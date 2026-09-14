@@ -1,0 +1,6 @@
+build/
+build-*/
+*.user
+.qtc_clangd/
+CMakeLists.txt.user
+.freebuff/
