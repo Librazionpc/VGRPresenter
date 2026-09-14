@@ -21,20 +21,31 @@ ApplicationWindow {
     // is accepted but doesn't switch the view.
     property string currentView: "show"
 
+    // Screens first (opaque, fill the window), then the shared header strip
+    // and the menu layer on top — AppMenuBar must sit above AppHeader because
+    // its logo/menu labels are drawn inside the same 48px strip.
     VGRPresenterMainScreen {
         anchors.fill: parent
         visible: window.currentView === "show"
-        onTabSelected: (tab) => {
-            if (tab === "show" || tab === "edit") window.currentView = tab
-        }
     }
 
     EditScreen {
         anchors.fill: parent
         visible: window.currentView === "edit"
+    }
+
+    AppHeader {
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        activeTab: window.currentView
         onTabSelected: (tab) => {
             if (tab === "show" || tab === "edit") window.currentView = tab
         }
+    }
+
+    AppMenuBar {
+        anchors.fill: parent
     }
 
     // ---- Settings overlay ----

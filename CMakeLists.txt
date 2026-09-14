@@ -41,3 +41,8 @@ set_target_properties(appVGRPresenterUI PROPERTIES
 target_link_libraries(appVGRPresenterUI
     PRIVATE Qt6::Quick Qt6::QuickControls2 Qt6::QuickShapes
 )
+
+# The generated qmltyperegistrations.cpp does `#if __has_include(<SlideListModel.h>)`
+# — without src/ on the include path the include is skipped and the generated
+# references to QAbstractListModel / SlideListModel::Role fail to compile.
+target_include_directories(appVGRPresenterUI PRIVATE src)

@@ -83,7 +83,10 @@ Item {
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             onClicked: {
-                root.activeTab = tabRoot.tabKey
+                // No self-assignment here: activeTab is owned by the parent
+                // (AppHeader <- Main.currentView). Assigning it imperatively
+                // would break the binding chain and let a dead "stage" click
+                // visually latch the tab strip.
                 root.tabSelected(tabRoot.tabKey)
             }
         }

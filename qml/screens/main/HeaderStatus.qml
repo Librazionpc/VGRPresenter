@@ -56,12 +56,30 @@ Item {
         }
     }
 
-    Row {
-        y: 18
-        spacing: 20
+    // Original export geometry: fixed 60x12 container with icons at x 0/20/40
+    // (a Row with spacing drifts if the PNG sizes change).
+    Rectangle {
+        x: 104
+        y: 1
 
-        Image { source: Qt.resolvedUrl("assets/close.png") }
-        Image { source: Qt.resolvedUrl("assets/minimize.png") }
-        Image { source: Qt.resolvedUrl("assets/maximize.png") }
+        height: 12
+        width: 60
+
+        color: "transparent"
+
+        Image {
+            id: close
+            source: Qt.resolvedUrl("assets/close.png")
+        }
+        Image {
+            id: minimize
+            x: 20
+            source: Qt.resolvedUrl("assets/minimize.png")
+        }
+        Image {
+            id: maximize
+            x: 40
+            source: Qt.resolvedUrl("assets/maximize.png")
+        }
     }
 }

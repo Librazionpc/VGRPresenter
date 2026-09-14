@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Shapes
 import VGRPresenterUI
-import "../main"
 
 // The Edit screen: the slide canvas editor shown when the "Edit" tab is
 // active. Faithfully matches VGRPresenter_Main_Screen_Edit.qml (the
@@ -21,8 +20,6 @@ Rectangle {
     clip: true
     color: "#12131a"
 
-    signal tabSelected(string tab)
-
     // Mock CRUD backend (src/SlideListModel.{h,cpp}) — stands in for the
     // real show/slide data source. Seeded with the same ground-truth
     // content the static array used to hold, but "Add slide" and selecting
@@ -37,25 +34,6 @@ Rectangle {
         { name: "Nursery Display", badge: "NURSERY", active: false },
         { name: "Stream Overlay", badge: "OBS FEED", active: false }
     ]
-
-    // ---- Header ----
-    Rectangle {
-        id: hdrBg
-        height: 48
-        width: 1440
-        color: "#12131a"
-
-        ViewTabs {
-            x: 639.50
-            y: 8
-            activeTab: "edit"
-            onTabSelected: (tab) => root.tabSelected(tab)
-        }
-        HeaderStatus {
-            x: 1260
-            y: 17
-        }
-    }
 
     // ---- Middle toolbar ----
     Rectangle {
@@ -790,9 +768,5 @@ Rectangle {
                 text: "›"
             }
         }
-    }
-
-    AppMenuBar {
-        anchors.fill: parent
     }
 }
