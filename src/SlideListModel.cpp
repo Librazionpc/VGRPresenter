@@ -2,30 +2,12 @@
 
 SlideListModel::SlideListModel(QObject *parent)
     : QAbstractListModel(parent)
+    , m_nextId(0)
 {
-    m_slides = {
-        { 1, true, QStringLiteral("SUNDAY SERVICE"), QStringLiteral("#9b8ff5"),
-          QStringLiteral("WELCOME HOME"),
-          QStringLiteral("“For where two or three gather in my name,"),
-          QStringLiteral("there am I with them.”"),
-          QStringLiteral("— Matthew 18:20") },
-        { 2, false, QStringLiteral("WORSHIP"), QStringLiteral("#ff8a3d"),
-          QStringLiteral("Great Are You Lord"),
-          QStringLiteral("It's Your breath in our lungs"),
-          QStringLiteral("so we pour out our praise"), QString() },
-        { 3, false, QStringLiteral("WORSHIP"), QStringLiteral("#ff8a3d"),
-          QStringLiteral("Way Maker"),
-          QStringLiteral("You are the Way Maker"),
-          QStringLiteral("Miracle Worker"), QString() },
-        { 4, false, QStringLiteral("WORSHIP"), QStringLiteral("#f0b73d"),
-          QStringLiteral("Oceans"),
-          QStringLiteral("You call me out upon the waters"),
-          QStringLiteral("the great unknown"), QString() },
-        { 5, false, QString(), QString(), QString(), QString(), QString(), QString() },
-        { 6, false, QString(), QString(), QString(), QString(), QString(), QString() },
-        { 7, false, QString(), QString(), QString(), QString(), QString(), QString() },
-        { 8, false, QString(), QString(), QString(), QString(), QString(), QString() },
-    };
+    // Starts empty: no seeded/hardcoded slides. The user builds the roster
+    // with "Add slide" (which auto-selects the new slide). This model owns
+    // roster metadata (num/id/tag/tagColor/active) only; slide content lives
+    // in EditScreen.qml's per-slide canvas archive.
 }
 
 int SlideListModel::rowCount(const QModelIndex &parent) const
@@ -50,6 +32,7 @@ QVariant SlideListModel::data(const QModelIndex &index, int role) const
     case Line1Role: return item.line1;
     case Line2Role: return item.line2;
     case RefRole: return item.ref;
+    case IdRole: return item.id;
     default: return {};
     }
 }
@@ -65,6 +48,7 @@ QHash<int, QByteArray> SlideListModel::roleNames() const
         { Line1Role, "line1" },
         { Line2Role, "line2" },
         { RefRole, "ref" },
+        { IdRole, "slideId" },
     };
 }
 
@@ -74,23 +58,31 @@ void SlideListModel::addSlide()
     beginInsertRows(QModelIndex(), row, row);
     SlideItem item;
     item.num = row + 1;
+    item.id = nextId();
     m_slides.append(item);
     endInsertRows();
+
+    // Auto-select the new slide — after "Add slide" the user edits it, so
+    // the canvas must already be showing it.
+    selectSlide(row);
 }
 
-void SlideListModel::duplicateSlide(int index)
+int SlideListModel::duplicateSlide(int index)
 {
     if (index < 0 || index >= m_slides.size())
-        return;
+        return -1;
 
     const int insertAt = index + 1;
     beginInsertRows(QModelIndex(), insertAt, insertAt);
     SlideItem copy = m_slides.at(index);
+    copy.num = 0;
+    copy.id = nextId(); // fresh id — the copy is its own slide, not an alias
     copy.active = false; // the copy lands next to the original, not selected
     m_slides.insert(insertAt, copy);
     endInsertRows();
 
     renumber(insertAt);
+    return copy.id;
 }
 
 void SlideListModel::removeSlide(int index)
@@ -154,6 +146,11 @@ int SlideListModel::activeIndex() const
     return -1;
 }
 
+int SlideListModel::nextId()
+{
+    return ++m_nextId;
+}
+
 const SlideItem *SlideListModel::activeItem() const
 {
     const int i = activeIndex();
@@ -208,6 +205,19 @@ int SlideListModel::activeNum() const
 {
     const SlideItem *item = activeItem();
     return item ? item->num : 0;
+}
+
+int SlideListModel::activeSlideId() const
+{
+    const SlideItem *item = activeItem();
+    return item ? item->id : -1;
+}
+
+int SlideListModel::slideIdAt(int index) const
+{
+    if (index < 0 || index >= m_slides.size())
+        return -1;
+    return m_slides.at(index).id;
 }
 
 QString SlideListModel::activeTag() const

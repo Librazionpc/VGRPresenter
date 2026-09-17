@@ -7,3 +7,5 @@ CMakeLists.txt.user
 InspirationOrResources/
 out.log
 err.log
+build.log
+cmake_config.log

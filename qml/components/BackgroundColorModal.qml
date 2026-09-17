@@ -1,12 +1,26 @@
 import QtQuick
 
-// Reusable "Background Color" picker: pick a solid color or gradient for a
-// slide background, plus a custom hex value and an opacity slider. Matches
+// Reusable color/gradient palette + picker: solid swatches, gradient
+// swatches, a custom hex field, a custom from/to gradient builder, a live
+// preview, and Apply/Cancel. Matches
 // 1BBTIwaya/VGRPresenter_Main_Screen_Edit_Background_Color.qml's
 // bg_modal_dim/bg_modal_card popup, which ships only as a flat PNG in the
 // ground truth export (no element-level QML to copy) — rebuilt here as real
 // QML, model-driven (colorSwatches/gradientSwatches), so it can be dropped
-// in anywhere a background needs picking, not just this one Edit-screen row.
+// in anywhere a color needs picking, not just the Edit screen's Background
+// row.
+//
+// There is deliberately no Opacity slider: opacity was removed from the app
+// (it either did nothing or just faded things confusingly), and a fill's
+// "less visible" state is expressed by picking a dimmer color instead. If it
+// ever comes back it belongs on the consumer's style object, not in this
+// picker's payload.
+//
+// The whole picker state is a single `selection` value —
+//   { kind: "color", color } | { kind: "gradient", from, to, name, subtitle }
+// — whether it came from a swatch or was typed live into the CUSTOM fields.
+// Consumers just read `selection` on applied() and decide what to do with it
+// (this component owns no application state of its own beyond the picker UI).
 //
 // Literal colors throughout, not Theme.* — same AOT-compiler limitation as
 // DropdownPanel.qml at this nesting depth (instantiated from EditScreen.qml,
@@ -16,8 +30,21 @@ Item {
 
     property bool open: false
 
+    // Header text — rename when reusing the picker for something other than
+    // the slide background (e.g. an item's border color).
+    property string title: qsTr("Background Color")
+
+    // The one place "no background" is spelled out — a real, deliberately-
+    // chosen swatch (rendered as a checkerboard below), not just whatever a
+    // freshly-created background happens to default to, so "no background"
+    // is always one click away again after picking an actual color.
+    // Consumers of this component (e.g. EditScreen.qml's slideBackground
+    // default) read this property instead of hardcoding "transparent"
+    // themselves, so there's exactly one definition to change.
+    readonly property string transparentValue: "transparent"
+
     property var colorSwatches: [
-        "#ffffff", "#000000", "#e74c3c", "#f39c12", "#f1c40f",
+        root.transparentValue, "#ffffff", "#000000", "#e74c3c", "#f39c12", "#f1c40f",
         "#2ecc71", "#14b8a6", "#3b82f6", "#8b5cf6", "#6b7280"
     ]
     property var gradientSwatches: [
@@ -33,14 +60,12 @@ Item {
     property string customHex: "#1B2440"
     property string customGradFrom: "#3b82f6"
     property string customGradTo: "#8b5cf6"
-    property real opacityPct: 80
 
     // "" | "color" | "gradient" — while non-empty, the preview/Apply follow
     // whatever is currently typed in the CUSTOM fields directly instead of
     // a swatch index, so the preview updates as you type instead of only
-    // after pressing Enter/clicking away (that only used to happen once
-    // editingFinished fired — nothing was live before then). Clicking any
-    // swatch clears this back to swatch-driven selection.
+    // after pressing Enter/clicking away. Clicking any swatch clears this
+    // back to swatch-driven selection.
     property string liveKind: ""
 
     function isValidHex(h) {
@@ -52,7 +77,6 @@ Item {
             hex = "#" + hex
         return hex
     }
-
     // Typing a custom hex and leaving the field both selects it (so it
     // drives the preview/Apply) and, if it's new, adds it as a swatch so
     // it's there to reuse next time — same "create on commit" idea as the
@@ -112,6 +136,8 @@ Item {
         root.liveKind = ""
     }
 
+    // The one value Apply carries — swatch-driven or typed live, unified
+    // into the same { kind, ... } shape either way.
     readonly property var selection: {
         if (root.liveKind === "color")
             return { kind: "color", color: root.customHex }
@@ -127,11 +153,56 @@ Item {
                  subtitle: root.gradientSwatches[root.selectedGradientIndex].subtitle }
     }
 
-    // Fires when "Apply" is clicked, carrying the current selection and
-    // opacity. The consumer decides what to do with it (this component owns
-    // no background state of its own beyond the picker UI).
-    signal applied(var selection, real opacityPct)
+    // Index into colorSwatches/gradientSwatches of whatever `selection`
+    // currently is, or -1 — so swatch highlighting stays in lockstep with
+    // the preview (including a custom hex that matches a swatch) instead of
+    // drifting from it. Live typing selects nothing until committed.
+    readonly property int selectedSwatch: {
+        if (root.liveKind !== "" || root.selection === null)
+            return -1
+        if (root.selection.kind === "color")
+            return root.colorSwatches.indexOf(root.selection.color)
+        for (let i = 0; i < root.gradientSwatches.length; ++i) {
+            if (root.gradientSwatches[i].from === root.selection.from && root.gradientSwatches[i].to === root.selection.to)
+                return i
+        }
+        return -1
+    }
+
+    // Fires when "Apply" is clicked, carrying the current selection. The
+    // consumer decides what to do with it.
+    signal applied(var selection)
     signal cancelled()
+
+    // One reusable gradient swatch: a rounded rect filled with a two-stop
+    // vertical gradient, a selection ring, and hover feedback. Used for
+    // both the preset gradients and the custom ones added by the builder —
+    // one definition instead of a hand-rolled copy per site.
+    component GradientSwatch: Rectangle {
+        id: gswatch
+
+        property color from: "#000000"
+        property color to: "#ffffff"
+        property bool selected: false
+
+        signal picked()
+
+        width: 68
+        height: 40
+        radius: 8
+        border.width: gswatch.selected ? 2 : 1
+        border.color: gswatch.selected ? "#6c5ce7" : "#2a3140"
+        gradient: Gradient {
+            GradientStop { position: 0; color: gswatch.from }
+            GradientStop { position: 1; color: gswatch.to }
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: gswatch.picked()
+        }
+    }
 
     anchors.fill: parent
     visible: root.open
@@ -179,7 +250,7 @@ Item {
                     Text {
                         anchors.left: parent.left
                         anchors.verticalCenter: parent.verticalCenter
-                        text: qsTr("Background Color")
+                        text: root.title
                         color: "#eef0f6"
                         font.family: "Inter"
                         font.pixelSize: 18
@@ -238,10 +309,9 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: 12
 
-                    // Checkerboard backing + the swatch on top with its
-                    // opacity bound to the slider, so dragging Opacity below
-                    // shows through it live instead of leaving no visible
-                    // preview of what "80%" etc. actually looks like.
+                    // Checkerboard backing + the swatch on top. The
+                    // checkerboard stays useful for light colors with
+                    // transparency of their own (#80ffffff and friends).
                     Item {
                         width: 36
                         height: 36
@@ -274,16 +344,13 @@ Item {
                             radius: 8
                             border.color: "#6c5ce7"
                             border.width: 1.5
-                            opacity: root.opacityPct / 100
-                            gradient: Gradient {
-                                GradientStop {
-                                    position: 0
-                                    color: root.selection.kind === "gradient" ? root.selection.from : root.selection.color
-                                }
-                                GradientStop {
-                                    position: 1
-                                    color: root.selection.kind === "gradient" ? root.selection.to : root.selection.color
-                                }
+                            color: root.selection.kind === "color" ? root.selection.color : "transparent"
+                            gradient: root.selection.kind === "gradient" ? gradPreview : null
+
+                            Gradient {
+                                id: gradPreview
+                                GradientStop { position: 0; color: root.selection.kind === "gradient" ? root.selection.from : root.selection.color }
+                                GradientStop { position: 1; color: root.selection.kind === "gradient" ? root.selection.to : root.selection.color }
                             }
                         }
                     }
@@ -293,15 +360,18 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
 
                         Text {
-                            text: root.selection.kind === "gradient" ? root.selection.name : qsTr("Custom color")
+                            text: {
+                                if (root.selection.kind === "gradient")
+                                    return root.selection.name
+                                return root.selection.color === root.transparentValue ? qsTr("Transparent") : qsTr("Custom color")
+                            }
                             color: "#eef0f6"
                             font.family: "Inter"
                             font.pixelSize: 13
                             font.weight: Font.Medium
                         }
                         Text {
-                            text: (root.selection.kind === "gradient" ? root.selection.subtitle : root.selection.color)
-                                  + qsTr("  ·  %1% opacity").arg(Math.round(root.opacityPct))
+                            text: root.selection.kind === "gradient" ? root.selection.subtitle : root.selection.color
                             color: "#5c6475"
                             font.family: "Inter"
                             font.pixelSize: 10
@@ -334,16 +404,47 @@ Item {
                             id: colorSwatch
                             required property int index
                             required property string modelData
+                            readonly property bool isTransparent: modelData === root.transparentValue
+                            readonly property bool selected: root.selectedSwatch === index
 
                             width: 40
                             height: 40
                             radius: 8
-                            color: modelData
-                            border.width: root.selectedColorIndex === index ? 2 : 1
-                            border.color: root.selectedColorIndex === index ? "#6c5ce7" : "#2a3140"
+                            clip: true
+                            // Hover feedback on the fill itself (same
+                            // lighten-on-hover language as every other
+                            // chip/button in this file family), in addition
+                            // to the selection ring below.
+                            color: colorSwatch.isTransparent
+                                   ? (colorSwatchArea.containsMouse ? "#242633" : "#1a1c26")
+                                   : (colorSwatchArea.containsMouse ? Qt.lighter(modelData, 1.15) : modelData)
+                            border.width: colorSwatch.selected ? 2 : 1
+                            border.color: colorSwatch.selected ? "#6c5ce7" : "#2a3140"
+                            Behavior on color { ColorAnimation { duration: 100 } }
+                            Behavior on border.width { NumberAnimation { duration: 100 } }
+
+                            // Mini checkerboard so "Transparent" reads as a
+                            // deliberate choice, not an empty/broken swatch.
+                            Grid {
+                                visible: colorSwatch.isTransparent
+                                anchors.fill: parent
+                                columns: 4
+                                rows: 4
+                                Repeater {
+                                    model: 16
+                                    delegate: Rectangle {
+                                        required property int index
+                                        width: 10
+                                        height: 10
+                                        color: (Math.floor(index / 4) + (index % 4)) % 2 === 0 ? "#2a2c38" : "#15161d"
+                                    }
+                                }
+                            }
 
                             MouseArea {
+                                id: colorSwatchArea
                                 anchors.fill: parent
+                                hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
                                     root.selectedColorIndex = colorSwatch.index
@@ -376,29 +477,17 @@ Item {
 
                     Repeater {
                         model: root.gradientSwatches
-                        delegate: Rectangle {
-                            id: gradSwatch
+                        delegate: GradientSwatch {
                             required property int index
                             required property var modelData
 
-                            width: 68
-                            height: 40
-                            radius: 8
-                            border.width: root.selectedColorIndex < 0 && root.selectedGradientIndex === index ? 2 : 1
-                            border.color: root.selectedColorIndex < 0 && root.selectedGradientIndex === index ? "#6c5ce7" : "#2a3140"
-                            gradient: Gradient {
-                                GradientStop { position: 0; color: gradSwatch.modelData.from }
-                                GradientStop { position: 1; color: gradSwatch.modelData.to }
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    root.selectedGradientIndex = gradSwatch.index
-                                    root.selectedColorIndex = -1
-                                    root.liveKind = ""
-                                }
+                            from: modelData.from
+                            to: modelData.to
+                            selected: root.selectedSwatch === index
+                            onPicked: {
+                                root.selectedGradientIndex = index
+                                root.selectedColorIndex = -1
+                                root.liveKind = ""
                             }
                         }
                     }
@@ -568,99 +657,6 @@ Item {
                 }
             }
 
-            // Opacity slider — same Binding{when: !dragging} handoff pattern
-            // as AppScrollBar.qml's thumb, so the declarative position
-            // binding and the imperative drag don't fight each other.
-            Column {
-                width: parent.width
-                spacing: 10
-
-                Item {
-                    width: parent.width
-                    height: opacityLabel.height
-
-                    Text {
-                        id: opacityLabel
-                        anchors.left: parent.left
-                        text: qsTr("Opacity")
-                        color: "#aeb6c8"
-                        font.family: "Inter"
-                        font.pixelSize: 12
-                    }
-                    Text {
-                        anchors.right: parent.right
-                        text: Math.round(root.opacityPct) + "%"
-                        color: "#aeb6c8"
-                        font.family: "Inter"
-                        font.pixelSize: 12
-                    }
-                }
-
-                Item {
-                    width: parent.width
-                    height: 14
-
-                    Rectangle {
-                        id: sliderTrack
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: parent.width
-                        height: 4
-                        radius: 2
-                        color: "#2a3140"
-
-                        Rectangle {
-                            width: parent.width * root.opacityPct / 100
-                            height: parent.height
-                            radius: 2
-                            color: "#6c5ce7"
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            anchors.margins: -5
-                            onClicked: (mouse) => {
-                                root.opacityPct = Math.max(0, Math.min(100, (mouse.x / sliderTrack.width) * 100))
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        id: thumb
-                        width: 14
-                        height: 14
-                        radius: 7
-                        anchors.verticalCenter: parent.verticalCenter
-                        color: "#ffffff"
-                        border.color: "#6c5ce7"
-                        border.width: 2
-
-                        Binding {
-                            target: thumb
-                            property: "x"
-                            value: (sliderTrack.width - thumb.width) * root.opacityPct / 100
-                            when: !thumbArea.drag.active
-                        }
-                        onXChanged: {
-                            if (thumbArea.drag.active) {
-                                const range = sliderTrack.width - thumb.width
-                                root.opacityPct = range > 0 ? (thumb.x / range) * 100 : 0
-                            }
-                        }
-
-                        MouseArea {
-                            id: thumbArea
-                            anchors.fill: parent
-                            anchors.margins: -6
-                            cursorShape: Qt.PointingHandCursor
-                            drag.target: thumb
-                            drag.axis: Drag.XAxis
-                            drag.minimumX: 0
-                            drag.maximumX: sliderTrack.width - thumb.width
-                        }
-                    }
-                }
-            }
-
             Rectangle { width: parent.width; height: 1; color: "#232530" }
 
             Row {
@@ -714,7 +710,7 @@ Item {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.applied(root.selection, root.opacityPct)
+                        onClicked: root.applied(root.selection)
                     }
                 }
             }

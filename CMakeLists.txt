@@ -25,6 +25,13 @@ qt_add_executable(appVGRPresenterUI
     src/OutputListModel.cpp
 )
 
+# Theme.qml has `pragma Singleton`, but qt_add_qml_module doesn't infer that
+# from the file content on its own — without this, the generated qmldir
+# lists it as an ordinary type ("Theme 1.0 ...") instead of a singleton
+# ("singleton Theme 1.0 ..."), which is exactly what made Theme.* resolve to
+# undefined at deeper nesting and forced literal hex colors everywhere.
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/Theme.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
+
 qt_add_qml_module(appVGRPresenterUI
     URI VGRPresenterUI
     VERSION 1.0

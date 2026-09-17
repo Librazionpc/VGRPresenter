@@ -2,11 +2,16 @@ import QtQuick
 
 // Reusable "label — value — draggable track" slider row: a label on the
 // left, the current value on the right, and a horizontal track/thumb below.
-// Used by SizeStyleCard.qml's Padding/Opacity/Radius/Width rows; the same
-// Binding{when: !dragging} handoff pattern as AppScrollBar.qml's thumb (and
-// BackgroundColorModal.qml's Opacity slider, which predates this and could
-// be swapped to use it) keeps the declarative position binding and the
-// imperative drag from fighting each other.
+// Used by BackgroundColorModal.qml's Opacity row. Controlled-component
+// convention: `value` is owned by the consumer, the slider only *reports*
+// changes via `moved` and never writes back to its own `value` property —
+// self-assigning it would break the consumer's `value: <binding>` (a QML
+// binding dies the first time something assigns the property imperatively),
+// which is exactly the bug that used to force consumers into imperative
+// re-push mirroring. The consumer reassigns `value` from its model, the
+// thumb follows, the Binding{when: !drag.active} handoff (same pattern as
+// AppScrollBar.qml) keeps the drag and the declarative thumb position from
+// fighting.
 //
 // Literal colors, not Theme.* — matches this file family's convention
 // (see EditScreen.qml/DropdownPanel.qml headers) even though this specific
@@ -23,7 +28,7 @@ Item {
 
     signal moved(real value)
 
-    height: 34
+    implicitHeight: 34
 
     readonly property real pct: root.maxValue > root.minValue
         ? Math.max(0, Math.min(1, (root.value - root.minValue) / (root.maxValue - root.minValue)))
@@ -72,8 +77,9 @@ Item {
                 anchors.margins: -5
                 onClicked: (mouse) => {
                     const p = Math.max(0, Math.min(1, mouse.x / track.width))
-                    root.value = root.minValue + p * (root.maxValue - root.minValue)
-                    root.moved(root.value)
+                    // Report only — the consumer assigns `value`; see the
+                    // controlled-component note in the header comment.
+                    root.moved(root.minValue + p * (root.maxValue - root.minValue))
                 }
             }
         }
@@ -98,8 +104,9 @@ Item {
                 if (thumbArea.drag.active) {
                     const range = track.width - thumb.width
                     const p = range > 0 ? thumb.x / range : 0
-                    root.value = root.minValue + p * (root.maxValue - root.minValue)
-                    root.moved(root.value)
+                    // Report only — the consumer assigns `value`; see the
+                    // controlled-component note in the header comment.
+                    root.moved(root.minValue + p * (root.maxValue - root.minValue))
                 }
             }
 

@@ -25,6 +25,12 @@ Item {
     property bool editing: false
 
     signal committed(string value)
+    // Fired on EVERY keystroke while editing (not on programmatic text
+    // changes) so the consumer can push live text into its data model —
+    // which is what makes bound thumbnails/update-watching surfaces update
+    // as you type instead of only on commit. `committed` still fires at the
+    // end, reconciling the final value.
+    signal edited(string value)
     // Fired on every single click (regardless of modifiers) so the
     // consumer can commit this object into its durable selection state
     // (see DraggableCanvasText's selectedRequested / EditScreen.qml's
@@ -78,6 +84,9 @@ Item {
             text = displayText.text
             root.editing = false
         }
+        // textEdited (not textChanged) — user keystrokes only, so a
+        // programmatic write back into the model can't echo back here.
+        onTextEdited: root.edited(text)
         onEditingFinished: {
             root.editing = false
             root.committed(text)

@@ -15,9 +15,6 @@ import "../../components"
 Rectangle {
     id: root
 
-    height: 900
-    width: 1440
-
     clip: true
     color: "#12131a"
 
@@ -28,6 +25,30 @@ Rectangle {
     SlideListModel {
         id: slideModel
     }
+
+    // Per-slide canvas state (items + background), keyed by the model's
+    // stable slide id — switching slides swaps the canvas, duplicating a
+    // slide clones its canvas, deleting one drops its archive.
+    SlideCanvasStore {
+        id: slideStore
+    }
+
+    // Switching slides swaps the canvas: the store re-archives the outgoing
+    // slide's working set and installs the incoming one. addSlide()
+    // auto-selects, so a fresh slide lands here with an empty canvas too.
+    Connections {
+        target: slideModel
+        function onActiveSlideChanged() {
+            slideStore.load(slideModel.activeSlideId)
+        }
+    }
+
+    // True when a slide is active — the roster starts EMPTY (no hardcoded
+    // slides), so this is false on a fresh launch until "Add slide" is used.
+    // Drives the empty state: canvas and right panel grey out (nothing to
+    // edit), while the slide list stays fully live (adding a slide is the
+    // way out).
+    readonly property bool hasActiveSlide: slideModel.activeSlideId > 0
 
     // Output roster comes from the OutputListModel singleton (src/OutputListModel.{h,cpp})
     // — the SAME model Settings · Outputs (OutputsScreen.qml) edits, so adding
@@ -41,75 +62,21 @@ Rectangle {
 
     // Background-color picker (see bgColorModal near the end of this file)
     // and the current selection it applies to the "Background" row's swatch.
-    // bgModalTarget says which row opened it ("background" or "border" —
-    // see SizeStyleCard's Border row), so one shared picker instance can
-    // serve both instead of duplicating it.
+    // bgModalTarget says which row opened it ("background", "itemBackground"
+    // or "border" — see SizeStyleCard's Border row), so one shared picker
+    // instance can serve both instead of duplicating it.
     property bool bgModalOpen: false
     property string bgModalTarget: "background"
-    property var slideBackground: ({ kind: "color", color: "#1a2240" })
 
-    // Size & Style panel state (SizeStyleCard, in the right panel below
-    // Background) — session-only, not persisted per-slide since
-    // SlideListModel has no style fields yet. One style object per
-    // canvas-object key (title/verse/ref/date), not shared globally —
-    // otherwise turning a style on for one object turned it on for all of
-    // them. Kept as a single generic map + get/set/setSelected trio (not
-    // one property per style field) specifically so adding the next style
-    // property — or reusing this whole thing for template items later —
-    // is a one-line addition, not a new parallel set of plumbing each time.
-    // SizeStyleCard shows/edits whichever object(s) are currently selected;
-    // a key with no entry yet just means "all defaults".
-    property var canvasItemStyles: ({})
-    readonly property string primaryCanvasKey: root.selectedCanvasObjects.length > 0 ? root.selectedCanvasObjects[0] : ""
+    // Which canvas object(s) are currently selected — drives which ones show
+    // the border+handle "selected" chrome (see DraggableCanvasText). Empty
+    // means nothing selected (clicking empty canvas clears it, and a slide
+    // starts with none). A plain or Ctrl+click replaces the selection with
+    // just that one; Shift+click toggles it in/out of a multi-selection.
+    property var selectedCanvasObjects: []
 
-    function getCanvasItemStyle(key) {
-        return root.canvasItemStyles[key] || {
-            padding: 24, opacity: 100,
-            enabled: false, width: 2, style: "line", radius: 12,
-            color: { kind: "color", color: "#ffffff" }
-        }
-    }
-    function setCanvasItemStyle(key, patch) {
-        const current = root.getCanvasItemStyle(key)
-        const merged = Object.assign({}, root.canvasItemStyles)
-        merged[key] = Object.assign({}, current, patch)
-        root.canvasItemStyles = merged
-    }
-    function setSelectedItemStyle(patch) {
-        root.selectedCanvasObjects.forEach((k) => root.setCanvasItemStyle(k, patch))
-    }
-    // SizeStyleCard's controls mirror whichever object is primary-selected;
-    // a plain property binding only syncs once and then breaks the moment
-    // the user interacts with a control (same as any other one-way-then-
-    // free binding in this file) — but here the "external" side (which
-    // object is selected) keeps changing, so it has to be re-pushed
-    // explicitly every time the selection changes, not just once.
-    onPrimaryCanvasKeyChanged: {
-        const s = root.getCanvasItemStyle(root.primaryCanvasKey)
-        sizeStyleCard.padding = s.padding
-        sizeStyleCard.styleOpacity = s.opacity
-        sizeStyleCard.borderEnabled = s.enabled
-        sizeStyleCard.borderWidth = s.width
-        sizeStyleCard.borderStyle = s.style
-        sizeStyleCard.radius = s.radius
-        sizeStyleCard.borderColor = s.color
-    }
-
-    // The service-date line rendered near the logo — session-only, same
-    // pattern as slideBackground above (not per-slide model
-    // data, so no SlideListModel field). Made into a real canvas object
-    // like title/verse/ref rather than a fixed Text, so it's actually
-    // editable — "VGR" next to it stays a fixed logo mark baked into
-    // slide_logo.png, not independent content, so it's left alone.
-    property string canvasDateLine: "SUNDAY · AUGUST 16, 2026"
-
-    // Which canvas text object(s) are currently selected — drives which
-    // ones show the border+handle "selected" chrome (see
-    // DraggableCanvasText, wrapping the title/verse/reference objects
-    // below). Empty means nothing selected (clicking empty canvas clears
-    // it). A plain or Ctrl+click replaces the selection with just that one;
-    // Shift+click toggles it in/out of a multi-selection.
-    property var selectedCanvasObjects: ["title"]
+    // Canvas items live in slideStore (per-slide, archived on slide switch)
+    // — no screen-level array anymore.
 
     // Right-click context menu for canvas text objects (Edit / Duplicate /
     // Delete) — see canvasContextMenu near the end of this file. Tracks
@@ -141,13 +108,35 @@ Rectangle {
         mCanvas.forceActiveFocus()
     }
 
+    // Every item's x/y/width/height *are* the data a Repeater delegate binds
+    // to, so writes through this function (from applyCanvasMove/
+    // applyCanvasResize below) propagate visually automatically.
     function canvasObjectByKey(key) {
-        if (key === "title") return titleObject
-        if (key === "verse") return verseObject
-        if (key === "ref") return refObject
-        if (key === "date") return dateObject
+        const items = slideStore.current.items
+        for (let i = 0; i < items.length; ++i) {
+            if (items[i].key === key)
+                return items[i]
+        }
         return null
     }
+
+    // Drives the top-of-panel "Background" row further down: it edits
+    // whichever item is primary-selected instead of the slide's own
+    // background when something is selected, rather than Size & Style
+    // duplicating the same swatch+chip control a second time.
+    readonly property CanvasItemStyle primarySelectedItemStyle: root.selectedCanvasObjects.length > 0
+        ? (root.canvasObjectByKey(root.selectedCanvasObjects[0])?.style ?? null)
+        : null
+
+    // Background/Border only have a visible effect on a "text" item — every
+    // other kind's content (camera's live-preview Shape, the generic
+    // media/audio/shape/timer/clock placeholder) fills its box edge-to-edge
+    // with its own opaque visual, completely covering whatever the style
+    // background/border would draw underneath. Drives those controls being
+    // greyed out for anything else, rather than looking active but doing
+    // nothing when applied.
+    readonly property bool primarySelectedSupportsFill: root.primarySelectedItemStyle === null
+        || root.primarySelectedItemStyle.kind === "text"
 
     // ---- Alignment-guide snapping helpers ----
     // Pure geometry math (modeled after FreeShow's src/frontend/components/
@@ -283,11 +272,9 @@ Rectangle {
 
         if (!snapDisabled && primaryStart && primaryObj) {
             const others = []
-            const allKeys = ["title", "verse", "ref", "date"]
-            allKeys.forEach((k) => {
-                if (root.selectedCanvasObjects.indexOf(k) >= 0) return
-                const o = root.canvasObjectByKey(k)
-                if (o && o.visible) others.push({ x: o.x, y: o.y, width: o.width, height: o.height })
+            slideStore.current.items.forEach((it) => {
+                if (root.selectedCanvasObjects.indexOf(it.key) >= 0) return
+                others.push({ x: it.x, y: it.y, width: it.width, height: it.height })
             })
             const snap = root.snapMove(primaryStart.x + finalDx, primaryStart.y + finalDy, primaryObj.width, primaryObj.height, mCanvas.width, mCanvas.height, others)
             finalDx = snap.x - primaryStart.x
@@ -318,11 +305,9 @@ Rectangle {
         }
 
         const others = []
-        const allKeys = ["title", "verse", "ref", "date"]
-        allKeys.forEach((k) => {
-            if (k === key) return
-            const o = root.canvasObjectByKey(k)
-            if (o && o.visible) others.push({ x: o.x, y: o.y, width: o.width, height: o.height })
+        slideStore.current.items.forEach((it) => {
+            if (it.key === key) return
+            others.push({ x: it.x, y: it.y, width: it.width, height: it.height })
         })
         const snap = root.snapResize(geom.x, geom.y, geom.width, geom.height, mCanvas.width, mCanvas.height, others, geom.left, geom.right, geom.top, geom.bottom)
         primaryObj.x = snap.x
@@ -347,14 +332,56 @@ Rectangle {
         })
     }
 
+    // Delete actually removes an item from the canvas entirely — nothing is
+    // a permanent slot anymore. Shared by deleteSelectedCanvasObjects below
+    // and canvasContextMenu's own "Delete" case, so the two delete paths
+    // can't drift apart.
+    function removeCanvasItems(keys) {
+        slideStore.removeItems(keys)
+        root.selectedCanvasObjects = root.selectedCanvasObjects.filter((k) => keys.indexOf(k) < 0)
+    }
+
     function deleteSelectedCanvasObjects() {
-        root.selectedCanvasObjects.forEach((k) => {
-            if (k === "title") slideModel.setActiveTitle("")
-            else if (k === "verse") { slideModel.setActiveLine1(""); slideModel.setActiveLine2("") }
-            else if (k === "ref") slideModel.setActiveRef("")
-            else if (k === "date") root.canvasDateLine = ""
-        })
+        root.removeCanvasItems(root.selectedCanvasObjects)
         root.selectedCanvasObjects = []
+    }
+
+    // Entry point for the "+" Add Content menu below — creates a new item
+    // of the clicked kind, drops it onto the canvas with a small cascading
+    // offset per existing item (so repeated adds don't stack exactly on top
+    // of each other), and selects it.
+    // Creates a new item of the given kind ("+" Add Content menu) — or, when
+    // `copyFrom` is given (the context menu's Duplicate), clones an existing
+    // item's geometry/text/style and lands the copy one tile down-right.
+    // The item is created and owned by the slide store so it archives with
+    // its slide. Returns the new CanvasItem.
+    function addCanvasItem(kind, copyFrom) {
+        const n = slideStore.current.items.length
+        const isCamera = kind === "camera"
+        const item = slideStore.createItem(
+            kind,
+            copyFrom ? copyFrom.text : "",
+            copyFrom ? copyFrom.x + 16 : 40 + (n % 6) * 20,
+            copyFrom ? copyFrom.y + 16 : 40 + (n % 6) * 20,
+            copyFrom ? copyFrom.width : (isCamera ? 112 : 220),
+            copyFrom ? copyFrom.height : (isCamera ? 84 : 44),
+            copyFrom ? copyFrom.style : null)
+        slideStore.addItem(item)
+        root.handleCanvasSelect(item.key, 0)
+        return item
+    }
+
+    // Finds the live Repeater delegate for a given item key — items are
+    // dynamically created (no fixed/named id the way the old title/verse/
+    // ref/date objects had), so reaching one from outside the Repeater means
+    // searching its instantiated delegates by their modelData.key.
+    function delegateForKey(key) {
+        for (let i = 0; i < canvasItemsRepeater.count; ++i) {
+            const d = canvasItemsRepeater.itemAt(i)
+            if (d && d.modelData && d.modelData.key === key)
+                return d
+        }
+        return null
     }
 
     // sourceItem is whichever DraggableCanvasText fired contextMenuRequested
@@ -362,11 +389,9 @@ Rectangle {
     // that object's own local space. Clamped to root's current bounds, same
     // reasoning as slideContextMenu's positioning below.
     function openCanvasContextMenu(sourceItem, mx, my, key) {
-        const p = sourceItem.mapToItem(root, mx, my)
-        canvasContextMenu.x = Math.max(0, Math.min(p.x, root.width - canvasContextMenu.width))
-        canvasContextMenu.y = Math.max(0, Math.min(p.y, root.height - canvasContextMenu.height))
+        // Shared map+clamp helper (see slideContextMenu's usage above).
+        canvasContextMenu.openAt(sourceItem, mx, my, root)
         root.canvasContextTarget = key
-        canvasContextMenu.visible = true
     }
 
     // Add-content chip + its popover menu (bottom of the canvas).
@@ -489,14 +514,94 @@ Rectangle {
     }
 
     // ---- Canvas ----
+    // width: 754, not 760 — 286 + 760 = 1046 overlapped 6px into rightPanel
+    // (x: 1040). 754 lands exactly on rightPanel's left edge.
     Rectangle {
         id: mCanvas
         x: 286
-        y: 142
-        height: 760
-        width: 760
+        y: 308
+        height: 428
+        width: 754
         clip: true
-        color: "#0f1015"
+        // No active slide = nothing to edit: every child MouseArea (empty-
+        // canvas click, drag areas, resize handles) and the keyboard nudge
+        // go inert. The empty-state veil below lives OUTSIDE this item at
+        // root level precisely so its own "Add slide" chip stays clickable.
+        enabled: root.hasActiveSlide
+        // Fill only — border is a separate top-layer Rectangle at the end
+        // of this file's children (see mCanvasBorder below), not a border
+        // set directly here: the checkerboard/background/content children
+        // fill edge-to-edge with anchors.fill:parent and draw on top of
+        // this Rectangle's own paint, which would hide a border set here
+        // completely (the exact bug camPanel's border had earlier).
+        color: "#141519"
+
+        // Transparency checkerboard (FreeShow's Zoomed.svelte convention) —
+        // sits behind slideBgLayer so it reads through wherever the slide
+        // background is transparent or less than fully opaque, and gets
+        // fully covered once a solid, fully-opaque background is chosen.
+        //
+        // Fixed whole-pixel tile size (16px), not width/columns — a
+        // fractional size (e.g. 760/48 ≈ 15.83px) still looks uneven even
+        // with exact index-based positioning, because the renderer snaps
+        // each tile's fractional edges to the physical pixel grid
+        // independently, and adjacent tiles can round differently. A whole-
+        // pixel size rounds identically every time, so every tile is
+        // pixel-for-pixel uniform. columns/rows overshoot the canvas
+        // slightly (ceil, not exact division) and mCanvas's clip:true crops
+        // the small remainder — invisible, and no worse than a partial tile
+        // would look anyway.
+        Item {
+            id: checkerGrid
+            anchors.fill: parent
+            readonly property int tileSize: 16
+            readonly property int columns: Math.ceil(width / tileSize)
+            readonly property int rows: Math.ceil(height / tileSize)
+
+            Repeater {
+                model: checkerGrid.columns * checkerGrid.rows
+                delegate: Rectangle {
+                    required property int index
+                    readonly property int col: index % checkerGrid.columns
+                    readonly property int row: Math.floor(index / checkerGrid.columns)
+                    x: col * checkerGrid.tileSize
+                    y: row * checkerGrid.tileSize
+                    width: checkerGrid.tileSize
+                    height: checkerGrid.tileSize
+                    color: (row + col) % 2 === 0 ? "#2a2c38" : "#15161d"
+                }
+            }
+        }
+
+        // Decorative alignment-grid dots — declared here, before
+        // slideBgLayer, so a chosen background actually covers them like it
+        // covers the checkerboard above. They used to sit after slideBgLayer
+        // in the file and so always rendered on top of it regardless of
+        // background choice, showing as faint dot-rows near the top no
+        // matter what color was picked.
+        Repeater {
+            model: 13 * 8
+            delegate: Rectangle {
+                required property int index
+                x: (index % 13) * 56 + 2
+                y: Math.floor(index / 13) * 56 + 14
+                width: 2
+                height: 2
+                radius: 1
+                color: "#232530"
+            }
+        }
+
+        // The actual slide background — driven by slideStore.current.background (see
+        // the "Background" row's Change button in the right panel). A
+        // dedicated layer, not mCanvas's own color: the checkerboard shows
+        // through when the background is deliberately set to Transparent
+        // (a real swatch in the picker, not just an unset default).
+        Rectangle {
+            id: slideBgLayer
+            anchors.fill: parent
+            color: slideStore.current.background
+        }
 
         // Arrow-key nudge / Delete / Escape for the selected canvas
         // object(s) — guarded so it never fires while a label is actually
@@ -531,241 +636,6 @@ Rectangle {
             event.accepted = true
         }
 
-        Repeater {
-            model: 14 * 14
-            delegate: Rectangle {
-                required property int index
-                x: (index % 14) * 56 + 2
-                y: Math.floor(index / 14) * 14 + 14
-                width: 2
-                height: 2
-                radius: 1
-                color: "#232530"
-            }
-        }
-
-        Image {
-            x: 14
-            y: 170
-            source: Qt.resolvedUrl("assets/slide_bg.png")
-        }
-        Image {
-            x: 74
-            y: 212
-            source: Qt.resolvedUrl("assets/slide_logo.png")
-        }
-        Text {
-            x: 78
-            y: 218
-            color: "#eef0f6"
-            font.family: "Inter"
-            font.pixelSize: 7
-            font.weight: Font.Bold
-            text: qsTr("VGR")
-        }
-        DraggableCanvasText {
-            id: dateObject
-            x: 264
-            y: 212
-            width: 221
-            selected: root.isCanvasObjectSelected("date") || dateLabel.editing
-            onSelectedRequested: (mods) => root.handleCanvasSelect("date", mods)
-            onContextMenuRequested: (mx, my) => root.openCanvasContextMenu(dateObject, mx, my, "date")
-            onResizing: (geom) => root.applyCanvasResize("date", geom)
-            onDragEnded: root.endCanvasDrag()
-            styleBorderEnabled: root.getCanvasItemStyle("date").enabled
-            styleBorderWidth: root.getCanvasItemStyle("date").width
-            styleBorderStyle: root.getCanvasItemStyle("date").style
-            styleBorderRadius: root.getCanvasItemStyle("date").radius
-            styleBorderColor: {
-                const c = root.getCanvasItemStyle("date").color
-                return c.kind === "gradient" ? c.from : c.color
-            }
-            stylePadding: root.getCanvasItemStyle("date").padding
-            styleOpacityPct: root.getCanvasItemStyle("date").opacity
-
-            EditableCanvasLabel {
-                id: dateLabel
-                width: parent.width
-                color: "#8a8fa3"
-                font.family: "Inter"
-                font.pixelSize: 11
-                font.weight: Font.Medium
-                horizontalAlignment: Text.AlignHCenter
-                text: root.canvasDateLine
-                onCommitted: (value) => root.canvasDateLine = value
-                onSelectRequested: (mods) => root.handleCanvasSelect("date", mods)
-                onMoveRequested: (dx, dy, snapDisabled) => {
-                    if (!root.isCanvasObjectSelected("date"))
-                        root.handleCanvasSelect("date", 0)
-                    root.applyCanvasMove("date", dx, dy, snapDisabled)
-                }
-                onDragEnded: root.endCanvasDrag()
-            }
-        }
-
-        // Canvas text objects — each one a DraggableCanvasText so it's an
-        // actual movable object (click to select, drag anywhere on it to
-        // reposition) instead of a fixed-position Text glued to the ground
-        // truth's original pixel coordinates. Default x/y below reproduce
-        // those original coordinates; once dragged, drag sets x/y directly
-        // and these formulas no longer apply (same one-way-then-free
-        // pattern as the CUSTOM hex fields in BackgroundColorModal.qml).
-
-        DraggableCanvasText {
-            id: titleObject
-            x: (mCanvas.width - width) / 2
-            y: 288
-            width: 461
-            selected: root.isCanvasObjectSelected("title") || titleLabel.editing
-            onSelectedRequested: (mods) => root.handleCanvasSelect("title", mods)
-            onContextMenuRequested: (mx, my) => root.openCanvasContextMenu(titleObject, mx, my, "title")
-            onResizing: (geom) => root.applyCanvasResize("title", geom)
-            onDragEnded: root.endCanvasDrag()
-            styleBorderEnabled: root.getCanvasItemStyle("title").enabled
-            styleBorderWidth: root.getCanvasItemStyle("title").width
-            styleBorderStyle: root.getCanvasItemStyle("title").style
-            styleBorderRadius: root.getCanvasItemStyle("title").radius
-            styleBorderColor: {
-                const c = root.getCanvasItemStyle("title").color
-                return c.kind === "gradient" ? c.from : c.color
-            }
-            stylePadding: root.getCanvasItemStyle("title").padding
-            styleOpacityPct: root.getCanvasItemStyle("title").opacity
-
-            Column {
-                width: parent.width
-
-                EditableCanvasLabel {
-                    id: titleLabel
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    width: parent.width
-                    color: "#f2f4fa"
-                    font.family: "Inter"
-                    font.pixelSize: 44
-                    font.weight: Font.Medium
-                    horizontalAlignment: Text.AlignHCenter
-                    text: slideModel.activeTitle
-                    onCommitted: (value) => slideModel.setActiveTitle(value)
-                    onSelectRequested: (mods) => root.handleCanvasSelect("title", mods)
-                    onMoveRequested: (dx, dy, snapDisabled) => {
-                        if (!root.isCanvasObjectSelected("title"))
-                            root.handleCanvasSelect("title", 0)
-                        root.applyCanvasMove("title", dx, dy, snapDisabled)
-                    }
-                    onDragEnded: root.endCanvasDrag()
-                }
-            }
-        }
-
-        DraggableCanvasText {
-            id: verseObject
-            x: (mCanvas.width - width) / 2
-            y: 402
-            width: 460
-            selected: root.isCanvasObjectSelected("verse") || line1Label.editing || line2Label.editing
-            onSelectedRequested: (mods) => root.handleCanvasSelect("verse", mods)
-            onContextMenuRequested: (mx, my) => root.openCanvasContextMenu(verseObject, mx, my, "verse")
-            onResizing: (geom) => root.applyCanvasResize("verse", geom)
-            onDragEnded: root.endCanvasDrag()
-            styleBorderEnabled: root.getCanvasItemStyle("verse").enabled
-            styleBorderWidth: root.getCanvasItemStyle("verse").width
-            styleBorderStyle: root.getCanvasItemStyle("verse").style
-            styleBorderRadius: root.getCanvasItemStyle("verse").radius
-            styleBorderColor: {
-                const c = root.getCanvasItemStyle("verse").color
-                return c.kind === "gradient" ? c.from : c.color
-            }
-            stylePadding: root.getCanvasItemStyle("verse").padding
-            styleOpacityPct: root.getCanvasItemStyle("verse").opacity
-
-            Column {
-                width: parent.width
-                spacing: 4
-
-                EditableCanvasLabel {
-                    id: line1Label
-                    width: parent.width
-                    color: "#c7cbd8"
-                    font.family: "Inter"
-                    font.pixelSize: 13
-                    font.weight: Font.Medium
-                    horizontalAlignment: Text.AlignHCenter
-                    wrapMode: Text.Wrap
-                    text: slideModel.activeLine1
-                    onCommitted: (value) => slideModel.setActiveLine1(value)
-                    onSelectRequested: (mods) => root.handleCanvasSelect("verse", mods)
-                    onMoveRequested: (dx, dy, snapDisabled) => {
-                        if (!root.isCanvasObjectSelected("verse"))
-                            root.handleCanvasSelect("verse", 0)
-                        root.applyCanvasMove("verse", dx, dy, snapDisabled)
-                    }
-                    onDragEnded: root.endCanvasDrag()
-                }
-                EditableCanvasLabel {
-                    id: line2Label
-                    width: parent.width
-                    color: "#c7cbd8"
-                    font.family: "Inter"
-                    font.pixelSize: 13
-                    font.weight: Font.Medium
-                    horizontalAlignment: Text.AlignHCenter
-                    wrapMode: Text.Wrap
-                    text: slideModel.activeLine2
-                    onCommitted: (value) => slideModel.setActiveLine2(value)
-                    onSelectRequested: (mods) => root.handleCanvasSelect("verse", mods)
-                    onMoveRequested: (dx, dy, snapDisabled) => {
-                        if (!root.isCanvasObjectSelected("verse"))
-                            root.handleCanvasSelect("verse", 0)
-                        root.applyCanvasMove("verse", dx, dy, snapDisabled)
-                    }
-                    onDragEnded: root.endCanvasDrag()
-                }
-            }
-        }
-
-        DraggableCanvasText {
-            id: refObject
-            x: (mCanvas.width - width) / 2
-            y: 448
-            width: 300
-            visible: slideModel.activeRef !== ""
-            selected: root.isCanvasObjectSelected("ref") || refLabel.editing
-            onSelectedRequested: (mods) => root.handleCanvasSelect("ref", mods)
-            onContextMenuRequested: (mx, my) => root.openCanvasContextMenu(refObject, mx, my, "ref")
-            onResizing: (geom) => root.applyCanvasResize("ref", geom)
-            onDragEnded: root.endCanvasDrag()
-            styleBorderEnabled: root.getCanvasItemStyle("ref").enabled
-            styleBorderWidth: root.getCanvasItemStyle("ref").width
-            styleBorderStyle: root.getCanvasItemStyle("ref").style
-            styleBorderRadius: root.getCanvasItemStyle("ref").radius
-            styleBorderColor: {
-                const c = root.getCanvasItemStyle("ref").color
-                return c.kind === "gradient" ? c.from : c.color
-            }
-            stylePadding: root.getCanvasItemStyle("ref").padding
-            styleOpacityPct: root.getCanvasItemStyle("ref").opacity
-
-            EditableCanvasLabel {
-                id: refLabel
-                width: parent.width
-                color: "#8a8fa3"
-                font.family: "Inter"
-                font.pixelSize: 11
-                font.weight: Font.Medium
-                horizontalAlignment: Text.AlignHCenter
-                text: slideModel.activeRef
-                onCommitted: (value) => slideModel.setActiveRef(value)
-                onSelectRequested: (mods) => root.handleCanvasSelect("ref", mods)
-                onMoveRequested: (dx, dy, snapDisabled) => {
-                    if (!root.isCanvasObjectSelected("ref"))
-                        root.handleCanvasSelect("ref", 0)
-                    root.applyCanvasMove("ref", dx, dy, snapDisabled)
-                }
-                onDragEnded: root.endCanvasDrag()
-            }
-        }
-
         // Clicking empty canvas clears the whole selection. z: -1 keeps it
         // behind every object's own MouseArea (so clicking an object still
         // selects/drags it) regardless of declaration order — only clicks
@@ -793,63 +663,256 @@ Rectangle {
             id: canvasSnapGuides
         }
 
-        Rectangle {
-            id: camPanel
-            x: 562
-            y: 448
-            height: 84
-            width: 112
+        // Every item on the canvas, created via the "+" Add Content menu
+        // (see addCanvasItem) — "text" gets a real editable label, "camera"
+        // gets the full live-preview visual, everything else gets a
+        // bordered placeholder showing its own icon/label from
+        // root.contentTypes (not just its bare kind name) so each kind at
+        // least reads as visually distinct until real per-kind content
+        // (a real media player frame, audio waveform, etc.) gets built out.
+        Repeater {
+            id: canvasItemsRepeater
+            model: slideStore.current.items
+            delegate: DraggableCanvasText {
+                id: canvasItemObject
+                required property var modelData
+                // Exposed so canvasContextMenu's "Edit" case (below) can
+                // reach into whichever delegate matches the clicked item and
+                // enter edit mode directly, without a fixed/named id to
+                // reference the way the old title/verse/ref/date objects had.
+                property alias textLabel: itemTextLabel
+                x: modelData.x
+                y: modelData.y
+                width: modelData.width
+                height: modelData.height
+                style: modelData.style
+                selected: root.isCanvasObjectSelected(modelData.key)
+                onSelectedRequested: (mods) => root.handleCanvasSelect(modelData.key, mods)
+                onContextMenuRequested: (mx, my) => root.openCanvasContextMenu(canvasItemObject, mx, my, modelData.key)
+                onResizing: (geom) => root.applyCanvasResize(modelData.key, geom)
+                onMoving: (dx, dy, snapDisabled) => root.applyCanvasMove(modelData.key, dx, dy, snapDisabled)
+                onDragEnded: root.endCanvasDrag()
 
-            Shape {
-                anchors.fill: parent
-                ShapePath {
-                    fillGradient: LinearGradient {
-                        x1: camPanel.width * 0.5; x2: camPanel.width * 0.5
-                        y1: 0; y2: camPanel.height
-                        GradientStop { color: "#ff123326"; position: 0 }
-                        GradientStop { color: "#ff07130e"; position: 1 }
+                EditableCanvasLabel {
+                    id: itemTextLabel
+                    visible: canvasItemObject.modelData.kind === "text"
+                    width: parent.width
+                    color: "#f2f4fa"
+                    font.family: "Inter"
+                    font.pixelSize: 16
+                    font.weight: Font.Medium
+                    horizontalAlignment: Text.AlignHCenter
+                    text: canvasItemObject.modelData.text
+                    // Live per-keystroke propagation into the item object
+                    // — the thumbnail binds to this same object, so rows
+                    // update as you type, not only on commit.
+                    onEdited: (value) => canvasItemObject.modelData.text = value
+                    onCommitted: (value) => canvasItemObject.modelData.text = value
+                    onSelectRequested: (mods) => root.handleCanvasSelect(canvasItemObject.modelData.key, mods)
+                    onMoveRequested: (dx, dy, snapDisabled) => {
+                        if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
+                            root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
+                        root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
                     }
-                    strokeColor: "#000"
-                    strokeWidth: 0
-                    PathRectangle { width: camPanel.width; height: camPanel.height; radius: 8 }
+                    onDragEnded: root.endCanvasDrag()
                 }
-            }
-            Image { x: 8; y: 8; source: Qt.resolvedUrl("assets/cam_dot.png") }
-            Text {
-                x: 18; y: 7
-                color: "#e2e8f0"
-                font.family: "Inter"
-                font.pixelSize: 7
-                font.weight: Font.Medium
-                text: qsTr("LIVE")
-            }
-            Rectangle { x: 10; y: 24; height: 34; width: 36; color: "#14503a"; radius: 4 }
-            Rectangle { x: 30; y: 24; height: 34; width: 24; color: "#0f3a2c"; radius: 4 }
-            Image { x: 96; y: 10; source: Qt.resolvedUrl("assets/cam_lens.png") }
-            Text {
-                x: 10; y: 68
-                color: "#eef0f6"
-                font.family: "Inter"
-                font.pixelSize: 8
-                font.weight: Font.Medium
-                text: qsTr("CAM 1")
-            }
-            Text {
-                x: 68; y: 68
-                color: "#5c6475"
-                font.family: "Inter"
-                font.pixelSize: 8
-                text: qsTr("10:24:07")
+
+                // The full live-preview visual (lifted from the former fixed
+                // camObject) — same Shape gradient, LIVE badge, cam icons,
+                // CAM 1 label, timestamp — for every "camera" kind item, not
+                // just a single hardcoded one.
+                Item {
+                    id: camContent
+                    visible: canvasItemObject.modelData.kind === "camera"
+                    anchors.fill: parent
+
+                    Shape {
+                        anchors.fill: parent
+                        ShapePath {
+                            fillGradient: LinearGradient {
+                                x1: camContent.width * 0.5; x2: camContent.width * 0.5
+                                y1: 0; y2: camContent.height
+                                GradientStop { color: "#ff123326"; position: 0 }
+                                GradientStop { color: "#ff07130e"; position: 1 }
+                            }
+                            strokeColor: "#000"
+                            strokeWidth: 0
+                            PathRectangle { width: camContent.width; height: camContent.height; radius: 8 }
+                        }
+                    }
+                    Image { x: 8; y: 8; source: Qt.resolvedUrl("assets/cam_dot.png") }
+                    Text {
+                        x: 18; y: 7
+                        color: "#e2e8f0"
+                        font.family: "Inter"
+                        font.pixelSize: 7
+                        font.weight: Font.Medium
+                        text: qsTr("LIVE")
+                    }
+                    Rectangle { x: 10; y: 24; height: 34; width: 36; color: "#14503a"; radius: 4 }
+                    Rectangle { x: 30; y: 24; height: 34; width: 24; color: "#0f3a2c"; radius: 4 }
+                    Image { x: 96; y: 10; source: Qt.resolvedUrl("assets/cam_lens.png") }
+                    Text {
+                        x: 10; y: 68
+                        color: "#eef0f6"
+                        font.family: "Inter"
+                        font.pixelSize: 8
+                        font.weight: Font.Medium
+                        text: qsTr("CAM 1")
+                    }
+                    Text {
+                        x: 68; y: 68
+                        color: "#5c6475"
+                        font.family: "Inter"
+                        font.pixelSize: 8
+                        text: qsTr("10:24:07")
+                    }
+
+                    // Click to select, drag the body to move — shared
+                    // press/threshold/delta body (see CanvasDragArea), the
+                    // same mechanics EditableCanvasLabel uses internally.
+                    CanvasDragArea {
+                        anchors.fill: parent
+                        onMoved: (dx, dy, snapDisabled) => {
+                            if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
+                                root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
+                            root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
+                        }
+                        onDragFinished: root.endCanvasDrag()
+                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers)
+                    }
+                }
+
+                // Generic placeholder for every other kind — its own
+                // icon/label from root.contentTypes, not just the bare kind
+                // name, so Media/Audio/Shape/Timer/Clock at least read as
+                // visually distinct from each other while real per-kind
+                // content is still future work.
+                Rectangle {
+                    id: genericPlaceholder
+                    readonly property var typeInfo: {
+                        for (let i = 0; i < root.contentTypes.length; ++i) {
+                            if (root.contentTypes[i].kind === canvasItemObject.modelData.kind)
+                                return root.contentTypes[i]
+                        }
+                        return { icon: "?", label: canvasItemObject.modelData.kind }
+                    }
+                    visible: !["text", "camera"].includes(canvasItemObject.modelData.kind)
+                    anchors.fill: parent
+                    color: "#1a1c26"
+                    border.color: "#3a4155"
+                    border.width: 1
+                    radius: 6
+
+                    Column {
+                        anchors.centerIn: parent
+                        spacing: 4
+
+                        Text {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            color: "#9b8ff5"
+                            font.pixelSize: 20
+                            text: genericPlaceholder.typeInfo.icon
+                        }
+                        Text {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            color: "#aeb6c8"
+                            font.family: "Inter"
+                            font.pixelSize: 11
+                            font.weight: Font.Medium
+                            text: genericPlaceholder.typeInfo.label.toUpperCase()
+                        }
+                    }
+
+                    // Click to select, drag the body to move — shared
+                    // press/threshold/delta body (see CanvasDragArea), the
+                    // same mechanics EditableCanvasLabel uses internally.
+                    CanvasDragArea {
+                        anchors.fill: parent
+                        onMoved: (dx, dy, snapDisabled) => {
+                            if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
+                                root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
+                            root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
+                        }
+                        onDragFinished: root.endCanvasDrag()
+                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers)
+                    }
+                }
             }
         }
 
-        Text {
-            x: 6
-            y: 10
-            color: "#5c6475"
-            font.family: "Inter"
-            font.pixelSize: 10
-            text: qsTr("Sunday Service  ·  Slide %1 — %2").arg(slideModel.activeNum).arg(slideModel.activeTitle)
+        // The actual edit-area border — declared last so it draws on top of
+        // every other child (checkerboard, background, text objects, camera
+        // panel), instead of underneath them the way a border set on
+        // mCanvas's own Rectangle would (see the comment up top).
+        Rectangle {
+            anchors.fill: parent
+            color: "transparent"
+            border.color: "#ffffff"
+            border.width: 2
+        }
+    }
+
+    // Empty-state veil over the canvas — shown only when no slide is active.
+    // A root-level sibling (not a child of mCanvas) deliberately: mCanvas is
+    // disabled in this state, and a disabled parent disables its children's
+    // input, so the "Add slide" chip here must not be inside it. Covers the
+    // canvas area only; the slide list and its Add slide button stay live.
+    Rectangle {
+        x: mCanvas.x
+        y: mCanvas.y
+        width: mCanvas.width
+        height: mCanvas.height
+        visible: !root.hasActiveSlide
+        color: "#b012131a"
+
+        Column {
+            anchors.centerIn: parent
+            spacing: 12
+
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                color: "#9aa0b5"
+                font.family: "Inter"
+                font.pixelSize: 13
+                text: qsTr("No slides yet")
+            }
+            Text {
+                width: 300
+                anchors.horizontalCenter: parent.horizontalCenter
+                horizontalAlignment: Text.AlignHCenter
+                color: "#5c6475"
+                font.family: "Inter"
+                font.pixelSize: 10
+                wrapMode: Text.Wrap
+                text: qsTr("Add a slide to start building — then place text, cameras and more on the canvas")
+            }
+
+            Rectangle {
+                anchors.horizontalCenter: parent.horizontalCenter
+                height: 36
+                width: 140
+                radius: 18
+                color: emptyAddArea.containsMouse ? "#7a6cf0" : "#6c5ce7"
+                Behavior on color { ColorAnimation { duration: 100 } }
+
+                Text {
+                    anchors.centerIn: parent
+                    color: "#ffffff"
+                    font.family: "Inter"
+                    font.pixelSize: 12
+                    font.weight: Font.Medium
+                    text: qsTr("+ Add slide")
+                }
+
+                MouseArea {
+                    id: emptyAddArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: slideModel.addSlide()
+                }
+            }
         }
     }
 
@@ -879,6 +942,9 @@ Rectangle {
         width: 46
         radius: 23
         color: "#6c5ce7"
+        // Nothing to add content TO without an active slide — dim and inert.
+        enabled: root.hasActiveSlide
+        opacity: root.hasActiveSlide ? 1 : 0.35
 
         Text {
             anchors.centerIn: parent
@@ -957,7 +1023,7 @@ Rectangle {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
-                            console.log("[edit] add content:", typeChip.modelData.kind)
+                            root.addCanvasItem(typeChip.modelData.kind)
                             root.addMenuOpen = false
                         }
                     }
@@ -1020,7 +1086,7 @@ Rectangle {
                 color: "#8a8fa3"
                 font.family: "Inter"
                 font.pixelSize: 9
-                text: qsTr("12 slides · Worship template")
+                text: qsTr("%1 slide(s)").arg(slideListRepeater.count)
             }
             Text {
                 x: 236
@@ -1032,42 +1098,21 @@ Rectangle {
             }
         }
 
-        Rectangle {
-            x: 12
-            y: 80
-            height: 31
-            width: 256
-            border.color: "#232530"
-            border.width: 1
-            color: "#1a1c26"
-            radius: 8
-
-            Image { x: 10; y: 9; source: Qt.resolvedUrl("assets/so_search_ic.png") }
-            Text {
-                x: 32
-                y: 8
-                color: "#5c6475"
-                font.family: "Inter"
-                font.pixelSize: 11
-                text: qsTr("Search this show…")
-            }
-        }
-
         Text {
             x: 12
-            y: 122
+            y: 80
             color: "#5c6475"
             font.family: "Inter"
             font.pixelSize: 10
-            text: qsTr("SLIDES · 12")
+            text: qsTr("SLIDES · %1").arg(slideListRepeater.count)
         }
 
         Flickable {
             id: slideListFlick
             x: 12
-            y: 140
+            y: 98
             width: 256
-            height: leftPanel.height - 140 - 12
+            height: leftPanel.height - 98 - 12
             clip: true
             contentWidth: width
             contentHeight: slideListColumn.height
@@ -1079,25 +1124,33 @@ Rectangle {
             spacing: 8
 
             Repeater {
+                id: slideListRepeater
                 model: slideModel
+                // No inline required-property declarations here —
+                // SlideListItem.qml declares them and the model injects them
+                // there. Duplicating them inline broke injection: the
+                // delegate failed to create ("Required property ... was not
+                // initialized"), which is exactly why thumbnails never
+                // appeared even though slides were created.
                 delegate: SlideListItem {
+                    // Live thumbnail: the slide's items straight from the
+                    // per-slide store — the same objects the canvas edits,
+                    // so a row re-renders the moment its content does.
+                    previewItems: slideStore.items(slideId)
+                    // The design space the items' coordinates live in — the
+                    // canvas's actual on-screen size, so the mini-canvas
+                    // scale can never drift from what you see while editing.
+                    canvasWidth: mCanvas.width
+                    canvasHeight: mCanvas.height
                     onSelected: slideModel.selectSlide(index)
                     onDuplicateRequested: slideModel.duplicateSlide(index)
                     onDeleteRequested: slideModel.removeSlide(index)
                     onContextMenuRequested: (mx, my) => {
-                        // Escape slideListFlick's clip region: reposition
-                        // the one shared menu instance (declared at root
-                        // level) in root's coordinate space. root.width/
-                        // height track the actual window size (root is
-                        // anchors.fill: parent on a resizable window), so
-                        // clamp against those — not the 1440x900 design
-                        // canvas — so the menu can't land partly or fully
-                        // off-screen when the window is narrower/shorter.
-                        const p = mapToItem(root, mx, my)
-                        slideContextMenu.x = Math.max(0, Math.min(p.x, root.width - slideContextMenu.width))
-                        slideContextMenu.y = Math.max(0, Math.min(p.y, root.height - slideContextMenu.height))
+                        // Shared map+clamp helper — openAt maps into root's
+                        // space and clamps to the window, so the menu escapes
+                        // slideListFlick's clip without landing off-screen.
+                        slideContextMenu.openAt(this, mx, my, root)
                         root.contextMenuSlideIndex = index
-                        slideContextMenu.visible = true
                     }
                 }
             }
@@ -1146,6 +1199,10 @@ Rectangle {
         height: 852
         width: 400
         color: "#0f1015"
+        // Greyed with the canvas in the empty state — Background/Size & Style
+        // target the active slide, which doesn't exist yet.
+        enabled: root.hasActiveSlide
+        opacity: root.hasActiveSlide ? 1 : 0.35
 
         Row {
             x: 32
@@ -1240,6 +1297,15 @@ Rectangle {
             width: 384
             color: "#161823"
             radius: 8
+            // Greyed out (not hidden — the row's meaning would otherwise
+            // silently flip back to "slide background" while something's
+            // still selected, which reads as more confusing than a dimmed,
+            // inert control) when the selected item's own visual (camera's
+            // live preview, the generic placeholder) fully covers whatever
+            // a background color would draw underneath it.
+            enabled: root.primarySelectedSupportsFill
+            opacity: root.primarySelectedSupportsFill ? 1 : 0.4
+            Behavior on opacity { NumberAnimation { duration: 100 } }
 
             Text {
                 x: 14
@@ -1247,7 +1313,11 @@ Rectangle {
                 color: "#eef1f8"
                 font.family: "Inter"
                 font.pixelSize: 12
-                text: qsTr("Background")
+                // Same row, two targets: the selected item's background when
+                // something's selected, the slide's own background
+                // otherwise — one control, not a duplicate built into
+                // Size & Style too (see that file's header comment).
+                text: root.primarySelectedItemStyle ? qsTr("Item Background") : qsTr("Background")
             }
             Rectangle {
                 x: 256
@@ -1257,16 +1327,10 @@ Rectangle {
                 border.color: "#3a4a7a"
                 border.width: 1
                 radius: 5
-                gradient: Gradient {
-                    GradientStop {
-                        position: 0
-                        color: root.slideBackground.kind === "gradient" ? root.slideBackground.from : root.slideBackground.color
-                    }
-                    GradientStop {
-                        position: 1
-                        color: root.slideBackground.kind === "gradient" ? root.slideBackground.to : root.slideBackground.color
-                    }
-                }
+                // A flat swatch — the slide background is a solid color now
+                // (gradients left with the opacity feature), so no swatch
+                // gradient plumbing.
+                color: root.primarySelectedItemStyle ? root.primarySelectedItemStyle.backgroundColor : slideStore.current.background
             }
             Rectangle {
                 x: 298
@@ -1294,7 +1358,7 @@ Rectangle {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
-                        root.bgModalTarget = "background"
+                        root.bgModalTarget = root.primarySelectedItemStyle ? "itemBackground" : "background"
                         root.bgModalOpen = true
                     }
                 }
@@ -1314,19 +1378,13 @@ Rectangle {
             x: 8
             y: 462
             width: 384
-            padding: root.getCanvasItemStyle(root.primaryCanvasKey).padding
-            styleOpacity: root.getCanvasItemStyle(root.primaryCanvasKey).opacity
-            radius: root.getCanvasItemStyle(root.primaryCanvasKey).radius
-            borderWidth: root.getCanvasItemStyle(root.primaryCanvasKey).width
-            borderStyle: root.getCanvasItemStyle(root.primaryCanvasKey).style
-            borderColor: root.getCanvasItemStyle(root.primaryCanvasKey).color
-            borderEnabled: root.getCanvasItemStyle(root.primaryCanvasKey).enabled
-            onPaddingChanged: root.setSelectedItemStyle({ padding: padding })
-            onStyleOpacityChanged: root.setSelectedItemStyle({ opacity: styleOpacity })
-            onRadiusChanged: root.setSelectedItemStyle({ radius: radius })
-            onBorderWidthChanged: root.setSelectedItemStyle({ width: borderWidth })
-            onBorderStyleChanged: root.setSelectedItemStyle({ style: borderStyle })
-            onBorderEnabledChanged: root.setSelectedItemStyle({ enabled: borderEnabled })
+            // Every selected object's style, in selection order — the card
+            // displays the first one and applies changes to all of them.
+            // canvasObjectByKey(k).style resolves correctly whether k is one
+            // of the fixed objects (registry-backed) or a "+"-added item
+            // (its own inline style) — one lookup path for both.
+            targets: root.selectedCanvasObjects.map((k) => root.canvasObjectByKey(k)?.style).filter((s) => s !== null && s !== undefined)
+            fillSupported: root.primarySelectedSupportsFill
             onChangeBorderRequested: {
                 root.bgModalTarget = "border"
                 root.bgModalOpen = true
@@ -1363,10 +1421,18 @@ Rectangle {
             case "Edit":
                 slideModel.selectSlide(root.contextMenuSlideIndex)
                 break
-            case "Duplicate":
-                slideModel.duplicateSlide(root.contextMenuSlideIndex)
+            case "Duplicate": {
+                // The copy gets a fresh stable id; clone the canvas onto it.
+                const newId = slideModel.duplicateSlide(root.contextMenuSlideIndex)
+                if (newId > 0)
+                    slideStore.cloneSlide(
+                        slideModel.slideIdAt(root.contextMenuSlideIndex), newId)
                 break
+            }
             case "Delete":
+                // Drop the archive BEFORE removing the row, so the item
+                // objects die with the slide instead of leaking.
+                slideStore.dropSlide(slideModel.slideIdAt(root.contextMenuSlideIndex))
                 slideModel.removeSlide(root.contextMenuSlideIndex)
                 break
             }
@@ -1374,10 +1440,9 @@ Rectangle {
         }
     }
 
-    // Right-click menu for canvas text objects (title/verse/reference).
-    // "Duplicate" duplicates the whole slide (these fields aren't
-    // independent list items the way slide rows are, so there's nothing
-    // narrower to duplicate); "Delete" clears just that object's own text.
+    // Right-click menu for canvas items: "Duplicate" copies this one item
+    // (offset one tile down-right, like the item add cascading), "Delete"
+    // removes just it.
     DropdownPanel {
         id: canvasContextMenu
         visible: false
@@ -1389,33 +1454,20 @@ Rectangle {
         ]
         onItemActivated: (label) => {
             switch (label) {
-            case "Edit":
-                switch (root.canvasContextTarget) {
-                case "title": titleLabel.editing = true; break
-                case "verse": line1Label.editing = true; break
-                case "ref":   refLabel.editing = true; break
-                case "date":  dateLabel.editing = true; break
-                }
+            case "Edit": {
+                const d = root.delegateForKey(root.canvasContextTarget)
+                if (d && d.modelData && d.modelData.kind === "text")
+                    d.textLabel.editing = true
                 break
+            }
             case "Duplicate":
-                slideModel.duplicateSlide(slideModel.activeNum - 1)
+                const src = root.canvasObjectByKey(root.canvasContextTarget)
+                if (src)
+                    root.addCanvasItem(src.kind, src)
                 break
             case "Delete":
-                switch (root.canvasContextTarget) {
-                case "title":
-                    slideModel.setActiveTitle("")
-                    break
-                case "verse":
-                    slideModel.setActiveLine1("")
-                    slideModel.setActiveLine2("")
-                    break
-                case "ref":
-                    slideModel.setActiveRef("")
-                    break
-                case "date":
-                    root.canvasDateLine = ""
-                    break
-                }
+                // removeCanvasItems also deselects the removed keys.
+                root.removeCanvasItems([root.canvasContextTarget])
                 break
             }
             canvasContextMenu.visible = false
@@ -1425,11 +1477,22 @@ Rectangle {
     BackgroundColorModal {
         id: bgColorModal
         open: root.bgModalOpen
-        onApplied: (selection, opacityPct) => {
-            if (root.bgModalTarget === "border")
-                root.setSelectedItemStyle({ color: selection })
-            else
-                root.slideBackground = selection
+        title: root.bgModalTarget === "border" ? qsTr("Border Color") : qsTr("Background Color")
+        onApplied: (selection) => {
+            if (root.bgModalTarget === "border" || root.bgModalTarget === "itemBackground") {
+                // Solid colors only (gradients aren't a border/item-fill
+                // concept here); the picker is shared with the slide
+                // Background case, which does support gradients.
+                const hex = selection.kind === "color" ? selection.color : selection.from
+                root.selectedCanvasObjects.forEach((k) => {
+                    const s = root.canvasObjectByKey(k)?.style
+                    if (!s) return
+                    if (root.bgModalTarget === "border") s.borderColor = hex
+                    else s.backgroundColor = hex
+                })
+            } else {
+                slideStore.current.background = selection.kind === "color" ? selection.color : selection.from
+            }
             root.bgModalOpen = false
         }
         onCancelled: root.bgModalOpen = false

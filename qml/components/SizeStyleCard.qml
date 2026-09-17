@@ -1,14 +1,32 @@
 import QtQuick
 
-// The Edit screen's "Size & Style" collapsible panel: Padding/Opacity
-// sliders, then a Border section (color row, Width, Corner Radius, and a
-// Line/Dotted/Dashed style selector — radius lives here, grouped with the
-// border it rounds, not up with Padding/Opacity). 1BBTIwaya/
-// VGRPresenter_Settings_Outputs_Edit.qml ships
+// The Edit screen's "Size & Style" collapsible panel: a Padding slider and
+// a Corner Radius slider (both always active — radius is an INDEPENDENT
+// control here, not a border setting: it rounds the box itself, so you can
+// round a box with the border off), then a Border section (color row, Width,
+// and a Line/Dotted/Dashed style selector). Item background fill is not a
+// control here — the
+// existing top-of-panel "Background" row (EditScreen.qml) already picks a
+// color; it targets the selected item's background when something's
+// selected and the slide's background otherwise, rather than this card
+// duplicating that same swatch+chip UI a second time.
+// 1BBTIwaya/VGRPresenter_Settings_Outputs_Edit.qml ships
 // this only as a flat PNG (style_dialog.png/modal_9.png), so it's rebuilt
 // here as real QML from the reference screenshot, model-driven where it
 // matters (borderStyle options) so it stays a self-contained, reusable card
 // rather than living inline in EditScreen.qml.
+//
+// The card edits CanvasItemStyle value objects directly: point `targets` at
+// the style object(s) of the currently selected canvas item(s) and every
+// control binds to targets[0] and writes to all of them. No mirroring layer,
+// no per-field signals — the card is reusable anywhere CanvasItemStyle is.
+// An empty array disables the controls.
+//
+// There is no Opacity slider: item transparency was removed (it only ever
+// made sense alongside slide backgrounds; on a text item it either did
+// nothing or just faded the text in a confusing way), and nothing here
+// needs it. Re-adding a style field later means one property on
+// CanvasItemStyle + one row here — nothing else.
 //
 // Literal colors, not Theme.* — same house convention as DropdownPanel.qml/
 // LabeledSlider.qml at this nesting depth.
@@ -16,17 +34,24 @@ Column {
     id: root
 
     property bool expanded: true
-    property real padding: 24
-    property real styleOpacity: 100
-    property real radius: 12
-    property real borderWidth: 2
-    property string borderStyle: "line" // "line" | "dotted" | "dashed"
-    property var borderColor: ({ kind: "color", color: "#ffffff" })
-    // Off by default — FreeShow (and most editors) don't put a border on a
-    // text item unless you deliberately turn one on; a checkbox is the
-    // explicit "yes, style this one" switch rather than every item always
-    // carrying whatever width/style happen to be dialed in here.
-    property bool borderEnabled: false
+
+    // The CanvasItemStyle object(s) being edited. [0] drives what the
+    // controls display; any change is applied to every target (so a
+    // multi-selection moves all of them together, matching how the canvas
+    // selection works).
+    property list<CanvasItemStyle> targets: []
+
+    readonly property CanvasItemStyle primary: targets.length > 0 ? targets[0] : null
+    readonly property bool hasTargets: primary !== null
+
+    // False for a kind whose own content (camera's live preview, the
+    // generic media/audio/shape/timer/clock placeholder) fully covers its
+    // box with an opaque visual — a background fill or border stroke drawn
+    // underneath it would never actually be seen, so the Border section
+    // greys out instead of looking active but doing nothing. Corner Radius
+    // is unaffected: it also rounds the selection outline/hover chrome,
+    // which draws on top of the content and so stays visible regardless.
+    property bool fillSupported: true
 
     // Fired when the Border row's "Change" chip is clicked — this card owns
     // no color-picker UI itself; the consumer (EditScreen.qml) reuses its
@@ -46,12 +71,6 @@ Column {
             anchors.verticalCenter: parent.verticalCenter
             spacing: 10
 
-            Text {
-                text: "|||"
-                color: "#8b5cf6"
-                font.pixelSize: 12
-                font.weight: Font.Bold
-            }
             Text {
                 text: qsTr("Size & Style")
                 color: "#eef1f8"
@@ -81,23 +100,30 @@ Column {
         spacing: 18
         visible: root.expanded
         height: visible ? implicitHeight : 0
+        opacity: root.hasTargets ? 1 : 0.4
 
         LabeledSlider {
             width: parent.width
             label: qsTr("Padding")
-            value: root.padding
+            value: root.primary ? root.primary.padding : 0
             minValue: 0
             maxValue: 64
-            onMoved: (v) => root.padding = v
+            onMoved: (v) => root.targets.forEach((t) => t.padding = v)
         }
+
+        // Corner Radius — deliberately OUTSIDE the border section below: it
+        // rounds the box itself (fill, outline, selection chrome all follow
+        // via CanvasItemStyle.cornerRadius), so it works with the border off.
+        // Always full-opacity; dimming it with the border would wrongly imply
+        // it belongs to the border.
         LabeledSlider {
             width: parent.width
-            label: qsTr("Opacity")
-            value: root.styleOpacity
+            label: qsTr("Corner Radius")
+            value: root.primary ? root.primary.cornerRadius : 0
             minValue: 0
-            maxValue: 100
-            suffix: "%"
-            onMoved: (v) => root.styleOpacity = v
+            maxValue: 48
+            suffix: "px"
+            onMoved: (v) => root.targets.forEach((t) => t.cornerRadius = v)
         }
 
         // Border color row — same card language as EditScreen.qml's
@@ -108,6 +134,9 @@ Column {
             height: 46
             radius: 8
             color: "#161823"
+            enabled: root.fillSupported
+            opacity: root.fillSupported ? 1 : 0.4
+            Behavior on opacity { NumberAnimation { duration: 100 } }
 
             Text {
                 x: 14
@@ -146,7 +175,7 @@ Column {
                     anchors.fill: parent
                     anchors.margins: -4
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.borderEnabled = !root.borderEnabled
+                    onClicked: root.targets.forEach((t) => t.borderEnabled = !root.borderEnabled)
                 }
             }
 
@@ -160,16 +189,7 @@ Column {
                 border.width: 1
                 radius: 5
                 Behavior on opacity { NumberAnimation { duration: 100 } }
-                gradient: Gradient {
-                    GradientStop {
-                        position: 0
-                        color: root.borderColor.kind === "gradient" ? root.borderColor.from : root.borderColor.color
-                    }
-                    GradientStop {
-                        position: 1
-                        color: root.borderColor.kind === "gradient" ? root.borderColor.to : root.borderColor.color
-                    }
-                }
+                color: root.primary ? root.primary.borderColor : "#ffffff"
             }
 
             Rectangle {
@@ -215,24 +235,14 @@ Column {
 
         LabeledSlider {
             width: parent.width
-            opacity: root.borderEnabled ? 1 : 0.4
+            enabled: root.fillSupported
+            opacity: (root.borderEnabled && root.fillSupported) ? 1 : 0.4
             label: qsTr("Width")
-            value: root.borderWidth
+            value: root.primary ? root.primary.borderWidth : 2
             minValue: 0
             maxValue: 12
             suffix: "px"
-            onMoved: (v) => root.borderWidth = v
-            Behavior on opacity { NumberAnimation { duration: 100 } }
-        }
-        LabeledSlider {
-            width: parent.width
-            opacity: root.borderEnabled ? 1 : 0.4
-            label: qsTr("Corner Radius")
-            value: root.radius
-            minValue: 0
-            maxValue: 48
-            suffix: "px"
-            onMoved: (v) => root.radius = v
+            onMoved: (v) => root.targets.forEach((t) => t.borderWidth = v)
             Behavior on opacity { NumberAnimation { duration: 100 } }
         }
 
@@ -240,7 +250,8 @@ Column {
         Row {
             width: parent.width
             spacing: 8
-            opacity: root.borderEnabled ? 1 : 0.4
+            enabled: root.fillSupported
+            opacity: (root.borderEnabled && root.fillSupported) ? 1 : 0.4
             Behavior on opacity { NumberAnimation { duration: 100 } }
 
             Repeater {
@@ -276,10 +287,16 @@ Column {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.borderStyle = styleBtn.modelData.key
+                        onClicked: root.targets.forEach((t) => t.borderStyle = styleBtn.modelData.key)
                     }
                 }
             }
         }
     }
+
+    // Shorthands over the primary target so the bindings above stay short.
+    // They read through `primary` reactively (primary is a readonly binding,
+    // so the whole chain re-evaluates when targets changes).
+    readonly property bool borderEnabled: primary ? primary.borderEnabled : false
+    readonly property string borderStyle: primary ? primary.borderStyle : "line"
 }

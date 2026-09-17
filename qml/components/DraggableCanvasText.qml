@@ -13,36 +13,53 @@ Item {
     property real minHeight: 20
     readonly property int edgeMargin: 16
 
-    // Persistent style border (SizeStyleCard's Border row), separate from
-    // selectionOutline below. Off by default.
-    property bool styleBorderEnabled: false
-    property real styleBorderWidth: 2
-    property color styleBorderColor: "#ffffff"
-    property string styleBorderStyle: "line" // "line" | "dotted" | "dashed"
-    property real styleBorderRadius: 0
-
-    // SizeStyleCard's Padding/Opacity — applied to content+border only, not
-    // to the selection chrome, so a faded/inset item's handles still show
-    // up crisp and fully opaque while it's selected.
-    property real stylePadding: 0
-    property real styleOpacityPct: 100
+    // The item's persistent style (padding + border), as one CanvasItemStyle
+    // object shared with the rest of the app — EditScreen creates one per
+    // canvas item and hands the same instance here and to SizeStyleCard, so
+    // a slider move shows up here with no mirroring layer. Null means "no
+    // styling": defaults below apply (no padding, no border).
+    property CanvasItemStyle style: null
 
     signal selectedRequested(var modifiers)
     // (x, y) in local coordinates — consumer maps into its own space to
     // escape mCanvas's clip.
     signal contextMenuRequested(real x, real y)
     signal resizing(var geom)
+    // Shift+drag-the-ring — per-event incremental deltas (not total-since-
+    // press), matching EditableCanvasLabel.moveRequested's exact contract so
+    // both feed the same consumer-side applyCanvasMove(key, dx, dy, ...)
+    // accumulation logic identically.
+    signal moving(real dx, real dy, bool snapDisabled)
     signal dragEnded()
 
     width: contentHolder.childrenRect.width
     height: contentHolder.childrenRect.height
+
+    // Local shorthands so every consumer below reads one name instead of
+    // re-testing for a null style object.
+    readonly property real stylePadding: style ? style.padding : 0
+    readonly property color styleBackgroundColor: style ? style.backgroundColor : "transparent"
+    readonly property bool styleBorderEnabled: style ? style.borderEnabled : false
+    readonly property real styleBorderWidth: style ? style.borderWidth : 2
+    readonly property color styleBorderColor: style ? style.borderColor : "#ffffff"
+    readonly property string styleBorderStyle: style ? style.borderStyle : "line"
+    readonly property real styleCornerRadius: style ? style.cornerRadius : 0
+
+    // Fill, full bounds (not inset by padding — same footprint as the
+    // border below it shares corner radius with). Declared before
+    // contentHolder so the fill sits behind the actual text/content. No
+    // visible: check needed — "transparent" already renders as nothing.
+    Rectangle {
+        anchors.fill: parent
+        radius: root.styleCornerRadius
+        color: root.styleBackgroundColor
+    }
 
     Item {
         id: contentHolder
         anchors.fill: parent
         anchors.margins: root.stylePadding
         clip: true
-        opacity: root.styleOpacityPct / 100
     }
 
     // Rectangle.border has no dash option, hence Shape; PathRectangle
@@ -51,7 +68,6 @@ Item {
     Shape {
         anchors.fill: parent
         visible: root.styleBorderEnabled && root.styleBorderWidth > 0
-        opacity: root.styleOpacityPct / 100
         antialiasing: true
         ShapePath {
             strokeColor: root.styleBorderColor
@@ -70,7 +86,7 @@ Item {
                 y: 0
                 width: root.width
                 height: root.height
-                radius: root.styleBorderRadius
+                radius: root.styleCornerRadius
             }
         }
     }
@@ -93,11 +109,26 @@ Item {
         id: hoverArea
     }
 
-    // Hover wash only — no always-on outline; selectionOutline below is
-    // the only chrome an unselected object shows nothing of.
+    // Very faint always-on outline so an unselected item's bounds stay
+    // legible without hunting for them — kept dim enough to not read as
+    // "selected" (selectionOutline below is a completely different color/
+    // weight) and to not tire the eye with several items on screen at once.
+    // radius follows the item's own cornerRadius — a hardcoded 2 here was
+    // exactly the mystery radius on fresh boxes (border off, yet rounded).
     Rectangle {
         anchors.fill: parent
-        radius: 2
+        radius: root.styleCornerRadius
+        color: "transparent"
+        border.color: "#ffffff"
+        border.width: 2
+        opacity: root.selected ? 0 : 0.22
+        Behavior on opacity { NumberAnimation { duration: 120 } }
+    }
+
+    // Hover wash.
+    Rectangle {
+        anchors.fill: parent
+        radius: root.styleCornerRadius
         color: "#0dffffff"
         opacity: (!root.selected && hoverArea.containsMouse) ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 120 } }
@@ -110,9 +141,9 @@ Item {
         id: selectionOutline
         anchors.fill: parent
         border.color: "#6c5ce7"
-        border.width: 1.5
+        border.width: 2
         color: "#146c5ce7"
-        radius: 2
+        radius: root.styleCornerRadius
         opacity: root.selected ? 1 : 0
         visible: opacity > 0.01
         Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
@@ -151,7 +182,6 @@ Item {
                 return (handle.resizeLeft === handle.resizeTop) ? Qt.SizeFDiagCursor : Qt.SizeBDiagCursor
             return h ? Qt.SizeHorCursor : Qt.SizeVerCursor
         }
-
         onPressed: (mouse) => {
             root.forceActiveFocus()
             moving = (mouse.modifiers & Qt.ShiftModifier) !== 0
@@ -176,32 +206,50 @@ Item {
             const g = mapToItem(root.parent, mouse.x, mouse.y)
             const dx = g.x - pressMouseX
             const dy = g.y - pressMouseY
-            if (Math.abs(dx) > 3 || Math.abs(dy) > 3)
-                dragMoved = true
 
             if (handle.moving) {
-                root.x = pressX + dx
-                root.y = pressY + dy
+                // Per-event delta, not total-since-press: reset the tracked
+                // point after every emit so this matches
+                // EditableCanvasLabel's dragArea exactly (see the `moving`
+                // signal's header comment — the consumer's applyCanvasMove
+                // expects per-event increments, not absolute totals).
+                if (dragMoved || Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+                    dragMoved = true
+                    root.moving(dx, dy, (mouse.modifiers & Qt.AltModifier) !== 0)
+                    pressMouseX = g.x
+                    pressMouseY = g.y
+                }
                 return
             }
 
+            if (Math.abs(dx) > 3 || Math.abs(dy) > 3)
+                dragMoved = true
+
+            // Computed into locals, never self-assigned onto root — a
+            // consumer may bind root.x/y/width/height one-way to external
+            // data (e.g. a Repeater delegate's modelData); self-assigning
+            // here would permanently break that binding the first time a
+            // resize happens (the same footgun LabeledSlider.qml's
+            // controlled-component rewrite exists to avoid).
+            let newX = root.x, newY = root.y, newWidth = root.width, newHeight = root.height
+
             if (handle.resizeRight) {
-                root.width = Math.max(root.minWidth, pressWidth + dx)
+                newWidth = Math.max(root.minWidth, pressWidth + dx)
             } else if (handle.resizeLeft) {
                 const nw = Math.max(root.minWidth, pressWidth - dx)
-                root.x = pressX + (pressWidth - nw)
-                root.width = nw
+                newX = pressX + (pressWidth - nw)
+                newWidth = nw
             }
             if (handle.resizeBottom) {
-                root.height = Math.max(root.minHeight, pressHeight + dy)
+                newHeight = Math.max(root.minHeight, pressHeight + dy)
             } else if (handle.resizeTop) {
                 const nh = Math.max(root.minHeight, pressHeight - dy)
-                root.y = pressY + (pressHeight - nh)
-                root.height = nh
+                newY = pressY + (pressHeight - nh)
+                newHeight = nh
             }
 
             root.resizing({
-                x: root.x, y: root.y, width: root.width, height: root.height,
+                x: newX, y: newY, width: newWidth, height: newHeight,
                 left: handle.resizeLeft, right: handle.resizeRight,
                 top: handle.resizeTop, bottom: handle.resizeBottom,
                 snapDisabled: (mouse.modifiers & Qt.AltModifier) !== 0

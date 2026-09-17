@@ -27,6 +27,24 @@ Rectangle {
 
     signal itemActivated(string label)
 
+    // Opens the panel at (x, y) — coordinates in `sourceItem`'s local space —
+    // clamped to stay fully inside `bounds` (usually the window root), so a
+    // menu opened near an edge can't land partly or fully off-screen. One
+    // implementation of the mapToItem + clamp dance instead of a copy per
+    // menu site (EditScreen's slide rows and canvas objects both use it;
+    // AppMenuBar's menus sit at fixed offsets and don't need it).
+    function openAt(sourceItem, x, y, bounds) {
+        if (bounds) {
+            const p = sourceItem.mapToItem(bounds, x, y)
+            root.x = Math.max(0, Math.min(p.x, bounds.width - root.width))
+            root.y = Math.max(0, Math.min(p.y, bounds.height - root.height))
+        } else {
+            root.x = x
+            root.y = y
+        }
+        root.visible = true
+    }
+
     // Matches Theme.space4 — see x/y note below.
     readonly property int insetPad: 16
 

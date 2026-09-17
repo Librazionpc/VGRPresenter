@@ -24,8 +24,9 @@ Item {
         openMenu = ""
     }
 
+    // Menu actions are presentation-only for now (the underlying commands
+    // don't exist yet); the menu just closes.
     function activateItem(menuName, label) {
-        console.log("[menu]", menuName, "->", label)
         closeMenu()
     }
 

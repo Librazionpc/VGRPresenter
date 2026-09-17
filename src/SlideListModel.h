@@ -6,7 +6,11 @@
 
 struct SlideItem
 {
+    // Stable identity: `num` is the display position and renumbers whenever
+    // slides are removed/inserted, so per-slide state elsewhere in the app
+    // (EditScreen's canvas archive) keys on `id`, never on `num`.
     int num = 0;
+    int id = 0;
     bool active = false;
     QString tag;
     QString tagColor;
@@ -29,6 +33,9 @@ class SlideListModel : public QAbstractListModel
     // renders whichever slide is active. Exposed as properties rather than
     // making QML call get(activeIndex) itself, so the canvas text just
     // binds directly and updates whenever selection changes.
+    // The active slide's stable id — the key EditScreen's per-slide canvas
+    // archive saves/loads under. -1 when no slide is active (empty roster).
+    Q_PROPERTY(int activeSlideId READ activeSlideId NOTIFY activeSlideChanged)
     Q_PROPERTY(int activeNum READ activeNum NOTIFY activeSlideChanged)
     Q_PROPERTY(QString activeTag READ activeTag NOTIFY activeSlideChanged)
     Q_PROPERTY(QString activeTagColor READ activeTagColor NOTIFY activeSlideChanged)
@@ -47,6 +54,9 @@ public:
         Line1Role,
         Line2Role,
         RefRole,
+        // Stable identity — delegates key per-slide state (EditScreen's
+        // canvas archive) on this, never on `num`, which renumbers.
+        IdRole,
     };
     Q_ENUM(Role)
 
@@ -57,9 +67,14 @@ public:
     QHash<int, QByteArray> roleNames() const override;
 
     Q_INVOKABLE void addSlide();
-    Q_INVOKABLE void duplicateSlide(int index);
+    // Returns the new slide's stable id (-1 for an out-of-range index), so
+    // the caller can clone per-slide state onto the copy.
+    Q_INVOKABLE int duplicateSlide(int index);
     Q_INVOKABLE void removeSlide(int index);
     Q_INVOKABLE void selectSlide(int index);
+    // Stable id of the slide at `index`, or -1 when out of range. Lets QML
+    // map a model row to archive keys without a JS-side shadow of the model.
+    Q_INVOKABLE int slideIdAt(int index) const;
 
     // Inline-editing the canvas text objects (DraggableCanvasText +
     // EditableCanvasLabel in EditScreen.qml) writes back through these
@@ -70,6 +85,7 @@ public:
     Q_INVOKABLE void setActiveRef(const QString &ref);
 
     int activeNum() const;
+    int activeSlideId() const;
     QString activeTag() const;
     QString activeTagColor() const;
     QString activeTitle() const;
@@ -82,8 +98,10 @@ signals:
 
 private:
     void renumber(int fromIndex);
+    int nextId();
     int activeIndex() const;
     const SlideItem *activeItem() const;
 
     QList<SlideItem> m_slides;
+    int m_nextId = 0;
 };
