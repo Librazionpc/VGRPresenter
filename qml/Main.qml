@@ -73,6 +73,7 @@ ApplicationWindow {
                 sourceComponent: {
                     switch (window.settingsSection) {
                     case "general": return generalScreenComponent
+                    case "outputs": return outputsScreenComponent
                     default: return placeholderComponent
                     }
                 }
@@ -83,6 +84,11 @@ ApplicationWindow {
     Component {
         id: generalScreenComponent
         GeneralScreen {}
+    }
+
+    Component {
+        id: outputsScreenComponent
+        OutputsScreen {}
     }
 
     Component {

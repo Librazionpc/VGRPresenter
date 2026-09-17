@@ -4,3 +4,6 @@ build-*/
 .qtc_clangd/
 CMakeLists.txt.user
 .freebuff/
+InspirationOrResources/
+out.log
+err.log

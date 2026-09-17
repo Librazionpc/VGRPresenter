@@ -25,6 +25,18 @@ class SlideListModel : public QAbstractListModel
     Q_OBJECT
     QML_ELEMENT
 
+    // The canvas (the big slide preview, as opposed to the thumbnail list)
+    // renders whichever slide is active. Exposed as properties rather than
+    // making QML call get(activeIndex) itself, so the canvas text just
+    // binds directly and updates whenever selection changes.
+    Q_PROPERTY(int activeNum READ activeNum NOTIFY activeSlideChanged)
+    Q_PROPERTY(QString activeTag READ activeTag NOTIFY activeSlideChanged)
+    Q_PROPERTY(QString activeTagColor READ activeTagColor NOTIFY activeSlideChanged)
+    Q_PROPERTY(QString activeTitle READ activeTitle NOTIFY activeSlideChanged)
+    Q_PROPERTY(QString activeLine1 READ activeLine1 NOTIFY activeSlideChanged)
+    Q_PROPERTY(QString activeLine2 READ activeLine2 NOTIFY activeSlideChanged)
+    Q_PROPERTY(QString activeRef READ activeRef NOTIFY activeSlideChanged)
+
 public:
     enum Role {
         NumRole = Qt::UserRole + 1,
@@ -45,11 +57,33 @@ public:
     QHash<int, QByteArray> roleNames() const override;
 
     Q_INVOKABLE void addSlide();
+    Q_INVOKABLE void duplicateSlide(int index);
     Q_INVOKABLE void removeSlide(int index);
     Q_INVOKABLE void selectSlide(int index);
 
+    // Inline-editing the canvas text objects (DraggableCanvasText +
+    // EditableCanvasLabel in EditScreen.qml) writes back through these
+    // rather than the read-only active* properties above.
+    Q_INVOKABLE void setActiveTitle(const QString &title);
+    Q_INVOKABLE void setActiveLine1(const QString &line1);
+    Q_INVOKABLE void setActiveLine2(const QString &line2);
+    Q_INVOKABLE void setActiveRef(const QString &ref);
+
+    int activeNum() const;
+    QString activeTag() const;
+    QString activeTagColor() const;
+    QString activeTitle() const;
+    QString activeLine1() const;
+    QString activeLine2() const;
+    QString activeRef() const;
+
+signals:
+    void activeSlideChanged();
+
 private:
     void renumber(int fromIndex);
+    int activeIndex() const;
+    const SlideItem *activeItem() const;
 
     QList<SlideItem> m_slides;
 };

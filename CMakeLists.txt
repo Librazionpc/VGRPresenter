@@ -21,6 +21,8 @@ qt_add_executable(appVGRPresenterUI
     src/main.cpp
     src/SlideListModel.h
     src/SlideListModel.cpp
+    src/OutputListModel.h
+    src/OutputListModel.cpp
 )
 
 qt_add_qml_module(appVGRPresenterUI
