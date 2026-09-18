@@ -33,7 +33,6 @@ ApplicationWindow {
         anchors.fill: parent
         visible: window.currentView === "edit"
     }
-
     // Opens the Settings dialog — the one entry point both the header's
     // gear button and the menu bar's Settings/Preferences items funnel
     // into, so a future keyboard shortcut (Ctrl+,) only ever calls this.
@@ -60,16 +59,14 @@ ApplicationWindow {
     }
 
     // ---- Settings overlay ----
-    Rectangle {
+    // Shared ModalScrim: click-dismisses, and consumes wheel events so a
+    // modal's scroll never leaks into the Flickables on the page behind.
+    ModalScrim {
         id: settingsScrim
-        anchors.fill: parent
         visible: false
-        color: Qt.rgba(0, 0, 0, 0.6)
-
-        MouseArea {
-            anchors.fill: parent
-            onClicked: settingsScrim.visible = false
-        }
+        // ModalScrim's #99000000 is exactly the 0.6 black this overlay
+        // always used — no visual change, just the shared behavior.
+        onDismissed: settingsScrim.visible = false
 
         ModalShell {
             anchors.centerIn: parent
@@ -89,6 +86,7 @@ ApplicationWindow {
                         case "plugins": return pluginsScreenComponent
                         case "outputs": return outputsScreenComponent
                         case "styles": return stylesScreenComponent
+                        case "av": return audioVideoScreenComponent
                         default: return placeholderComponent
                         }
                     }
@@ -127,12 +125,16 @@ ApplicationWindow {
     }
 
     Component {
+        id: audioVideoScreenComponent
+        AudioVideoScreen {}
+    }
+
+    Component {
         id: placeholderComponent
         PlaceholderScreen {
             title: {
                 switch (window.settingsSection) {
                 case "outputs": return "Outputs"
-                case "av": return "Audio & Video"
                 default: return window.settingsSection
                 }
             }

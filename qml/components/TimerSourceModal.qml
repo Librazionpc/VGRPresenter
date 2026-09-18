@@ -38,14 +38,9 @@ Item {
     anchors.fill: parent
     visible: root.open
 
-    Rectangle {
+    ModalScrim {
         anchors.fill: parent
-        color: "#99000000"
-
-        MouseArea {
-            anchors.fill: parent
-            onClicked: root.cancelled()
-        }
+        onDismissed: root.cancelled()
     }
 
     Rectangle {

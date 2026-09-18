@@ -56,15 +56,11 @@ Item {
     visible: root.open
 
     // Dim scrim behind the card; clicking it cancels, same as every other
-    // overlay in this app (see BackgroundColorModal.qml).
-    Rectangle {
+    // overlay in this app (see BackgroundColorModal.qml). Shared ModalScrim
+    // — also consumes wheel so the page behind can't scroll through it.
+    ModalScrim {
         anchors.fill: parent
-        color: "#99000000"
-
-        MouseArea {
-            anchors.fill: parent
-            onClicked: root.cancelled()
-        }
+        onDismissed: root.cancelled()
     }
 
     Rectangle {

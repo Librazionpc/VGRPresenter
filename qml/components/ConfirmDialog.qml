@@ -30,10 +30,11 @@ Item {
     // dialog was up) can reset their bindings via onOpenCountChanged.
     property int openCount: 0
 
-    Rectangle {
+    // Shared scrim — also consumes wheel events so scrolling can't leak
+    // into the page's Flickable behind the dialog.
+    ModalScrim {
         anchors.fill: parent
-        color: "#99000000"
-        MouseArea { anchors.fill: parent; onClicked: root.dismissed() }
+        onDismissed: root.dismissed()
     }
 
     Rectangle {

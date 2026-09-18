@@ -208,15 +208,11 @@ Item {
     visible: root.open
 
     // Dim scrim behind the card; clicking it cancels, same as an
-    // outside-click on any other overlay in this app.
-    Rectangle {
+    // outside-click on any other overlay in this app. Shared ModalScrim —
+    // also consumes wheel so the canvas behind can't scroll through it.
+    ModalScrim {
         anchors.fill: parent
-        color: "#99000000"
-
-        MouseArea {
-            anchors.fill: parent
-            onClicked: root.cancelled()
-        }
+        onDismissed: root.cancelled()
     }
 
     Rectangle {

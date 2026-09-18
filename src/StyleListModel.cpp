@@ -34,6 +34,9 @@ QVariant StyleListModel::data(const QModelIndex &index, int role) const
     switch (role) {
     case NameRole: return item.name;
     case ResRole: return item.res;
+    case ContentTypeRole: return item.contentType;
+    case TemplateKeyRole: return item.templateKey;
+    case BackgroundColorRole: return item.backgroundColor;
     default: return {};
     }
 }
@@ -43,6 +46,9 @@ QHash<int, QByteArray> StyleListModel::roleNames() const
     return {
         { NameRole, "name" },
         { ResRole, "res" },
+        { ContentTypeRole, "contentType" },
+        { TemplateKeyRole, "templateKey" },
+        { BackgroundColorRole, "backgroundColor" },
     };
 }
 
@@ -91,4 +97,55 @@ void StyleListModel::setResolution(int index, const QString &res)
     m_styles[index].res = res;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { ResRole });
+}
+
+void StyleListModel::setContentType(int index, const QString &contentType)
+{
+    if (index < 0 || index >= m_styles.size())
+        return;
+    if (m_styles[index].contentType == contentType)
+        return;
+
+    m_styles[index].contentType = contentType;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { ContentTypeRole });
+}
+
+void StyleListModel::setTemplateKey(int index, const QString &templateKey)
+{
+    if (index < 0 || index >= m_styles.size())
+        return;
+    if (m_styles[index].templateKey == templateKey)
+        return;
+
+    m_styles[index].templateKey = templateKey;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { TemplateKeyRole });
+}
+
+void StyleListModel::setBackgroundColor(int index, const QString &color)
+{
+    if (index < 0 || index >= m_styles.size())
+        return;
+    if (m_styles[index].backgroundColor == color)
+        return;
+
+    m_styles[index].backgroundColor = color;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { BackgroundColorRole });
+}
+
+QVariantMap StyleListModel::getStyle(int index) const
+{
+    if (index < 0 || index >= m_styles.size())
+        return {};
+
+    const StyleItem &item = m_styles.at(index);
+    return {
+        { "name", item.name },
+        { "res", item.res },
+        { "contentType", item.contentType },
+        { "templateKey", item.templateKey },
+        { "backgroundColor", item.backgroundColor },
+    };
 }

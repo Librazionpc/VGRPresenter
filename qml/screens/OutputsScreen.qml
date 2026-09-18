@@ -340,8 +340,15 @@ Item {
     }
 
     // ---- Card context menu (Edit / Duplicate / Delete) ----
+    // MenuCatcher under the menu: any click or scroll outside dismisses it
+    // instead of leaving it stuck over the page.
+    MenuCatcher {
+        menu: screenContextMenu
+    }
+
     DropdownPanel {
         id: screenContextMenu
+        z: 50
         visible: false
         model: [
             { label: "Edit" },

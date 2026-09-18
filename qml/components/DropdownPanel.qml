@@ -1,4 +1,5 @@
 import QtQuick
+import VGRPresenterUI
 
 // A menu dropdown panel: optional header (title + subtitle), then a list of
 // items built from a plain data model. Each entry in `model` is one of:
@@ -9,6 +10,11 @@ import QtQuick
 // `danger` items get red text always (a destructive action, e.g. "Emergency
 // Stop") — every other item is neutral text that only tints on hover, so no
 // row looks permanently "selected" the way the raw export baked in.
+//
+// SCROLLING: `maxHeight` (default 0 = size to content, the historical
+// behavior every existing menu relies on) caps the panel's height — past
+// the cap the item list becomes a Flickable with an AppScrollBar, so a long
+// option list (a device picker) scrolls instead of running off-screen.
 //
 // Every color/spacing/font value below is a literal, not a Theme.* reference:
 // this file is instantiated from AppMenuBar.qml, itself nested two documents
@@ -24,23 +30,37 @@ Rectangle {
     property var model: []
     property string headerTitle: ""
     property string headerSubtitle: ""
+    // 0 = size to content; a positive value caps the height and turns the
+    // item list into a scrollable Flickable (see header comment).
+    property int maxHeight: 0
 
     signal itemActivated(string label)
 
     // Opens the panel at (x, y) — coordinates in `sourceItem`'s local space —
-    // clamped to stay fully inside `bounds` (usually the window root), so a
-    // menu opened near an edge can't land partly or fully off-screen. One
-    // implementation of the mapToItem + clamp dance instead of a copy per
-    // menu site (EditScreen's slide rows and canvas objects both use it;
-    // AppMenuBar's menus sit at fixed offsets and don't need it).
+    // clamped to stay fully inside `bounds` (any common ancestor, usually
+    // the window root), so a menu opened near an edge can't land partly or
+    // fully off-screen.
+    //
+    // POSITIONING SPACE: the point is mapped into THIS PANEL'S PARENT's
+    // coordinate space (where root.x/root.y actually apply), NOT into
+    // `bounds` space. An earlier version mapped into bounds-space and
+    // assigned the result directly — correct only when the panel's parent
+    // sat at the window origin, and silently offset down-right by the
+    // parent's position otherwise (the AV board's context menu landed far
+    // from the cursor; the menu sits inside the settings modal there).
+    // Mapping to root.parent + converting the clamp rect with mapFromItem
+    // is correct for ANY parent, so no call site needs to know where its
+    // menu is declared. One implementation of the map + clamp dance
+    // instead of a copy per menu site.
     function openAt(sourceItem, x, y, bounds) {
+        const p = sourceItem.mapToItem(root.parent, x, y)
         if (bounds) {
-            const p = sourceItem.mapToItem(bounds, x, y)
-            root.x = Math.max(0, Math.min(p.x, bounds.width - root.width))
-            root.y = Math.max(0, Math.min(p.y, bounds.height - root.height))
+            const bp = root.parent.mapFromItem(bounds, 0, 0)
+            root.x = Math.max(bp.x, Math.min(p.x, bp.x + bounds.width - root.width))
+            root.y = Math.max(bp.y, Math.min(p.y, bp.y + bounds.height - root.height))
         } else {
-            root.x = x
-            root.y = y
+            root.x = p.x
+            root.y = p.y
         }
         root.visible = true
     }
@@ -49,7 +69,12 @@ Rectangle {
     readonly property int insetPad: 16
 
     width: 240
-    height: content.height + 16
+    height: root.maxHeight > 0
+            ? Math.min(headerCol.height + itemList.height + 16, root.maxHeight)
+            : headerCol.height + itemList.height + 16
+    // The viewport the item list scrolls within — everything inside the
+    // panel that isn't the 8px top/bottom padding or the header.
+    readonly property real listViewport: height - 16 - headerCol.height
     radius: 10 // Theme.radiusLg
     color: "#16171e" // Theme.rowBg
     border.color: "#232530" // Theme.border
@@ -62,6 +87,7 @@ Rectangle {
         width: parent.width
 
         Column {
+            id: headerCol
             visible: root.headerTitle !== ""
             width: parent.width
             spacing: 2
@@ -86,68 +112,97 @@ Rectangle {
             Rectangle { width: parent.width; height: 1; color: "#232530" /* Theme.border */ }
         }
 
-        Repeater {
-            model: root.model
-            delegate: Loader {
-                required property var modelData
-                width: content.width
-                sourceComponent: modelData.divider === true ? dividerC : itemC
+        // The item list — a Flickable whenever maxHeight caps it, so the cap
+        // scrolls instead of clipping. interactive only when it actually
+        // overflows, so short lists keep their native click feel.
+        Flickable {
+            id: itemFlick
+            width: content.width
+            height: root.maxHeight > 0 ? root.listViewport : itemList.height
+            contentWidth: width
+            contentHeight: itemList.height
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: root.maxHeight > 0 && contentHeight > height
 
-                Component {
-                    id: dividerC
-                    Item {
-                        width: content.width
-                        height: 12 // Theme.space3
-                        Rectangle {
-                            anchors.centerIn: parent
-                            width: parent.width - 32 // Theme.space4 * 2
-                            height: 1
-                            color: "#232530" // Theme.border
-                        }
-                    }
-                }
+            Column {
+                id: itemList
+                width: parent.width
 
-                Component {
-                    id: itemC
-                    Rectangle {
-                        width: content.width
-                        height: 34
-                        color: itemArea.containsMouse
-                               ? (modelData.danger ? "#24ff4d3d" /* Theme.danger @ 14% */
-                                                    : "#232530" /* Theme.border */)
-                               : "transparent"
-                        Behavior on color { ColorAnimation { duration: 100 } }
+                Repeater {
+                    model: root.model
+                    delegate: Loader {
+                        required property var modelData
+                        width: itemList.width
+                        sourceComponent: modelData.divider === true ? dividerC : itemC
 
-                        Text {
-                            x: root.insetPad
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: modelData.label
-                            color: modelData.danger ? "#ff6b61" /* Theme.dangerLight */ : "#e2e8f0" /* Theme.textPrimary */
-                            font.family: "Inter" // Theme.fontFamily
-                            font.pixelSize: 13 // Theme.textMd
-                            font.weight: Font.Medium
+                        Component {
+                            id: dividerC
+                            Item {
+                                width: itemList.width
+                                height: 12 // Theme.space3
+                                Rectangle {
+                                    anchors.centerIn: parent
+                                    width: parent.width - 32 // Theme.space4 * 2
+                                    height: 1
+                                    color: "#232530" // Theme.border
+                                }
+                            }
                         }
 
-                        Text {
-                            anchors.right: parent.right
-                            anchors.rightMargin: 16 // Theme.space4
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: modelData.trailing || ""
-                            color: "#5c6475" // Theme.textMuted
-                            font.family: "Inter" // Theme.fontFamily
-                            font.pixelSize: 9 // Theme.textXs
-                        }
+                        Component {
+                            id: itemC
+                            Rectangle {
+                                width: itemList.width
+                                height: 34
+                                color: itemArea.containsMouse
+                                       ? (modelData.danger ? "#24ff4d3d" /* Theme.danger @ 14% */
+                                                           : "#232530" /* Theme.border */)
+                                       : "transparent"
+                                Behavior on color { ColorAnimation { duration: 100 } }
 
-                        MouseArea {
-                            id: itemArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.itemActivated(modelData.label)
+                                Text {
+                                    x: root.insetPad
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: modelData.label
+                                    color: modelData.danger ? "#ff6b61" /* Theme.dangerLight */ : "#e2e8f0" /* Theme.textPrimary */
+                                    font.family: "Inter" // Theme.fontFamily
+                                    font.pixelSize: 13 // Theme.textMd
+                                    font.weight: Font.Medium
+                                }
+
+                                Text {
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 16 // Theme.space4
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: modelData.trailing || ""
+                                    color: "#5c6475" // Theme.textMuted
+                                    font.family: "Inter" // Theme.fontFamily
+                                    font.pixelSize: 9 // Theme.textXs
+                                }
+
+                                MouseArea {
+                                    id: itemArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.itemActivated(modelData.label)
+                                }
+                            }
                         }
                     }
                 }
             }
+        }
+
+        // Auto-hides when the list doesn't overflow (AppScrollBar's own
+        // visible binding); sits in the panel's right padding strip.
+        AppScrollBar {
+            flickable: itemFlick
+            x: root.width - width - 3
+            y: content.y + headerCol.height
+            height: itemFlick.height
+            z: 1
         }
     }
 }

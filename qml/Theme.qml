@@ -15,6 +15,7 @@ QtObject {
     readonly property color successLight: "#7ee2a8"
     readonly property color warning: "#f5c26b"
     readonly property color info: "#4da6ff"
+    readonly property color infoLight: "#8ecbff"
 
     // ---- Neutrals ----
     // Every value below is pulled directly from the Figma-to-Qt export

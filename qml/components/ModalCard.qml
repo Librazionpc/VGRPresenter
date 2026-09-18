@@ -50,10 +50,11 @@ Item {
     function open() { shown = true }
     function close() { shown = false }
 
-    Rectangle {
+    // Shared scrim — also consumes wheel events so scrolling a full (or
+    // empty) dialog can't leak into the page's Flickable behind the modal.
+    ModalScrim {
         anchors.fill: parent
-        color: "#99000000"
-        MouseArea { anchors.fill: parent; onClicked: root.cancelled() }
+        onDismissed: root.cancelled()
     }
 
     Rectangle {
