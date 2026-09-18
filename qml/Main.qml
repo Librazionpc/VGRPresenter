@@ -34,6 +34,15 @@ ApplicationWindow {
         visible: window.currentView === "edit"
     }
 
+    // Opens the Settings dialog — the one entry point both the header's
+    // gear button and the menu bar's Settings/Preferences items funnel
+    // into, so a future keyboard shortcut (Ctrl+,) only ever calls this.
+    function openSettings(section) {
+        if (section !== undefined)
+            window.settingsSection = section
+        settingsScrim.visible = true
+    }
+
     AppHeader {
         anchors.top: parent.top
         anchors.left: parent.left
@@ -42,10 +51,12 @@ ApplicationWindow {
         onTabSelected: (tab) => {
             if (tab === "show" || tab === "edit") window.currentView = tab
         }
+        onSettingsClicked: window.openSettings("general")
     }
 
     AppMenuBar {
         anchors.fill: parent
+        onSettingsRequested: window.openSettings("general")
     }
 
     // ---- Settings overlay ----
@@ -69,15 +80,19 @@ ApplicationWindow {
             onSaveRequested: settingsScrim.visible = false
 
             Loader {
-                anchors.fill: parent
-                sourceComponent: {
-                    switch (window.settingsSection) {
-                    case "general": return generalScreenComponent
-                    case "outputs": return outputsScreenComponent
-                    default: return placeholderComponent
+                    anchors.fill: parent
+                    sourceComponent: {
+                        switch (window.settingsSection) {
+                        case "general": return generalScreenComponent
+                        case "smart": return smartConfigScreenComponent
+                        case "recording": return recordingScreenComponent
+                        case "plugins": return pluginsScreenComponent
+                        case "outputs": return outputsScreenComponent
+                        case "styles": return stylesScreenComponent
+                        default: return placeholderComponent
+                        }
                     }
                 }
-            }
         }
     }
 
@@ -87,8 +102,28 @@ ApplicationWindow {
     }
 
     Component {
+        id: smartConfigScreenComponent
+        SmartConfigScreen {}
+    }
+
+    Component {
+        id: recordingScreenComponent
+        RecordingScreen {}
+    }
+
+    Component {
+        id: pluginsScreenComponent
+        PluginsScreen {}
+    }
+
+    Component {
         id: outputsScreenComponent
         OutputsScreen {}
+    }
+
+    Component {
+        id: stylesScreenComponent
+        StylesScreen {}
     }
 
     Component {
@@ -96,12 +131,8 @@ ApplicationWindow {
         PlaceholderScreen {
             title: {
                 switch (window.settingsSection) {
-                case "smart": return "Smart Config"
                 case "outputs": return "Outputs"
-                case "screens": return "Screens"
                 case "av": return "Audio & Video"
-                case "recording": return "Recording"
-                case "plugins": return "Plugins"
                 default: return window.settingsSection
                 }
             }

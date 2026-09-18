@@ -8,7 +8,7 @@ Rectangle {
         { key: "general",   label: "General",        icon: "sliders" },
         { key: "smart",     label: "Smart Config",    icon: "spark" },
         { key: "outputs",   label: "Outputs",         icon: "monitor" },
-        { key: "screens",   label: "Screens",         icon: "monitor" },
+        { key: "styles",    label: "Styles",          icon: "layoutTemplate" },
         { key: "av",        label: "Audio & Video",   icon: "monitor" },
         { key: "recording", label: "Recording",       icon: "recordDot" },
         { key: "plugins",   label: "Plugins",         icon: "grid" }

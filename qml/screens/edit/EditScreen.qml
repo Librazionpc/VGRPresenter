@@ -18,13 +18,6 @@ Rectangle {
     clip: true
     color: "#12131a"
 
-    // TEMP DIAGNOSTIC — remove after user reproduction
-    onSelectedCanvasObjectsChanged: console.log("[diag] selection=", JSON.stringify(selectedCanvasObjects), "canvasFocus=", mCanvas.activeFocus)
-    Connections {
-        target: slideModel
-        function onRowsInserted() { console.log("[diag] addSlide clicked -> rows=", slideModel.rowCount(), "canvasFocus=", mCanvas.activeFocus, "focusItem=", root.Window.window && root.Window.window.activeFocusItem ? root.Window.window.activeFocusItem : "null") }
-    }
-
     // Mock CRUD backend (src/SlideListModel.{h,cpp}) — stands in for the
     // real show/slide data source. Seeded with the same ground-truth
     // content the static array used to hold, but "Add slide" and selecting
@@ -2083,29 +2076,37 @@ Rectangle {
                     required property string name
                     required property string badge
                     required property bool active
+                    required property bool isEnabled
 
                     height: 143
                     width: 182
-                    border.color: outputCard.active ? "#85261f" : "#232530"
+                    // Live = danger-red border; inactive = visible slate
+                    // border + slightly lifted preview so an off tile reads
+                    // as "inactive", not just black.
+                    border.color: outputCard.active ? "#85261f" : "#2b2e3d"
                     border.width: 1
                     color: "#16171e"
                     radius: 8
-
-                    Rectangle {
-                        x: 6
-                        y: 6
-                        height: 110
-                        width: 170
-                        clip: true
-                        color: "#101116"
-                        radius: 4
+                    // Disabled screens dim here too — same model, same state.
+                    opacity: outputCard.isEnabled ? 1 : 0.45
+                    Behavior on opacity { NumberAnimation { duration: 120 } }                        Rectangle {
+                            x: 6
+                            y: 6
+                            height: 110
+                            width: 170
+                            clip: true
+                            color: outputCard.active ? "#101116" : "#1a1c26"
+                            radius: 4
 
                         Rectangle {
                             x: 6
                             y: 6
                             height: 16
                             width: badgeRow.width + 16
-                            color: "#b3000000"
+                            // LIVE badge in the danger red (#ff4d3d family)
+                            // when on air — same pill the Screens settings
+                            // card renders; neutral dark chip otherwise.
+                            color: outputCard.active ? "#33ff4d3d" : "#262833"
                             radius: 4
 
                             Row {
@@ -2126,7 +2127,7 @@ Rectangle {
                                 }
                                 Text {
                                     anchors.verticalCenter: parent.verticalCenter
-                                    color: "#e2e8f0"
+                                    color: outputCard.active ? "#ff6b61" : "#9aa0b5"
                                     font.family: "Inter"
                                     font.pixelSize: 9
                                     font.weight: Font.DemiBold
@@ -2163,19 +2164,10 @@ Rectangle {
                             text: outputCard.name
                         }
 
-                        // Configure-this-output entry point — no settings
-                        // surface exists yet for individual outputs (that's
-                        // a separate, larger feature), so this is a visible
-                        // but inert affordance for now, matching the ground
-                        // truth's own per-card gear icon.
-                        IconGlyph {
-                            anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            name: "settings"
-                            color: "#5c6475"
-                            implicitWidth: 12
-                            implicitHeight: 12
-                        }
+                        // Configure-this-output affordance removed — the
+                        // per-output edit dialog lives in Settings · Outputs
+                        // (right-click a card there); a lone inert gear here
+                        // promised an editor this screen doesn't have.
                     }
                 }
             }

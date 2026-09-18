@@ -38,7 +38,7 @@ Item {
     Flickable {
         id: flick
         anchors.fill: parent
-        anchors.rightMargin: 10
+        anchors.rightMargin: Theme.space6 + Theme.space2
         contentWidth: width
         contentHeight: layout.height + 24
         clip: true
@@ -46,9 +46,9 @@ Item {
 
         Column {
             id: layout
-            x: 8
-            y: 12
-            width: flick.width - 16
+            x: Theme.space6
+            y: Theme.space5
+            width: flick.width - Theme.space6
             spacing: 16
 
             // ---- Page header ----
@@ -513,47 +513,12 @@ Item {
                     width: parent.width - 40
                     spacing: 24
 
-                    component ProfileMeter: Item {
-                        id: meter
-                        property string label: ""
-                        property int pct: 0
-                        width: (parent.width - 48) / 3
-                        height: 30
-
-                        Text {
-                            anchors.top: parent.top
-                            text: meter.label
-                            color: Theme.textPrimary
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.textSm
-                        }
-                        Text {
-                            anchors.top: parent.top
-                            anchors.right: parent.right
-                            text: meter.pct + "%"
-                            color: Theme.textPrimary
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.textSm
-                        }
-                        Rectangle {
-                            anchors.bottom: parent.bottom
-                            width: parent.width
-                            height: 6
-                            radius: 3
-                            color: Theme.inset
-
-                            Rectangle {
-                                width: parent.width * meter.pct / 100
-                                height: parent.height
-                                radius: 3
-                                color: Theme.accent
-                            }
-                        }
-                    }
-
-                    ProfileMeter { label: qsTr("Rendering"); pct: 68 }
-                    ProfileMeter { label: qsTr("Encoding"); pct: 42 }
-                    ProfileMeter { label: qsTr("Output"); pct: 55 }
+                    // The shared meter component (see LabeledMeter.qml) —
+                    // the same one Smart Config's Resource budgets use, so
+                    // the two screens' meters can't drift apart.
+                    LabeledMeter { label: qsTr("Rendering"); pct: 68; width: (parent.width - 48) / 3 }
+                    LabeledMeter { label: qsTr("Encoding"); pct: 42; width: (parent.width - 48) / 3 }
+                    LabeledMeter { label: qsTr("Output"); pct: 55; width: (parent.width - 48) / 3 }
                 }
             }
 
@@ -694,9 +659,9 @@ Item {
     // Shared app scrollbar at the screen's fixed right edge (a sibling of
     // the Flickable, not a child — see the root Item note above).
     AppScrollBar {
-        x: parent.width - width - 2
-        y: 4
-        height: parent.height - 8
+        x: parent.width - (Theme.space6 + Theme.space2 + width) / 2
+        y: Theme.space3
+        height: parent.height - Theme.space6
         flickable: flick
     }
 }

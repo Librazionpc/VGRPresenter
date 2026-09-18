@@ -2,7 +2,7 @@ import QtQuick
 import VGRPresenterUI
 
 // Small glyph drawn from primitives, matching the nav-rail icon set.
-// kind: "sliders" | "spark" | "monitor" | "recordDot" | "grid"
+// kind: "sliders" | "spark" | "monitor" | "layoutTemplate" | "recordDot" | "grid"
 Item {
     id: root
     property string kind: "sliders"
@@ -34,13 +34,23 @@ Item {
         Rectangle { x: 12; y: 12; width: 3; height: 3; radius: 1.5; color: root.color }
     }
 
-    // monitor (Outputs / Screens / Audio & Video)
+    // monitor (Outputs / Audio & Video)
     Item {
         visible: root.kind === "monitor"
         anchors.fill: parent
         Rectangle { x: 1; y: 2; width: 14; height: 9; radius: 1.5; color: root.color }
         Rectangle { x: 6; y: 11; width: 4; height: 2; color: root.color }
         Rectangle { x: 3; y: 13; width: 10; height: 1.5; radius: 0.75; color: root.color }
+    }
+
+    // layoutTemplate (Styles) — Lucide's layout-template: a top band over
+    // two lower cells, drawn as filled primitives like the other glyphs.
+    Item {
+        visible: root.kind === "layoutTemplate"
+        anchors.fill: parent
+        Rectangle { x: 1; y: 2; width: 14; height: 5; radius: 1; color: root.color }
+        Rectangle { x: 1; y: 9; width: 6; height: 5; radius: 1; color: root.color }
+        Rectangle { x: 9; y: 9; width: 6; height: 5; radius: 1; color: root.color }
     }
 
     // recordDot (Recording)

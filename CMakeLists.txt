@@ -23,6 +23,8 @@ qt_add_executable(appVGRPresenterUI
     src/SlideListModel.cpp
     src/OutputListModel.h
     src/OutputListModel.cpp
+    src/StyleListModel.h
+    src/StyleListModel.cpp
 )
 
 # Theme.qml has `pragma Singleton`, but qt_add_qml_module doesn't infer that

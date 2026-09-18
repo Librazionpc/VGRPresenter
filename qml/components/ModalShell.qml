@@ -13,6 +13,39 @@ Rectangle {
     property bool showFooter: true
     property bool showSave: true
 
+    // The search palette's index (see TitleBar.qml): one entry per
+    // searchable setting across the app's settings sections. Defaults
+    // cover the built sections' key rows plus every rail section itself;
+    // a consumer can override with its own index.
+    property var searchIndex: [
+        { label: "General", section: "Settings", key: "general" },
+        { label: "Smart Config", section: "Settings", key: "smart" },
+        { label: "Outputs", section: "Settings", key: "outputs" },
+        { label: "Styles", section: "Settings", key: "styles" },
+        { label: "Audio & Video", section: "Settings", key: "av" },
+        { label: "Recording", section: "Settings", key: "recording" },
+        { label: "Plugins", section: "Settings", key: "plugins" },
+        { label: "Resource profile", section: "General", key: "general" },
+        { label: "Appearance", section: "General", key: "general" },
+        { label: "Accent color", section: "General", key: "general" },
+        { label: "Lock In Mode", section: "General", key: "general" },
+        { label: "Autosave", section: "General", key: "general" },
+        { label: "Backups & recovery", section: "General", key: "general" },
+        { label: "Crash recovery", section: "General", key: "general" },
+        { label: "Notifications & logs", section: "General", key: "general" },
+        { label: "Configuration mode", section: "Smart Config", key: "smart" },
+        { label: "Hardware detected", section: "Smart Config", key: "smart" },
+        { label: "Resource budgets", section: "Smart Config", key: "smart" },
+        { label: "Stream platform", section: "Recording", key: "recording" },
+        { label: "Stream key", section: "Recording", key: "recording" },
+        { label: "Video bitrate", section: "Recording", key: "recording" },
+        { label: "Encoder", section: "Recording", key: "recording" },
+        { label: "Screens to record", section: "Recording", key: "recording" },
+        { label: "Recording & Streaming", section: "Recording", key: "recording" },
+        { label: "Installed plugins", section: "Plugins", key: "plugins" },
+        { label: "Browse plugin store", section: "Plugins", key: "plugins" }
+    ]
+
     signal sectionSelected(string key)
     signal closeRequested()
     signal cancelRequested()
@@ -41,6 +74,11 @@ Rectangle {
         TitleBar {
             id: titleBar
             width: parent.width
+            // Raised above the rail/content Row below so the search
+            // suggestions dropdown paints over them, not under.
+            z: 10
+            searchIndex: root.searchIndex
+            onSectionRequested: (key) => root.sectionSelected(key)
             onCloseRequested: root.closeRequested()
         }
 
