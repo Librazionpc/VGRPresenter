@@ -18,4 +18,10 @@ QtObject {
     property real width: 160
     property real height: 40
     property CanvasItemStyle style: CanvasItemStyle { kind: item.kind }
+    // Free-form per-kind configuration that doesn't fit the generic fields
+    // above — e.g. a "clock" item's { format, style, showSeconds, showDate }
+    // or a "timer" item's { mode, durationSeconds, autoStart, showOnStage,
+    // startedAt } (see ClockSourceModal.qml/TimerSourceModal.qml). Kinds
+    // without a picker yet just leave this at {}.
+    property var meta: ({})
 }

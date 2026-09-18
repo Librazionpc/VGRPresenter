@@ -24,10 +24,17 @@ Item {
         openMenu = ""
     }
 
+    // Emitted for the two menu items that open the Settings dialog (logo
+    // menu's "Settings", Edit menu's "Preferences…") — Main.qml owns the
+    // dialog and shows it on this signal.
+    signal settingsRequested()
+
     // Menu actions are presentation-only for now (the underlying commands
-    // don't exist yet); the menu just closes.
+    // don't exist yet) — except Settings/Preferences, which are live.
     function activateItem(menuName, label) {
         closeMenu()
+        if (label === "Settings" || label === "Preferences…")
+            root.settingsRequested()
     }
 
     readonly property var logoMenuItems: [

@@ -27,6 +27,14 @@ Item {
     property int decimals: 0
 
     signal moved(real value)
+    // Brackets one whole drag (or a single track click) as a single
+    // gesture — a consumer wiring this into an undo/history system snapshots
+    // on dragStarted, not on every moved(), so a slider drag collapses into
+    // one undo step instead of one per pixel of thumb travel. Any control
+    // driving continuous `moved` calls from a press-drag-release gesture
+    // should offer this same pair, not just this component.
+    signal dragStarted()
+    signal dragFinished()
 
     implicitHeight: 34
 
@@ -77,9 +85,14 @@ Item {
                 anchors.margins: -5
                 onClicked: (mouse) => {
                     const p = Math.max(0, Math.min(1, mouse.x / track.width))
+                    // A track click is its own single, atomic gesture — no
+                    // separate press/release to bracket, so both signals
+                    // fire back-to-back around the one resulting move.
+                    root.dragStarted()
                     // Report only — the consumer assigns `value`; see the
                     // controlled-component note in the header comment.
                     root.moved(root.minValue + p * (root.maxValue - root.minValue))
+                    root.dragFinished()
                 }
             }
         }
@@ -115,6 +128,8 @@ Item {
                 anchors.fill: parent
                 anchors.margins: -6
                 cursorShape: Qt.PointingHandCursor
+                onPressed: root.dragStarted()
+                onReleased: root.dragFinished()
                 drag.target: thumb
                 drag.axis: Drag.XAxis
                 drag.minimumX: 0

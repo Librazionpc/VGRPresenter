@@ -137,6 +137,49 @@ QtObject {
                                 src.width, src.height, src.style)
     }
 
+    // ---- Undo/redo support (EditScreen.qml) -----------------------------
+
+    // Freezes the working set's current field values into plain data — the
+    // CanvasItem objects themselves keep changing live, so a snapshot for
+    // undo/redo has to copy values out, not just remember which objects
+    // were on the canvas.
+    function snapshotItems() {
+        return store.current.items.map((it) => ({
+            key: it.key, kind: it.kind, text: it.text,
+            x: it.x, y: it.y, width: it.width, height: it.height,
+            meta: it.meta,
+            style: {
+                padding: it.style.padding, backgroundColor: it.style.backgroundColor,
+                cornerRadius: it.style.cornerRadius, borderEnabled: it.style.borderEnabled,
+                borderWidth: it.style.borderWidth, borderStyle: it.style.borderStyle,
+                borderColor: it.style.borderColor
+            }
+        }))
+    }
+
+    // Replaces the working set with fresh CanvasItem objects rebuilt from a
+    // snapshot (see snapshotItems), preserving each item's original key so
+    // selection/thumbnail bindings by key survive an undo/redo. Destroys
+    // the current items first, same as removeItems/dropSlide.
+    function restoreItems(snapshot) {
+        store.current.items.forEach((it) => it.destroy())
+        store.current.items = snapshot.map((d) => {
+            const item = store.canvasItemComponent.createObject(null, {
+                key: d.key, kind: d.kind, text: d.text,
+                x: d.x, y: d.y, width: d.width, height: d.height
+            })
+            item.meta = d.meta
+            item.style.padding = d.style.padding
+            item.style.backgroundColor = d.style.backgroundColor
+            item.style.cornerRadius = d.style.cornerRadius
+            item.style.borderEnabled = d.style.borderEnabled
+            item.style.borderWidth = d.style.borderWidth
+            item.style.borderStyle = d.style.borderStyle
+            item.style.borderColor = d.style.borderColor
+            return item
+        })
+    }
+
     // ---- Live thumbnails -----------------------------------------------------
 
     // Every item of any slide, in canvas order — the real CanvasItem

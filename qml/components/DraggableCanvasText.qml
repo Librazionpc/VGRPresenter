@@ -20,6 +20,14 @@ Item {
     // styling": defaults below apply (no padding, no border).
     property CanvasItemStyle style: null
 
+    // Drives the hover-wash Rectangle below. Set externally from whichever
+    // content MouseArea is actually present (EditableCanvasLabel.hovered,
+    // or a CanvasDragArea's own containsMouse) — not tracked by a second
+    // MouseArea of this item's own layered on top of content: two stacked
+    // hoverEnabled MouseAreas over the same region is exactly what made
+    // click delivery flaky after a hover-leave/hover-enter cycle.
+    property bool contentHovered: false
+
     signal selectedRequested(var modifiers)
     // (x, y) in local coordinates — consumer maps into its own space to
     // escape mCanvas's clip.
@@ -101,14 +109,6 @@ Item {
         }
     }
 
-    MouseArea {
-        anchors.fill: parent
-        hoverEnabled: true
-        acceptedButtons: Qt.NoButton
-        cursorShape: Qt.IBeamCursor
-        id: hoverArea
-    }
-
     // Very faint always-on outline so an unselected item's bounds stay
     // legible without hunting for them — kept dim enough to not read as
     // "selected" (selectionOutline below is a completely different color/
@@ -130,7 +130,7 @@ Item {
         anchors.fill: parent
         radius: root.styleCornerRadius
         color: "#0dffffff"
-        opacity: (!root.selected && hoverArea.containsMouse) ? 1 : 0
+        opacity: (!root.selected && root.contentHovered) ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 120 } }
     }
 

@@ -24,6 +24,9 @@ Rectangle {
 
     property string activeTab: "show"
     signal tabSelected(string tab)
+    // The gear — the entry point to the Settings dialog (Main.qml owns the
+    // dialog itself and shows it on this signal).
+    signal settingsClicked()
 
     ViewTabs {
         x: 639.50
@@ -31,6 +34,36 @@ Rectangle {
         activeTab: root.activeTab
         onTabSelected: (tab) => root.tabSelected(tab)
     }
+
+    // Settings gear — sits between the tabs and the status/window-controls
+    // cluster, the standard top-right slot. Hover-washed round button with
+    // the same Lucide gear path data IconGlyph already carries.
+    Rectangle {
+        x: 1218
+        y: 10
+        width: 28
+        height: 28
+        radius: 14
+        color: gearArea.containsMouse ? "#1a6c5ce7" : "transparent"
+        Behavior on color { ColorAnimation { duration: 100 } }
+
+        IconGlyph {
+            anchors.centerIn: parent
+            name: "settings"
+            color: gearArea.containsMouse ? "#e2e8f0" : "#8a94a6"
+            implicitWidth: 14
+            implicitHeight: 14
+        }
+
+        MouseArea {
+            id: gearArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.settingsClicked()
+        }
+    }
+
     HeaderStatus {
         x: 1260
         y: 17

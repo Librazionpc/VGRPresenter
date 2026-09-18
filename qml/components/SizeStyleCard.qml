@@ -53,6 +53,16 @@ Column {
     // which draws on top of the content and so stays visible regardless.
     property bool fillSupported: true
 
+    // Same reusable undo-notification pattern as TextItemPanel.qml's own
+    // undoHook (see its header comment for the full reasoning) — a
+    // consumer wires this to its own history/snapshot function; null means
+    // no undo support wired up.
+    property var undoHook: null
+    function notifyUndo() {
+        if (root.undoHook)
+            root.undoHook()
+    }
+
     // Fired when the Border row's "Change" chip is clicked — this card owns
     // no color-picker UI itself; the consumer (EditScreen.qml) reuses its
     // existing BackgroundColorModal instance for both Background and Border.
@@ -108,6 +118,7 @@ Column {
             value: root.primary ? root.primary.padding : 0
             minValue: 0
             maxValue: 64
+            onDragStarted: root.notifyUndo()
             onMoved: (v) => root.targets.forEach((t) => t.padding = v)
         }
 
@@ -123,6 +134,7 @@ Column {
             minValue: 0
             maxValue: 48
             suffix: "px"
+            onDragStarted: root.notifyUndo()
             onMoved: (v) => root.targets.forEach((t) => t.cornerRadius = v)
         }
 
@@ -175,7 +187,10 @@ Column {
                     anchors.fill: parent
                     anchors.margins: -4
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.targets.forEach((t) => t.borderEnabled = !root.borderEnabled)
+                    onClicked: {
+                        root.notifyUndo()
+                        root.targets.forEach((t) => t.borderEnabled = !root.borderEnabled)
+                    }
                 }
             }
 
@@ -242,6 +257,7 @@ Column {
             minValue: 0
             maxValue: 12
             suffix: "px"
+            onDragStarted: root.notifyUndo()
             onMoved: (v) => root.targets.forEach((t) => t.borderWidth = v)
             Behavior on opacity { NumberAnimation { duration: 100 } }
         }
@@ -287,7 +303,10 @@ Column {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.targets.forEach((t) => t.borderStyle = styleBtn.modelData.key)
+                        onClicked: {
+                            root.notifyUndo()
+                            root.targets.forEach((t) => t.borderStyle = styleBtn.modelData.key)
+                        }
                     }
                 }
             }

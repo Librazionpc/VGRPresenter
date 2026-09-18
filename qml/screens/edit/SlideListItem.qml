@@ -37,6 +37,19 @@ Rectangle {
     property real canvasWidth: 754
     property real canvasHeight: 428
 
+    // { kind, icon, label } entries — the SAME array EditScreen.qml's "+"
+    // Add Content menu and canvas placeholder use (passed straight through,
+    // not duplicated), so a non-text item's thumbnail shows its icon
+    // instead of rendering as an unlabeled blank tile.
+    property var contentTypes: []
+    function typeInfoFor(kind) {
+        for (let i = 0; i < root.contentTypes.length; ++i) {
+            if (root.contentTypes[i].kind === kind)
+                return root.contentTypes[i]
+        }
+        return { icon: "?", label: kind }
+    }
+
     signal selected()
     signal duplicateRequested()
     signal deleteRequested()
@@ -95,6 +108,15 @@ Rectangle {
                 id: miniItem
                 required property var modelData
                 readonly property var st: modelData.style
+                // text always shows its (possibly empty) text; camera/media
+                // show the source/file name picked in their "+" menu popup
+                // once one's actually been set — same live value the canvas
+                // itself shows, not just a kind icon.
+                readonly property bool showValueText: miniItem.modelData.kind === "text"
+                    || (["camera", "media"].includes(miniItem.modelData.kind) && miniItem.modelData.text.length > 0)
+                readonly property bool showLiveValue: ["clock", "timer"].includes(miniItem.modelData.kind)
+                readonly property bool showIcon: !miniItem.showValueText && !miniItem.showLiveValue
+                    && miniItem.modelData.kind !== "shape"
 
                 x: canvasThumb.offX + modelData.x * canvasThumb.fit
                 y: canvasThumb.offY + modelData.y * canvasThumb.fit
@@ -110,7 +132,7 @@ Rectangle {
                 border.color: st && st.borderEnabled ? st.borderColor : "#343a4e"
 
                 Text {
-                    visible: miniItem.modelData.kind === "text"
+                    visible: miniItem.showValueText
                     anchors.fill: parent
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
@@ -121,6 +143,60 @@ Rectangle {
                     color: "#f2f4fa"
                     elide: Text.ElideRight
                     text: miniItem.modelData.text
+                }
+
+                // Live-ticking value for clock/timer kinds — same
+                // LiveClock.qml shared component and math the canvas visual
+                // itself uses (see EditScreen.qml's clockContent/
+                // timerContent), so the thumbnail shows an actually-live
+                // clock/countdown instead of a frozen or generic icon.
+                LiveClock {
+                    id: miniTicker
+                    running: miniItem.showLiveValue
+                }
+
+                Text {
+                    visible: miniItem.modelData.kind === "clock"
+                    anchors.fill: parent
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                    font.family: "Inter"
+                    font.pixelSize: Math.max(3, 11 * canvasThumb.fit)
+                    color: "#9b8ff5"
+                    elide: Text.ElideRight
+                    text: miniTicker.formatClock(miniTicker.now,
+                        miniItem.modelData.meta.format !== "24",
+                        miniItem.modelData.meta.showSeconds !== false)
+                }
+
+                Text {
+                    visible: miniItem.modelData.kind === "timer"
+                    anchors.fill: parent
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                    font.family: "Inter"
+                    font.pixelSize: Math.max(3, 11 * canvasThumb.fit)
+                    color: "#9b8ff5"
+                    elide: Text.ElideRight
+                    text: miniTicker.formatDuration(miniTicker.timerSeconds(miniTicker.now,
+                        miniItem.modelData.meta.mode ?? "countdown",
+                        miniItem.modelData.meta.durationSeconds ?? 300,
+                        miniItem.modelData.meta.startedAt ?? Date.now()))
+                }
+
+                // Every remaining kind with no live value of its own
+                // (audio, or camera/media before a source is picked) — its
+                // icon glyph, same as the canvas's own generic placeholder,
+                // so it still reads as identifiable content instead of a
+                // blank tile. "shape" is excluded: its own style-driven
+                // fill/border above (the same one the canvas itself uses)
+                // already reads as real content without an icon on top.
+                Text {
+                    visible: miniItem.showIcon
+                    anchors.centerIn: parent
+                    color: "#9b8ff5"
+                    font.pixelSize: Math.max(6, Math.min(miniItem.width, miniItem.height) * 0.4)
+                    text: root.typeInfoFor(miniItem.modelData.kind).icon
                 }
             }
         }
