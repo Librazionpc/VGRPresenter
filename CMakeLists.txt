@@ -351,6 +351,8 @@ qt_add_executable(appVGRPresenterUI
     src/EventBus.cpp
     src/CrashHandler.h
     src/CrashHandler.cpp
+    src/EngineBridge.h
+    src/EngineBridge.cpp
     src/SlideListModel.h
     src/SlideListModel.cpp
     src/OutputListModel.h
@@ -390,7 +392,7 @@ set_target_properties(appVGRPresenterUI PROPERTIES
 )
 
 target_link_libraries(appVGRPresenterUI
-    PRIVATE Qt6::Quick Qt6::QuickControls2 Qt6::QuickShapes
+    PRIVATE Qt6::Quick Qt6::QuickControls2 Qt6::QuickShapes engine_core
 )
 
 # The generated qmltyperegistrations.cpp does `#if __has_include(<SlideListModel.h>)`

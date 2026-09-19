@@ -13,8 +13,8 @@ import VGRPresenterUI
 // line-drag CrossCursor works only because that screen is unscaled. Forcing
 // the shape from ONE layer outside any transform removes the arbitration
 // problem entirely: while the stack is non-empty, the pushed shape wins
-// app-wide; when it empties, this layer stops asserting any shape at all
-// and normal per-item cursors resume.
+// app-wide; when it empties, this layer releases the cursor entirely and
+// normal per-item cursors resume.
 //
 // HoverHandler with blocking: false — NOT a hoverEnabled MouseArea — is
 // what lets this coexist with everything below: a non-blocking handler
@@ -24,37 +24,39 @@ import VGRPresenterUI
 // have swallowed hover the moment it became visible, freezing every
 // containsMouse below it (and stranding pushed cursors).
 //
-// ALWAYS ENABLED, cursor-neutral when idle — this exact combination is the
-// conclusion of two earlier designs, each of which failed differently:
+// ALWAYS ENABLED, shape set IMPERATIVELY — the conclusion of three failed
+// designs, each proven with a standalone probe or the AOT codegen dump:
 //
 //  * Catcher-as-MouseArea: worked until an override was showing, then it
 //    swallowed hover and froze every containsMouse below it.
 //
-//  * HoverHandler with `enabled: AppCursor.active`: don't do this. Every
-//    push/pop flips the handler off and on MID-HOVER, and a handler that
-//    gets enabled while the pointer is already stationary inside the window
-//    doesn't observe an enter transition, so it doesn't begin asserting its
-//    cursorShape until the next real mouse event. Visible symptom: the
-//    I-beam intermittently not appearing when a text edit opens (or the
-//    pointer re-enters the box) — exactly the "cursor doesn't show
-//    throughout while editing" report. Keep the handler enabled from
-//    startup so hover is permanently latched and every shape change is a
-//    live cursorShape re-assert (this codebase's resize-ring handles prove
-//    those apply while hovered — they morph I-beam↔hand↔size shapes under
-//    a stationary pointer with no extra mouse move needed).
+//  * HoverHandler with `enabled: AppCursor.active`: every push/pop flips
+//    the handler off and on MID-HOVER, and a handler enabled under a
+//    stationary pointer doesn't observe an enter transition, so it doesn't
+//    assert its shape until the next real mouse event — the I-beam
+//    intermittently not appearing at edit start.
 //
-//  * (rejected) always-enabled with a CONSTANT shape: a handler with a set
-//    cursorShape re-asserts from the window root, which would shadow plain
-//    cursorShape MouseAreas app-wide (buttons losing their pointing hand).
+//  * HoverHandler always enabled with `cursorShape: active ? shape :
+//    undefined` BINDING: the qmlcachegen AOT dump of the compiled binding
+//    shows the undefined branch is CONVERTED TO AN INT (0) and assigned
+//    through setCursorShape() — which per Qt CLAIMS the cursor
+//    (isCursorShapeExplicitlySet() = true). Net effect: the catcher forced
+//    ArrowCursor app-wide whenever the stack was empty, and every plain
+//    cursorShape MouseArea below it (menu rows, buttons — their pointing
+//    hands) never applied. An interpreted qmltestrunner probe cannot see
+//    this: there the engine routes binding-undefined to the property's
+//    RESET; the AOT path does not.
 //
-// With `cursorShape: <shape> : undefined` neither failure mode exists:
-// per Qt, a PointerHandler whose cursorShape is unset never modifies the
-// cursor at all — the OS keeps whatever item below would set. The only
-// shapes that ever come out of this layer are ones the AppCursor stack
-// explicitly pushed. Null-shape transition warnings ("QML HoverHandler:
-// cursorShape cannot be reset to an unknown or null shape") are benign
-// noise — the shape stays the last pushed one during that tick; the stack
-// itself is the source of truth and pops are validated separately.
+// The working form assigns undefined from IMPERATIVE JS: that routes
+// through QQmlPropertyPrivate::write, which honors a resettable property's
+// RESET method (resetCursorShape() → cursorSet = false → the handler stops
+// claiming the cursor and items below take over). qtdeclarative's own docs
+// (qquickpointerhandler.cpp): "This property can be reset to the same
+// initial condition by setting it to undefined." Assignments of a real
+// shape claim it for exactly as long as the stack is non-empty. The
+// handler itself is never disabled, so hover stays latched from startup
+// and every transition applies immediately — including under a stationary
+// pointer.
 Item {
     anchors.fill: parent
 
@@ -68,6 +70,22 @@ Item {
         // scenePosition: window-scene coordinates, the canonical frame the
         // stack stores (hovered() maps items into it via mapFromItem(null)).
         onPointChanged: AppCursor.setPointerPos(point.scenePosition)
-        cursorShape: AppCursor.active ? AppCursor.shape : undefined
+    }
+
+    function syncShape() {
+        // Assign undefined (the documented RESET) when the stack is empty —
+        // NEVER a fallback int, or this layer would claim the arrow and
+        // shadow every pointing-hand below it.
+        catcherHandler.cursorShape = AppCursor.active ? AppCursor.shape
+                                                      : undefined
+    }
+    Component.onCompleted: syncShape()
+    Connections {
+        target: AppCursor
+        function onActiveChanged() { syncShape() }
+        function onShapeChanged() {
+            if (AppCursor.active)
+                syncShape()
+        }
     }
 }

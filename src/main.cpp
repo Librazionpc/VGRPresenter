@@ -7,6 +7,7 @@
 #include <cstdio>
 
 #include "CrashHandler.h"
+#include "EngineBridge.h"
 #include "EventBus.h"
 
 namespace {
@@ -51,6 +52,17 @@ int main(int argc, char *argv[])
 
     // Needs QStandardPaths, which needs the QGuiApplication constructed above.
     InstallCrashHandler();
+
+    // Boots the real PresentationEngine before any QML loads, so every
+    // screen has it available from its very first frame. See EngineBridge.h
+    // for exactly what this does and doesn't touch — sandboxed data/log
+    // dirs, no plugins, no network listener. A failure here is reported as
+    // a toast (via EventBus, already wired above) rather than aborting
+    // startup — the UI still works against its existing mock data either way.
+    (void)EngineBridge::instance().boot();
+    QObject::connect(&app, &QGuiApplication::aboutToQuit, [] {
+        EngineBridge::instance().shutdown();
+    });
 
     QQmlApplicationEngine engine;
     QObject::connect(

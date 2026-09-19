@@ -74,6 +74,25 @@ QtObject {
         }
     }
 
+    // Same position-truth source as hovered(), but returns WHERE inside
+    // `item` (local coordinates), not just whether — lets a consumer that
+    // tracks WHICH CHILD is hovered (not just hovered/not) recover its
+    // state the moment it appears under an already-stationary pointer, the
+    // same class of gap hovered() exists to close. null when unknown or the
+    // point falls outside item's bounds.
+    function pointerPos(item) {
+        if (!_point || !item)
+            return null
+        try {
+            const p = item.mapFromItem(null, _point.x, _point.y)
+            if (p.x < 0 || p.y < 0 || p.x > item.width || p.y > item.height)
+                return null
+            return p
+        } catch (err) {
+            return null
+        }
+    }
+
     readonly property int shape: _stack.length > 0 ? _stack[_stack.length - 1].shape : Qt.ArrowCursor
     readonly property bool active: _stack.length > 0
 

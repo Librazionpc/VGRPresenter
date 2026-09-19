@@ -25,17 +25,49 @@ std::string RegistryString(HKEY root, const char* subKey, const char* value) {
 // and identical to BuildInfo (kCompileArch).
 std::string ArchString() { return CompileArch(); }
 
-std::string OsVersion() {
-    // RtlGetVersion (Vista+) is not deprecated like GetVersionExA.
+struct RawOsVersion {
+    DWORD major = 0;
+    DWORD minor = 0;
+    DWORD build = 0;
+    bool ok = false;
+};
+
+RawOsVersion QueryOsVersion() {
+    // RtlGetVersion (Vista+) is not deprecated like GetVersionExA — it
+    // reports the true running OS regardless of the app's manifest, which
+    // GetVersionExA/VerifyVersionInfo silently lie about without one.
     using RtlGetVersionFn = LONG(WINAPI*)(PRTL_OSVERSIONINFOW);
     static auto fn = reinterpret_cast<RtlGetVersionFn>(
         GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
-    if (!fn) return {};
+    RawOsVersion out;
+    if (!fn) return out;
     OSVERSIONINFOW ovi{};
     ovi.dwOSVersionInfoSize = sizeof(ovi);
-    if (fn(&ovi) != 0) return {};
-    return std::to_string(ovi.dwMajorVersion) + "." + std::to_string(ovi.dwMinorVersion) + "." +
-           std::to_string(ovi.dwBuildNumber);
+    if (fn(&ovi) != 0) return out;
+    out.major = ovi.dwMajorVersion;
+    out.minor = ovi.dwMinorVersion;
+    out.build = ovi.dwBuildNumber;
+    out.ok = true;
+    return out;
+}
+
+std::string OsVersionString(const RawOsVersion& v) {
+    if (!v.ok) return {};
+    return std::to_string(v.major) + "." + std::to_string(v.minor) + "." + std::to_string(v.build);
+}
+
+// Marketing name for EnvironmentInfo::osName (IEnvironment.hpp documents
+// "Windows 11" as the expected shape, matching Linux's "Ubuntu 24.04 LTS")
+// — kept separate from osVersion's raw kernel string. Windows 11 is still
+// internally NT 10.0 (Microsoft deliberately never bumped the major/minor —
+// countless apps hardcode a "10.0" check and would break otherwise), so the
+// build number is the ONLY signal that distinguishes 10 from 11; these are
+// Microsoft's own published boundaries, not a guess.
+std::string FriendlyOsName(const RawOsVersion& v) {
+    if (!v.ok) return "Windows";
+    if (v.major == 10 && v.minor == 0)
+        return v.build >= 22000 ? "Windows 11" : "Windows 10";
+    return "Windows";   // pre-Win10 or a future major bump — don't fabricate a name
 }
 
 std::string Timezone() {
@@ -53,8 +85,9 @@ std::string Locale() {
 
 EnvironmentInfo WindowsEnvironment::Current() const {
     EnvironmentInfo info;
-    info.osName = "Windows";
-    info.osVersion = OsVersion();
+    const RawOsVersion raw = QueryOsVersion();
+    info.osName = FriendlyOsName(raw);
+    info.osVersion = OsVersionString(raw);
     info.arch = ArchString();
     info.buildNumber = info.osVersion;
 

@@ -1,4 +1,5 @@
 import QtQuick
+import VGRPresenterUI
 
 // A single MouseArea that reports which child of `container` (a Row/Grid/
 // etc, sized to exactly cover with anchors.fill) the cursor is currently
@@ -76,4 +77,23 @@ MouseArea {
     onEntered: root.hoveredIndex = root.zoneAt(mouseX)
     onPositionChanged: (mouse) => root.hoveredIndex = root.zoneAt(mouse.x)
     onExited: root.hoveredIndex = -1
+
+    // This area is typically hidden until some popover/menu opens (see
+    // EditScreen.qml's content-type picker) — containsMouse only updates on
+    // a real mouse event, so if the pointer is already resting over a chip
+    // the instant the menu opens, hoveredIndex stays stuck at -1 (no
+    // highlight) until the mouse physically moves. AppCursor.pointerPos is
+    // position TRUTH (fed continuously by the window-wide hover catcher,
+    // not gated on this area's own event history), so re-derive the zone
+    // from it the moment this area becomes visible — same fix shape as
+    // every AppCursor.hovered() call elsewhere in this codebase for the
+    // identical "appeared under a stationary pointer" gap.
+    onVisibleChanged: {
+        if (!visible) {
+            root.hoveredIndex = -1
+            return
+        }
+        const p = AppCursor.pointerPos(root)
+        root.hoveredIndex = p ? root.zoneAt(p.x) : -1
+    }
 }

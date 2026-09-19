@@ -131,49 +131,88 @@ Rectangle {
     })
 
     // ---- Undo/redo -------------------------------------------------------
-    // A reusable UndoHistory (see UndoHistory.qml) instead of a stack baked
-    // into this screen — the snapshot mechanism is project-wide (text,
-    // style and geometry all restore through it), not canvas-specific. Each
-    // surface that wants undo instantiates its own UndoHistory and teaches
-    // it its capture/apply; this screen's surface is the whole per-slide
-    // canvas state ({ items, background }).
+    // Backed by the real engine's UndoRedoManager (via EngineBridge, see
+    // EngineBridge.h) instead of a local snapshot stack — this screen's
+    // surface is still the whole per-slide canvas state ({ items,
+    // background }), but the ordering/depth-cap/grouping bookkeeping now
+    // lives in bps::project::UndoRedoManager, not a QML JS array. Undo
+    // entries are real ICommand pairs: capture "before" when an edit
+    // starts, capture "after" once it's actually finished, then hand both
+    // to EngineBridge.pushCommand as one command.
     //
-    // One snapshot per whole gesture, never per intermediate value: drags
-    // collapse via dragSnapshotTaken (below), slider gestures via the
-    // components' dragStarted hooks, a typing session via beginTextEdit
-    // (below). Slide-level operations (add/remove/duplicate slide) are NOT
-    // yet covered — see KNOWN_ISSUES.md if that scope grows later.
-    UndoHistory {
-        id: canvasHistory
-        capture: function () {
-            return { items: slideStore.snapshotItems(), background: slideStore.current.background }
-        }
-        apply: function (snap) {
-            slideStore.restoreItems(snap.items)
-            slideStore.current.background = snap.background
-        }
-        // Restored items are fresh objects; keys survive restore, object
-        // references don't — the selection is transient state referencing
-        // exactly those, so it resets after every undo/redo.
-        afterRestore: function () { root.selectedCanvasObjects = [] }
+    // One entry per whole gesture, never per intermediate value: drags
+    // collapse via dragSnapshotTaken (below), a typing session via
+    // beginTextEdit (below). Slide-level operations (add/remove/duplicate
+    // slide) are NOT yet covered — see KNOWN_ISSUES.md if that scope grows
+    // later.
+    function captureCanvasSnapshot() {
+        return { items: slideStore.snapshotItems(), background: slideStore.current.background }
+    }
+    // Deliberately does NOT touch selectedCanvasObjects — restored items
+    // are fresh objects, so a stale selection referencing the old ones
+    // would dangle, but clearing it here would also fire on the harmless
+    // redundant re-apply commitUndoStep does right after a fresh edit (see
+    // below), which should NOT blow away a selection the edit just made
+    // (e.g. addCanvasItem selecting the item it just created). undo()/
+    // redo() clear it explicitly instead — the same places the old
+    // UndoHistory's afterRestore hook used to.
+    function applyCanvasSnapshot(snap) {
+        slideStore.restoreItems(snap.items)
+        slideStore.current.background = snap.background
     }
 
-    // The one push entry point — every edit path in this file and both
-    // panels' undoHook wiring go through here, so the "snapshot must be the
-    // pre-change state" contract lives in exactly one place. Undo/redo also
-    // pull keyboard focus back to the canvas: a chord pressed right after
-    // clicking a panel control otherwise fires while the panel's TextInput
-    // still owns focus, which native-edit behavior would route into that
-    // field instead of the canvas history.
-    function pushUndoSnapshot() {
-        canvasHistory.push()
+    // Pending "before" snapshot for the undo step currently being
+    // gathered — null when no edit is in progress.
+    property var _pendingUndoBefore: null
+    property string _pendingUndoLabel: ""
+
+    // Starts gathering one undo step. Re-entrant-safe: a second call while
+    // one is already pending (e.g. every mouse-move of a drag) is a no-op,
+    // which is what collapses a whole gesture into a single entry.
+    //
+    // deferred (default true) auto-commits via Qt.callLater once the
+    // current synchronous edit finishes — right for one-shot edits (nudge,
+    // delete, add, recolor), INCLUDING ones whose caller does a couple of
+    // follow-up property writes in the same tick (e.g. CameraSourceModal.
+    // onApplied calls addCanvasItem() then sets item.text — callLater fires
+    // after both, so the undo step captures the fully-configured item, not
+    // a half-built one). Pass false for gestures that span multiple real
+    // events — a drag, a resize, a multi-keystroke text-edit session —
+    // where commitUndoStep() is instead called explicitly once the gesture
+    // truly ends (endCanvasDrag / endTextEdit).
+    function beginUndoStep(label, deferred) {
+        if (root._pendingUndoBefore !== null)
+            return
+        root._pendingUndoBefore = root.captureCanvasSnapshot()
+        root._pendingUndoLabel = label
+        if (deferred !== false)
+            Qt.callLater(root.commitUndoStep)
     }
+
+    function commitUndoStep() {
+        if (root._pendingUndoBefore === null)
+            return
+        const before = root._pendingUndoBefore
+        const after = root.captureCanvasSnapshot()
+        const label = root._pendingUndoLabel
+        root._pendingUndoBefore = null
+        EngineBridge.pushCommand(label,
+            function () { root.applyCanvasSnapshot(after) },
+            function () { root.applyCanvasSnapshot(before) })
+    }
+
+    // Undo/redo also pull keyboard focus back to the canvas: a chord
+    // pressed right after clicking a panel control otherwise fires while
+    // the panel's TextInput still owns focus, which native-edit behavior
+    // would route into that field instead of the canvas history.
     function undo() {
-        canvasHistory.undo()
+        EngineBridge.undo()
+        root.selectedCanvasObjects = []
         mCanvas.forceActiveFocus()
     }
     function redo() {
-        canvasHistory.redo()
+        EngineBridge.redo()
+        root.selectedCanvasObjects = []
         mCanvas.forceActiveFocus()
     }
 
@@ -195,10 +234,11 @@ Rectangle {
         if (root.textUndoKey === key)
             return
         root.textUndoKey = key
-        root.pushUndoSnapshot()
+        root.beginUndoStep(qsTr("Edit text"), false)
     }
     function endTextEdit() {
         root.textUndoKey = ""
+        root.commitUndoStep()
     }
 
     // ---- Copy/paste --------------------------------------------------
@@ -426,7 +466,7 @@ Rectangle {
 
     function applyCanvasMove(key, dx, dy, snapDisabled) {
         if (!root.canvasMoveDrag || root.canvasMoveDrag.key !== key) {
-            root.pushUndoSnapshot()
+            root.beginUndoStep(qsTr("Move"), false)
             const positions = {}
             root.selectedCanvasObjects.forEach((k) => {
                 const o = root.canvasObjectByKey(k)
@@ -480,7 +520,7 @@ Rectangle {
         // (applyCanvasResize fires continuously while dragging a handle) —
         // see dragSnapshotTaken's header comment and endCanvasDrag below.
         if (!root.dragSnapshotTaken) {
-            root.pushUndoSnapshot()
+            root.beginUndoStep(qsTr("Resize"), false)
             root.dragSnapshotTaken = true
         }
 
@@ -501,10 +541,11 @@ Rectangle {
         root.canvasMoveDrag = null
         root.dragSnapshotTaken = false
         canvasSnapGuides.guides = []
+        root.commitUndoStep()
     }
 
     function nudgeSelectedCanvasObjects(dx, dy) {
-        root.pushUndoSnapshot()
+        root.beginUndoStep(qsTr("Nudge"))
         root.selectedCanvasObjects.forEach((k) => {
             const o = root.canvasObjectByKey(k)
             if (o) {
@@ -519,7 +560,7 @@ Rectangle {
     // and canvasContextMenu's own "Delete" case, so the two delete paths
     // can't drift apart.
     function removeCanvasItems(keys) {
-        root.pushUndoSnapshot()
+        root.beginUndoStep(qsTr("Delete"))
         slideStore.removeItems(keys)
         root.selectedCanvasObjects = root.selectedCanvasObjects.filter((k) => keys.indexOf(k) < 0)
     }
@@ -539,7 +580,11 @@ Rectangle {
     // The item is created and owned by the slide store so it archives with
     // its slide. Returns the new CanvasItem.
     function addCanvasItem(kind, copyFrom) {
-        root.pushUndoSnapshot()
+        // Deferred: several callers (CameraSourceModal.onApplied etc.) set
+        // item.text/item.meta right after this returns, in the same tick —
+        // the deferred commit fires after those too, so the undo step
+        // captures the fully-configured item, not a half-built one.
+        root.beginUndoStep(copyFrom ? qsTr("Duplicate item") : qsTr("Add item"))
         const n = slideStore.current.items.length
         const isCamera = kind === "camera"
         const item = slideStore.createItem(
@@ -699,7 +744,7 @@ Rectangle {
                 height: 28
                 width: 28
                 radius: 7
-                enabled: canvasHistory.canUndo
+                enabled: EngineBridge.canUndo
                 opacity: enabled ? 1 : 0.35
                 color: undoArea.containsMouse ? "#20242f" : "#1a1c26"
                 Behavior on color { ColorAnimation { duration: 100 } }
@@ -718,7 +763,7 @@ Rectangle {
                 height: 28
                 width: 28
                 radius: 7
-                enabled: canvasHistory.canRedo
+                enabled: EngineBridge.canRedo
                 opacity: enabled ? 1 : 0.35
                 color: redoArea.containsMouse ? "#20242f" : "#1a1c26"
                 Behavior on color { ColorAnimation { duration: 100 } }
@@ -903,8 +948,30 @@ Rectangle {
         // DraggableCanvasText), so there's genuinely empty space around an
         // unselected object for this to catch.
         MouseArea {
+            id: canvasBackgroundArea
             anchors.fill: parent
             z: -1
+            hoverEnabled: true
+            // Cursor via the AppCursor override stack (see EditableCanvasLabel's
+            // dragArea for the full why — scale-transformed canvas kills plain
+            // cursorShape). Without this, truly empty canvas space never
+            // pushed anything: AppCursorCatcher's "no active override = leave
+            // the OS cursor alone" default then left whatever was last pushed
+            // (a resize handle's size cursor, a label's I-beam...) stuck
+            // showing over empty canvas indefinitely, since nothing here ever
+            // asserted Arrow to fall back to. z: -1 already keeps this behind
+            // every object's own MouseArea, so it only ever wins hover (and
+            // only ever pushes) over genuinely uncovered space.
+            cursorShape: Qt.ArrowCursor
+            function syncCursor() {
+                if (visible && enabled && (containsMouse || AppCursor.hovered(canvasBackgroundArea)))
+                    AppCursor.push(Qt.ArrowCursor, canvasBackgroundArea)
+                else
+                    AppCursor.pop(canvasBackgroundArea)
+            }
+            onContainsMouseChanged: syncCursor()
+            onEnabledChanged: syncCursor()
+            Component.onDestruction: AppCursor.pop(canvasBackgroundArea)
             onClicked: {
                 // Steals focus from any object's TextInput mid-edit, so
                 // clicking empty canvas both exits edit mode and clears
@@ -1770,6 +1837,14 @@ Rectangle {
                         name: typeChip.modelData.icon
                         color: typeChip.active ? "#9b8ff5" : "#9aa0b5"
                         visible: typeChip.modelData.icon !== "text"
+                        // "media"/"audio" use the older, smaller Figma-export
+                        // play/music glyphs (native ~8-9px) rather than the
+                        // Lucide 24-grid family the other five icons come
+                        // from (scaled to ~14px) — without this they read
+                        // visibly smaller/thinner next to camera/shape/timer/
+                        // clock in the same row. Scaled from center, so this
+                        // doesn't shift its already-centered position.
+                        scale: (typeChip.modelData.icon === "play" || typeChip.modelData.icon === "music") ? 1.6 : 1
                     }
                     Text {
                         y: 22
@@ -2381,7 +2456,7 @@ Rectangle {
         ]
         onItemActivated: (label) => {
             if (root.primarySelectedItem) {
-                root.pushUndoSnapshot()
+                root.beginUndoStep(qsTr("Change font weight"))
                 root.primarySelectedItem.meta = Object.assign({}, root.primarySelectedItem.meta, { fontWeight: label })
             }
             textFontMenu.visible = false
@@ -2394,7 +2469,7 @@ Rectangle {
         title: root.bgModalTarget === "border" ? qsTr("Border Color")
             : root.bgModalTarget === "textColor" ? qsTr("Text Color") : qsTr("Background Color")
         onApplied: (selection) => {
-            root.pushUndoSnapshot()
+            root.beginUndoStep(qsTr("Change color"))
             if (root.bgModalTarget === "border" || root.bgModalTarget === "itemBackground") {
                 // Solid colors only (gradients aren't a border/item-fill
                 // concept here); the picker is shared with the slide
