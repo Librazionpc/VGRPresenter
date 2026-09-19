@@ -1,4 +1,4 @@
-#include "CrashHandler.h"
+#include "services/CrashHandler.h"
 
 #include <QDateTime>
 #include <QDir>

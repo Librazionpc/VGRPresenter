@@ -6,9 +6,9 @@
 
 #include <cstdio>
 
-#include "CrashHandler.h"
-#include "EngineBridge.h"
-#include "EventBus.h"
+#include "services/CrashHandler.h"
+#include "services/EngineBridge.h"
+#include "services/EventBus.h"
 
 namespace {
 

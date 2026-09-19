@@ -143,16 +143,28 @@ QtObject {
     // CanvasItem objects themselves keep changing live, so a snapshot for
     // undo/redo has to copy values out, not just remember which objects
     // were on the canvas.
+    //
+    // backgroundColor/borderColor are stringified (QML `color` -> "#aarrggbb")
+    // rather than left as live color value-types: a snapshot taken here can
+    // end up captured inside a JS closure that crosses into C++ (the engine-
+    // backed undo history stores pending do/undo closures as QJSValue inside
+    // a plain std::vector, well outside QML's own object lifetime tracking)
+    // and read back out much later. A `color` gadget doesn't reliably
+    // survive that round trip — it comes back as something `property color`
+    // rejects with "Could not find any constructor for value type
+    // QQuickColorValueType to call with value QVariant(Invalid)". A plain
+    // hex string has no such problem and `property color` accepts it
+    // identically to a real color value on assignment.
     function snapshotItems() {
         return store.current.items.map((it) => ({
             key: it.key, kind: it.kind, text: it.text,
             x: it.x, y: it.y, width: it.width, height: it.height,
             meta: it.meta,
             style: {
-                padding: it.style.padding, backgroundColor: it.style.backgroundColor,
+                padding: it.style.padding, backgroundColor: it.style.backgroundColor.toString(),
                 cornerRadius: it.style.cornerRadius, borderEnabled: it.style.borderEnabled,
                 borderWidth: it.style.borderWidth, borderStyle: it.style.borderStyle,
-                borderColor: it.style.borderColor
+                borderColor: it.style.borderColor.toString()
             }
         }))
     }

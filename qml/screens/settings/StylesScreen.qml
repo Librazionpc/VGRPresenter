@@ -1,6 +1,6 @@
 import QtQuick
 import VGRPresenterUI
-import "../components"
+import "../../components"
 
 // Settings · Styles — the presentation "themes" an output renders with,
 // promoted from a card inside Outputs to its own section. Roster lives in

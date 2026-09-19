@@ -46,7 +46,7 @@ QtObject {
     // Flip to true (e.g. from a probe or a temporary edit) to trace every
     // push/pop/validate live on stderr — the tool for the next "cursor got
     // stuck" report that can't be reproduced on demand.
-    property bool debug: false
+    property bool debug: true
 
     // The window-scene pointer position, fed every event by the catcher's
     // permanently-latched HoverHandler (see AppCursorCatcher.qml). This is
@@ -141,12 +141,14 @@ QtObject {
         kept.push({ shape: shape, owner: owner })
         _stack = kept
         if (root.debug)
-            console.log("[AppCursor] push", shape, "depth", _stack.length)
+            console.log("[AppCursor] push", shape, "depth", _stack.length, "owner", owner, "stack=", _stack.map((e) => e.owner))
     }
 
     function pop(owner) {
         if (!owner)
             return
+        if (root.debug)
+            console.log("[AppCursor] pop attempt", "owner", owner, "wasInStack", _stack.some((e) => e.owner === owner))
         const before = _stack.length
         _stack = _stack.filter((e) => e.owner !== owner)
         if (root.debug && _stack.length !== before)

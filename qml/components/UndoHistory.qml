@@ -1,30 +1,60 @@
 import QtQuick
+import VGRPresenterUI
 
-// Generic snapshot-based undo/redo history — the mechanism extracted out of
-// EditScreen.qml so any surface in the app can own an undo stack instead of
-// each growing a bespoke one. A "surface" is whatever unit of state should
-// undo as a whole: EditScreen's canvas ({ items, background }), a future
-// slide-roster history, a properties dialog, etc. Each surface instantiates
-// one UndoHistory and teaches it two things:
+// Generic undo/redo history — the reusable surface adapter over the real
+// engine's undo stack (bps::project::UndoRedoManager, via the EngineBridge
+// service; see src/EngineBridge.h). Any surface in the app (EditScreen's
+// canvas, a future slide-roster history, a properties dialog...)
+// instantiates one UndoHistory and teaches it two things:
 //
 //   capture — function() -> snapshot. Reads the surface's CURRENT state and
-//             returns it as a plain value. Deep-copy anything that will keep
-//             changing after the push: live objects must be frozen into
-//             plain data (exactly why SlideCanvasStore.snapshotItems copies
-//             field values out instead of remembering object references).
-//   apply   — function(snapshot). Puts a snapshot back. Called by undo()/
-//             redo() AFTER the outgoing state has been captured, so it can
-//             freely destroy/replace live objects.
+//             returns it as PLAIN DATA (deep-copy anything that will keep
+//             changing — live objects must be frozen into values, and in
+//             particular must not leave QML value-type gadgets like `color`
+//             in the snapshot: it gets captured inside a closure that
+//             crosses into C++ — EngineBridge.pushCommand stores the
+//             pending do/undo closures as QJSValue inside the engine's own
+//             std::vector-backed stack, well outside QML's object lifetime
+//             tracking — and a `color` gadget doesn't reliably survive that
+//             round trip. Stringify colors etc. before returning them; see
+//             SlideCanvasStore.snapshotItems for the pattern and the exact
+//             failure this avoids).
+//   apply   — function(snapshot). Puts a snapshot back.
 //
-// afterRestore (optional) runs after every restore — clearing transient
-// state that may reference objects apply() just replaced (e.g. a selection).
+// afterRestore (optional) runs after every undo()/redo() — clearing
+// transient state that may reference objects apply() just replaced (e.g. a
+// selection).
 //
-// Usage contract: consumers push() BEFORE mutating (the snapshot must be
-// the pre-change state) and bracket whole gestures themselves — one push
-// per drag, per slider gesture, per typing session, never per intermediate
-// value. That policy stays with the consumer because only it knows where
-// its gestures begin and end; this component deliberately knows nothing
-// about gestures.
+// NOTE: every UndoHistory instance shares the SAME underlying stack — the
+// engine has one bps::project::UndoRedoManager for the whole process, the
+// same way any real editor has one Ctrl+Z history, not an isolated one per
+// panel. Multiple surfaces each instantiating their own UndoHistory is
+// still the right pattern (each just teaches the shared stack how to
+// capture/apply ITS OWN state) — they aren't independently undoable from
+// each other.
+//
+// Usage — three ways to bracket an edit, depending on what signal the
+// caller actually has:
+//   push(label)                 — one-shot edits (nudge, delete, recolor):
+//                                  commits automatically via Qt.callLater
+//                                  once the current synchronous edit (and
+//                                  any same-tick follow-up writes) finishes.
+//   push(label, false) + commit() later
+//                                — gestures spanning multiple real events (a
+//                                  drag, a resize, a multi-keystroke typing
+//                                  session): push at the gesture's start,
+//                                  call commit() explicitly once it truly
+//                                  ends.
+//   push() with no arguments    — settle-debounced: commits after a short
+//                                  quiet period (600ms) with no further
+//                                  push() calls. For callers that only have
+//                                  a "gesture started" signal with no
+//                                  matching "ended" signal to hook (e.g. a
+//                                  slider component that fires onDragStarted
+//                                  but reports no dragFinished back here).
+// A push() call while one is already pending is a no-op (beyond possibly
+// extending the settle window) — that's what collapses a whole gesture
+// into a single undo entry.
 QtObject {
     id: history
 
@@ -32,56 +62,85 @@ QtObject {
     property var apply: null
     property var afterRestore: null
 
-    // History cap — oldest entries fall off once exceeded.
-    property int maxDepth: 50
+    readonly property bool canUndo: EngineBridge.canUndo
+    readonly property bool canRedo: EngineBridge.canRedo
 
-    property var undoStack: []
-    property var redoStack: []
+    // The "before" snapshot for the undo step currently being gathered —
+    // null when no edit is in progress.
+    property var _pendingBefore: null
+    property string _pendingLabel: ""
 
-    // Toolbar buttons / menu items / Shortcut.enabled bind enablement to
-    // these instead of poking at the stacks directly.
-    readonly property bool canUndo: undoStack.length > 0
-    readonly property bool canRedo: redoStack.length > 0
+    property Timer _settleTimer: Timer {
+        interval: 600
+        onTriggered: history.commit()
+    }
 
-    // Remembers the current state as the next undo step and invalidates the
-    // redo branch — standard undo semantics: a new edit after an undo ends
-    // that redo timeline.
-    function push() {
-        if (!capture)
+    function push(label, deferred) {
+        if (!history.capture)
             return
-        undoStack = undoStack.concat([capture()])
-        if (undoStack.length > maxDepth)
-            undoStack = undoStack.slice(undoStack.length - maxDepth)
-        redoStack = []
+        if (history._pendingBefore !== null) {
+            if (label === undefined)
+                history._settleTimer.restart()
+            return
+        }
+        history._pendingBefore = history.capture()
+        history._pendingLabel = label !== undefined ? label : qsTr("Edit")
+        if (label === undefined)
+            history._settleTimer.restart()
+        else if (deferred !== false)
+            Qt.callLater(history.commit)
+    }
+
+    function commit() {
+        if (history._pendingBefore === null || !history.capture || !history.apply)
+            return
+        const before = history._pendingBefore
+        const after = history.capture()
+        const label = history._pendingLabel
+        history._pendingBefore = null
+        EngineBridge.pushCommand(label,
+            function () { history.apply(after) },
+            function () { history.apply(before) })
+        // No "message" key — see EventBus.h's convention: this stays silent
+        // telemetry (NotificationCenter only turns a payload into a toast
+        // when it carries one), so every nudge/drag doesn't spam a toast,
+        // while still being a real, subscribable event for anything that
+        // wants to react to undo activity project-wide (an activity log, a
+        // status line, ...) without coupling to EngineBridge or any one
+        // screen's UndoHistory instance directly.
+        EventBus.publish("undo.pushed", { label: label })
     }
 
     function undo() {
-        if (undoStack.length === 0 || !apply)
-            return
-        const snap = undoStack[undoStack.length - 1]
-        undoStack = undoStack.slice(0, -1)
-        redoStack = redoStack.concat([capture()])
-        apply(snap)
-        if (afterRestore)
-            afterRestore()
+        EngineBridge.undo()
+        if (history.afterRestore)
+            history.afterRestore()
+        // redoLabel() is correct here, not undoLabel(): undo() just moved
+        // this entry from the undo stack onto the redo stack, so it's now
+        // "the thing redo() would redo" — exactly the entry that was undone.
+        EventBus.publish("undo.undone", {
+            label: EngineBridge.redoLabel(),
+            canUndo: EngineBridge.canUndo, canRedo: EngineBridge.canRedo
+        })
     }
 
     function redo() {
-        if (redoStack.length === 0 || !apply)
-            return
-        const snap = redoStack[redoStack.length - 1]
-        redoStack = redoStack.slice(0, -1)
-        undoStack = undoStack.concat([capture()])
-        apply(snap)
-        if (afterRestore)
-            afterRestore()
+        EngineBridge.redo()
+        if (history.afterRestore)
+            history.afterRestore()
+        // Symmetric with undo() above: redo() just moved the entry back
+        // onto the undo stack, so undoLabel() names what was just redone.
+        EventBus.publish("undo.redone", {
+            label: EngineBridge.undoLabel(),
+            canUndo: EngineBridge.canUndo, canRedo: EngineBridge.canRedo
+        })
     }
 
-    // Drops all history — call when the underlying surface is replaced
-    // wholesale (a new document, loading a show file), not after normal
-    // edits.
+    // Drops the WHOLE app-wide history (see the shared-stack note above) —
+    // call when the underlying surface is replaced wholesale (a new
+    // document, loading a show file), not after normal edits.
     function clear() {
-        undoStack = []
-        redoStack = []
+        EngineBridge.clearHistory()
+        history._pendingBefore = null
     }
 }

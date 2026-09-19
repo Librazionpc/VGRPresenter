@@ -1,6 +1,6 @@
 import QtQuick
 import VGRPresenterUI
-import "../components"
+import "../../components"
 
 // Settings · Recording & Streaming — same skeleton as the other settings
 // screens (Item root, Flickable, shared AppScrollBar, Theme tokens), but

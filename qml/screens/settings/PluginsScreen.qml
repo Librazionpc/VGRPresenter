@@ -1,6 +1,6 @@
 import QtQuick
 import VGRPresenterUI
-import "../components"
+import "../../components"
 
 // Settings · Plugins — the installed-plugins list, same minimal skeleton
 // as the other settings screens (Item root, Flickable, shared

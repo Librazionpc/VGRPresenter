@@ -1,6 +1,6 @@
 import QtQuick
 import VGRPresenterUI
-import "../components"
+import "../../components"
 
 // Settings · Outputs — CRUD hub for the outputs a show is sent to: the
 // output roster (Add / Edit / Duplicate / Delete), each output's live state

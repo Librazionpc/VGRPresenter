@@ -1,6 +1,6 @@
 import QtQuick
 import VGRPresenterUI
-import "../components"
+import "../../components"
 
 // Settings · Smart Config — rebuilt from the reference screenshot
 // (1BBTIwaya's VGRPresenter_Settings_Smart_Config.qml is a PNG placeholder

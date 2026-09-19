@@ -347,12 +347,12 @@ file(GLOB_RECURSE APP_ASSET_FILES
 
 qt_add_executable(appVGRPresenterUI
     src/main.cpp
-    src/EventBus.h
-    src/EventBus.cpp
-    src/CrashHandler.h
-    src/CrashHandler.cpp
-    src/EngineBridge.h
-    src/EngineBridge.cpp
+    qml/services/include/services/EventBus.h
+    qml/services/EventBus.cpp
+    qml/services/include/services/CrashHandler.h
+    qml/services/CrashHandler.cpp
+    qml/services/include/services/EngineBridge.h
+    qml/services/EngineBridge.cpp
     src/SlideListModel.h
     src/SlideListModel.cpp
     src/OutputListModel.h
@@ -372,9 +372,9 @@ qt_add_executable(appVGRPresenterUI
 # lists it as an ordinary type ("Theme 1.0 ...") instead of a singleton
 # ("singleton Theme 1.0 ..."), which is exactly what made Theme.* resolve to
 # undefined at deeper nesting and forced literal hex colors everywhere.
-set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/Theme.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
-set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/AppCursor.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
-set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/NotificationCenter.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/Theme.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/AppCursor.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/components/NotificationCenter.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 
 qt_add_qml_module(appVGRPresenterUI
     URI VGRPresenterUI
@@ -396,6 +396,12 @@ target_link_libraries(appVGRPresenterUI
 )
 
 # The generated qmltyperegistrations.cpp does `#if __has_include(<SlideListModel.h>)`
-# — without src/ on the include path the include is skipped and the generated
-# references to QAbstractListModel / SlideListModel::Role fail to compile.
-target_include_directories(appVGRPresenterUI PRIVATE src)
+# — a BARE filename check, so every QML_ELEMENT header's own directory has to
+# be a search root directly, not just an ancestor of it. src/ covers the
+# List models; qml/services/include/services covers EngineBridge/EventBus
+# (whose headers live in services/include/services/*.h, one level deeper
+# than services/include itself — that outer path is kept too so
+# `#include "services/EngineBridge.h"` from main.cpp/EngineBridge.cpp still
+# resolves). Without either, the include is skipped and the generated
+# registration code fails with "EventBus was not declared in this scope".
+target_include_directories(appVGRPresenterUI PRIVATE src qml/services/include qml/services/include/services)

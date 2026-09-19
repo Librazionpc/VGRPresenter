@@ -1,4 +1,4 @@
-#include "EventBus.h"
+#include "services/EventBus.h"
 
 #include <QJSEngine>
 #include <QQmlEngine>

@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Shapes
 import VGRPresenterUI
-import "../components"
+import "../../components"
 
 // Settings · Audio & Video — the mixing/routing board (reference:
 // InspirationOrResources/1BBTIwaya/VGRPresenter_Settings_Audio_Video.qml).

@@ -58,7 +58,20 @@ Column {
     // consumer wires this to its own history/snapshot function; null means
     // no undo support wired up.
     property var undoHook: null
+    // Called BEFORE undoHook — hands keyboard focus back to the canvas
+    // first, same as clicking to select an item already does (see
+    // EditScreen.qml's handleCanvasSelect) and the same as a resize-handle
+    // press already does (DraggableCanvasText's onPressed). Without this, a
+    // slider drag that starts while a text item is still mid-edit leaves
+    // focus on that item's TextEdit — Ctrl+Z/Ctrl+Y are gated on
+    // mCanvas.activeFocus specifically (so they can't steal focus away from
+    // an in-progress typing session), and that gate would then stay closed
+    // for the rest of the session, not just this one drag. A consumer wires
+    // this to mCanvas.forceActiveFocus; null means nothing to hand off to.
+    property var focusHook: null
     function notifyUndo() {
+        if (root.focusHook)
+            root.focusHook()
         if (root.undoHook)
             root.undoHook()
     }

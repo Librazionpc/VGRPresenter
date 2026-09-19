@@ -1,6 +1,6 @@
 import QtQuick
 import VGRPresenterUI
-import "../components"
+import "../../components"
 
 // Settings · General — a faithful rebuild of the two reference exports
 // (1BBTIwaya's VGRPresenter_Settings_General.qml and its _Scrolled state):

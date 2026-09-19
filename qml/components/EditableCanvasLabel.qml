@@ -99,7 +99,12 @@ Item {
         visible: !root.editing
     }
 
-    TextInput {
+    // TextEdit, not TextInput — TextInput is inherently single-line (it has
+    // no representation for an embedded newline at all), so Enter could
+    // never insert one; it could only ever end the edit. TextEdit accepts
+    // Enter as a real newline like any multi-line editor, matching
+    // displayText's own wrapMode-based multi-line rendering.
+    TextEdit {
         id: editInput
         anchors.fill: parent
         verticalAlignment: Text.AlignVCenter
@@ -108,6 +113,7 @@ Item {
         color: displayText.color
         font: displayText.font
         horizontalAlignment: displayText.horizontalAlignment
+        wrapMode: displayText.wrapMode
         selectByMouse: true
 
         // Hover-scoped edit cursor: the I-beam override is only on the
