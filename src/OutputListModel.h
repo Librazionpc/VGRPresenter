@@ -90,7 +90,10 @@ public:
                                const QString &resolution, const QString &refresh,
                                const QString &testPattern = QStringLiteral("none"));
     Q_INVOKABLE void addOutput();
+    // Refuses for the Main Output (see kMainOutputName in the .cpp) — the
+    // UI hides the Delete affordance for it; this is the model-side backstop.
     Q_INVOKABLE void removeOutput(int index);
+    Q_INVOKABLE bool isMainOutput(int index) const;
     Q_INVOKABLE void setActive(int index);
     Q_INVOKABLE void setEnabled(int index, bool on);
     Q_INVOKABLE void duplicateOutput(int index);

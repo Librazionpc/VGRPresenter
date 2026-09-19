@@ -36,6 +36,10 @@ Item {
             case "pause": return pauseC
             case "stop": return stopC
             case "close": return closeC
+            case "camera": return cameraC
+            case "clock": return clockC
+            case "timer": return timerC
+            case "shape": return shapeC
             default: return dotC
             }
         }
@@ -236,10 +240,74 @@ Item {
             Rectangle { anchors.centerIn: parent; width: 12; height: 1.5; radius: 0.75; color: root.color; rotation: 45 }
             Rectangle { anchors.centerIn: parent; width: 12; height: 1.5; radius: 0.75; color: root.color; rotation: -45 }
         }
-    }
-
-    Component {
+    }    Component {
         id: dotC
         Rectangle { anchors.centerIn: parent; width: 6; height: 6; radius: 3; color: root.color }
     }
+
+    // ---- 24x24-grid icons (Lucide path data) -----------------------------
+    // These four back the Edit screen's "+" Add Content chips and the
+    // generic canvas placeholder. Authored in Lucide's native 24x24 grid
+    // (unlike the pre-scaled export icons above), so they're shrunk to the
+    // same ~14px visual box via `scale` — PathSvg has no viewBox auto-fit.
+    Component {
+        id: cameraC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2 // Lucide's native 2px @ 24px grid
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 22 8 L 16 12 L 22 16 L 22 8 Z M 2 8 C 2 6.9 2.9 6 4 6 L 14 6 C 15.1 6 16 6.9 16 8 L 16 16 C 16 17.1 15.1 18 14 18 L 4 18 C 2.9 18 2 17.1 2 16 L 2 8 Z" }
+            }
+        }
+    }
+
+    Component {
+        id: clockC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 12 2 A 10 10 0 1 0 12 22 A 10 10 0 1 0 12 2 M 12 6 L 12 12 L 16 14" }
+            }
+        }
+    }
+
+    Component {
+        id: timerC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 10 2 L 14 2 M 12 14 L 15 11 M 12 6 A 8 8 0 1 0 12 22 A 8 8 0 1 0 12 6" }
+            }
+        }
+    }
+
+    Component {
+        id: shapeC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 5 3 L 19 3 C 20.1 3 21 3.9 21 5 L 21 19 C 21 20.1 20.1 21 19 21 L 5 21 C 3.9 21 3 20.1 3 19 L 3 5 C 3 3.9 3.9 3 5 3 Z" }
+            }
+        }
+    }
+
 }

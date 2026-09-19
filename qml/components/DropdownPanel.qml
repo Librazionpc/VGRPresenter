@@ -35,6 +35,11 @@ Rectangle {
     property int maxHeight: 0
 
     signal itemActivated(string label)
+    // Hover in/out of a non-divider row — `rowItem` is the row's own
+    // Rectangle, in THIS panel's coordinate space, so a consumer that wants
+    // to open a flyout submenu next to it can map from a known-good item
+    // instead of re-deriving the row's position from the model index.
+    signal itemHovered(string label, bool hovering, var rowItem)
 
     // Opens the panel at (x, y) — coordinates in `sourceItem`'s local space —
     // clamped to stay fully inside `bounds` (any common ancestor, usually
@@ -153,6 +158,7 @@ Rectangle {
                         Component {
                             id: itemC
                             Rectangle {
+                                id: itemRow
                                 width: itemList.width
                                 height: 34
                                 color: itemArea.containsMouse
@@ -187,6 +193,8 @@ Rectangle {
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: root.itemActivated(modelData.label)
+                                    onEntered: root.itemHovered(modelData.label, true, itemRow)
+                                    onExited: root.itemHovered(modelData.label, false, itemRow)
                                 }
                             }
                         }

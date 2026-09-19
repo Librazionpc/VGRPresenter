@@ -26,15 +26,18 @@ Item {
 
     // Emitted for the two menu items that open the Settings dialog (logo
     // menu's "Settings", Edit menu's "Preferences…") — Main.qml owns the
-    // dialog and shows it on this signal.
-    signal settingsRequested()
+    // dialog and shows it on this signal. `section` is a ModalShell nav key
+    // ("general", "smart", …) — the plain click and Preferences… both still
+    // just land on "general"; the Settings row's hover flyout (below) is
+    // the only thing that ever passes a specific one.
+    signal settingsRequested(string section)
 
     // Menu actions are presentation-only for now (the underlying commands
     // don't exist yet) — except Settings/Preferences, which are live.
     function activateItem(menuName, label) {
         closeMenu()
         if (label === "Settings" || label === "Preferences…")
-            root.settingsRequested()
+            root.settingsRequested("general")
     }
 
     readonly property var logoMenuItems: [
@@ -46,10 +49,90 @@ Item {
         { label: "Import…" },
         { label: "Export…" },
         { divider: true },
-        { label: "Settings" },
+        { label: "Settings", trailing: "›" },
         { label: "About VGRPresenter" },
         { label: "Exit" }
     ]
+
+    // Same seven sections ModalShell's own nav rail lists (kept in sync by
+    // hand — there's no shared source both a QML nav list and this menu's
+    // plain {label,key} shape can pull from without one depending on the
+    // other's internal structure). Hovering "Settings" flies this out
+    // instead of making every settings section a two-step trip through the
+    // dialog's own nav rail.
+    readonly property var settingsSubmenuItems: [
+        { label: "General", key: "general" },
+        { label: "Smart Config", key: "smart" },
+        { label: "Outputs", key: "outputs" },
+        { label: "Styles", key: "styles" },
+        { label: "Audio & Video", key: "av" },
+        { label: "Recording", key: "recording" },
+        { label: "Plugins", key: "plugins" }
+    ]
+    // Open while EITHER the "Settings" row or the flyout itself is
+    // hovered — OR the flyout is PINNED by clicking the "Settings" row
+    // (see onItemActivated below). Hover alone was too fragile to rely on:
+    // the row and the flyout are two separate, non-overlapping items, so
+    // the cursor crosses a real gap moving from one to the other — a
+    // diagonal move (the natural way to reach a lower item) samples a
+    // mouse position outside BOTH areas for at least a frame. That flips
+    // both flags false, which used to hide the flyout immediately; once
+    // hidden, its rows stop receiving hover events at all, so it could
+    // never recover even once the cursor actually arrived.
+    // settingsFlyoutVisible below is the same signal with a short grace
+    // period on the way to false — and the click-pin is the deterministic
+    // path that doesn't depend on hover timing at all.
+    property bool settingsRowHovered: false
+    property bool settingsFlyoutHovered: false
+    // The row item from the last "Settings" hover — lets the click-pin
+    // path position the flyout without re-deriving the row's geometry.
+    property var lastSettingsRow: null
+    readonly property bool settingsFlyoutOpen: root.openMenu === "logo"
+                                                && (root.settingsPinned
+                                                    || root.settingsRowHovered
+                                                    || root.settingsFlyoutHovered)
+    // Clicking "Settings" pins the flyout open (click again to unpin) —
+    // so the section list is selectable at leisure, not in a race against
+    // the hover grace timer. Hover still previews it.
+    property bool settingsPinned: false
+
+    property bool settingsFlyoutVisible: false
+    onSettingsFlyoutOpenChanged: {
+        if (root.settingsFlyoutOpen) {
+            settingsCloseTimer.stop()
+            root.settingsFlyoutVisible = true
+        } else {
+            settingsCloseTimer.restart()
+        }
+    }
+    // The whole menu bar closing (outside click, an item activated) drops
+    // the flyout instantly AND clears every hover/pin flag: hiding a panel
+    // swallows the hover-exit events its rows would have delivered (the
+    // same invisible-item trap the cursor stack had), so a flag left true
+    // here would instantly re-show the flyout — unpositioned — the next
+    // time the logo menu opened.
+    onOpenMenuChanged: if (root.openMenu !== "logo") {
+        settingsCloseTimer.stop()
+        root.settingsFlyoutVisible = false
+        root.settingsPinned = false
+        root.settingsRowHovered = false
+        root.settingsFlyoutHovered = false
+    }
+    Timer {
+        id: settingsCloseTimer
+        interval: 300
+        onTriggered: root.settingsFlyoutVisible = false
+    }
+
+    // Positions the flyout just to the right of the hovered row, in THIS
+    // item's coordinate space (where settingsFlyout.x/y actually apply) —
+    // plain assignment, not a binding, so it only moves on hover-enter
+    // rather than fighting `visible`'s own binding below.
+    function positionSettingsFlyout(rowItem) {
+        const p = rowItem.mapToItem(root, rowItem.width, 0)
+        settingsFlyout.x = p.x
+        settingsFlyout.y = p.y
+    }
 
     readonly property var fileMenuItems: [
         { label: "New show", trailing: "Ctrl+N" },
@@ -252,7 +335,52 @@ Item {
         headerTitle: "VGRPresenter"
         headerSubtitle: "v1.0.5-beta.2"
         model: root.logoMenuItems
-        onItemActivated: (label) => root.activateItem("logo", label)
+        onItemActivated: (label) => {
+            // "Settings" doesn't activate — it PINS the section-list flyout
+            // open (hover still previews it). Activating straight into the
+            // dialog bypassed the list entirely, so a click could never
+            // reach e.g. Outputs or Styles without hover gymnastics first.
+            if (label === "Settings") {
+                if (root.lastSettingsRow)
+                    root.positionSettingsFlyout(root.lastSettingsRow)
+                root.settingsPinned = !root.settingsPinned
+                return
+            }
+            root.activateItem("logo", label)
+        }
+        onItemHovered: (label, hovering, rowItem) => {
+            if (label !== "Settings")
+                return
+            if (hovering) {
+                root.lastSettingsRow = rowItem
+                root.positionSettingsFlyout(rowItem)
+            }
+            root.settingsRowHovered = hovering
+        }
+    }
+
+    // Settings' hover flyout — a second, independent DropdownPanel (not
+    // nested inside the logo menu's) so it isn't clipped by that panel's
+    // own `clip: true`; positioned imperatively via positionSettingsFlyout.
+    DropdownPanel {
+        id: settingsFlyout
+        visible: root.settingsFlyoutVisible
+        model: root.settingsSubmenuItems
+        onItemActivated: (label) => {
+            const item = root.settingsSubmenuItems.find((i) => i.label === label)
+            root.closeMenu()
+            if (item)
+                root.settingsRequested(item.key)
+        }
+        onItemHovered: (label, hovering) => root.settingsFlyoutHovered = hovering
+    }
+    // Keyboard affordance matching the pinned flyout: Escape (with the
+    // logo menu open) unpins first, closes the menu only on a second
+    // press — so pinning never feels like a trap.
+    Shortcut {
+        sequence: "Esc"
+        enabled: root.openMenu === "logo" && root.settingsPinned
+        onActivated: root.settingsPinned = false
     }
     DropdownPanel {
         x: 154; y: 48

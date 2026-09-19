@@ -12,11 +12,15 @@ Pill {
     property bool muted: false
     property color accent: Theme.success
     property color accentLight: Theme.successLight
+    // The off-state label — "MUTE" fits an audio-carrying row, but a
+    // camera/screen feed isn't "muted" when off, it's paused. Callers pass
+    // whatever fits (see AudioVideoScreen.qml's Edit/Add Video dialogs).
+    property string offLabel: qsTr("MUTE")
     signal toggleRequested()
 
     anchors.rightMargin: 10
     anchors.topMargin: 8
-    text: root.muted ? qsTr("MUTE") : qsTr("LIVE")
+    text: root.muted ? root.offLabel : qsTr("LIVE")
     baseColor: root.muted ? Theme.textMuted : root.accent
     lightColor: root.muted ? Theme.textSecondary : root.accentLight
     tint: true

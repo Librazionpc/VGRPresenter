@@ -55,8 +55,14 @@ ApplicationWindow {
 
     AppMenuBar {
         anchors.fill: parent
-        onSettingsRequested: window.openSettings("general")
+        onSettingsRequested: (section) => window.openSettings(section)
     }
+
+    // Topmost cursor layer — renders the AppCursor override stack's shape
+    // while any gesture (canvas move/resize, AV line-drag) has one pushed;
+    // inert the rest of the time. Declared LAST so it z-orders above every
+    // screen, the menu bar, and all modals.
+    AppCursorCatcher {}
 
     // ---- Settings overlay ----
     // Shared ModalScrim: click-dismisses, and consumes wheel events so a
@@ -139,5 +145,14 @@ ApplicationWindow {
                 }
             }
         }
+    }
+
+    // Declared LAST (after the Settings overlay) so a crash/error toast
+    // always z-orders above an open modal, not just the screens underneath.
+    NotificationOverlay {
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.margins: Theme.space5
+        z: 10000
     }
 }

@@ -1,0 +1,136 @@
+#pragma once
+
+// BibleEngine (docs/specs/24): the Phase 12 facade. Owns the provider
+// registry, the installed-Bible registry, the import/validation pipeline,
+// reference resolution, query engine, formatting, parallel-Bible comparison,
+// user data (notes/highlights/collections), cross references, and Search
+// Engine integration. Knows nothing about presentation, rendering, display, or
+// UI — it only provides structured Scripture.
+
+#include "core/common/Common.hpp"
+#include "core/events/EventBus.hpp"
+#include "core/events/Events.hpp"
+#include "interfaces/IService.hpp"
+#include "modules/bible/BibleFormatter.hpp"
+#include "modules/bible/BibleTypes.hpp"
+#include "modules/bible/IBibleProvider.hpp"
+#include "modules/bible/ReferenceResolver.hpp"
+
+#include <atomic>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
+
+namespace bps::bible {
+
+class BibleEngine final : public IService {
+public:
+    static BibleEngine& Instance();
+
+    // --- Lifecycle (engine-wide contract) ---
+    Result<void> Initialize() override;
+    Result<void> Start() override;
+    Result<void> Stop() override;
+    Result<void> Shutdown() override;
+    Result<void> Reload() override;
+    Result<void> Reset() override;
+    HealthReport GetHealth() const override;
+    Metrics MetricsSnapshot() const override;
+    const char* ServiceName() const noexcept override { return "BibleEngine"; }
+
+    // --- Provider registry (docs/specs/24 §Plugin Support) ---
+    Result<void> RegisterProvider(std::shared_ptr<IBibleProvider> provider);
+    Result<void> UnregisterProvider(std::string_view name);
+    std::vector<std::string> ProviderNames() const;
+
+    // --- Import pipeline: detect -> validate -> convert -> store -> index ---
+    Result<std::string> Import(std::string_view source, std::string_view format,
+                               const ImportOptions& options = {});
+    Result<void> RemoveBible(std::string_view bibleId);
+    std::vector<std::string> BibleIds() const;
+    size_t BibleCount() const;
+
+    // --- Lookup ---
+    Result<BibleVersion> GetBible(std::string_view bibleId) const;
+    Result<BibleBook> GetBook(std::string_view bibleId, std::string_view bookId) const;
+    Result<std::vector<BibleVerse>> GetPassage(std::string_view bibleId,
+                                               const PassageRef& ref) const;
+    Result<BibleVerse> GetVerse(std::string_view bibleId, std::string_view bookId,
+                                int chapter, int verse) const;
+    Result<size_t> VerseCount(std::string_view bibleId) const;
+
+    // --- Reference resolution ---
+    Result<PassageRef> ResolveReference(std::string_view text,
+                                        std::string_view bibleId = "") const;
+    Result<std::vector<PassageRef>> ResolveReferences(std::string_view text,
+                                                      std::string_view bibleId = "") const;
+
+    // --- Search (actual verse content, via the Search Engine) ---
+    Result<std::vector<BibleSearchHit>> Search(std::string_view query,
+                                               std::string_view bibleId = "") const;
+
+    // --- Parallel Bible (align the same reference across versions) ---
+    Result<std::vector<ParallelVerse>> Compare(std::string_view refText,
+                                               const std::vector<std::string>& bibleIds) const;
+
+    // --- Formatting ---
+    Result<std::string> Format(std::string_view bibleId, const PassageRef& ref,
+                               const FormatOptions& options = {}) const;
+
+    // --- User data (stored separately from Scripture) ---
+    Result<void> AddNote(std::string_view bibleId, const PassageRef& ref,
+                         const std::string& text);
+    Result<std::vector<UserNote>> Notes(std::string_view bibleId,
+                                        const PassageRef& ref) const;
+    Result<void> SetHighlight(std::string_view bibleId, const PassageRef& ref, bool on);
+    Result<std::vector<PassageRef>> Highlights(std::string_view bibleId) const;
+    Result<void> AddCollection(std::string_view name);
+    Result<void> AddToCollection(std::string_view collection, const PassageRef& ref);
+    Result<std::vector<PassageRef>> Collection(std::string_view collection) const;
+    std::vector<std::string> CollectionNames() const;
+
+    // --- Cross references ---
+    Result<std::vector<CrossReference>> CrossReferences(std::string_view bibleId,
+                                                        const PassageRef& ref) const;
+
+    // --- Events ---
+    void WireEvents();
+    void UnwireEvents();
+    void OnConfigReload(const events::ConfigHotReload& e);
+
+private:
+    BibleEngine() = default;
+
+    // Validation runs inside Import after the provider parse (docs/specs/24
+    // §Import & Validation). Returns the number of warnings.
+    Result<size_t> Validate(const BibleVersion& bible) const;
+
+    // Indexes verse content into the Search Engine (docs/specs/24 §Search).
+    Result<size_t> IndexBible(const BibleVersion& bible);
+
+    // Canonical reference key for user-data stores ("JHN 3:16").
+    static std::string RefKey(const PassageRef& ref);
+
+    // Books for resolution: the target Bible's table, or the first installed
+    // Bible's table when bibleId is empty.
+    std::vector<BibleBook> BooksFor(std::string_view bibleId) const;
+
+    mutable std::mutex mutex_;
+    std::vector<std::shared_ptr<IBibleProvider>> providers_;
+    std::map<std::string, BibleVersion, std::less<>> bibles_;
+    // User data — never inside Scripture (docs/specs/24 §User Data).
+    std::map<std::string, std::vector<UserNote>, std::less<>> notes_;       // bible|ref
+    std::map<std::string, std::vector<PassageRef>, std::less<>> highlights_; // bibleId
+    std::map<std::string, std::vector<PassageRef>, std::less<>> collections_;
+    std::vector<Subscription> subscriptions_;
+    std::atomic<bool> initialized_{false};
+    std::atomic<bool> running_{false};
+    std::atomic<uint64_t> errorCount_{0};
+    std::atomic<uint64_t> importCount_{0};
+    // mutable: ResolveReference() is const but counts resolutions.
+    mutable std::atomic<uint64_t> resolveCount_{0};
+};
+
+} // namespace bps::bible

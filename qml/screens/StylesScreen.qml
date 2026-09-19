@@ -177,6 +177,9 @@ Item {
                             required property string contentType
                             required property string templateKey
                             required property string backgroundColor
+                            // backgroundColor is a model STRING role (Qt
+                            // role values arrive as strings, not color) — the
+                            // string comparison is correct here.
                             readonly property bool isTransparent: styleRow.backgroundColor === "transparent"
                             // `bg` is a pre-tinted 8-digit ARGB hex literal,
                             // not computed via Qt.rgba(color.r, ...) — the

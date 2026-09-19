@@ -5,6 +5,14 @@
 #include <QScreen>
 #include <algorithm>
 
+namespace {
+// The one output every show needs — deleting it would leave the app with no
+// way to put anything on the primary display, so it's protected everywhere
+// (Settings · Outputs hides its Delete affordance; removeOutput refuses).
+constexpr auto kMainOutputName = "Main Output";
+}
+
+
 OutputListModel::OutputListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
@@ -199,10 +207,19 @@ void OutputListModel::removeOutput(int index)
 {
     if (index < 0 || index >= m_outputs.size())
         return;
+    // Main Output is load-bearing — every show needs a primary destination.
+    if (m_outputs.at(index).name == QLatin1String(kMainOutputName))
+        return;
 
     beginRemoveRows(QModelIndex(), index, index);
     m_outputs.removeAt(index);
     endRemoveRows();
+}
+
+bool OutputListModel::isMainOutput(int index) const
+{
+    return index >= 0 && index < m_outputs.size()
+        && m_outputs.at(index).name == QLatin1String(kMainOutputName);
 }
 
 void OutputListModel::setActive(int index)

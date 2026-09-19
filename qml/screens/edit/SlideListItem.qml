@@ -126,7 +126,11 @@ Rectangle {
                 // A transparent fill renders as a neutral tile so the item's
                 // footprint stays legible in the thumbnail; a picked color
                 // (or an enabled border) shows as-is.
-                color: st && st.backgroundColor !== "transparent"
+                // Alpha test, not !== "transparent" — a QML color holding
+                // "transparent" reads back as #00000000, so the string
+                // comparison never matched (see EditScreen.qml's
+                // shapeContent.hasFill for the full note).
+                color: st && st.backgroundColor.a > 0
                        ? st.backgroundColor : "#1e2130"
                 border.width: st && st.borderEnabled ? Math.max(1, st.borderWidth * canvasThumb.fit) : 1
                 border.color: st && st.borderEnabled ? st.borderColor : "#343a4e"

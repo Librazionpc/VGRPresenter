@@ -595,13 +595,18 @@ Rectangle {
     property bool clockModalOpen: false
     property bool shapeModalOpen: false
     readonly property var contentTypes: [
-        { kind: "text",   icon: "Aa", label: "Text" },
-        { kind: "camera", icon: "◎", label: "Camera" },
-        { kind: "media",  icon: "▶", label: "Media" },
-        { kind: "audio",  icon: "♪", label: "Audio" },
-        { kind: "shape",  icon: "□", label: "Shape" },
-        { kind: "timer",  icon: "⏱", label: "Timer" },
-        { kind: "clock",  icon: "◷", label: "Clock" }
+        // `icon` is an IconGlyph name (qml/components/IconGlyph.qml — Lucide
+        // path data), not a Text glyph: the old "⏱"/"◷"/"◎" unicode
+        // strings had no glyph coverage in Inter and rendered as missing-
+        // glyph tofu boxes on Windows. Kind is the fallback for "text" —
+        // plain letters need no icon.
+        { kind: "text",   icon: "text",   label: "Text" },
+        { kind: "camera", icon: "camera",  label: "Camera" },
+        { kind: "media",  icon: "play",    label: "Media" },
+        { kind: "audio",  icon: "music",   label: "Audio" },
+        { kind: "shape",  icon: "shape",   label: "Shape" },
+        { kind: "timer",  icon: "timer",   label: "Timer" },
+        { kind: "clock",  icon: "clock",   label: "Clock" }
     ]
 
     // ---- Middle toolbar ----
@@ -1197,7 +1202,7 @@ Rectangle {
                     Rectangle {
                         anchors.fill: parent
                         radius: canvasItemObject.style ? canvasItemObject.style.cornerRadius : 8
-                        color: (canvasItemObject.style && canvasItemObject.style.backgroundColor !== "transparent")
+                        color: (canvasItemObject.style && canvasItemObject.style.backgroundColor.a > 0)
                             ? canvasItemObject.style.backgroundColor : "#12131a"
                         border.color: (canvasItemObject.style && canvasItemObject.style.borderEnabled)
                             ? canvasItemObject.style.borderColor : "#3a4155"
@@ -1322,7 +1327,7 @@ Rectangle {
                     Rectangle {
                         anchors.fill: parent
                         radius: canvasItemObject.style ? canvasItemObject.style.cornerRadius : 8
-                        color: (canvasItemObject.style && canvasItemObject.style.backgroundColor !== "transparent")
+                        color: (canvasItemObject.style && canvasItemObject.style.backgroundColor.a > 0)
                             ? canvasItemObject.style.backgroundColor : "#12131a"
                         border.color: (canvasItemObject.style && canvasItemObject.style.borderEnabled)
                             ? canvasItemObject.style.borderColor : "#3a4155"
@@ -1367,7 +1372,14 @@ Rectangle {
                     readonly property var cfg: canvasItemObject.modelData.meta
                     readonly property string shapeType: shapeContent.cfg.shapeType ?? "rectangle"
                     readonly property var st: canvasItemObject.style
-                    readonly property color fillColor: (shapeContent.st && shapeContent.st.backgroundColor !== "transparent")
+                    // Alpha-based transparent test, NOT `!== "transparent"`:
+                    // a QML color holding "transparent" reads back as
+                    // #00000000, so a string comparison is ALWAYS true and
+                    // the fallback never fired — every shape rendered with a
+                    // fully transparent fill (the "shape doesn't show" bug).
+                    // Verified with a standalone qml runtime probe.
+                    readonly property bool hasFill: shapeContent.st && shapeContent.st.backgroundColor.a > 0
+                    readonly property color fillColor: shapeContent.hasFill
                         ? shapeContent.st.backgroundColor : "#3a3f55"
                     readonly property color strokeColor: shapeContent.st ? shapeContent.st.borderColor : "#6c5ce7"
                     readonly property real strokeWidth: (shapeContent.st && shapeContent.st.borderEnabled) ? shapeContent.st.borderWidth : 0
@@ -1469,12 +1481,33 @@ Rectangle {
                         anchors.centerIn: parent
                         spacing: 4
 
+                    // IconGlyph, not a unicode Text glyph — same missing-
+                    // glyph problem the Add Content chips had (see
+                    // contentTypes' comment).
+                    Item {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        y: 16
+                        width: 20
+                        height: 20
+
                         Text {
-                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.fill: parent
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                            visible: genericPlaceholder.typeInfo.icon === "text"
                             color: "#9b8ff5"
-                            font.pixelSize: 20
-                            text: genericPlaceholder.typeInfo.icon
+                            font.pixelSize: 16
+                            text: "Aa"
                         }
+                        IconGlyph {
+                            anchors.centerIn: parent
+                            visible: genericPlaceholder.typeInfo.icon !== "text"
+                            name: genericPlaceholder.typeInfo.icon
+                            color: "#9b8ff5"
+                            width: 16
+                            height: 16
+                        }
+                    }
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
                             color: "#aeb6c8"
@@ -1725,7 +1758,18 @@ Rectangle {
                         color: typeChip.active ? "#9b8ff5" : "#9aa0b5"
                         font.family: "Inter"
                         font.pixelSize: 12
-                        text: typeChip.modelData.icon
+                        // "text" keeps its Aa letters; every other kind
+                        // renders its real IconGlyph (see contentTypes above).
+                        text: typeChip.modelData.icon === "text" ? "Aa"
+                            : typeChip.modelData.icon
+                        visible: typeChip.modelData.icon === "text"
+                    }
+                    IconGlyph {
+                        y: 4
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        name: typeChip.modelData.icon
+                        color: typeChip.active ? "#9b8ff5" : "#9aa0b5"
+                        visible: typeChip.modelData.icon !== "text"
                     }
                     Text {
                         y: 22
@@ -2032,7 +2076,7 @@ Rectangle {
             height: 3
             radius: 1.50
             color: "#ff4d3d"
-            // Centered under the active label: each label is one equal cell
+            // Centered under the active label: each label is one eqzual cell
             // of the tab strip, so the underline is the label's text width
             // placed at the cell's horizontal center — it glides between
             // cell centers when the tab changes and tracks automatically if
@@ -2070,106 +2114,10 @@ Rectangle {
             columnSpacing: 12
 
             Repeater {
-                model: OutputListModel
-                delegate: Rectangle {
-                    id: outputCard
-                    required property string name
-                    required property string badge
-                    required property bool active
-                    required property bool isEnabled
-
-                    height: 143
-                    width: 182
-                    // Live = danger-red border; inactive = visible slate
-                    // border + slightly lifted preview so an off tile reads
-                    // as "inactive", not just black.
-                    border.color: outputCard.active ? "#85261f" : "#2b2e3d"
-                    border.width: 1
-                    color: "#16171e"
-                    radius: 8
-                    // Disabled screens dim here too — same model, same state.
-                    opacity: outputCard.isEnabled ? 1 : 0.45
-                    Behavior on opacity { NumberAnimation { duration: 120 } }                        Rectangle {
-                            x: 6
-                            y: 6
-                            height: 110
-                            width: 170
-                            clip: true
-                            color: outputCard.active ? "#101116" : "#1a1c26"
-                            radius: 4
-
-                        Rectangle {
-                            x: 6
-                            y: 6
-                            height: 16
-                            width: badgeRow.width + 16
-                            // LIVE badge in the danger red (#ff4d3d family)
-                            // when on air — same pill the Screens settings
-                            // card renders; neutral dark chip otherwise.
-                            color: outputCard.active ? "#33ff4d3d" : "#262833"
-                            radius: 4
-
-                            Row {
-                                id: badgeRow
-                                anchors.centerIn: parent
-                                spacing: 4
-
-                                // The live indicator dot only makes sense
-                                // for the output actually on air — the
-                                // others are just labeled destinations.
-                                Rectangle {
-                                    visible: outputCard.active
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    width: 6
-                                    height: 6
-                                    radius: 3
-                                    color: "#ff4d3d"
-                                }
-                                Text {
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    color: outputCard.active ? "#ff6b61" : "#9aa0b5"
-                                    font.family: "Inter"
-                                    font.pixelSize: 9
-                                    font.weight: Font.DemiBold
-                                    text: outputCard.badge
-                                }
-                            }
-                        }
-
-                        // Play badge for whichever output is actually live
-                        // — the others stay a plain empty preview until
-                        // real per-output thumbnails exist.
-                        IconGlyph {
-                            visible: outputCard.active
-                            anchors.centerIn: parent
-                            name: "playCircle"
-                            color: "#ff4d3d"
-                            implicitWidth: 28
-                            implicitHeight: 28
-                        }
-                    }
-                    Item {
-                        x: 6
-                        y: 120
-                        width: 170
-                        height: 16
-
-                        Text {
-                            anchors.left: parent.left
-                            anchors.verticalCenter: parent.verticalCenter
-                            color: "#e2e8f0"
-                            font.family: "Inter"
-                            font.pixelSize: 11
-                            font.weight: Font.Medium
-                            text: outputCard.name
-                        }
-
-                        // Configure-this-output affordance removed — the
-                        // per-output edit dialog lives in Settings · Outputs
-                        // (right-click a card there); a lone inert gear here
-                        // promised an editor this screen doesn't have.
-                    }
-                }
+                model: OutputListModel                // The shared monitor tile (qml/components/OutputMonitorTile.qml)
+                // — same component the Show screen's monitor wall renders, so
+                // renames/toggles/edits land in both places from one file.
+                delegate: OutputMonitorTile {}
             }
         }
 

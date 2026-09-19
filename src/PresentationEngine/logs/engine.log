@@ -1,0 +1,538 @@
+[INFO][Core][Thread-1][Kernel] Kernel v1.0.0 booting...
+[INFO][Core][Thread-1][Kernel] ConfigurationManager ready
+[INFO][Core][Thread-1] ThreadPool initialized with 6 workers
+[INFO][Core][Thread-1][Kernel] Platform: Ubuntu 24.04.2 LTS 6.6.87.2-microsoft-standard-WSL2 / x86_64 / 6 cores / 13978 MiB RAM / host=LibrazionPc
+[INFO][Core][Thread-1][CAMS] ContentManager ready: 3 importers, 3 exporters, 0 assets
+[INFO][Core][Thread-1][Notify] NotificationService ready: 3 providers
+[INFO][Core][Thread-1][DataManager] DataManager ready: 0 projects restored
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime: 6 cores, 13978 MB RAM, no GPU backend
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime started (mode=Automatic, layer=Automatic)
+[INFO][Core][Thread-1][Kernel] Kernel ready in 2.13 ms — state=Running
+[INFO][Core][Thread-1][Modules] Module registered: presentation v1.0.0
+[INFO][Core][Thread-1][Presentation] Presentation module started
+[INFO][Core][Thread-1][CLI] [cli] subscriber received slide 3 of 12
+[INFO][Core][Thread-1][Presentation] SlideChanged -> display/remote/ndi/obs: 3/12 "The Good Shepherd"
+[INFO][Core][Thread-1][Modules] Module registered: songs v1.0.0
+[INFO][Core][Thread-1][Songs] Songs module loaded
+[INFO][Core][Thread-1][Songs] Songs module started
+[INFO][Core][Thread-1][Songs] Song verse: "Amazing Grace" [1/2]
+[INFO][Core][Thread-1][Songs] Song verse: "Amazing Grace" [2/2]
+[INFO][Core][Thread-1][Modules] Module registered: media v1.0.0
+[INFO][Core][Thread-1][Media] Media module loaded
+[INFO][Core][Thread-1][Media] Media module started
+[INFO][Core][Thread-1][Media] Media playing: Welcome Video
+[INFO][Core][Thread-1][Media] Media paused at 0.304054835s
+[INFO][Core][Thread-1][Media] Media stopped
+[INFO][Core][Thread-1][BibleEngine] Bible imported: TEST (1 verses)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Amazing Grace" (Amazing-Grace-81591)
+[INFO][Core][Thread-1][FlowEngine] [flow] Welcome to Morning Service
+[INFO][Core][Thread-1][FlowEngine] Flow completed: sunday
+[WARN][Core][Thread-1][BroadcastEngine] [ndi] NDI SDK not installed (libndi not found): dlopen failed for 'libndi.so': libndi.so: cannot open shared object file: No such file or directory
+[WARN][Core][Thread-1][BroadcastEngine] [sdi] DeckLink SDK not installed: dlopen failed for 'libDeckLinkAPI.dylib': libDeckLinkAPI.dylib: cannot open shared object file: No such file or directory
+[INFO][Core][Thread-2][CLI] delayed task fired
+[INFO][Core][Thread-1][Kernel] Kernel shutdown: tearing down 34 systems
+[INFO][Core][Thread-1][Songs] Songs module stopped
+[INFO][Core][Thread-1][Media] Media module stopped
+[INFO][Core][Thread-1][Presentation] Presentation module stopped
+[INFO][Core][Thread-1][Kernel] Kernel shutdown complete
+[INFO][Core][Thread-1][Kernel] Kernel v1.0.0 booting...
+[INFO][Core][Thread-1][Kernel] ConfigurationManager ready
+[INFO][Core][Thread-1] ThreadPool initialized with 6 workers
+[INFO][Core][Thread-1][Kernel] Platform: Ubuntu 24.04.2 LTS 6.6.87.2-microsoft-standard-WSL2 / x86_64 / 6 cores / 13978 MiB RAM / host=LibrazionPc
+[INFO][Core][Thread-1][CAMS] ContentManager ready: 3 importers, 3 exporters, 0 assets
+[INFO][Core][Thread-1][Notify] NotificationService ready: 3 providers
+[INFO][Core][Thread-1][DataManager] DataManager ready: 0 projects restored
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime: 6 cores, 13978 MB RAM, no GPU backend
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime started (mode=Automatic, layer=Automatic)
+[INFO][Core][Thread-1][Kernel] Kernel ready in 1.873 ms — state=Running
+[INFO][Core][Thread-1][Modules] Module registered: presentation v1.0.0
+[INFO][Core][Thread-1][Presentation] Presentation module started
+[INFO][Core][Thread-1][CLI] [cli] subscriber received slide 3 of 12
+[INFO][Core][Thread-1][Presentation] SlideChanged -> display/remote/ndi/obs: 3/12 "The Good Shepherd"
+[INFO][Core][Thread-1][Modules] Module registered: songs v1.0.0
+[INFO][Core][Thread-1][Songs] Songs module loaded
+[INFO][Core][Thread-1][Songs] Songs module started
+[INFO][Core][Thread-1][Songs] Song verse: "Amazing Grace" [1/2]
+[INFO][Core][Thread-1][Songs] Song verse: "Amazing Grace" [2/2]
+[INFO][Core][Thread-1][Modules] Module registered: media v1.0.0
+[INFO][Core][Thread-1][Media] Media module loaded
+[INFO][Core][Thread-1][Media] Media module started
+[INFO][Core][Thread-1][Media] Media playing: Welcome Video
+[INFO][Core][Thread-1][Media] Media paused at 0.304338715s
+[INFO][Core][Thread-1][Media] Media stopped
+[INFO][Core][Thread-1][BibleEngine] Bible imported: TEST (1 verses)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Amazing Grace" (Amazing-Grace-81590)
+[INFO][Core][Thread-1][FlowEngine] [flow] Welcome to Morning Service
+[INFO][Core][Thread-1][FlowEngine] Flow completed: sunday
+[WARN][Core][Thread-1][BroadcastEngine] [ndi] NDI SDK not installed (libndi not found): dlopen failed for 'libndi.so': libndi.so: cannot open shared object file: No such file or directory
+[WARN][Core][Thread-1][BroadcastEngine] [sdi] DeckLink SDK not installed: dlopen failed for 'libDeckLinkAPI.dylib': libDeckLinkAPI.dylib: cannot open shared object file: No such file or directory
+[INFO][Core][Thread-2][CLI] delayed task fired
+[INFO][Core][Thread-1][Kernel] Kernel shutdown: tearing down 34 systems
+[INFO][Core][Thread-1][Songs] Songs module stopped
+[INFO][Core][Thread-1][Media] Media module stopped
+[INFO][Core][Thread-1][Presentation] Presentation module stopped
+[INFO][Core][Thread-1][Kernel] Kernel shutdown complete
+[INFO][Core][Thread-1][Test] unit-test-log
+[WARN][Core][Thread-1][Test] another-line
+[INFO][Core][Thread-1][Test] with-session
+[INFO][Core][Thread-1][Test] json-line
+[FATAL][Test][Thread-1][Crash] crash-marker
+[INFO][Core][Thread-1][Test] debugger-line
+[INFO][Core][Thread-1][Test] remote-line
+[ERROR][Core][Thread-1][EventBus] EventBus: subscriber threw for 'engine.kernel.state_changed': boom
+[ERROR][Core][Thread-2] TaskScheduler: task 5 exceeded its retry budget (2): boom
+[INFO][Core][Thread-1][Resources] Resource mode -> Performance
+[INFO][Core][Thread-1][Resources] Resource mode -> Balanced
+[INFO][Core][Thread-1] ThreadPool initialized with 4 workers
+[INFO][Core][Thread-1][Ipc] IPC server listening on 127.0.0.1:34787
+[INFO][Core][Thread-1][Ipc] IPC server stopped
+[ERROR][Core][Thread-1] LifecycleManager: transition 'test:rollback' to Paused failed: boom
+[INFO][Core][Thread-1][Modules] Module registered: presentation v1.0.0
+[INFO][Core][Thread-1][Presentation] Presentation module started
+[INFO][Core][Thread-1][Presentation] SlideChanged -> display/remote/ndi/obs: 1/3 "Intro"
+[INFO][Core][Thread-1][Presentation] Presentation module paused
+[INFO][Core][Thread-1][Presentation] Presentation module resumed
+[INFO][Core][Thread-1][Presentation] Presentation module stopped
+[INFO][Core][Thread-1][Presentation] Presentation module started
+[INFO][Core][Thread-1][Presentation] Presentation module stopped
+[INFO][Core][Thread-1][Presentation] Presentation module started
+[INFO][Core][Thread-1][Modules] Module registered: demo v1.0.0
+[INFO][Core][Thread-1][Modules] ModuleManager: discovered 1 sidecars, registered 1
+[INFO][Core][Thread-1][Presentation] Presentation module stopped
+[INFO][Core][Thread-1][Modules] Module registered: presentation v1.0.0
+[INFO][Core][Thread-1][Presentation] Presentation module started
+[INFO][Core][Thread-1][Presentation] Autoplay started: 3 slides @ 15ms
+[INFO][Core][Thread-2][Presentation] SlideChanged -> display/remote/ndi/obs: 1/3 "Slide 1"
+[INFO][Core][Thread-2][Presentation] SlideChanged -> display/remote/ndi/obs: 2/3 "Slide 2"
+[INFO][Core][Thread-2][Presentation] SlideChanged -> display/remote/ndi/obs: 3/3 "Slide 3"
+[INFO][Core][Thread-1][Presentation] Presentation module stopped
+[INFO][Core][Thread-1][Modules] Module registered: songs v1.0.0
+[INFO][Core][Thread-1][Songs] Songs module loaded
+[INFO][Core][Thread-1][Songs] Songs module started
+[INFO][Core][Thread-1][Songs] Song verse: "Test Song" [1/3]
+[INFO][Core][Thread-1][Songs] Song verse: "Test Song" [2/3]
+[INFO][Core][Thread-1][Songs] Song verse: "Test Song" [3/3]
+[INFO][Core][Thread-1][Songs] Song verse: "Test Song" [2/3]
+[INFO][Core][Thread-1][Songs] Songs module stopped
+[INFO][Core][Thread-1][Modules] Module registered: media v1.0.0
+[INFO][Core][Thread-1][Media] Media module loaded
+[INFO][Core][Thread-1][Media] Media module started
+[INFO][Core][Thread-1][Media] Media playing: Intro
+[INFO][Core][Thread-1][Media] Media paused at 0.200337052s
+[INFO][Core][Thread-2][Media] Media finished: Intro
+[INFO][Core][Thread-1][Media] Media playing: Intro
+[INFO][Core][Thread-1][Media] Media playing: Outro
+[INFO][Core][Thread-1][Media] Media paused at 0.300436706s
+[INFO][Core][Thread-1][Media] Media stopped
+[INFO][Core][Thread-1][Media] Media module stopped
+[INFO][Core][Thread-1][CAMS] ContentManager ready: 3 importers, 3 exporters, 0 assets
+[INFO][Core][Thread-1][CAMS] CAMS: imported hostfile.json (Json, 20 bytes)
+[INFO][Core][Thread-1][CAMS] ContentManager reloaded (cache=67108864 bytes)
+[INFO][Core][Thread-1][CAMS] CAMS: restored 2 assets from database
+[INFO][Core][Thread-1][CAMS] ContentManager ready: 3 importers, 3 exporters, 2 assets
+[INFO][Core][Thread-1][Plugins] Plugin discovered: plug
+[ERROR][Core][Thread-1] PluginManager: load failed for /tmp/bps_plugin_test/plug.so: dlopen failed for '/tmp/bps_plugin_test/plug.so': /tmp/bps_plugin_test/plug.so: cannot open shared object file: No such file or directory
+[INFO][Core][Thread-1][Plugins] Plugin updated: plug 1.0.0 -> 1.1.0
+[INFO][Core][Thread-1][Ipc] IPC server listening on 127.0.0.1:44509
+[INFO][Core][Thread-1][Ipc] IPC server stopped
+[INFO][Core][Thread-1][Notify] NotificationService ready: 3 providers
+[INFO][Core][Thread-1][Notify] NotificationService ready: 3 providers
+[INFO][Core][Thread-1][Notify] [Information][System] Hello - World
+[INFO][Core][Thread-1][Notify] [Information][System] Direct - now
+[INFO][Core][Thread-1][Notify] [Information][System] Later - scheduled
+[INFO][Core][Thread-1][Notify] [Information][System] Progress - 50%
+[INFO][Core][Thread-1][Notify] [Information][System] Hello - World
+[INFO][Core][Thread-1][Notify] [Success][Import] Import finished - Imported song.mp4 (1 asset)
+[INFO][Core][Thread-1][ProjectManager] Project created: 'Sunday Service'
+[INFO][Core][Thread-1][ProjectManager] Project closed: 'Sunday Service 2026'
+[INFO][Core][Thread-1][ProjectManager] Project opened: 'Sunday Service 2026'
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'Sunday Service 2026'
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'Sunday Service 2026 (copy)'
+[INFO][Core][Thread-1][DocumentManager] Document opened: doc-1 (test-doc)
+[WARN][Core][Thread-1][RecoveryManager] Crash recovery: unsaved work detected
+[INFO][Core][Thread-1][CAMS] ContentManager ready: 3 importers, 3 exporters, 0 assets
+[INFO][Core][Thread-1][ProjectManager] Project created: 'Packaged Project'
+[INFO][Core][Thread-1][PackageManager] Package exported (1 assets): /tmp/bps_test.bpspkg
+[INFO][Core][Thread-1][ProjectManager] Project created: 'Packaged Project (imported)'
+[INFO][Core][Thread-1][PackageManager] Package imported: 'Packaged Project (imported)' with 1 assets
+[INFO][Core][Thread-1][BackupManager] Backup bak-1ba4f6d976cbd256 (full) for project 1ca660b9-f131-40be-9ca6-60b9f131c0be
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'Packaged Project'
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'Packaged Project (imported)'
+[INFO][Core][Thread-1][DataManager] DataManager ready: 0 projects restored
+[INFO][Core][Thread-1][ProjectManager] Project created: 'Template Source'
+[INFO][Core][Thread-1][ProjectManager] Project created: 'New From Template'
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'New From Template'
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'Template Source'
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime: 6 cores, 13978 MB RAM, no GPU backend
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime started (mode=Automatic, layer=Automatic)
+[INFO][Core][Thread-1][Resources] Resource mode -> Performance
+[INFO][Core][Thread-1][Render] RenderEngine: cleared 2 GPU textures (High)
+[INFO][Core][Thread-1][PresentationEngine] Presentation created: 'Sunday Service' (pres-1)
+[INFO][Core][Thread-1][PresentationRuntime] Presentation opened: 'Sunday Service' (2 slides)
+[DEBUG][Core][Thread-1][SceneBuilder] Scene built: pres:pres-1:slide-1
+[DEBUG][Core][Thread-1][SceneBuilder] Scene built: pres:pres-1:slide-2
+[INFO][Core][Thread-1][PresentationRuntime] Presentation LIVE: 'Sunday Service'
+[INFO][Core][Thread-1][BibleEngine] Bible imported: KJV (2 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: NBS (1 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: WMB (1 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: JSNB (1 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: USFMB (2 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: OSISB (1 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: TEXTB (2 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: TEST (3 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: ESV (1 verses)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Amazing Grace" (grace)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Amazing Grace" (Amazing-Grace-59192)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Holy Holy Holy" (Holy-Holy-Holy-59193)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Great Is Thy Faithfulness" (Great-Is-Thy-Faithfulness-59193)
+[INFO][Core][Thread-1][SongEngine] Song imported: "How Great Thou Art" (How-Great-Thou-Art-59194)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Untitled" (Untitled-59194)
+[INFO][Core][Thread-1][SongEngine] Song imported: "It Is Well" (It-Is-Well-59195)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Amazing Grace" (grace)
+[INFO][Core][Thread-1][FlowEngine] Flow completed: svc
+[INFO][Core][Thread-1][FlowEngine] Flow completed: svc
+[INFO][Core][Thread-1][FlowEngine] Flow completed: svc
+[WARN][Core][Thread-1][FlowEngine] FlowEngine: emergency stop halted 1 execution(s)
+[INFO][Core][Thread-1][FlowEngine] Flow completed: branch
+[INFO][Core][Thread-1][FlowEngine] Flow completed: branch2
+[INFO][Core][Thread-1][FlowEngine] Flow completed: par
+[INFO][Core][Thread-1][FlowEngine] Flow completed: dl
+[INFO][Core][Thread-1][FlowEngine] Flow completed: fskip
+[INFO][Core][Thread-1][FlowEngine] Flow completed: ffb
+[INFO][Core][Thread-1][FlowEngine] Flow completed: fpause
+[INFO][Core][Thread-1][FlowEngine] Flow completed: rec
+[WARN][Core][Thread-1][BroadcastEngine] [ndi] NDI SDK not installed (libndi not found): dlopen failed for 'libndi.so': libndi.so: cannot open shared object file: No such file or directory
+[WARN][Core][Thread-1][BroadcastEngine] [sdi] DeckLink SDK not installed: dlopen failed for 'libDeckLinkAPI.dylib': libDeckLinkAPI.dylib: cannot open shared object file: No such file or directory
+[INFO][Core][Thread-1][Kernel] Kernel v1.0.0 booting...
+[INFO][Core][Thread-1][Kernel] ConfigurationManager ready
+[INFO][Core][Thread-1] ThreadPool initialized with 6 workers
+[INFO][Core][Thread-1][Resources] Resource mode -> Balanced
+[INFO][Core][Thread-1][Kernel] Platform: Ubuntu 24.04.2 LTS 6.6.87.2-microsoft-standard-WSL2 / x86_64 / 6 cores / 13978 MiB RAM / host=LibrazionPc
+[INFO][Core][Thread-1][Notify] NotificationService ready: 3 providers
+[INFO][Core][Thread-1][DataManager] DataManager ready: 0 projects restored
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime: 6 cores, 13978 MB RAM, no GPU backend
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime started (mode=Automatic, layer=Automatic)
+[INFO][Core][Thread-1][Kernel] Kernel ready in 465.818 ms — state=Running
+[INFO][Core][Thread-1][Kernel] Kernel shutdown: tearing down 34 systems
+[INFO][Core][Thread-1][Kernel] Kernel shutdown complete
+[INFO][Core][Thread-1][Kernel] Kernel v1.0.0 booting...
+[INFO][Core][Thread-1][Kernel] ConfigurationManager ready
+[INFO][Core][Thread-1] ThreadPool initialized with 6 workers
+[INFO][Core][Thread-1][Kernel] Platform: Ubuntu 24.04.2 LTS 6.6.87.2-microsoft-standard-WSL2 / x86_64 / 6 cores / 13978 MiB RAM / host=LibrazionPc
+[INFO][Core][Thread-1][CAMS] ContentManager ready: 3 importers, 3 exporters, 0 assets
+[INFO][Core][Thread-1][Notify] NotificationService ready: 3 providers
+[INFO][Core][Thread-1][DataManager] DataManager ready: 0 projects restored
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime started (mode=Automatic, layer=Automatic)
+[INFO][Core][Thread-1][Kernel] Kernel ready in 4.567 ms — state=Running
+[INFO][Core][Thread-1][Kernel] Kernel shutdown: tearing down 34 systems
+[INFO][Core][Thread-1][Kernel] Kernel shutdown complete
+[INFO][Core][Thread-1][Test] unit-test-log
+[WARN][Core][Thread-1][Test] another-line
+[INFO][Core][Thread-1][Test] with-session
+[INFO][Core][Thread-1][Test] json-line
+[FATAL][Test][Thread-1][Crash] crash-marker
+[INFO][Core][Thread-1][Test] debugger-line
+[INFO][Core][Thread-1][Test] remote-line
+[ERROR][Core][Thread-1][EventBus] EventBus: subscriber threw for 'engine.kernel.state_changed': boom
+[ERROR][Core][Thread-2] TaskScheduler: task 5 exceeded its retry budget (2): boom
+[INFO][Core][Thread-1][Resources] Resource mode -> Performance
+[INFO][Core][Thread-1][Resources] Resource mode -> Balanced
+[INFO][Core][Thread-1] ThreadPool initialized with 4 workers
+[INFO][Core][Thread-1][Ipc] IPC server listening on 127.0.0.1:33335
+[INFO][Core][Thread-1][Ipc] IPC server stopped
+[ERROR][Core][Thread-1] LifecycleManager: transition 'test:rollback' to Paused failed: boom
+[INFO][Core][Thread-1][Modules] Module registered: presentation v1.0.0
+[INFO][Core][Thread-1][Presentation] Presentation module started
+[INFO][Core][Thread-1][Presentation] SlideChanged -> display/remote/ndi/obs: 1/3 "Intro"
+[INFO][Core][Thread-1][Presentation] Presentation module paused
+[INFO][Core][Thread-1][Presentation] Presentation module resumed
+[INFO][Core][Thread-1][Presentation] Presentation module stopped
+[INFO][Core][Thread-1][Presentation] Presentation module started
+[INFO][Core][Thread-1][Presentation] Presentation module stopped
+[INFO][Core][Thread-1][Presentation] Presentation module started
+[INFO][Core][Thread-1][Modules] Module registered: demo v1.0.0
+[INFO][Core][Thread-1][Modules] ModuleManager: discovered 1 sidecars, registered 1
+[INFO][Core][Thread-1][Presentation] Presentation module stopped
+[INFO][Core][Thread-1][Modules] Module registered: presentation v1.0.0
+[INFO][Core][Thread-1][Presentation] Presentation module started
+[INFO][Core][Thread-1][Presentation] Autoplay started: 3 slides @ 15ms
+[INFO][Core][Thread-2][Presentation] SlideChanged -> display/remote/ndi/obs: 1/3 "Slide 1"
+[INFO][Core][Thread-2][Presentation] SlideChanged -> display/remote/ndi/obs: 2/3 "Slide 2"
+[INFO][Core][Thread-2][Presentation] SlideChanged -> display/remote/ndi/obs: 3/3 "Slide 3"
+[INFO][Core][Thread-1][Presentation] Presentation module stopped
+[INFO][Core][Thread-1][Modules] Module registered: songs v1.0.0
+[INFO][Core][Thread-1][Songs] Songs module loaded
+[INFO][Core][Thread-1][Songs] Songs module started
+[INFO][Core][Thread-1][Songs] Song verse: "Test Song" [1/3]
+[INFO][Core][Thread-1][Songs] Song verse: "Test Song" [2/3]
+[INFO][Core][Thread-1][Songs] Song verse: "Test Song" [3/3]
+[INFO][Core][Thread-1][Songs] Song verse: "Test Song" [2/3]
+[INFO][Core][Thread-1][Songs] Songs module stopped
+[INFO][Core][Thread-1][Modules] Module registered: media v1.0.0
+[INFO][Core][Thread-1][Media] Media module loaded
+[INFO][Core][Thread-1][Media] Media module started
+[INFO][Core][Thread-1][Media] Media playing: Intro
+[INFO][Core][Thread-1][Media] Media paused at 0.200155901s
+[INFO][Core][Thread-2][Media] Media finished: Intro
+[INFO][Core][Thread-1][Media] Media playing: Intro
+[INFO][Core][Thread-1][Media] Media playing: Outro
+[INFO][Core][Thread-1][Media] Media paused at 0.300261097s
+[INFO][Core][Thread-1][Media] Media stopped
+[INFO][Core][Thread-1][Media] Media module stopped
+[INFO][Core][Thread-1][CAMS] ContentManager ready: 3 importers, 3 exporters, 0 assets
+[INFO][Core][Thread-1][CAMS] CAMS: imported hostfile.json (Json, 20 bytes)
+[INFO][Core][Thread-1][CAMS] ContentManager reloaded (cache=67108864 bytes)
+[INFO][Core][Thread-1][CAMS] CAMS: restored 2 assets from database
+[INFO][Core][Thread-1][CAMS] ContentManager ready: 3 importers, 3 exporters, 2 assets
+[INFO][Core][Thread-1][Plugins] Plugin discovered: plug
+[ERROR][Core][Thread-1] PluginManager: load failed for /tmp/bps_plugin_test/plug.so: dlopen failed for '/tmp/bps_plugin_test/plug.so': /tmp/bps_plugin_test/plug.so: cannot open shared object file: No such file or directory
+[INFO][Core][Thread-1][Plugins] Plugin updated: plug 1.0.0 -> 1.1.0
+[INFO][Core][Thread-1][Ipc] IPC server listening on 127.0.0.1:39261
+[INFO][Core][Thread-1][Ipc] IPC server stopped
+[INFO][Core][Thread-1][Notify] NotificationService ready: 3 providers
+[INFO][Core][Thread-1][Notify] NotificationService ready: 3 providers
+[INFO][Core][Thread-1][Notify] [Information][System] Hello - World
+[INFO][Core][Thread-1][Notify] [Information][System] Direct - now
+[INFO][Core][Thread-1][Notify] [Information][System] Later - scheduled
+[INFO][Core][Thread-1][Notify] [Information][System] Progress - 50%
+[INFO][Core][Thread-1][Notify] [Information][System] Hello - World
+[INFO][Core][Thread-1][Notify] [Success][Import] Import finished - Imported song.mp4 (1 asset)
+[INFO][Core][Thread-1][ProjectManager] Project created: 'Sunday Service'
+[INFO][Core][Thread-1][ProjectManager] Project closed: 'Sunday Service 2026'
+[INFO][Core][Thread-1][ProjectManager] Project opened: 'Sunday Service 2026'
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'Sunday Service 2026'
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'Sunday Service 2026 (copy)'
+[INFO][Core][Thread-1][DocumentManager] Document opened: doc-1 (test-doc)
+[WARN][Core][Thread-1][RecoveryManager] Crash recovery: unsaved work detected
+[INFO][Core][Thread-1][CAMS] ContentManager ready: 3 importers, 3 exporters, 0 assets
+[INFO][Core][Thread-1][ProjectManager] Project created: 'Packaged Project'
+[INFO][Core][Thread-1][PackageManager] Package exported (1 assets): /tmp/bps_test.bpspkg
+[INFO][Core][Thread-1][ProjectManager] Project created: 'Packaged Project (imported)'
+[INFO][Core][Thread-1][PackageManager] Package imported: 'Packaged Project (imported)' with 1 assets
+[INFO][Core][Thread-1][BackupManager] Backup bak-1b362dfb0383a78e (full) for project 99e699e7-8a55-45e4-99e6-99e78a5535e4
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'Packaged Project'
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'Packaged Project (imported)'
+[INFO][Core][Thread-1][DataManager] DataManager ready: 0 projects restored
+[INFO][Core][Thread-1][ProjectManager] Project created: 'Template Source'
+[INFO][Core][Thread-1][ProjectManager] Project created: 'New From Template'
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'New From Template'
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'Template Source'
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime: 6 cores, 13978 MB RAM, no GPU backend
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime started (mode=Automatic, layer=Automatic)
+[INFO][Core][Thread-1][Resources] Resource mode -> Performance
+[INFO][Core][Thread-1][Render] RenderEngine: cleared 2 GPU textures (High)
+[INFO][Core][Thread-1][PresentationEngine] Presentation created: 'Sunday Service' (pres-1)
+[INFO][Core][Thread-1][PresentationRuntime] Presentation opened: 'Sunday Service' (2 slides)
+[DEBUG][Core][Thread-1][SceneBuilder] Scene built: pres:pres-1:slide-1
+[DEBUG][Core][Thread-1][SceneBuilder] Scene built: pres:pres-1:slide-2
+[INFO][Core][Thread-1][PresentationRuntime] Presentation LIVE: 'Sunday Service'
+[INFO][Core][Thread-1][BibleEngine] Bible imported: KJV (2 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: NBS (1 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: WMB (1 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: JSNB (1 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: USFMB (2 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: OSISB (1 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: TEXTB (2 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: TEST (3 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: ESV (1 verses)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Amazing Grace" (grace)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Amazing Grace" (Amazing-Grace-90434)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Holy Holy Holy" (Holy-Holy-Holy-90434)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Great Is Thy Faithfulness" (Great-Is-Thy-Faithfulness-90434)
+[INFO][Core][Thread-1][SongEngine] Song imported: "How Great Thou Art" (How-Great-Thou-Art-90434)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Untitled" (Untitled-90434)
+[INFO][Core][Thread-1][SongEngine] Song imported: "It Is Well" (It-Is-Well-90434)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Amazing Grace" (grace)
+[INFO][Core][Thread-1][FlowEngine] Flow completed: svc
+[INFO][Core][Thread-1][FlowEngine] Flow completed: svc
+[INFO][Core][Thread-1][FlowEngine] Flow completed: svc
+[WARN][Core][Thread-1][FlowEngine] FlowEngine: emergency stop halted 1 execution(s)
+[INFO][Core][Thread-1][FlowEngine] Flow completed: branch
+[INFO][Core][Thread-1][FlowEngine] Flow completed: branch2
+[INFO][Core][Thread-1][FlowEngine] Flow completed: par
+[INFO][Core][Thread-1][FlowEngine] Flow completed: dl
+[INFO][Core][Thread-1][FlowEngine] Flow completed: fskip
+[INFO][Core][Thread-1][FlowEngine] Flow completed: ffb
+[INFO][Core][Thread-1][FlowEngine] Flow completed: fpause
+[INFO][Core][Thread-1][FlowEngine] Flow completed: rec
+[WARN][Core][Thread-1][BroadcastEngine] [ndi] NDI SDK not installed (libndi not found): dlopen failed for 'libndi.so': libndi.so: cannot open shared object file: No such file or directory
+[WARN][Core][Thread-1][BroadcastEngine] [sdi] DeckLink SDK not installed: dlopen failed for 'libDeckLinkAPI.dylib': libDeckLinkAPI.dylib: cannot open shared object file: No such file or directory
+[INFO][Core][Thread-1][Kernel] Kernel v1.0.0 booting...
+[INFO][Core][Thread-1][Kernel] ConfigurationManager ready
+[INFO][Core][Thread-1] ThreadPool initialized with 6 workers
+[INFO][Core][Thread-1][Resources] Resource mode -> Balanced
+[INFO][Core][Thread-1][Kernel] Platform: Ubuntu 24.04.2 LTS 6.6.87.2-microsoft-standard-WSL2 / x86_64 / 6 cores / 13978 MiB RAM / host=LibrazionPc
+[INFO][Core][Thread-1][Notify] NotificationService ready: 3 providers
+[INFO][Core][Thread-1][DataManager] DataManager ready: 0 projects restored
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime: 6 cores, 13978 MB RAM, no GPU backend
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime started (mode=Automatic, layer=Automatic)
+[INFO][Core][Thread-1][Kernel] Kernel ready in 266.287 ms — state=Running
+[INFO][Core][Thread-1][Kernel] Kernel shutdown: tearing down 34 systems
+[INFO][Core][Thread-1][Kernel] Kernel shutdown complete
+[INFO][Core][Thread-1][Kernel] Kernel v1.0.0 booting...
+[INFO][Core][Thread-1][Kernel] ConfigurationManager ready
+[INFO][Core][Thread-1] ThreadPool initialized with 6 workers
+[INFO][Core][Thread-1][Kernel] Platform: Ubuntu 24.04.2 LTS 6.6.87.2-microsoft-standard-WSL2 / x86_64 / 6 cores / 13978 MiB RAM / host=LibrazionPc
+[INFO][Core][Thread-1][CAMS] ContentManager ready: 3 importers, 3 exporters, 0 assets
+[INFO][Core][Thread-1][Notify] NotificationService ready: 3 providers
+[INFO][Core][Thread-1][DataManager] DataManager ready: 0 projects restored
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime started (mode=Automatic, layer=Automatic)
+[INFO][Core][Thread-1][Kernel] Kernel ready in 0.687 ms — state=Running
+[INFO][Core][Thread-1][Kernel] Kernel shutdown: tearing down 34 systems
+[INFO][Core][Thread-1][Kernel] Kernel shutdown complete
+[INFO][Core][Thread-1][Test] unit-test-log
+[WARN][Core][Thread-1][Test] another-line
+[INFO][Core][Thread-1][Test] with-session
+[INFO][Core][Thread-1][Test] json-line
+[FATAL][Test][Thread-1][Crash] crash-marker
+[INFO][Core][Thread-1][Test] debugger-line
+[INFO][Core][Thread-1][Test] remote-line
+[ERROR][Core][Thread-1][EventBus] EventBus: subscriber threw for 'engine.kernel.state_changed': boom
+[ERROR][Core][Thread-2] TaskScheduler: task 5 exceeded its retry budget (2): boom
+[INFO][Core][Thread-1][Resources] Resource mode -> Performance
+[INFO][Core][Thread-1][Resources] Resource mode -> Balanced
+[INFO][Core][Thread-1] ThreadPool initialized with 4 workers
+[INFO][Core][Thread-1][Ipc] IPC server listening on 127.0.0.1:42309
+[INFO][Core][Thread-1][Ipc] IPC server stopped
+[ERROR][Core][Thread-1] LifecycleManager: transition 'test:rollback' to Paused failed: boom
+[INFO][Core][Thread-1][Modules] Module registered: presentation v1.0.0
+[INFO][Core][Thread-1][Presentation] Presentation module started
+[INFO][Core][Thread-1][Presentation] SlideChanged -> display/remote/ndi/obs: 1/3 "Intro"
+[INFO][Core][Thread-1][Presentation] Presentation module paused
+[INFO][Core][Thread-1][Presentation] Presentation module resumed
+[INFO][Core][Thread-1][Presentation] Presentation module stopped
+[INFO][Core][Thread-1][Presentation] Presentation module started
+[INFO][Core][Thread-1][Presentation] Presentation module stopped
+[INFO][Core][Thread-1][Presentation] Presentation module started
+[INFO][Core][Thread-1][Modules] Module registered: demo v1.0.0
+[INFO][Core][Thread-1][Modules] ModuleManager: discovered 1 sidecars, registered 1
+[INFO][Core][Thread-1][Presentation] Presentation module stopped
+[INFO][Core][Thread-1][Modules] Module registered: presentation v1.0.0
+[INFO][Core][Thread-1][Presentation] Presentation module started
+[INFO][Core][Thread-1][Presentation] Autoplay started: 3 slides @ 15ms
+[INFO][Core][Thread-2][Presentation] SlideChanged -> display/remote/ndi/obs: 1/3 "Slide 1"
+[INFO][Core][Thread-2][Presentation] SlideChanged -> display/remote/ndi/obs: 2/3 "Slide 2"
+[INFO][Core][Thread-2][Presentation] SlideChanged -> display/remote/ndi/obs: 3/3 "Slide 3"
+[INFO][Core][Thread-1][Presentation] Presentation module stopped
+[INFO][Core][Thread-1][Modules] Module registered: songs v1.0.0
+[INFO][Core][Thread-1][Songs] Songs module loaded
+[INFO][Core][Thread-1][Songs] Songs module started
+[INFO][Core][Thread-1][Songs] Song verse: "Test Song" [1/3]
+[INFO][Core][Thread-1][Songs] Song verse: "Test Song" [2/3]
+[INFO][Core][Thread-1][Songs] Song verse: "Test Song" [3/3]
+[INFO][Core][Thread-1][Songs] Song verse: "Test Song" [2/3]
+[INFO][Core][Thread-1][Songs] Songs module stopped
+[INFO][Core][Thread-1][Modules] Module registered: media v1.0.0
+[INFO][Core][Thread-1][Media] Media module loaded
+[INFO][Core][Thread-1][Media] Media module started
+[INFO][Core][Thread-1][Media] Media playing: Intro
+[INFO][Core][Thread-1][Media] Media paused at 0.200360015s
+[INFO][Core][Thread-2][Media] Media finished: Intro
+[INFO][Core][Thread-1][Media] Media playing: Intro
+[INFO][Core][Thread-1][Media] Media playing: Outro
+[INFO][Core][Thread-1][Media] Media paused at 0.301000875s
+[INFO][Core][Thread-1][Media] Media stopped
+[INFO][Core][Thread-1][Media] Media module stopped
+[INFO][Core][Thread-1][CAMS] ContentManager ready: 3 importers, 3 exporters, 0 assets
+[INFO][Core][Thread-1][CAMS] CAMS: imported hostfile.json (Json, 20 bytes)
+[INFO][Core][Thread-1][CAMS] ContentManager reloaded (cache=67108864 bytes)
+[INFO][Core][Thread-1][CAMS] CAMS: restored 2 assets from database
+[INFO][Core][Thread-1][CAMS] ContentManager ready: 3 importers, 3 exporters, 2 assets
+[INFO][Core][Thread-1][Plugins] Plugin discovered: plug
+[ERROR][Core][Thread-1] PluginManager: load failed for /tmp/bps_plugin_test/plug.so: dlopen failed for '/tmp/bps_plugin_test/plug.so': /tmp/bps_plugin_test/plug.so: cannot open shared object file: No such file or directory
+[INFO][Core][Thread-1][Plugins] Plugin updated: plug 1.0.0 -> 1.1.0
+[INFO][Core][Thread-1][Ipc] IPC server listening on 127.0.0.1:37737
+[INFO][Core][Thread-1][Ipc] IPC server stopped
+[INFO][Core][Thread-1][Notify] NotificationService ready: 3 providers
+[INFO][Core][Thread-1][Notify] NotificationService ready: 3 providers
+[INFO][Core][Thread-1][Notify] [Information][System] Hello - World
+[INFO][Core][Thread-1][Notify] [Information][System] Direct - now
+[INFO][Core][Thread-1][Notify] [Information][System] Later - scheduled
+[INFO][Core][Thread-1][Notify] [Information][System] Progress - 50%
+[INFO][Core][Thread-1][Notify] [Information][System] Hello - World
+[INFO][Core][Thread-1][Notify] [Success][Import] Import finished - Imported song.mp4 (1 asset)
+[INFO][Core][Thread-1][ProjectManager] Project created: 'Sunday Service'
+[INFO][Core][Thread-1][ProjectManager] Project closed: 'Sunday Service 2026'
+[INFO][Core][Thread-1][ProjectManager] Project opened: 'Sunday Service 2026'
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'Sunday Service 2026'
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'Sunday Service 2026 (copy)'
+[INFO][Core][Thread-1][DocumentManager] Document opened: doc-1 (test-doc)
+[WARN][Core][Thread-1][RecoveryManager] Crash recovery: unsaved work detected
+[INFO][Core][Thread-1][CAMS] ContentManager ready: 3 importers, 3 exporters, 0 assets
+[INFO][Core][Thread-1][ProjectManager] Project created: 'Packaged Project'
+[INFO][Core][Thread-1][PackageManager] Package exported (1 assets): /tmp/bps_test.bpspkg
+[INFO][Core][Thread-1][ProjectManager] Project created: 'Packaged Project (imported)'
+[INFO][Core][Thread-1][PackageManager] Package imported: 'Packaged Project (imported)' with 1 assets
+[INFO][Core][Thread-1][BackupManager] Backup bak-1b02ba8b8247307f (full) for project 0692f3ae-83d3-47a9-8692-f3ae83d397a9
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'Packaged Project'
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'Packaged Project (imported)'
+[INFO][Core][Thread-1][DataManager] DataManager ready: 0 projects restored
+[INFO][Core][Thread-1][ProjectManager] Project created: 'Template Source'
+[INFO][Core][Thread-1][ProjectManager] Project created: 'New From Template'
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'New From Template'
+[INFO][Core][Thread-1][ProjectManager] Project deleted: 'Template Source'
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime: 6 cores, 13978 MB RAM, no GPU backend
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime started (mode=Automatic, layer=Automatic)
+[INFO][Core][Thread-1][Resources] Resource mode -> Performance
+[INFO][Core][Thread-1][Render] RenderEngine: cleared 2 GPU textures (High)
+[INFO][Core][Thread-1][PresentationEngine] Presentation created: 'Sunday Service' (pres-1)
+[INFO][Core][Thread-1][PresentationRuntime] Presentation opened: 'Sunday Service' (2 slides)
+[DEBUG][Core][Thread-1][SceneBuilder] Scene built: pres:pres-1:slide-1
+[DEBUG][Core][Thread-1][SceneBuilder] Scene built: pres:pres-1:slide-2
+[INFO][Core][Thread-1][PresentationRuntime] Presentation LIVE: 'Sunday Service'
+[INFO][Core][Thread-1][BibleEngine] Bible imported: KJV (2 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: NBS (1 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: WMB (1 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: JSNB (1 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: USFMB (2 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: OSISB (1 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: TEXTB (2 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: TEST (3 verses)
+[INFO][Core][Thread-1][BibleEngine] Bible imported: ESV (1 verses)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Amazing Grace" (grace)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Amazing Grace" (Amazing-Grace-5935)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Holy Holy Holy" (Holy-Holy-Holy-5936)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Great Is Thy Faithfulness" (Great-Is-Thy-Faithfulness-5936)
+[INFO][Core][Thread-1][SongEngine] Song imported: "How Great Thou Art" (How-Great-Thou-Art-5937)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Untitled" (Untitled-5937)
+[INFO][Core][Thread-1][SongEngine] Song imported: "It Is Well" (It-Is-Well-5938)
+[INFO][Core][Thread-1][SongEngine] Song imported: "Amazing Grace" (grace)
+[INFO][Core][Thread-1][FlowEngine] Flow completed: svc
+[INFO][Core][Thread-1][FlowEngine] Flow completed: svc
+[INFO][Core][Thread-1][FlowEngine] Flow completed: svc
+[WARN][Core][Thread-1][FlowEngine] FlowEngine: emergency stop halted 1 execution(s)
+[INFO][Core][Thread-1][FlowEngine] Flow completed: branch
+[INFO][Core][Thread-1][FlowEngine] Flow completed: branch2
+[INFO][Core][Thread-1][FlowEngine] Flow completed: par
+[INFO][Core][Thread-1][FlowEngine] Flow completed: dl
+[INFO][Core][Thread-1][FlowEngine] Flow completed: fskip
+[INFO][Core][Thread-1][FlowEngine] Flow completed: ffb
+[INFO][Core][Thread-1][FlowEngine] Flow completed: fpause
+[INFO][Core][Thread-1][FlowEngine] Flow completed: rec
+[WARN][Core][Thread-1][BroadcastEngine] [ndi] NDI SDK not installed (libndi not found): dlopen failed for 'libndi.so': libndi.so: cannot open shared object file: No such file or directory
+[WARN][Core][Thread-1][BroadcastEngine] [sdi] DeckLink SDK not installed: dlopen failed for 'libDeckLinkAPI.dylib': libDeckLinkAPI.dylib: cannot open shared object file: No such file or directory
+[INFO][Core][Thread-1][Kernel] Kernel v1.0.0 booting...
+[INFO][Core][Thread-1][Kernel] ConfigurationManager ready
+[INFO][Core][Thread-1] ThreadPool initialized with 6 workers
+[INFO][Core][Thread-1][CAMS] CAMS: memory pressure — freed 0 cache bytes, dropped 2 thumbnails
+[INFO][Core][Thread-1][CAMS] CAMS: memory pressure — freed 0 cache bytes, dropped 0 thumbnails
+[INFO][Core][Thread-1][Resources] Resource mode -> Balanced
+[INFO][Core][Thread-1][Kernel] Platform: Ubuntu 24.04.2 LTS 6.6.87.2-microsoft-standard-WSL2 / x86_64 / 6 cores / 13978 MiB RAM / host=LibrazionPc
+[INFO][Core][Thread-1][Notify] NotificationService ready: 3 providers
+[INFO][Core][Thread-1][DataManager] DataManager ready: 0 projects restored
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime: 6 cores, 13978 MB RAM, no GPU backend
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime started (mode=Automatic, layer=Automatic)
+[INFO][Core][Thread-1][Kernel] Kernel ready in 28.18 ms — state=Running
+[INFO][Core][Thread-1][Kernel] Kernel shutdown: tearing down 34 systems
+[INFO][Core][Thread-1][Kernel] Kernel shutdown complete
+[INFO][Core][Thread-1][Kernel] Kernel v1.0.0 booting...
+[INFO][Core][Thread-1][Kernel] ConfigurationManager ready
+[INFO][Core][Thread-1] ThreadPool initialized with 6 workers
+[INFO][Core][Thread-1][Kernel] Platform: Ubuntu 24.04.2 LTS 6.6.87.2-microsoft-standard-WSL2 / x86_64 / 6 cores / 13978 MiB RAM / host=LibrazionPc
+[INFO][Core][Thread-1][CAMS] ContentManager ready: 3 importers, 3 exporters, 0 assets
+[INFO][Core][Thread-1][Notify] NotificationService ready: 3 providers
+[INFO][Core][Thread-1][DataManager] DataManager ready: 0 projects restored
+[INFO][Core][Thread-1][Adaptive] AdaptiveRuntime started (mode=Automatic, layer=Automatic)
+[INFO][Core][Thread-1][Kernel] Kernel ready in 3.621 ms — state=Running
+[INFO][Core][Thread-1][Kernel] Kernel shutdown: tearing down 34 systems
+[INFO][Core][Thread-1][Kernel] Kernel shutdown complete

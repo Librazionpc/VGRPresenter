@@ -50,6 +50,38 @@ Item {
     function open() { shown = true }
     function close() { shown = false }
 
+    // Brings an item from the content column into view. A selection that
+    // REVEALS a new section (AudioEffectsPanel's selected-effect editor)
+    // otherwise materializes below the fold of a tall dialog — which reads
+    // as "nothing happened". Maps the item into content coordinates and
+    // nudges contentY just far enough to expose it; no-op when already
+    // visible. Pass an empty item/null to skip.
+    NumberAnimation {
+        id: revealAnim
+        target: flick
+        property: "contentY"
+        duration: 160
+        easing.type: Easing.OutCubic
+    }
+    function revealItem(item) {
+        if (!item || !contentCol)
+            return
+        const top = item.mapToItem(contentCol, 0, 0).y
+        const bottom = top + item.height
+        let target = flick.contentY
+        if (top < flick.contentY + 8)
+            target = Math.max(0, top - 8)
+        else if (bottom > flick.contentY + flick.height - 8)
+            target = Math.max(0, Math.min(flick.contentHeight - flick.height,
+                                          bottom - flick.height + 8))
+        if (Math.abs(target - flick.contentY) > 1) {
+            revealAnim.stop()
+            revealAnim.from = flick.contentY
+            revealAnim.to = target
+            revealAnim.start()
+        }
+    }
+
     // Shared scrim — also consumes wheel events so scrolling a full (or
     // empty) dialog can't leak into the page's Flickable behind the modal.
     ModalScrim {

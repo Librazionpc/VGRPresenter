@@ -1,4 +1,5 @@
 import QtQuick
+import VGRPresenterUI
 
 // A canvas text label: single click selects it (see selectRequested below),
 // click-and-drag moves the object it belongs to (see moveRequested below),
@@ -109,13 +110,33 @@ Item {
         horizontalAlignment: displayText.horizontalAlignment
         selectByMouse: true
 
+        // Hover-scoped edit cursor: the I-beam override is only on the
+        // stack while the pointer is actually over the field. Pushing it
+        // unconditionally for the whole edit session made it stick
+        // everywhere after clicking away — a click on a non-focusable
+        // panel doesn't steal focus, so `visible` never flipped and the
+        // pop never ran (same scale limitation as ever: TextInput's
+        // built-in cursor can't apply under the zoom transform).
+        function syncEditCursor() {
+            // AppCursor.hovered(editInput) — position truth — covers the
+            // edit-opens-under-a-stationary-pointer case where the fresh
+            // hover area's containsMouse hasn't latched yet (needs a mouse
+            // event). Without it the I-beam intermittently failed to show
+            // right at edit start until the mouse moved.
+            if (visible && (editHoverArea.containsMouse || AppCursor.hovered(editInput)))
+                AppCursor.push(Qt.IBeamCursor, editInput)
+            else
+                AppCursor.pop(editInput)
+        }
         onVisibleChanged: {
             if (visible) {
                 preEditText = displayText.text
                 forceActiveFocus()
                 selectAll()
             }
+            syncEditCursor()
         }
+        Component.onDestruction: AppCursor.pop(editInput)
         Keys.onEscapePressed: {
             // Restore the pre-edit text before exiting — onEditingFinished
             // (focus loss from becoming invisible) then commits the RESTORED
@@ -133,6 +154,22 @@ Item {
         }
     }
 
+    // Tracks the pointer over the label while editing (the drag area below
+    // hides itself then, so it can't do it) — feeds syncEditCursor above.
+    // Declared after editInput so it's topmost and sees hover even when the
+    // cursor is over the TextInput itself (a TextInput accepts hover, so a
+    // handler UNDER it would never fire there). acceptedButtons: NoButton
+    // keeps it invisible to clicks — presses still reach editInput below.
+    MouseArea {
+        id: editHoverArea
+        anchors.fill: parent
+        visible: root.editing
+        hoverEnabled: true
+        acceptedButtons: Qt.NoButton
+        onContainsMouseChanged: editInput.syncEditCursor()
+        onVisibleChanged: editInput.syncEditCursor()
+    }
+
     MouseArea {
         id: dragArea
 
@@ -145,7 +182,42 @@ Item {
         hoverEnabled: true
         cursorShape: dragArea.dragMoved ? Qt.ClosedHandCursor : Qt.IBeamCursor
 
+        // Cursor via the AppCursor override stack, not cursorShape alone:
+        // the canvas sits under mCanvas's scale (zoom) transform, and
+        // cursorShape silently stops applying under scaled ancestors while
+        // hover delivery (containsMouse) keeps working — so hover IS known
+        // here but the OS cursor never changed. Pushing the shape onto the
+        // app-wide stack (rendered by Main.qml's unscaled AppCursorCatcher)
+        // forces it at any zoom. cursorShape stays as the zoom==1 fallback;
+        // the pushed shape is identical so the two can't disagree.
+        function syncCursor() {
+            // Same position-truth rule as CanvasDragArea's syncCursor: the
+            // appearance-under-a-stationary-pointer cases (item re-selected
+            // after an edit, zoom flip) — containsMouse lags there.
+            if (visible && (containsMouse || pressed || AppCursor.hovered(root)))
+                AppCursor.push(dragMoved ? Qt.ClosedHandCursor : Qt.IBeamCursor, dragArea)
+            else
+                AppCursor.pop(dragArea)
+        }
+        onContainsMouseChanged: syncCursor()
+        onEnabledChanged: syncCursor()
+        // While editing, this area hides itself — an invisible MouseArea
+        // stops receiving hover events, so containsMouse can stay true with
+        // nobody left to clear it. Pop explicitly on hide (syncCursor only
+        // re-pushes from live hover/press events, never on restore, so a
+        // stale containsMouse can't resurrect the cursor after editing).
+        onVisibleChanged: {
+            // Reappear (edit ended / zoom flip): re-check with position
+            // truth so a stale hover state can't resurrect the override.
+            if (visible)
+                syncCursor()
+            else
+                AppCursor.pop(dragArea)
+        }
+        Component.onDestruction: AppCursor.pop(dragArea)
+
         onPressed: (mouse) => {
+            syncCursor()
             const g = mapToItem(null, mouse.x, mouse.y)
             pressMouseX = g.x
             pressMouseY = g.y
@@ -159,12 +231,16 @@ Item {
             const dy = g.y - pressMouseY
             if (dragMoved || Math.abs(dx) > 4 || Math.abs(dy) > 4) {
                 dragMoved = true
+                syncCursor() // hand cursor once the drag is live
                 root.moveRequested(dx, dy, (mouse.modifiers & Qt.AltModifier) !== 0)
                 pressMouseX = g.x
                 pressMouseY = g.y
             }
         }
-        onReleased: root.dragEnded()
+        onReleased: {
+            syncCursor()
+            root.dragEnded()
+        }
         onClicked: (mouse) => {
             if (dragMoved)
                 return

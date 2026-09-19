@@ -12,11 +12,15 @@ import "."
 // AudioInputListModel's EffectsRole and defaultEffectsTemplate() emit):
 // { key, label, enabled, value, minValue, maxValue, suffix }. Controlled
 // component — state is owned by the caller; the panel only reports:
-//   effectSelected(key)               — chip body clicked (opens editor)
-//   effectToggled(key)                — chip's dot clicked (on/off)
+//   effectSelected(key)               — chip body clicked (opens its editor;
+//                                       clicking the open chip closes it)
+//   effectToggled(key)                — dot clicked (flips on/off)
 //   effectValueMoved(key, value)      — editor slider moved
-// The dot's MouseArea is a child of the chip's, and QML delivers presses to
-// the topmost (child) area first, so toggling never selects.
+// Two controls, two jobs: the BODY selects (the reference's own caption is
+// "pick any effect in the grid to edit its parameters" — selection must be
+// reachable on the whole card, not a 10px dot), and the DOT toggles (and
+// also selects, since flipping an effect on is usually the moment you want
+// to edit it).
 Column {
     id: root
 
@@ -85,9 +89,24 @@ Column {
                     }
                 }
 
-                // Enabled dot — its own MouseArea intercepts the press before
-                // the chip body's (child-before-parent), so toggling never
-                // also selects.
+                // Body click = SELECT (or deselect if already open — the
+                // editor needs a way to close). The dot's own MouseArea is
+                // a child of this one, so pressing the dot never reaches
+                // the body: toggling never selects by accident. Emits are
+                // immediate — this component never mutates `effects` (it's
+                // a controlled component), and consumers defer their model
+                // writes (see AudioVideoScreen.qml), so the click dispatch
+                // always completes before a Repeater reset could destroy
+                // this chip mid-event.
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.effectSelected(
+                        root.selectedKey === chip.modelData.key ? "" : chip.modelData.key)
+                }
+
+                // The green dot = TOGGLE (and select, since flipping an
+                // effect on is usually the moment you want to edit it).
                 Rectangle {
                     id: dot
                     anchors.right: parent.right
@@ -104,20 +123,23 @@ Column {
 
                     MouseArea {
                         anchors.fill: parent
-                        anchors.margins: -4
+                        anchors.margins: -8
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.effectToggled(chip.modelData.key)
+                        // Emit immediately — deferring this lambda was the
+                        // bug: the consumer's model write rebuilds the rack
+                        // (this Repeater), destroying the chip whose scope
+                        // the lambda closes over, so `root` was already dead
+                        // when callLater ran → ReferenceError → the toggle
+                        // AND the select silently never happened. The safe
+                        // shape is emit-now / mutate-later: the panel emits
+                        // synchronously (it mutates nothing), and the
+                        // consumer defers the model write past this event
+                        // dispatch (see AudioVideoScreen.qml's handlers).
+                        onClicked: {
+                            root.effectToggled(chip.modelData.key)
+                            root.effectSelected(chip.modelData.key)
+                        }
                     }
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    // Click a selected chip to DEselect it — selection used
-                    // to be a one-way ratchet with no way to clear it.
-                    // "" closes the parameter editor.
-                    onClicked: root.effectSelected(
-                                   root.selectedKey === chip.modelData.key ? "" : chip.modelData.key)
                 }
             }
         }

@@ -9,11 +9,15 @@ import "../components"
 // all C++ singletons) laid out as Audio Inputs | Buses & Routing | Video
 // Sources, with curved lines drawn from each bus's stored routing.
 //
-// v1 scope, confirmed with the user up front: CRUD + computed connector
-// lines, not a live drag-to-connect canvas — a bus's Edit dialog has a
-// route-to toggle list, and the lines are drawn from that stored state.
-// Ducking settings, real audio/video engine wiring, and live drag-to-
-// reconnect are all deferred.
+// Full CRUD (Add/Edit/Duplicate/Delete, right-click menu on every card) plus
+// live drag-to-connect: press-drag a card's port dot onto a bus to route it,
+// right-click a line (true point-to-curve hit-testing, see lineClickedAt) to
+// remove it, or use a bus's Edit dialog's route-toggle list — all three
+// write through the same BusListModel toggle calls, so they can't drift.
+// Audio routing is many-to-many; video is strictly 1:1 (dropAllowed) since a
+// bus renders exactly one video frame. Ducking settings and a real audio/
+// video engine (levels/effects are stored values, not live DSP) are the
+// only pieces still deferred.
 Item {
     id: root
 
@@ -185,9 +189,6 @@ Item {
         root.editVideoSublabel = data.sublabel
         root.editVideoMuted = data.muted
         root.editVideoLevel = data.level
-        // SettingsToggle self-flips its `checked` on click — re-sync per
-        // open (same as the audio dialog's toggle).
-        editVideoMuteToggle.checked = root.editVideoMuted
     }
     function saveEditVideo() {
         if (root.editVideoIndex < 0)
@@ -448,6 +449,7 @@ Item {
     }
     // Which bus card (if any) a board-space point lands on — geometry from
     // the board's own layout constants, so it can't drift from the cards.
+    // Buses stack with the standard rowH rhythm (busPortY).
     function busIndexAt(p) {
         if (p.x < board.busX - 8 || p.x > board.busX + board.busColW + 8)
             return -1
@@ -455,7 +457,8 @@ Item {
         if (relY < 0)
             return -1
         const row = Math.floor(relY / (board.rowH + board.rowGap))
-        if (row >= BusListModel.rowCount())
+        const bottom = relY - row * (board.rowH + board.rowGap)
+        if (row >= BusListModel.rowCount() || bottom > board.rowH)
             return -1
         return row
     }
@@ -538,9 +541,22 @@ Item {
                 // whatever room it's actually given.
                 width: layout.width
                 readonly property real gutterW: 32
+                // Video cards carry a preview thumb the other columns don't,
+                // so they get their own slightly wider column — the extra
+                // room lets a full-width name sit beside the thumb instead
+                // of eliding to "Audience C…". Audio/bus keep colW.
+                readonly property real vidColW: Math.max(200, (board.width - board.gutterW * 2) * 0.30) + 36
                 readonly property real colW: Math.max(200, (board.width - board.gutterW * 2) * 0.30)
-                readonly property real busColW: Math.max(220, (board.width - board.gutterW * 2) * 0.34)
+                // The -36 keeps the three columns' combined width the same as
+                // before (video borrowed it); the floor moves down with it.
+                readonly property real busColW: Math.max(184, (board.width - board.gutterW * 2) * 0.34 - 36)
                 readonly property int rowH: 64
+                // Video rows share the row rhythm — a taller video-only row
+                // broke the board's visual alignment (three columns must
+                // read as one grid). The thumb fits a 64px row by sizing
+                // off the pane's own height (see vidThumb below); vidColW
+                // is what buys the names room, not extra height.
+                readonly property int vidRowH: board.rowH
                 readonly property int rowGap: Theme.space3
                 readonly property int headerBoxH: 40
                 readonly property int headerH: headerBoxH + rowGap
@@ -549,8 +565,17 @@ Item {
                 readonly property real busX: board.colW + board.gutterW
                 readonly property real videoX: board.busX + board.busColW + board.gutterW
 
-                function portY(i) {
+                // Per-kind port centers — each column stacks with its own
+                // row height, so a connector's endpoint y must use the
+                // row height of the column the port lives in.
+                function audioPortY(i) {
                     return board.headerH + i * (board.rowH + board.rowGap) + board.rowH / 2
+                }
+                function busPortY(i) {
+                    return board.headerH + i * (board.rowH + board.rowGap) + board.rowH / 2
+                }
+                function videoPortY(i) {
+                    return board.headerH + i * (board.vidRowH + board.rowGap) + board.vidRowH / 2
                 }
                 function connectorPairs() {
                     root.modelsRev
@@ -558,14 +583,14 @@ Item {
                     const busCount = BusListModel.rowCount()
                     for (let b = 0; b < busCount; ++b) {
                         const bus = BusListModel.getBus(b)
-                        const by = board.portY(b)
+                        const by = board.busPortY(b)
                         for (const ai of bus.routedAudioInputs) {
-                            pairs.push({ x1: board.audioX + board.colW, y1: board.portY(ai),
+                            pairs.push({ x1: board.audioX + board.colW, y1: board.audioPortY(ai),
                                          x2: board.busX, y2: by, color: Theme.success,
                                          kind: "audio", busIndex: b, srcIndex: ai })
                         }
                         for (const vi of bus.routedVideoSources) {
-                            pairs.push({ x1: board.videoX, y1: board.portY(vi),
+                            pairs.push({ x1: board.videoX, y1: board.videoPortY(vi),
                                          x2: board.busX + board.busColW, y2: by, color: Theme.info,
                                          kind: "video", busIndex: b, srcIndex: vi })
                         }
@@ -575,9 +600,12 @@ Item {
 
                 height: {
                     root.modelsRev
-                    const rows = Math.max(AudioInputListModel.rowCount(), VideoSourceListModel.rowCount(),
-                                           BusListModel.rowCount(), 1)
-                    return board.headerH + rows * (board.rowH + board.rowGap)
+                    // Each column spans with its own row height; the board
+                    // must fit the tallest.
+                    return Math.max(board.headerH + AudioInputListModel.rowCount() * (board.rowH + board.rowGap),
+                                    board.headerH + BusListModel.rowCount() * (board.rowH + board.rowGap),
+                                    board.headerH + VideoSourceListModel.rowCount() * (board.vidRowH + board.rowGap),
+                                    board.headerH + board.rowH)
                 }
 
                 // Connector lines — drawn behind the columns so each card's
@@ -1042,8 +1070,8 @@ Item {
                             // the feed out at the bus it feeds.
                             readonly property bool isMedia: vidRow.kind === "media"
 
-                            width: board.colW
-                            height: board.rowH
+                            width: board.vidColW
+                            height: board.vidRowH
                             radius: Theme.radiusMd
                             color: Theme.inset
 
@@ -1065,9 +1093,12 @@ Item {
                                 accent: Theme.info
                             }
 
+                            // Name + sublabel run the full width up to the
+                            // thumb — vidColW is what keeps a normal source
+                            // name from eliding, not extra row height.
                             Text {
-                                x: 28; y: 8
-                                width: board.colW - 160
+                                x: 28; y: 12
+                                width: vidThumb.x - 28 - 12
                                 text: vidRow.name
                                 color: Theme.textPrimary
                                 font.family: Theme.fontFamily
@@ -1077,8 +1108,8 @@ Item {
                             }
 
                             Text {
-                                x: 28; y: 24
-                                width: board.colW - 160
+                                x: 28; y: 30
+                                width: vidThumb.x - 28 - 12
                                 visible: vidRow.sublabel !== ""
                                 text: vidRow.sublabel
                                 color: Theme.textMuted
@@ -1098,19 +1129,23 @@ Item {
                                 id: vidMutePill
                                 anchors.right: vidThumb.left
                                 anchors.top: parent.top
+                                anchors.topMargin: 10
                                 muted: vidRow.muted
+                                // A camera/screen feed isn't "muted" when
+                                // off, it's paused — only media carries audio.
+                                offLabel: vidRow.isMedia ? qsTr("MUTE") : qsTr("PAUSED")
                                 accent: Theme.info
                                 accentLight: Theme.infoLight
                                 onToggleRequested: VideoSourceListModel.setMuted(vidRow.index, !vidRow.muted)
                             }
 
                             LevelTrack {
-                                x: 28; y: 48
+                                x: 28
+                                anchors.bottom: parent.bottom
+                                anchors.bottomMargin: 14
                                 visible: vidRow.isMedia
-                                // Stop short of the preview thumb (it starts
-                                // at width-76; audio cards use -90 because
-                                // they have no thumb to clear).
-                                width: parent.width - 112
+                                // Stop short of the Edit link's hover area.
+                                width: vidThumb.x - 28 - 44
                                 value: vidRow.level
                                 fillColor: Theme.info
                             }
@@ -1121,10 +1156,21 @@ Item {
                             // dark pane with the kind's glyph.
                             Rectangle {
                                 id: vidThumb
-                                x: parent.width - 76
-                                y: 10
-                                width: 64
-                                height: 44
+                                anchors.right: parent.right
+                                anchors.rightMargin: 12
+                                anchors.top: parent.top
+                                anchors.topMargin: 12
+                                anchors.bottom: parent.bottom
+                                anchors.bottomMargin: 12
+                                // Sized off this pane's OWN height (row minus
+                                // its top/bottom margins), not the row height
+                                // itself — using the row height directly for
+                                // a 16:9 ratio made the thumb far wider than
+                                // it is tall, eating most of the card width.
+                                // The 96 cap keeps a taller row from growing
+                                // the thumb into the name's room: past it the
+                                // pane stops being 16:9 and letterboxes.
+                                width: Math.min(96, Math.round((height) * 16 / 9))
                                 radius: Theme.radiusSm
                                 color: "#0d0f16"
                                 border.width: 1
@@ -1200,7 +1246,7 @@ Item {
                             Text {
                                 anchors.right: vidThumb.left
                                 anchors.bottom: parent.bottom
-                                anchors.bottomMargin: 8
+                                anchors.bottomMargin: 10
                                 text: qsTr("Edit")
                                 color: Theme.accentLight
                                 font.family: Theme.fontFamily
@@ -1447,14 +1493,30 @@ Item {
         }
 
         AudioEffectsPanel {
+            id: editFxPanel
             width: parent.width
             effects: root.editAudioEffects
             selectedKey: root.editAudioSelectedEffect
-            onEffectSelected: (key) => root.editAudioSelectedEffect = key
+            // A selection grows the panel below the fold — scroll the just-
+            // opened editor into view, or "nothing happened" is the read.
+            onEffectSelected: (key) => {
+                root.editAudioSelectedEffect = key
+                if (key !== "") editAudioDialog.revealItem(editFxPanel)
+            }
             onEffectToggled: (key) => {
-                if (root.editAudioIndex < 0) return
-                const cur = root.editAudioEffects.find((e) => e.key === key)
-                AudioInputListModel.setEffectEnabled(root.editAudioIndex, key, cur ? !cur.enabled : true)
+                // Deferred model write: the write rebuilds this rack (the
+                // panel is bound to the model through modelsRev), and a
+                // synchronous rebuild inside the chip's own click event
+                // destroys the dispatching delegate mid-event. Same hazard
+                // as the routing board's line hit-testing — never mutate
+                // the model that rebuilds your own delegate from within its
+                // event. (Deferring here is the other half of the panel's
+                // emit-now contract; see AudioEffectsPanel.qml.)
+                Qt.callLater(() => {
+                    if (root.editAudioIndex < 0) return
+                    const cur = root.editAudioEffects.find((e) => e.key === key)
+                    AudioInputListModel.setEffectEnabled(root.editAudioIndex, key, cur ? !cur.enabled : true)
+                })
             }
             onEffectValueMoved: (key, v) => {
                 if (root.editAudioIndex < 0) return
@@ -1478,9 +1540,10 @@ Item {
     }
 
     // ---- Edit Video Source dialog ----
-    // Every kind gets a preview pane; MEDIA rows additionally get the audio
-    // meter + volume control (they're the only video sources that carry
-    // audio — same rule as the board card's mute pill).
+    // Preview-first flow (name → kind → preview [+ volume for media] →
+    // device) — both previews sit right under the kind picker instead of
+    // scrolled below the device field, and the pane itself is a real 16:9
+    // instead of the flat 180px strip this started as.
     ModalCard {
         id: editVideoDialog
         shown: root.editVideoIndex >= 0
@@ -1490,183 +1553,179 @@ Item {
         onCancelled: root.editVideoIndex = -1
         onAccepted: root.saveEditVideo()
 
-        // ---- Preview pane (all kinds) — decorative, same mock convention
-        // as the board cards' thumbs: the kind's glyph in a dark pane.
-        Rectangle {
+        SettingsField {
             width: parent.width
-            height: 120
-            radius: Theme.radiusMd
-            color: "#0d0f16"
-            border.width: 1
-            border.color: Theme.border
+            label: qsTr("Name")
+            text: root.editVideoName
+            onTextEdited: (t) => root.editVideoName = t
+        }
 
-            Item {
-                anchors.centerIn: parent
-                visible: root.editVideoKind === "camera"
-                width: 64; height: 64
-
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: 44; height: 44; radius: 22
-                    color: "transparent"
-                    border.width: 3
-                    border.color: Theme.textMuted
-                }
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: 14; height: 14; radius: 7
-                    color: Theme.textMuted
-                }
+        Column {
+            width: parent.width
+            spacing: Theme.space2
+            Text {
+                text: qsTr("Kind")
+                color: Theme.textSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
             }
-
-            Item {
-                anchors.centerIn: parent
-                visible: root.editVideoKind === "screen"
-                width: 80; height: 60
-
-                Rectangle {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    anchors.top: parent.top
-                    width: 64; height: 42; radius: 3
-                    color: "transparent"
-                    border.width: 2.4
-                    border.color: Theme.textMuted
-                }
-                Rectangle {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    anchors.bottom: parent.bottom
-                    width: 24; height: 3; radius: 1.5
-                    color: Theme.textMuted
-                }
-            }
-
-            Shape {
-                anchors.centerIn: parent
-                visible: root.editVideoKind === "media"
-                width: 40; height: 46
-                preferredRendererType: Shape.CurveRenderer
-
-                ShapePath {
-                    fillColor: Theme.textMuted
-                    strokeColor: "transparent"
-                    startX: 0; startY: 0
-                    PathLine { x: 0; y: 46 }
-                    PathLine { x: 40; y: 23 }
-                    PathLine { x: 0; y: 0 }
+            Row {
+                spacing: Theme.space2
+                Repeater {
+                    model: root.videoKinds
+                    delegate: SelectableChip {
+                        required property var modelData
+                        label: modelData.label
+                        selected: root.editVideoKind === modelData.key
+                        onPicked: root.editVideoKind = modelData.key
+                    }
                 }
             }
         }
 
-        Row {
+        // ---- Preview (all kinds) — decorative, same mock convention as
+        // the board cards' thumbs: the kind's glyph in a real 16:9 pane,
+        // with the LIVE/PAUSED status and a decorative resolution readout
+        // overlaid on the pane itself rather than living in separate rows.
+        Column {
             width: parent.width
-            spacing: Theme.space4
+            spacing: Theme.space2
 
-            Column {
+            Text {
+                text: qsTr("Preview")
+                color: Theme.textSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
+            }
+
+            Rectangle {
+                id: editVideoPreview
                 width: parent.width
-                spacing: Theme.space4
+                height: width * 9 / 16
+                radius: Theme.radiusMd
+                color: "#0d0f16"
+                border.width: 1
+                border.color: Theme.border
+                clip: true
 
-                SettingsField {
-                    width: parent.width
-                    label: qsTr("Name")
-                    text: root.editVideoName
-                    onTextEdited: (t) => root.editVideoName = t
-                }
-
-                Column {
-                    width: parent.width
-                    spacing: Theme.space2
-                    Text {
-                        text: qsTr("Kind")
-                        color: Theme.textSecondary
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textXs
-                    }
-                    Row {
-                        spacing: Theme.space2
-                        Repeater {
-                            model: root.videoKinds
-                            delegate: SelectableChip {
-                                required property var modelData
-                                label: modelData.label
-                                selected: root.editVideoKind === modelData.key
-                                onPicked: root.editVideoKind = modelData.key
-                            }
-                        }
-                    }
-                }
-
-                SettingsField {
-                    width: parent.width
-                    label: qsTr("Source")
-                    placeholder: qsTr("e.g. “PTZ · Wide”")
-                    text: root.editVideoSublabel
-                    onTextEdited: (t) => root.editVideoSublabel = t
-                }
-
-                // Media-only: the audio meter + volume control — a media
-                // player carries audio, a camera/screen feed doesn't.
-                Row {
-                    width: parent.width
-                    spacing: Theme.space5
-                    visible: root.editVideoKind === "media"
-
-                    LevelDial {
-                        width: 110
-                        anchors.top: parent.top
-                        value: root.editVideoLevel
-                        minValue: 0
-                        maxValue: 100
-                        label: qsTr("Volume")
-                        onMoved: (v) => root.editVideoLevel = v
-                    }
-
-                    Column {
-                        anchors.top: parent.top
-                        width: parent.width - 110 - Theme.space5
-                        spacing: Theme.space2
-
-                        LevelMeterPreview {
-                            active: editVideoDialog.shown
-                        }
-                    }
-                }
-
-                // Mute — every kind. For media it silences the audio
-                // track; for camera/screen it blacks the feed out at the
-                // bus it feeds.
                 Item {
-                    width: parent.width
-                    height: 34
-                    Text {
-                        anchors.left: parent.left
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: qsTr("Muted")
-                        color: Theme.textSecondary
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textSm
+                    anchors.centerIn: parent
+                    visible: root.editVideoKind === "camera"
+                    width: 64; height: 64
+
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: 44; height: 44; radius: 22
+                        color: "transparent"
+                        border.width: 3
+                        border.color: Theme.textMuted
                     }
-                    SettingsToggle {
-                        id: editVideoMuteToggle
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        checked: root.editVideoMuted
-                        onToggled: root.editVideoMuted = !root.editVideoMuted
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: 14; height: 14; radius: 7
+                        color: Theme.textMuted
                     }
                 }
 
-                // Kind-specific hint under the toggle: media mutes audio,
-                // camera/screen mutes the feed itself.
-                Text {
-                    width: parent.width
-                    text: root.editVideoKind === "media"
-                          ? qsTr("Muting silences this media's audio track.")
-                          : qsTr("Muting blacks this feed out at the bus it feeds — cameras and screens carry no audio track.")
-                    color: Theme.textMuted
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textXs
-                    wrapMode: Text.WordWrap
+                Item {
+                    anchors.centerIn: parent
+                    visible: root.editVideoKind === "screen"
+                    width: 80; height: 60
+
+                    Rectangle {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.top: parent.top
+                        width: 64; height: 42; radius: 3
+                        color: "transparent"
+                        border.width: 2.4
+                        border.color: Theme.textMuted
+                    }
+                    Rectangle {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.bottom: parent.bottom
+                        width: 24; height: 3; radius: 1.5
+                        color: Theme.textMuted
+                    }
+                }
+
+                Shape {
+                    anchors.centerIn: parent
+                    visible: root.editVideoKind === "media"
+                    width: 40; height: 46
+                    preferredRendererType: Shape.CurveRenderer
+
+                    ShapePath {
+                        fillColor: Theme.textMuted
+                        strokeColor: "transparent"
+                        startX: 0; startY: 0
+                        PathLine { x: 0; y: 46 }
+                        PathLine { x: 40; y: 23 }
+                        PathLine { x: 0; y: 0 }
+                    }
+                }
+
+                // The pill IS the toggle — same convention as every card on
+                // the board, so there's no separate toggle row below. A
+                // camera/screen feed isn't "muted" when off, it's paused;
+                // only media carries audio to mute.
+                MutePill {
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.leftMargin: 10
+                    muted: root.editVideoMuted
+                    offLabel: root.editVideoKind === "media" ? qsTr("MUTE") : qsTr("PAUSED")
+                    accent: Theme.info
+                    accentLight: Theme.infoLight
+                    onToggleRequested: root.editVideoMuted = !root.editVideoMuted
+                }
+
+                // Decorative resolution/frame-rate readout — no real video
+                // engine anywhere in this app, same mock convention as the
+                // level meters.
+                Pill {
+                    anchors.left: parent.left
+                    anchors.bottom: parent.bottom
+                    anchors.leftMargin: 10
+                    anchors.bottomMargin: 10
+                    text: qsTr("1080p · 60fps")
+                    tint: false
+                    fontSize: 9
                 }
             }
+
+            // Kind-specific hint: media mutes audio, camera/screen pauses
+            // the feed itself.
+            Text {
+                width: parent.width
+                text: root.editVideoKind === "media"
+                      ? qsTr("Muting silences this media's audio track.")
+                      : qsTr("Pausing blacks this feed out at the bus it feeds — cameras and screens carry no audio track.")
+                color: Theme.textMuted
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
+                wrapMode: Text.WordWrap
+            }
+
+            // Media-only volume — a plain line meter with its value, not
+            // the fuller dial + animated-bar treatment the Edit Audio
+            // dialog gets: this is a supplementary control on a VIDEO
+            // dialog, kept simple on purpose.
+            LabeledSlider {
+                width: parent.width
+                visible: root.editVideoKind === "media"
+                label: qsTr("Volume")
+                suffix: "%"
+                value: root.editVideoLevel
+                onMoved: (v) => root.editVideoLevel = v
+            }
+        }
+
+        SettingsField {
+            width: parent.width
+            label: qsTr("Device")
+            placeholder: qsTr("e.g. “PTZ Camera · SDI 1”")
+            text: root.editVideoSublabel
+            onTextEdited: (t) => root.editVideoSublabel = t
         }
 
         Row {
@@ -2009,46 +2068,158 @@ Item {
                 }
             }
 
-            SettingsField {
+            // ---- Preview — same layout as the Edit Video dialog: the
+            // kind's glyph in a real 16:9 pane, with the LIVE/PAUSED status
+            // and a decorative resolution readout overlaid on the pane
+            // itself. Moved up, right under Kind, ahead of Device.
+            Column {
                 width: parent.width
-                label: qsTr("Source")
-                placeholder: qsTr("e.g. “PTZ · Wide”")
-                text: root.addSourceSublabel
-                onTextEdited: (t) => root.addSourceSublabel = t
-            }
+                spacing: Theme.space2
 
-            Item {
-                width: parent.width
-                height: 34
                 Text {
-                    anchors.left: parent.left
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: qsTr("Muted")
+                    text: qsTr("Preview")
                     color: Theme.textSecondary
                     font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
+                    font.pixelSize: Theme.textXs
                 }
-                SettingsToggle {
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    checked: root.addSourceMuted
-                    onToggled: root.addSourceMuted = !root.addSourceMuted
+
+                Rectangle {
+                    id: addSourceVideoPreview
+                    width: parent.width
+                    height: width * 9 / 16
+                    radius: Theme.radiusMd
+                    color: "#0d0f16"
+                    border.width: 1
+                    border.color: Theme.border
+                    clip: true
+
+                    Item {
+                        anchors.centerIn: parent
+                        visible: root.addSourceKind === "camera"
+                        width: 64; height: 64
+
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 44; height: 44; radius: 22
+                            color: "transparent"
+                            border.width: 3
+                            border.color: Theme.textMuted
+                        }
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 14; height: 14; radius: 7
+                            color: Theme.textMuted
+                        }
+                    }
+
+                    Item {
+                        anchors.centerIn: parent
+                        visible: root.addSourceKind === "screen"
+                        width: 80; height: 60
+
+                        Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.top: parent.top
+                            width: 64; height: 42; radius: 3
+                            color: "transparent"
+                            border.width: 2.4
+                            border.color: Theme.textMuted
+                        }
+                        Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.bottom: parent.bottom
+                            width: 24; height: 3; radius: 1.5
+                            color: Theme.textMuted
+                        }
+                    }
+
+                    Shape {
+                        anchors.centerIn: parent
+                        visible: root.addSourceKind === "media"
+                        width: 40; height: 46
+                        preferredRendererType: Shape.CurveRenderer
+
+                        ShapePath {
+                            fillColor: Theme.textMuted
+                            strokeColor: "transparent"
+                            startX: 0; startY: 0
+                            PathLine { x: 0; y: 46 }
+                            PathLine { x: 40; y: 23 }
+                            PathLine { x: 0; y: 0 }
+                        }
+                    }
+
+                    // The pill IS the toggle — same convention as the board
+                    // cards and the Edit Video dialog. A camera/screen feed
+                    // isn't "muted" when off, it's paused.
+                    MutePill {
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        anchors.leftMargin: 10
+                        muted: root.addSourceMuted
+                        offLabel: root.addSourceKind === "media" ? qsTr("MUTE") : qsTr("PAUSED")
+                        accent: Theme.info
+                        accentLight: Theme.infoLight
+                        onToggleRequested: root.addSourceMuted = !root.addSourceMuted
+                    }
+
+                    // Decorative resolution/frame-rate readout — no real
+                    // video engine anywhere in this app.
+                    Pill {
+                        anchors.left: parent.left
+                        anchors.bottom: parent.bottom
+                        anchors.leftMargin: 10
+                        anchors.bottomMargin: 10
+                        text: qsTr("1080p · 60fps")
+                        tint: false
+                        fontSize: 9
+                    }
                 }
+
+                // Media-only volume — a plain line meter with its value,
+                // not the fuller dial + animated-bar treatment the audio
+                // side gets: kept simple on this video dialog.
+                LabeledSlider {
+                    width: parent.width
+                    visible: root.addSourceKind === "media"
+                    label: qsTr("Volume")
+                    suffix: "%"
+                    value: root.addSourceLevel
+                    onMoved: (v) => root.addSourceLevel = v
+                }
+            }
+
+            SettingsField {
+                width: parent.width
+                label: qsTr("Device")
+                placeholder: qsTr("e.g. “PTZ Camera · SDI 1”")
+                text: root.addSourceSublabel
+                onTextEdited: (t) => root.addSourceSublabel = t
             }
         }
 
         // Effects rack — audio only, shared component, same as Edit's.
         AudioEffectsPanel {
+            id: addFxPanel
             width: parent.width
             visible: root.addSourceType === "audio"
             effects: root.addSourceEffects
             selectedKey: root.addSourceSelectedEffect
-            onEffectSelected: (key) => root.addSourceSelectedEffect = key
+            // Same reveal-on-select as the Edit dialog.
+            onEffectSelected: (key) => {
+                root.addSourceSelectedEffect = key
+                if (key !== "") addSourceDialog.revealItem(addFxPanel)
+            }
             onEffectToggled: (key) => {
-                // Reassign the whole array — plain in-place mutation wouldn't
-                // notify QML bindings (var-property change detection).
-                root.addSourceEffects = root.addSourceEffects.map((e) =>
-                    e.key === key ? Object.assign({}, e, { enabled: !e.enabled }) : e)
+                // Same deferred write as the Edit dialog — the reassignment
+                // rebuilds the rack, and the dispatching chip must survive
+                // its own click event. (Reassigning the whole var array is
+                // also what notifies QML's var-property change detection;
+                // plain in-place mutation wouldn't.)
+                Qt.callLater(() => {
+                    root.addSourceEffects = root.addSourceEffects.map((e) =>
+                        e.key === key ? Object.assign({}, e, { enabled: !e.enabled }) : e)
+                })
             }
             onEffectValueMoved: (key, v) => {
                 root.addSourceEffects = root.addSourceEffects.map((e) =>

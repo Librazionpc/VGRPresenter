@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Shapes
+import VGRPresenterUI
 
 // One movable/resizable text object on the slide canvas (title, verse,
 // reference, ...). Literal colors, not Theme.* — AOT singleton-resolution
@@ -173,7 +174,13 @@ Item {
 
         enabled: root.selected
         hoverEnabled: true
-        cursorShape: {
+        // Cursor via the AppCursor override stack (see EditableCanvasLabel's
+        // dragArea for the full why): the canvas sits under a scale (zoom)
+        // transform and per-MouseArea cursorShape silently stops applying
+        // there — push the computed shape instead; Main.qml's unscaled
+        // AppCursorCatcher renders it. cursorShape remains as the zoom==1
+        // fallback and computes the identical shape.
+        function targetShape() {
             if (handle.moving)
                 return Qt.ClosedHandCursor
             const h = handle.resizeLeft || handle.resizeRight
@@ -182,7 +189,36 @@ Item {
                 return (handle.resizeLeft === handle.resizeTop) ? Qt.SizeFDiagCursor : Qt.SizeBDiagCursor
             return h ? Qt.SizeHorCursor : Qt.SizeVerCursor
         }
+        function syncCursor() {
+            // AppCursor.hovered(handle) — position truth — covers
+            // select-under-a-stationary-pointer: selecting an item enables
+            // its handles while the pointer may already sit on one, and a
+            // just-enabled MouseArea's containsMouse stays false until the
+            // next real mouse event (exactly the missing size-cursor case).
+            if (visible && enabled && (containsMouse || pressed || AppCursor.hovered(handle)))
+                AppCursor.push(handle.targetShape(), handle)
+            else
+                AppCursor.pop(handle)
+        }
+        cursorShape: handle.targetShape()
+        onContainsMouseChanged: syncCursor()
+        // Handles disable on deselect while the pointer may still be over
+        // them — a disabled MouseArea stops receiving hover events, so
+        // containsMouse can stay stale-true with nobody left to clear it.
+        // Pop explicitly on disable (the visible flip inside editing also
+        // routes here) so the pushed shape can't outlive the handle.
+        onEnabledChanged: {
+            // Deselect (and the editing visible-flip) route here: drop the
+            // pushed size shape immediately; re-enabling re-checks with
+            // position truth (syncCursor above).
+            if (enabled)
+                syncCursor()
+            else
+                AppCursor.pop(handle)
+        }
+        Component.onDestruction: AppCursor.pop(handle)
         onPressed: (mouse) => {
+            syncCursor()
             root.forceActiveFocus()
             moving = (mouse.modifiers & Qt.ShiftModifier) !== 0
             dragMoved = false
@@ -196,6 +232,7 @@ Item {
             pressMouseY = g.y
         }
         onReleased: {
+            syncCursor()
             if (!dragMoved)
                 root.selectedRequested(pressModifiers)
             root.dragEnded()
