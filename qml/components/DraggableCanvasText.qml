@@ -191,17 +191,22 @@ Item {
         }
         function syncCursor() {
             // AppCursor.hovered(handle) — position truth — covers
-            // select-under-a-stationary-pointer: selecting an item enables
-            // its handles while the pointer may already sit on one, and a
-            // just-enabled MouseArea's containsMouse stays false until the
-            // next real mouse event (exactly the missing size-cursor case).
-            if (visible && enabled && (containsMouse || pressed || AppCursor.hovered(handle)))
+            // select-under-a-stationary-pointer AND is the only hover signal
+            // besides `pressed`: containsMouse latches in this build
+            // (hover-exit never delivers — KNOWN_ISSUES.md), so gating on it
+            // left the size cursor stuck after leaving the handle.
+            if (visible && enabled && (pressed || AppCursor.hovered(handle)))
                 AppCursor.push(handle.targetShape(), handle)
             else
                 AppCursor.pop(handle)
         }
         cursorShape: handle.targetShape()
-        onContainsMouseChanged: syncCursor()
+        // Recompute from the pointer-position stream (every move) instead of
+        // onContainsMouseChanged — same mechanism as PositionHoverArea.
+        Connections {
+            target: AppCursor
+            function onPointerMoved() { handle.syncCursor() }
+        }
         // Handles disable on deselect while the pointer may still be over
         // them — a disabled MouseArea stops receiving hover events, so
         // containsMouse can stay stale-true with nobody left to clear it.

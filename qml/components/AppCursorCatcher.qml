@@ -63,6 +63,15 @@ Item {
     HoverHandler {
         id: catcherHandler
         blocking: false
+        // Window-level hover transitions DO deliver reliably (unlike
+        // MouseArea containsMouse — see KNOWN_ISSUES.md). Mirror them into
+        // AppCursor: windowHovered gates every position-driven hover wash,
+        // and a cleared point can never read as "still over something".
+        onHoveredChanged: {
+            AppCursor.windowHovered = hovered
+            if (!hovered)
+                AppCursor.clearPointerPos()
+        }
         // Feeds AppCursor the pointer position on every event so push sites
         // can ask AppCursor.hovered(item) — position truth even when the
         // pointer is stationary (containsMouse can't answer that for a

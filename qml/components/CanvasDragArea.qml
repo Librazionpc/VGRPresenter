@@ -31,17 +31,23 @@ MouseArea {
     // cursorShape). Identical shape as the fallback binding below.
     function syncCursor() {
         // AppCursor.hovered(root) — position truth from the window catcher —
-        // covers the appearance-under-a-stationary-pointer cases where
-        // containsMouse is still false: becoming enabled while hovered
-        // (item selection is what enables this area's siblings' handles),
-        // or the whole item re-shown/re-entered without the mouse moving.
-        if (visible && enabled && (containsMouse || pressed || AppCursor.hovered(root)))
+        // covers the appearance-under-a-stationary-pointer cases where a
+        // fresh area has no hover history yet, and is the ONLY hover signal
+        // besides `pressed`: containsMouse latches in this build (hover-exit
+        // never delivers — KNOWN_ISSUES.md), so gating on it left the hand
+        // cursor stuck on after leaving the item.
+        if (visible && enabled && (pressed || AppCursor.hovered(root)))
             AppCursor.push(root.dragMoved ? Qt.ClosedHandCursor : Qt.PointingHandCursor, root)
         else
             AppCursor.pop(root)
     }
     cursorShape: root.dragMoved ? Qt.ClosedHandCursor : Qt.PointingHandCursor
-    onContainsMouseChanged: syncCursor()
+    // Recompute from the pointer-position stream (every move) instead of
+    // onContainsMouseChanged — same mechanism as PositionHoverArea.
+    Connections {
+        target: AppCursor
+        function onPointerMoved() { root.syncCursor() }
+    }
     onEnabledChanged: syncCursor()
     Component.onDestruction: AppCursor.pop(root)
 

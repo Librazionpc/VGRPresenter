@@ -196,10 +196,14 @@ Item {
     ]
 
     // Swallows the next click anywhere on screen to close an open menu,
-    // without intercepting input at all when no menu is open.
+    // without intercepting input at all when no menu is open. Click-only:
+    // hover delivery is broken app-wide (KNOWN_ISSUES.md) and this catcher
+    // needs no hover state of its own.
     MouseArea {
+        id: outsideCatcher
         anchors.fill: parent
         enabled: root.openMenu !== ""
+        hoverEnabled: false
         onClicked: root.closeMenu()
     }
 
@@ -220,7 +224,12 @@ Item {
             height: parent.height
 
             readonly property bool isOpen: root.openMenu === "logo"
-            readonly property bool isHover: logoArea.containsMouse
+            // Position truth, not containsMouse — hover-exit never delivers
+            // to MouseAreas in this build (KNOWN_ISSUES.md), so a containsMouse
+            // wash would stick forever. PositionHoverArea derives hover from
+            // the AppCursorCatcher's pointer-position stream, which exits
+            // flawlessly the moment the pointer moves off.
+            readonly property bool isHover: logoHover.hovered
 
             Rectangle {
                 anchors.fill: parent
@@ -253,12 +262,10 @@ Item {
                 verticalAlignment: Text.AlignTop
             }
 
-            MouseArea {
-                id: logoArea
+            PositionHoverArea {
+                id: logoHover
                 anchors.fill: parent
                 anchors.margins: -4
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
                 onClicked: root.toggleMenu("logo")
             }
         }
@@ -281,7 +288,8 @@ Item {
                 property int labelWidth: 0
 
                 readonly property bool isOpen: root.openMenu === menuName
-                readonly property bool isHover: mouseArea.containsMouse
+                // Position truth — see logoButton.isHover above.
+                readonly property bool isHover: hoverArea.hovered
 
                 height: 15
                 width: labelWidth > 0 ? labelWidth : label.implicitWidth
@@ -312,12 +320,10 @@ Item {
                     verticalAlignment: Text.AlignTop
                 }
 
-                MouseArea {
-                    id: mouseArea
+                PositionHoverArea {
+                    id: hoverArea
                     anchors.fill: parent
                     anchors.margins: -4
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
                     onClicked: root.toggleMenu(labelRoot.menuName)
                 }
             }

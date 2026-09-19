@@ -161,7 +161,7 @@ Rectangle {
                                 id: itemRow
                                 width: itemList.width
                                 height: 34
-                                color: itemArea.containsMouse
+                                color: itemArea.hovered
                                        ? (modelData.danger ? "#24ff4d3d" /* Theme.danger @ 14% */
                                                            : "#232530" /* Theme.border */)
                                        : "transparent"
@@ -187,11 +187,16 @@ Rectangle {
                                     font.pixelSize: 9 // Theme.textXs
                                 }
 
-                                MouseArea {
+                                // Position truth, not containsMouse — hover-exit
+                                // never delivers to MouseAreas in this build
+                                // (KNOWN_ISSUES.md), which is exactly why these
+                                // rows' hover effects felt dead. shownChain
+                                // (inside PositionHoverArea) is a binding over
+                                // every ancestor's visible/enabled, so a panel
+                                // closing also clears its rows' hover.
+                                PositionHoverArea {
                                     id: itemArea
                                     anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
                                     onClicked: root.itemActivated(modelData.label)
                                     onEntered: root.itemHovered(modelData.label, true, itemRow)
                                     onExited: root.itemHovered(modelData.label, false, itemRow)

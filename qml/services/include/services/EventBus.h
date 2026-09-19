@@ -45,6 +45,23 @@ public:
     // still delivered to every subscriber, just not surfaced as one.
     Q_INVOKABLE void publish(const QString &topic, const QVariantMap &payload = QVariantMap());
 
+    // The STANDARD door for UI-originated notifications — screens call THIS,
+    // never NotificationCenter directly (which stays a pure subscriber) and
+    // never hand-rolled payload maps. It stamps the conventional payload keys
+    // (level/title/message/origin) and namespaces the topic as
+    // "ui.<screen>.<what>" when the caller doesn't provide one, so engine
+    // traffic ("recording.failed", "project.saved") and UI traffic
+    // ("ui.edit.textCopied") stay distinguishable in the feed and in any
+    // future activity log/filter. Every topic published through here also
+    // carries origin="ui"; engine relay events carry origin="engine".
+    //
+    // level: "info" (default) | "success" | "warning" | "error" — error
+    // toasts stick longer (NotificationCenter's own rule).
+    Q_INVOKABLE void notify(const QString &message,
+                            const QString &level = QStringLiteral("info"),
+                            const QString &title = QStringLiteral("Application"),
+                            const QString &topic = QString());
+
 signals:
     void eventPosted(const QString &topic, const QVariantMap &payload);
 

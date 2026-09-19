@@ -4,7 +4,10 @@
 #include <QString>
 #include <QStringList>
 #include <QJSValue>
+#include <QVariantList>
 #include <qqml.h>
+
+#include "core/events/EventBus.hpp"
 
 class QJSEngine;
 class QQmlEngine;
@@ -67,6 +70,13 @@ public:
     // of letting process exit cut them off mid-flight.
     void shutdown();
 
+    // GUI-thread-only entry point the relay's marshalled lambdas call (see
+    // startRelay in EngineBridge.cpp): appends to the recent-events ring,
+    // emits engineEvent, publishes to the UI EventBus. Public because the
+    // EngineLogSink (a free class, not a member) invokes it via
+    // QMetaObject::invokeMethod after hopping off the Logger's engine thread.
+    void ingestEngineEvent(const QString &topic, const QVariantMap &payload);
+
     // Registers one reversible step — doFn runs now (ExecuteCommand's own
     // contract), undoFn runs on undo(), doFn runs again on redo() (ICommand's
     // default Redo() == Execute()). Clears the redo branch, same as any
@@ -81,10 +91,39 @@ public:
 signals:
     void stackChanged();
     void bootedChanged();
+    // Fired for every ENGINE-side event relayed into the UI process — kernel
+    // state changes, display/recording/render/media/broadcast failures and
+    // recoveries, undo/redo performed, ... (the curated set in
+    // EngineBridge.cpp's startRelay). topic is the engine's own kTopic string
+    // verbatim ("recording.failed", "presentation.slide_changed"), so QML can
+    // filter with `if (topic === "...")`. Emitted on the GUI thread no matter
+    // which engine thread produced the event. EventBus.eventPosted carries the
+    // same payload for the toast pipeline; this signal is the typed,
+    // engine-specific feed for screens that want to react without seeing UI-
+    // internal traffic.
+    void engineEvent(const QString &topic, const QVariantMap &payload);
 
 private:
     explicit EngineBridge(QObject *parent = nullptr);
     Q_DISABLE_COPY(EngineBridge)
 
     QString bootError_;
+
+    // ---- Engine → UI relay (see startRelay in EngineBridge.cpp) ----------
+    // The kernel drives everything; the UI only relays. Attaches a Logger
+    // sink (engine warnings/errors/fatals) and engine-EventBus subscriptions
+    // (the curated user-facing event set); each hops to the GUI thread via a
+    // queued invoke before touching the UI-side EventBus.
+    void startRelay();
+    void stopRelay();
+
+    std::vector<bps::Subscription> relaySubs_;
+    QVariantList recentEngineEvents_;   // ring capped at kMaxRecentEvents
+    static constexpr int kMaxRecentEvents = 200;
+
+public:
+    // The most recent relayed engine events (newest LAST), for diagnostics
+    // surfaces (a future debug console / activity log). level/title/message
+    // keys match the EventBus toast convention; "topic" is the engine topic.
+    Q_INVOKABLE QVariantList recentEngineEvents(int max = 50) const;
 };

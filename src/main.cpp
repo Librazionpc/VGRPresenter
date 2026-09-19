@@ -2,7 +2,15 @@
 #include <QDebug>
 #include <QQmlApplicationEngine>
 #include <QQmlError>
+#include <QQmlContext>
 #include <QStringList>
+
+#include <QCommandLineParser>
+#include <QPoint>
+#include <QPointF>
+#include <QTimer>
+#include <QWindow>
+#include <qpa/qwindowsysteminterface.h>
 
 #include <cstdio>
 
@@ -65,6 +73,12 @@ int main(int argc, char *argv[])
     });
 
     QQmlApplicationEngine engine;
+    // TEMP A/B: hide the window-root cursor catcher to test whether its
+    // HoverHandler is what suppresses MouseArea hover-exit delivery.
+    // REMOVE WITH THE A/B RESULT.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("hoverProbeNoCatcher"),
+        qEnvironmentVariableIsSet("VGR_NO_CATCHER"));
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed,
         &app, [] {
@@ -85,6 +99,42 @@ int main(int argc, char *argv[])
         });
 
     engine.loadFromModule("VGRPresenterUI", "Main");
+
+    // ---- TEMP hover A/B probe driver (--hoverprobe logicalX,logicalY;...) ----
+    // REMOVE WITH THE A/B RESULT. Synthesizes mouse input through
+    // QWindowSystemInterface — the exact pipeline real OS pointer events
+    // enter through.
+    {
+        QCommandLineParser parser;
+        parser.setSingleDashWordOptionMode(QCommandLineParser::ParseAsLongOptions);
+        QCommandLineOption probeOpt("hoverprobe", "Run hover probe", "hoverprobe");
+        parser.addOption(probeOpt);
+        parser.process(app);
+        if (parser.isSet(probeOpt)) {
+            static const QStringList steps = parser.value(probeOpt).split(';');
+            auto *probeTimer = new QTimer(&app);
+            probeTimer->setInterval(600);
+            static int step = 0;
+            QObject::connect(probeTimer, &QTimer::timeout, [&]() {
+                QWindow *win = QGuiApplication::topLevelWindows().isEmpty()
+                    ? nullptr : QGuiApplication::topLevelWindows().first();
+                if (!win || !win->isVisible()) return;
+                if (step >= steps.size()) { probeTimer->stop(); return; }
+                const QString s = steps[step++];
+                const int comma = s.indexOf(',');
+                if (comma < 0) return;
+                const double lx = s.left(comma).toDouble();
+                const double ly = s.mid(comma + 1).toDouble();
+                const double dsf = win->devicePixelRatio();
+                const double designW = 1440.0;
+                const double scale = (win->width() / dsf) / designW;
+                const QPointF local(lx * scale * dsf, ly * scale * dsf);
+                QWindowSystemInterface::handleMouseEvent(win, local, win->mapToGlobal(local),
+                                                         Qt::NoButton, Qt::NoButton, QEvent::MouseMove);
+            });
+            probeTimer->start();
+        }
+    }
 
     // A safety net for exceptions that escape the event loop (e.g. from a
     // future engine-bridge call) — logs and exits cleanly instead of letting

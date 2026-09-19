@@ -405,3 +405,6 @@ target_link_libraries(appVGRPresenterUI
 # resolves). Without either, the include is skipped and the generated
 # registration code fails with "EventBus was not declared in this scope".
 target_include_directories(appVGRPresenterUI PRIVATE src qml/services/include qml/services/include/services)
+# TEMP hover A/B probe: private Qt platform API for the in-process input
+# driver (remove with the --hoverprobe block in src/main.cpp).
+target_include_directories(appVGRPresenterUI PRIVATE "C:/Qt/6.11.1/mingw_64/include/QtGui/6.11.1/QtGui")

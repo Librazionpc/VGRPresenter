@@ -30,7 +30,12 @@ Item {
         property real iconShapeHeight: 10.50
 
         readonly property bool isActive: root.activeTab === tabKey
-        readonly property bool isHover: mouseArea.containsMouse
+        // Position truth, not containsMouse — hover-exit never delivers to
+        // MouseAreas in this build (see KNOWN_ISSUES.md); a containsMouse
+        // wash sticks forever after a click. PositionHoverArea derives hover
+        // from the AppCursorCatcher's pointer-position stream, which clears
+        // the instant the pointer moves off.
+        readonly property bool isHover: tabHover.hovered
 
         height: 32
         radius: 6
@@ -77,11 +82,16 @@ Item {
             Behavior on color { ColorAnimation { duration: 100 } }
         }
 
+        // TEMP A/B probe — REMOVE WITH THE A/B RESULT.
         MouseArea {
-            id: mouseArea
+            id: abProbeArea
             anchors.fill: parent
             hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
+            onContainsMouseChanged: console.log("[ABPROBE] tab", tabRoot.tabKey, "containsMouse=", containsMouse)
+        }
+        PositionHoverArea {
+            id: tabHover
+            anchors.fill: parent
             onClicked: {
                 // No self-assignment here: activeTab is owned by the parent
                 // (AppHeader <- Main.currentView). Assigning it imperatively

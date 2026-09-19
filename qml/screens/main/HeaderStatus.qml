@@ -1,10 +1,19 @@
 import QtQuick
 import QtQuick.Shapes
+import VGRPresenterUI
 
-// The "Connected" indicator + window controls (close/minimize/maximize) that
+// The connection indicator + window controls (close/minimize/maximize) that
 // sit in the top-right of the app header. Extracted so EditScreen.qml can
 // reuse the exact same chrome as VGRPresenterMainScreen.qml without
 // duplicating the vector icon paths.
+//
+// "Connected" is KERNEL-DRIVEN, not baked text: EngineBridge's relay emits
+// engine.kernel.state_changed with structured to/from fields whenever the
+// kernel's state machine moves; the indicator reflects that live — dot color
+// and label both. Between events it simply holds the last state, exactly
+// like every real dashboard status light. (EngineBridge.boot() itself fires
+// the first state_changed on the engine's own bus, so this populates even
+// before the QML engine finishes loading.)
 //
 // Literal colors, not Theme.* — same AOT-compiler limitation documented in
 // AppMenuBar.qml applies at this nesting depth.
@@ -13,6 +22,39 @@ Item {
 
     height: 32
     width: 164
+
+    // Kernel truth, mirrored from the relay. "Running" = the kernel booted
+    // and is serving; anything else shows a matching degraded/idle color.
+    property string kernelState: "Booting"
+    readonly property bool kernelUp: kernelState === "Running"
+
+    Connections {
+        target: EngineBridge
+        function onEngineEvent(topic, payload) {
+            if (topic === "engine.kernel.state_changed" && payload && payload.to)
+                root.kernelState = payload.to
+        }
+    }
+
+    // Re-sync from the relay's ring at construction — catches the state
+    // change(s) fired before this header existed (boot happens in main()
+    // before the QML engine loads).
+    Component.onCompleted: {
+        const recent = EngineBridge.recentEngineEvents(200)
+        for (let i = recent.length - 1; i >= 0; --i) {
+            if (recent[i].topic === "engine.kernel.state_changed" && recent[i].to) {
+                root.kernelState = recent[i].to
+                break
+            }
+        }
+    }
+
+    // Indicator color by kernel state: green Running, amber transitional
+    // (Booting/Starting/CrashRecovery), grey shut down, red anything else.
+    readonly property color indicatorColor: kernelUp ? "#3ddc84"
+        : (kernelState === "ShuttingDown" || kernelState === "Stopped") ? "#8a94a6"
+        : (kernelState === "Booting" || kernelState === "Starting" || kernelState === "CrashRecovery") ? "#f5a623"
+        : "#e5534b"
 
     Rectangle {
         id: quickStats
@@ -34,7 +76,7 @@ Item {
 
                 ShapePath {
                     fillColor: "#00000000"
-                    strokeColor: "#8a94a6"
+                    strokeColor: root.indicatorColor
                     strokeWidth: 2
 
                     PathSvg {
@@ -47,11 +89,11 @@ Item {
             x: 22
             height: 13
             width: 59
-            color: "#8a94a6"
+            color: root.kernelUp ? "#8a94a6" : "#c8a06a"
             font.family: "Inter"
             font.pixelSize: 11
             font.weight: Font.Normal
-            text: qsTr("Connected")
+            text: root.kernelUp ? qsTr("Connected") : root.kernelState
             textFormat: Text.PlainText
         }
     }

@@ -44,22 +44,28 @@ Rectangle {
         width: 28
         height: 28
         radius: 14
-        color: gearArea.containsMouse ? "#1a6c5ce7" : "transparent"
+        // Position truth — containsMouse latches forever in this build
+        // (KNOWN_ISSUES.md). showCursor: false: the wash itself is the
+        // feedback; no pointing hand over a settings gear.
+        color: gearHover.hovered ? "#1a6c5ce7" : "transparent"
         Behavior on color { ColorAnimation { duration: 100 } }
 
+        // IconGlyph is a plain Item: implicitWidth/Height alone leave it
+        // 0x0, and everything anchored inside it collapses to its top-left
+        // corner — the gear rendered visibly off-center (down-right) inside
+        // this circle. Explicit width/height actually size it; centerIn
+        // then centers it.
         IconGlyph {
             anchors.centerIn: parent
             name: "settings"
-            color: gearArea.containsMouse ? "#e2e8f0" : "#8a94a6"
-            implicitWidth: 14
-            implicitHeight: 14
+            color: gearHover.hovered ? "#e2e8f0" : "#8a94a6"
+            width: 14
+            height: 14
         }
 
-        MouseArea {
-            id: gearArea
+        PositionHoverArea {
+            id: gearHover
             anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
             onClicked: root.settingsClicked()
         }
     }

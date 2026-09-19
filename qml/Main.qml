@@ -21,6 +21,12 @@ ApplicationWindow {
     // is accepted but doesn't switch the view.
     property string currentView: "show"
 
+    // TEMP A/B probe: hide the window-root cursor catcher (set
+    // VGR_NO_CATCHER=1 in the environment) to test whether its HoverHandler
+    // is what suppresses MouseArea hover-exit delivery. REMOVE WITH THE
+    // A/B RESULT.
+    property bool probeNoCatcher: hoverProbeNoCatcher
+
     // Screens first (opaque, fill the window), then the shared header strip
     // and the menu layer on top — AppMenuBar must sit above AppHeader because
     // its logo/menu labels are drawn inside the same 48px strip.
@@ -61,8 +67,10 @@ ApplicationWindow {
     // Topmost cursor layer — renders the AppCursor override stack's shape
     // while any gesture (canvas move/resize, AV line-drag) has one pushed;
     // inert the rest of the time. Declared LAST so it z-orders above every
-    // screen, the menu bar, and all modals.
-    AppCursorCatcher {}
+    // screen, the menu bar, and all modals. Also the app's single pointer-
+    // position truth source: every position-driven hover (PositionHoverArea)
+    // reads AppCursor's point, so this must never be hidden or disabled.
+    AppCursorCatcher { }
 
     // ---- Settings overlay ----
     // Shared ModalScrim: click-dismisses, and consumes wheel events so a

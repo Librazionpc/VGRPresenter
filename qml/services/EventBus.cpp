@@ -28,3 +28,22 @@ void EventBus::publish(const QString &topic, const QVariantMap &payload)
 {
     emit eventPosted(topic, payload);
 }
+
+void EventBus::notify(const QString &message, const QString &level,
+                      const QString &title, const QString &topic)
+{
+    // UI-originated, standard-shaped: same payload convention as the engine
+    // relay (level/title/message), plus origin="ui" so any subscriber — and
+    // the toast overlay — can tell UI-raised from engine-raised traffic
+    // (the relay stamps origin="engine"). Callers who want a filterable
+    // topic pass one ("ui.edit.textCopied"); the generic fallback keeps the
+    // feed free of unnamed topics.
+    QVariantMap payload{
+        {QStringLiteral("level"), level.isEmpty() ? QStringLiteral("info") : level},
+        {QStringLiteral("title"), title.isEmpty() ? QStringLiteral("Application") : title},
+        {QStringLiteral("message"), message},
+        {QStringLiteral("origin"), QStringLiteral("ui")},
+    };
+    const QString t = topic.isEmpty() ? QStringLiteral("ui.notification") : topic;
+    emit eventPosted(t, payload);
+}

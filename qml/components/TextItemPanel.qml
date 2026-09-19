@@ -75,7 +75,18 @@ Column {
     // Drives the Size slider's dynamic max — the slider ends exactly where
     // the text would start leaving the bounding box, instead of letting the
     // thumb travel dead space that changes nothing (or overflows the box).
+    //
+    // Only meaningful in shrinkToFit/growToFit, where "fits the box" is the
+    // actual goal — in "none" the user has fully manual control and this
+    // must stay a FIXED ceiling. It depends on fitMeasure's content size,
+    // which changes with every keystroke, so leaving it live in "none" mode
+    // made the slider's max (and so the thumb's position for an unchanged
+    // value) visibly drift while typing, with nothing having actually
+    // changed the font size — reads exactly like "the size crept up on its
+    // own".
     readonly property real fitMaxFontSize: {
+        if (root.autoSize === "none")
+            return 400
         if (!root.target)
             return 120
         const pad = root.target.style ? root.target.style.padding : 0

@@ -46,7 +46,7 @@ QtObject {
     // Flip to true (e.g. from a probe or a temporary edit) to trace every
     // push/pop/validate live on stderr — the tool for the next "cursor got
     // stuck" report that can't be reproduced on demand.
-    property bool debug: true
+    property bool debug: false
 
     // The window-scene pointer position, fed every event by the catcher's
     // permanently-latched HoverHandler (see AppCursorCatcher.qml). This is
@@ -58,7 +58,29 @@ QtObject {
     // handles re-enabled on select), which is when containsMouse-based
     // logic provably misses.
     property var _point: null
-    function setPointerPos(pos) { _point = pos }
+    // False whenever the pointer is known to be outside the window (the
+    // catcher's HoverHandler unhovers — one of the few hover transitions
+    // that DOES deliver reliably). Position-driven consumers read this too,
+    // so no hover wash outlives the pointer leaving the window even though
+    // _point itself would still map inside.
+    property bool windowHovered: true
+    // Emitted on every pointer position update AND when the position is
+    // cleared — the tick position-truth consumers (PositionHoverArea)
+    // recompute from, replacing the enter/exit MouseArea events this build
+    // delivers unreliably (enter arrives, exit never does).
+    signal pointerMoved()
+    function setPointerPos(pos) {
+        _point = pos
+        windowHovered = true
+        pointerMoved()
+    }
+    // Pointer left the window (or hover was otherwise lost): drop position
+    // truth so nothing can read a stale point as "still hovered".
+    function clearPointerPos() {
+        _point = null
+        windowHovered = false
+        pointerMoved()
+    }
 
     // Is the current pointer position inside `item` (its local geometry)?
     // Deterministic, no event history involved. Destroyed/dead items read

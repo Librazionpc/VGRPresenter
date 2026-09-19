@@ -64,6 +64,78 @@ Rectangle {
     // way out).
     readonly property bool hasActiveSlide: slideModel.activeSlideId > 0
 
+    // TEMP DIAGNOSTIC — reproduce "type text, exit, re-enter and type more,
+    // undo WHILE still in that second edit session" exactly. Flip to true
+    // ONLY when debugging an undo regression: it seeds a slide + text item
+    // on every launch (so the app never starts in the empty, greyed-out
+    // "no active slide" state while it's on) and drives the scripted
+    // type/undo sequence, logging [DIAG] lines to stderr. Default off —
+    // the app must start empty, which is what the regression it found (the
+    // mid-edit junk-command push) is now verified fixed.
+    property bool diagUndoHarness: false
+    Component.onCompleted: {
+        if (!root.diagUndoHarness)
+            return
+        slideModel.addSlide()
+        const freshItem = root.addCanvasItem("text")
+        root.handleCanvasSelect(freshItem.key, 0)
+        function afterMs(ms, fn) {
+            const t = Qt.createQmlObject('import QtQuick; Timer { interval: ' + ms + '; running: true; repeat: false }', root, "diagTimer")
+            t.triggered.connect(fn)
+        }
+        afterMs(200, function () {
+            // Fresh reference — addCanvasItem's own deferred "after" commit
+            // (Qt.callLater) already fired by now and destroyed+recreated
+            // every item as a side effect (restoreItems' redundant re-
+            // apply), so the ORIGINAL `item` capture is stale/destroyed.
+            const item = slideStore.current.items[0]
+            console.log("[DIAG] fresh item key=", item.key)
+            // Session 1: type "AAA", then commit (leave edit mode).
+            root.beginTextEdit(item.key)
+            item.text = "AAA"
+            root.endTextEdit()
+            afterMs(200, function () {
+                console.log("[DIAG] after session 1 commit: text=", slideStore.current.items[0].text, "canUndo=", canvasHistory.canUndo)
+                // Session 2: re-enter edit on the SAME item, type more —
+                // but do NOT end the session yet.
+                const item2 = slideStore.current.items[0]
+                root.beginTextEdit(item2.key)
+                item2.text = "AAABBB"
+                console.log("[DIAG] mid session 2 (still editing): text=", item2.text, "anyTextEditing=", root.anyTextEditing)
+                // Undo WHILE still mid-session-2 — the exact repro.
+                root.undo()
+                console.log("[DIAG] after undo WHILE mid-session-2: text=", slideStore.current.items[0].text,
+                             "canUndo=", canvasHistory.canUndo, "canRedo=", canvasHistory.canRedo,
+                             "anyTextEditing=", root.anyTextEditing)
+                // One tick later: the old endTextEdit->commit chain (fired
+                // by the undo's apply() recreating the delegate) used to
+                // push a JUNK command here ("do: restore post-undo state",
+                // undo: re-apply "AAA"), clearing canRedo with it — so the
+                // NEXT Ctrl+Z resurrected the text that was just undone
+                // ("undo undoes the undo"). With abandonPending in place
+                // canRedo must STILL be true.
+                afterMs(50, function () {
+                    console.log("[DIAG] commit-tick: text=", slideStore.current.items[0].text,
+                                 "canUndo=", canvasHistory.canUndo, "canRedo=", canvasHistory.canRedo,
+                                 "(canRedo MUST still be true — no junk step)")
+                    // Drains the last real command (session 1's edit, then
+                    // the add itself — whose "before" is an EMPTY canvas, so
+                    // items[0] legitimately no longer exists afterwards).
+                    // The old junk command would instead have re-applied
+                    // "AAA" here and left an extra entry on the stack.
+                    root.undo()
+                    const drained = slideStore.current.items.length === 0
+                    console.log("[DIAG] second undo: items empty=", drained,
+                                 "(expect true — the add command's before-state)",
+                                 "text=", drained ? "(no items)" : slideStore.current.items[0].text,
+                                 "canUndo=", canvasHistory.canUndo, "(expect false — stack drained)",
+                                 "canRedo=", canvasHistory.canRedo,
+                                 "(expect true — redo of session 1 intact)")
+                })
+            })
+        })
+    }
+
     // Output roster comes from the OutputListModel singleton (src/OutputListModel.{h,cpp})
     // — the SAME model Settings · Outputs (OutputsScreen.qml) edits, so adding
     // or renaming an output there shows up here too instead of two arrays
@@ -175,12 +247,30 @@ Rectangle {
     // pressed right after clicking a panel control otherwise fires while
     // the panel's TextInput still owns focus, which native-edit behavior
     // would route into that field instead of the canvas history.
+    //
+    // Safe to fire mid-text-edit too (the Shortcuts below explicitly stay
+    // enabled while root.anyTextEditing): canvasHistory.undo() ABANDONS the
+    // open session's pending push before touching the engine stack (see
+    // UndoHistory.abandonPending), so no junk command can be committed from
+    // the post-undo state when the interrupted session ends.
+    //
+    // Also resets the session bookkeeping explicitly: undo()'s apply()
+    // destroys and recreates the delegates, and a TextEdit destroyed
+    // mid-edit never emits onEditingChanged — so textUndoKey/anyTextEditing
+    // would stay stale (anyTextEditing stuck true; worse, a beginTextEdit on
+    // the SAME restored key early-returns and its typing would never be
+    // undoable). The pending snapshot was already dropped inside
+    // canvasHistory.undo(); this only clears the flags.
     function undo() {
         canvasHistory.undo()
+        root.textUndoKey = ""
+        root.anyTextEditing = false
         mCanvas.forceActiveFocus()
     }
     function redo() {
         canvasHistory.redo()
+        root.textUndoKey = ""
+        root.anyTextEditing = false
         mCanvas.forceActiveFocus()
     }
 
@@ -198,6 +288,12 @@ Rectangle {
     // the pushed snapshot still holds the pre-typing text, because the
     // model write happens right after the push in the same handler.
     property string textUndoKey: ""
+    // True the instant ANY item's edit mode actually starts (set by the
+    // Repeater delegate's onEditingChanged below) — unlike textUndoKey,
+    // which stays "" until the session's first keystroke. Undo/redo need
+    // THIS one: pressing Ctrl+Z right after double-clicking into edit mode,
+    // before typing anything, has to work too.
+    property bool anyTextEditing: false
     function beginTextEdit(key) {
         if (root.textUndoKey === key)
             return
@@ -239,6 +335,13 @@ Rectangle {
             newKeys.push(item.key)
         })
         root.selectedCanvasObjects = newKeys
+        // UI-originated notification — the STANDARD way: through EventBus's
+        // notify() (stamps level/title/message/origin=ui and namespaces the
+        // topic under ui.*), so NotificationCenter toasts it and any other
+        // subscriber sees it exactly like engine traffic. Screens never call
+        // NotificationCenter directly and never hand-roll payload maps.
+        EventBus.notify(qsTr("%1 item(s) pasted").arg(newKeys.length),
+                        "success", "Edit", "ui.edit.itemsPasted")
     }
 
     // Right-click context menu for canvas text objects (Edit / Duplicate /
@@ -677,13 +780,35 @@ Rectangle {
                 text: qsTr("Template · Worship")
             }
         }
+        // KERNEL-DRIVEN, not baked text: reflects real project.saved events
+        // relayed from the engine (autosave flag included). Before the first
+        // save it says so honestly instead of claiming an autosave that never
+        // happened. Backfilled from the relay ring for events that fired
+        // before this screen existed.
         Text {
+            id: saveLabelText
             x: 556
             y: 17
             color: "#5c6475"
             font.family: "Inter"
             font.pixelSize: 9
-            text: qsTr("Autosaved ✓")
+            text: qsTr("Not saved yet")
+            function applySave(autosave) { text = autosave ? qsTr("Autosaved ✓") : qsTr("Saved ✓") }
+            Component.onCompleted: {
+                const recent = EngineBridge.recentEngineEvents(200)
+                for (let i = recent.length - 1; i >= 0; --i)
+                    if (recent[i].topic === "project.saved") {
+                        applySave(recent[i].autosave)
+                        break
+                    }
+            }
+        }
+        Connections {
+            target: EngineBridge
+            function onEngineEvent(topic, payload) {
+                if (topic === "project.saved")
+                    saveLabelText.applySave(payload && payload.autosave === true)
+            }
         }
         Text {
             x: 638
@@ -932,12 +1057,20 @@ Rectangle {
             // only ever pushes) over genuinely uncovered space.
             cursorShape: Qt.ArrowCursor
             function syncCursor() {
-                if (visible && enabled && (containsMouse || AppCursor.hovered(canvasBackgroundArea)))
+                // Position truth only: containsMouse latches in this build
+                // (hover-exit never delivers — KNOWN_ISSUES.md); the pointer-
+                // position stream tracks both directions reliably.
+                if (visible && enabled && AppCursor.hovered(canvasBackgroundArea))
                     AppCursor.push(Qt.ArrowCursor, canvasBackgroundArea)
                 else
                     AppCursor.pop(canvasBackgroundArea)
             }
-            onContainsMouseChanged: syncCursor()
+            // Recompute from the pointer-position stream (every move) instead
+            // of onContainsMouseChanged — same mechanism as PositionHoverArea.
+            Connections {
+                target: AppCursor
+                function onPointerMoved() { canvasBackgroundArea.syncCursor() }
+            }
             onEnabledChanged: syncCursor()
             Component.onDestruction: AppCursor.pop(canvasBackgroundArea)
             onClicked: {
@@ -1130,7 +1263,20 @@ Rectangle {
                     // exits edit mode without committing. Without this, a
                     // second double-click-and-type into the same item would
                     // silently merge into the first session's undo step.
-                    onEditingChanged: { if (!itemTextLabel.editing) root.endTextEdit() }
+                    //
+                    // Also tracks root.anyTextEditing — separate from
+                    // textUndoKey, which only gets set on the session's
+                    // FIRST KEYSTROKE (see beginTextEdit's own comment) and
+                    // so stays empty the whole time if you enter edit mode
+                    // and press Ctrl+Z before typing anything. This flips
+                    // true the instant edit mode actually starts (the
+                    // double-click), which is what the undo/redo Shortcuts
+                    // below actually need to stay enabled through.
+                    onEditingChanged: {
+                        root.anyTextEditing = itemTextLabel.editing
+                        if (!itemTextLabel.editing)
+                            root.endTextEdit()
+                    }
                     onSelectRequested: (mods) => root.handleCanvasSelect(canvasItemObject.modelData.key, mods)
                     onMoveRequested: (dx, dy, snapDisabled) => {
                         if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
@@ -1138,6 +1284,22 @@ Rectangle {
                         root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
                     }
                     onDragEnded: root.endCanvasDrag()
+                    // Undo/redo chords pressed while this item's edit is
+                    // open (see EditableCanvasLabel.undoRedoRequested for
+                    // why they arrive here instead of via the Shortcuts
+                    // below: the focused TextEdit accepts their
+                    // ShortcutOverride, so the Shortcuts never activate).
+                    // Deferred with Qt.callLater for the same reason
+                    // UndoHistory.commit is deferred: undo() applies a
+                    // snapshot that DESTROYS AND RECREATES this very
+                    // delegate — running it synchronously here would mutate
+                    // the model mid-key-dispatch from inside the dying
+                    // TextEdit (the documented AudioEffectsPanel hazard).
+                    // By the callLater tick the event is done, undo() has
+                    // abandoned the open session's pending snapshot and
+                    // pulled focus back to mCanvas — a clean exit path.
+                    onUndoRedoRequested: (undo) => Qt.callLater(undo ? root.undo
+                                                                     : root.redo)
                 }
 
                 // The full live-preview visual (lifted from the former fixed
@@ -1873,6 +2035,26 @@ Rectangle {
         border.width: 1
         color: "#12131a"
 
+        // Plain background cursor reset — declared FIRST (so every real
+        // button below sits above it in z-order and still wins its own
+        // hover/cursor). This panel sits outside mCanvas's scale transform,
+        // so a direct cursorShape works here without going through
+        // AppCursor at all (that mechanism exists specifically to work
+        // around cursorShape not applying under a scale transform — see
+        // AppCursorCatcher.qml). Without this, moving the pointer here
+        // right after something elsewhere pushed a non-default OS cursor
+        // (a resize handle's size cursor, a text item's I-beam...) left it
+        // stuck: nothing in this panel's plain background space ever
+        // asserted a cursor of its own to replace it, same gap
+        // EditScreen's canvasBackgroundArea exists to close for the canvas
+        // side.
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.NoButton
+            cursorShape: Qt.ArrowCursor
+        }
+
         Rectangle {
             x: 12
             y: 6
@@ -2035,6 +2217,18 @@ Rectangle {
         // target the active slide, which doesn't exist yet.
         enabled: root.hasActiveSlide
         opacity: root.hasActiveSlide ? 1 : 0.35
+
+        // Plain background cursor reset — see leftPanel's own copy of this
+        // MouseArea for the full reasoning (this is the exact gap behind
+        // the "cursor stays as I-beam after leaving a text edit to pick a
+        // background/border color" report: this panel hosts that Change
+        // button, and had no cursor handling of its own at all).
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.NoButton
+            cursorShape: Qt.ArrowCursor
+        }
 
         // Interactive now — the ground truth export (VGRPresenter_Main_
         // Screen_Edit_Add_Camera.qml's r_tab*) has this same three-tab bar
@@ -2269,7 +2463,7 @@ Rectangle {
             targets: root.selectedCanvasObjects.map((k) => root.canvasObjectByKey(k)?.style).filter((s) => s !== null && s !== undefined)
             fillSupported: root.primarySelectedSupportsFill
             undoHook: root.pushUndoSnapshot
-            focusHook: mCanvas.forceActiveFocus
+            focusHook: function () { mCanvas.forceActiveFocus() }
             onChangeBorderRequested: {
                 root.bgModalTarget = "border"
                 root.bgModalOpen = true
@@ -2291,7 +2485,7 @@ Rectangle {
                 && root.primarySelectedItem.kind === "text"
             target: visible ? root.primarySelectedItem : null
             undoHook: root.pushUndoSnapshot
-            focusHook: mCanvas.forceActiveFocus
+            focusHook: function () { mCanvas.forceActiveFocus() }
             onChangeColorRequested: {
                 root.bgModalTarget = "textColor"
                 root.bgModalOpen = true
@@ -2530,14 +2724,26 @@ Rectangle {
     // Escape) already relies on to know nothing is mid-edit — a focused
     // TextInput (an item being typed into, a modal's search field, ...)
     // steals focus away from mCanvas, so these can't fire mid-typing.
+    //
+    // Undo/redo specifically ALSO stay enabled while root.anyTextEditing is
+    // true — i.e. while a canvas text item is mid-edit specifically (not
+    // just any focused text field elsewhere, like a slide rename or a hex
+    // color input, which don't set this) — by explicit request: Ctrl+Z
+    // should jump straight out of an in-progress text edit and revert the
+    // whole step, not require clicking away first. canvasHistory.undo()/
+    // redo() below hand focus back to mCanvas either way. Deliberately NOT
+    // textUndoKey here — that only gets set on the edit session's first
+    // KEYSTROKE (see beginTextEdit's comment), so it stays "" if you enter
+    // edit mode and press Ctrl+Z before typing anything; anyTextEditing
+    // flips true the instant edit mode itself starts.
     Shortcut {
         sequence: root.shortcutBindings.undo
-        enabled: mCanvas.activeFocus
+        enabled: mCanvas.activeFocus || root.anyTextEditing
         onActivated: root.undo()
     }
     Shortcut {
         sequence: root.shortcutBindings.redo
-        enabled: mCanvas.activeFocus
+        enabled: mCanvas.activeFocus || root.anyTextEditing
         onActivated: root.redo()
     }
     // Ctrl+Y — the second-standard redo chord, alongside Ctrl+Shift+Z above.
@@ -2545,7 +2751,7 @@ Rectangle {
     // are why users report "redo is broken" on the other.
     Shortcut {
         sequence: root.shortcutBindings.redoAlt
-        enabled: mCanvas.activeFocus
+        enabled: mCanvas.activeFocus || root.anyTextEditing
         onActivated: root.redo()
     }
     Shortcut {

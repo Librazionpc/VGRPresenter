@@ -2946,9 +2946,45 @@ Rectangle {
                         font.pixelSize: 11
                         font.weight: Font.Normal
                         horizontalAlignment: Text.AlignHCenter
-                        text: qsTr("Autosaved 2 mins ago")
                         textFormat: Text.PlainText
                         verticalAlignment: Text.AlignTop
+                        // KERNEL-DRIVEN: real project.saved relay events with a
+                        // live "n ago" ticker, not the export's frozen string.
+                        property real lastSaveTs: 0
+                        function relabel() {
+                            if (lastSaveTs <= 0) {
+                                text = qsTr("Not saved yet")
+                                return
+                            }
+                            const mins = Math.max(0, Math.floor((Date.now() - lastSaveTs) / 60000))
+                            text = mins === 0 ? qsTr("Autosaved just now")
+                                 : qsTr("Autosaved %1 min%2 ago").arg(mins).arg(mins === 1 ? "" : "s")
+                        }
+                        Timer {
+                            interval: 30000
+                            running: parent.lastSaveTs > 0
+                            repeat: true
+                            triggeredOnStart: true
+                            onTriggered: parent.relabel()
+                        }
+                        Component.onCompleted: {
+                            const recent = EngineBridge.recentEngineEvents(200)
+                            for (let i = recent.length - 1; i >= 0; --i)
+                                if (recent[i].topic === "project.saved") {
+                                    lastSaveTs = recent[i].ts
+                                    break
+                                }
+                            relabel()
+                        }
+                    }
+                    Connections {
+                        target: EngineBridge
+                        function onEngineEvent(topic, payload) {
+                            if (topic === "project.saved" && payload) {
+                                autosaved_2_mins_ago.lastSaveTs = Date.now()
+                                autosaved_2_mins_ago.relabel()
+                            }
+                        }
                     }
                 }
             }

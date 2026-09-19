@@ -81,6 +81,17 @@ Item {
     // Fired on release of a body-drag (whether or not it actually moved),
     // so a consumer can clear its snap-guide/group-drag state.
     signal dragEnded()
+    // Fired when the user presses an undo/redo chord (Ctrl+Z / Ctrl+Shift+Z
+    // / Ctrl+Y) while editing. A focused TextEdit ACCEPTS the ShortcutOverride
+    // for those chords (it's editable), so the EditScreen-level Shortcuts
+    // never activate and the TextEdit's own INTERNAL undo would eat them —
+    // exactly the "undo doesn't work while the item is in edit mode; it
+    // works once I click away" report. The edit forwards the chords out
+    // instead (see editInput's Keys.onPressed); the consumer routes them to
+    // its real history. Deferred execution is the CONSUMER's job — this
+    // signal is emitted from inside the TextEdit's own key-event dispatch,
+    // and an undo applies a snapshot that destroys this very delegate.
+    signal undoRedoRequested(bool undo)
 
     // Fills whatever box it's placed in (the owning DraggableCanvasText's
     // full content area), not just its own text's natural size — content-
@@ -116,6 +127,24 @@ Item {
         wrapMode: displayText.wrapMode
         selectByMouse: true
 
+            // Fixed-color blinking caret — TextEdit draws its cursor using its
+            // own `color` (the text color) unless given a cursorDelegate, so
+            // without one, changing the text's color also changed the caret's
+            // color, making it hard to see (or invisible) against some colors.
+            // TextEdit positions this automatically; a CUSTOM delegate is only
+            // responsible for its own visual AND its own blink — the built-in
+            // automatic blink is specifically a property of the default cursor,
+            // not something TextEdit keeps driving once you supply your own.
+            cursorDelegate: Rectangle {
+                width: 2
+                color: "#ffffff"
+                SequentialAnimation on opacity {
+                    loops: Animation.Infinite
+                    PropertyAnimation { to: 0; duration: 500 }
+                    PropertyAnimation { to: 1; duration: 500 }
+                }
+            }
+
         // Hover-scoped edit cursor: the I-beam override is only on the
         // stack while the pointer is actually over the field. Pushing it
         // unconditionally for the whole edit session made it stick
@@ -124,12 +153,15 @@ Item {
         // pop never ran (same scale limitation as ever: TextInput's
         // built-in cursor can't apply under the zoom transform).
         function syncEditCursor() {
-            // AppCursor.hovered(editInput) — position truth — covers the
-            // edit-opens-under-a-stationary-pointer case where the fresh
-            // hover area's containsMouse hasn't latched yet (needs a mouse
-            // event). Without it the I-beam intermittently failed to show
-            // right at edit start until the mouse moved.
-            if (visible && (editHoverArea.containsMouse || AppCursor.hovered(editInput)))
+            // AppCursor.hovered(editInput) — position truth — is the ONLY
+            // signal here now. The old editHoverArea.containsMouse
+            // disjunct is a trap in this build: hover-exit never delivers
+            // to MouseAreas (KNOWN_ISSUES.md), so containsMouse latches
+            // true and the I-beam stuck after leaving the field. The
+            // catcher's pointer-position stream covers both directions —
+            // including the edit-opens-under-a-stationary-pointer case
+            // that motivated the original disjunct.
+            if (visible && AppCursor.hovered(editInput))
                 AppCursor.push(Qt.IBeamCursor, editInput)
             else
                 AppCursor.pop(editInput)
@@ -151,6 +183,30 @@ Item {
             text = preEditText
             root.editing = false
         }
+        // Intercept the undo/redo chords BEFORE the TextEdit's own key
+        // handling (Keys priority is BeforeItem by default): a focused,
+        // editable TextEdit accepts the ShortcutOverride for them, so the
+        // app-level Shortcuts never fire and the internal QQuickTextEdit
+        // undo would otherwise run instead — the canvas history would never
+        // see the chord (probe-verified: with focus on a TextEdit, a
+        // window-level Ctrl+Z Shortcut fires 0 times). accepted: true both
+        // blocks the internal undo and keeps the Shortcut suppressed
+        // (ShortcutOverride was accepted by us, the focused item).
+        Keys.onPressed: (e) => {
+            const ctrl = (e.modifiers & Qt.ControlModifier) !== 0
+            if (!ctrl)
+                return
+            if (e.key === Qt.Key_Z && (e.modifiers & Qt.ShiftModifier)) {
+                e.accepted = true
+                root.undoRedoRequested(false)
+            } else if (e.key === Qt.Key_Z) {
+                e.accepted = true
+                root.undoRedoRequested(true)
+            } else if (e.key === Qt.Key_Y) {
+                e.accepted = true
+                root.undoRedoRequested(false)
+            }
+        }
         // textEdited (not textChanged) — user keystrokes only, so a
         // programmatic write back into the model can't echo back here.
         onTextEdited: root.edited(text)
@@ -162,18 +218,25 @@ Item {
 
     // Tracks the pointer over the label while editing (the drag area below
     // hides itself then, so it can't do it) — feeds syncEditCursor above.
-    // Declared after editInput so it's topmost and sees hover even when the
-    // cursor is over the TextInput itself (a TextInput accepts hover, so a
-    // handler UNDER it would never fire there). acceptedButtons: NoButton
+    // Declared after editInput so it's topmost. acceptedButtons: NoButton
     // keeps it invisible to clicks — presses still reach editInput below.
+    // Trigger is the pointer-POSITION stream, not containsMouse: exit never
+    // delivers to MouseAreas in this build (KNOWN_ISSUES.md), so a
+    // containsMouse-driven trigger latched and the I-beam stuck after the
+    // pointer left the field. Position truth covers both directions, and
+    // onVisibleChanged still covers edit-open/close under a stationary
+    // pointer.
     MouseArea {
         id: editHoverArea
         anchors.fill: parent
         visible: root.editing
-        hoverEnabled: true
+        hoverEnabled: false
         acceptedButtons: Qt.NoButton
-        onContainsMouseChanged: editInput.syncEditCursor()
         onVisibleChanged: editInput.syncEditCursor()
+        Connections {
+            target: AppCursor
+            function onPointerMoved() { editInput.syncEditCursor() }
+        }
     }
 
     MouseArea {
@@ -197,16 +260,24 @@ Item {
         // forces it at any zoom. cursorShape stays as the zoom==1 fallback;
         // the pushed shape is identical so the two can't disagree.
         function syncCursor() {
-            // Same position-truth rule as CanvasDragArea's syncCursor: the
-            // appearance-under-a-stationary-pointer cases (item re-selected
-            // after an edit, zoom flip) — containsMouse lags there.
-            if (visible && (containsMouse || pressed || AppCursor.hovered(root)))
+            // Position truth + pressed. The old containsMouse disjunct is a
+            // latch trap: hover-exit never delivers to MouseAreas in this
+            // build (KNOWN_ISSUES.md), so containsMouse stuck true and this
+            // push outlived the pointer forever. `pressed` still covers the
+            // active drag (the grab keeps press alive outside the item); on
+            // release, AppCursor.hovered decides from where the pointer IS.
+            if (visible && (pressed || AppCursor.hovered(root)))
                 AppCursor.push(dragMoved ? Qt.ClosedHandCursor : Qt.IBeamCursor, dragArea)
             else
                 AppCursor.pop(dragArea)
         }
-        onContainsMouseChanged: syncCursor()
+        // (Position-stream trigger via the Connections below; the drag
+        // onPositionChanged handler covers moves while pressed.)
         onEnabledChanged: syncCursor()
+        Connections {
+            target: AppCursor
+            function onPointerMoved() { dragArea.syncCursor() }
+        }
         // While editing, this area hides itself — an invisible MouseArea
         // stops receiving hover events, so containsMouse can stay true with
         // nobody left to clear it. Pop explicitly on hide (syncCursor only

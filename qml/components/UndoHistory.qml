@@ -95,23 +95,63 @@ QtObject {
         if (history._pendingBefore === null || !history.capture || !history.apply)
             return
         const before = history._pendingBefore
-        const after = history.capture()
         const label = history._pendingLabel
         history._pendingBefore = null
-        EngineBridge.pushCommand(label,
-            function () { history.apply(after) },
-            function () { history.apply(before) })
-        // No "message" key — see EventBus.h's convention: this stays silent
-        // telemetry (NotificationCenter only turns a payload into a toast
-        // when it carries one), so every nudge/drag doesn't spam a toast,
-        // while still being a real, subscribable event for anything that
-        // wants to react to undo activity project-wide (an activity log, a
-        // status line, ...) without coupling to EngineBridge or any one
-        // screen's UndoHistory instance directly.
-        EventBus.publish("undo.pushed", { label: label })
+        // Deferred: commit() can be called SYNCHRONOUSLY from deep inside
+        // another item's own event handler — e.g. a resize handle's
+        // onPressed calls forceActiveFocus() to steal focus away from a
+        // still-open text edit, which blurs its TextEdit, which fires
+        // endTextEdit() -> commit(), all while that onPressed handler is
+        // still on the call stack. EngineBridge.pushCommand's doFn runs
+        // SYNCHRONOUSLY too (bps::project::UndoRedoManager::ExecuteCommand
+        // calls cmd->Execute() immediately), and for canvas history that
+        // means destroying and recreating every item right then — while
+        // the ORIGINAL caller's own item (the resize handle's
+        // DraggableCanvasText) is still executing code that reads `root`.
+        // That's exactly the "mutate a model from inside a delegate's own
+        // event, destroying the delegate mid-dispatch" hazard already
+        // documented in AudioEffectsPanel.qml — here it surfaces as
+        // "ReferenceError: root is not defined" a couple of lines after a
+        // forceActiveFocus() call. Qt.callLater defers the whole capture-
+        // and-push past the current dispatch, same "emit-now, mutate-later"
+        // fix shape used there — safe even when commit() is already being
+        // called from inside push()'s OWN Qt.callLater (a harmless extra
+        // tick, not a second command).
+        Qt.callLater(function () {
+            const after = history.capture()
+            EngineBridge.pushCommand(label,
+                function () { history.apply(after) },
+                function () { history.apply(before) })
+            // No "message" key — see EventBus.h's convention: this stays
+            // silent telemetry (NotificationCenter only turns a payload
+            // into a toast when it carries one), so every nudge/drag
+            // doesn't spam a toast, while still being a real, subscribable
+            // event for anything that wants to react to undo activity
+            // project-wide (an activity log, a status line, ...) without
+            // coupling to EngineBridge or any one screen's UndoHistory
+            // instance directly.
+            EventBus.publish("undo.pushed", { label: label })
+        })
+    }
+
+    function abandonPending() {
+        // Discards an open push(label, false) bracket — the pending "before"
+        // snapshot describes an edit that never became a command, so it must
+        // NOT commit afterwards. The critical caller is undo()/redo() below:
+        // undoing while a gesture/typing session is mid-flight reverts the
+        // surface, and the session-end path (endTextEdit -> commit) would
+        // otherwise capture that POST-UNDO state as its "after" and push a
+        // junk command on top — clearing the redo branch with it (so the
+        // entry you just undid also became un-redoable) and making the next
+        // Ctrl+Z "undo the undo". Abandoning first leaves the stack exactly
+        // as the engine's own undo() produced it.
+        history._pendingBefore = null
+        history._pendingLabel = ""
+        history._settleTimer.stop()
     }
 
     function undo() {
+        history.abandonPending()
         EngineBridge.undo()
         if (history.afterRestore)
             history.afterRestore()
@@ -125,6 +165,7 @@ QtObject {
     }
 
     function redo() {
+        history.abandonPending()
         EngineBridge.redo()
         if (history.afterRestore)
             history.afterRestore()
@@ -141,6 +182,6 @@ QtObject {
     // document, loading a show file), not after normal edits.
     function clear() {
         EngineBridge.clearHistory()
-        history._pendingBefore = null
+        history.abandonPending()
     }
 }
