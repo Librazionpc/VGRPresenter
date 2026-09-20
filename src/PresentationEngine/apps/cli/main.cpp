@@ -28,7 +28,32 @@
 #include <cstdio>
 #include <cstdlib>
 #include <format>
+#if defined(__cpp_lib_print)
 #include <print>
+#else
+#include <string_view>
+// MinGW 13's libstdc++ predates <print> (GCC 14 ships it); same surface via
+// <format> + cstdio until the toolchain moves up. The real std::print /
+// std::println are used unchanged once __cpp_lib_print is defined.
+namespace std {
+template <typename... Args>
+void print(string_view fmt, Args&&... args) {
+    fputs(vformat(fmt, make_format_args(args...)).c_str(), stdout);
+}
+template <typename... Args>
+void print(FILE* stream, string_view fmt, Args&&... args) {
+    fputs(vformat(fmt, make_format_args(args...)).c_str(), stream);
+}
+template <typename... Args>
+void println(string_view fmt, Args&&... args) {
+    fputs((vformat(fmt, make_format_args(args...)) + '\n').c_str(), stdout);
+}
+template <typename... Args>
+void println(FILE* stream, string_view fmt, Args&&... args) {
+    fputs((vformat(fmt, make_format_args(args...)) + '\n').c_str(), stream);
+}
+}  // namespace std
+#endif
 #include <string>
 #include <thread>
 

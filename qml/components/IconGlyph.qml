@@ -37,6 +37,9 @@ Item {
             case "stop": return stopC
             case "close": return closeC
             case "camera": return cameraC
+            case "mic": return micC
+            case "micOff": return micOffC
+            case "volume2": return volume2C
             case "clock": return clockC
             case "timer": return timerC
             case "shape": return shapeC
@@ -197,6 +200,42 @@ Item {
         FillIcon {
             width: 8; height: 9
             svgPath: "M 0 1.0002304296146796 C 0 0.8242881310285464 0.04632834597266171 0.6514468130225394 0.1344584035227467 0.49915853390607945 C 0.2225884610728317 0.3468702547896195 0.34934774115207246 0.22052685298362776 0.5019370784515489 0.13288568305758774 C 0.6545264157510253 0.04524451313154773 0.8275432973060747 0 1.003517796589478 0 C 1.179492295872881 0 1.3521941580105123 0.04761252409988084 1.504184842173567 0.13628745355382385 L 7.50342070790257 3.635056998416793 C 7.654821159118948 3.7228910511616786 7.7805138396052795 3.84891533583123 7.8679359380336535 4.00053502900992 C 7.9553580364620275 4.15215472218861 8.001448406938437 4.32405951923572 8.00160026550293 4.499068798405053 C 8.001752124067423 4.674078077574385 7.955959863935468 4.8460622180753665 7.8688010268378115 4.997833341774561 C 7.781642189740155 5.149604465473755 7.656168821664965 5.275846337459151 7.504921021782327 5.36394290155996 L 1.504184842173567 8.863712710348146 C 1.3521941580105123 8.952387639802089 1.179492295872881 8.999397009830902 1.003517796589478 8.999994278331213 C 0.8275432973060747 9.000591546831524 0.6545264157510253 8.954755412367557 0.5019370784515489 8.867114242441517 C 0.34934774115207246 8.779473072515476 0.2225884610728317 8.653129894212173 0.1344584035227467 8.500841615095712 C 0.04632834597266171 8.348553335979252 0 8.175711630568587 0 7.9997693319824545 Z"
+        }
+    }
+
+    Component {
+        id: micC
+        StrokeIcon {
+            width: 24; height: 24
+            // Lucide "mic" (24×24) — capsule + stand arc + stem + base.
+            svgPath: "M 12 2 a 3 3 0 0 0 -3 3 v 7 a 3 3 0 0 0 6 0 V 5 a 3 3 0 0 0 -3 -3 Z M 19 10 v 2 a 7 7 0 0 1 -14 0 v -2 M 12 19 v 3 M 8 22 h 8"
+        }
+    }
+
+    Component {
+        id: volume2C
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2 // Lucide's native 2px @ 24px grid
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                // Lucide "volume-2" — speaker cone + one near arc + two
+                // far arcs (the "sound waves" pair the reference's
+                // Channels header shows next to the label).
+                PathSvg { path: "M 11 5 L 6 9 L 2 9 L 2 15 L 6 15 L 11 19 L 11 5 Z M 15.54 8.46 a 5 5 0 0 1 0 7.07 M 19.07 4.93 a 10 10 0 0 1 0 14.14" }
+            }
+        }
+    }
+
+    Component {
+        id: micOffC
+        StrokeIcon {
+            width: 24; height: 24
+            // Lucide "mic-off" — the strike through the muted mic.
+            svgPath: "M 23 23 L 1 1 M 9 9 v 3 a 3 3 0 0 0 5.12 2.12 M 15 9.34 V 4 a 3 3 0 0 0 -5.94 -0.6 M 17 16.95 A 7 7 0 0 1 5 12 v -2 M 19 12 v 1 a 7 7 0 0 1 -0.11 1.23 M 12 19 v 4 M 8 23 h 3 M 16 23 h -3"
         }
     }
 

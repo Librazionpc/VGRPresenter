@@ -13,6 +13,7 @@
 #include "platform/windows/WindowsLibrary.hpp"
 #include "platform/windows/WindowsMonitor.hpp"
 #include "platform/windows/WindowsAudio.hpp"
+#include "platform/windows/WindowsVideo.hpp"
 #include "platform/windows/WindowsNetwork.hpp"
 #include "platform/windows/WindowsPower.hpp"
 #include "platform/windows/WindowsClipboard.hpp"
@@ -45,6 +46,7 @@ public:
     ILibrary& Library() override { return library_; }
     IMonitor& Monitor() override { return monitor_; }
     IAudio& Audio() override { return audio_; }
+    IVideo& Video() override { return video_; }
     INetwork& Network() override { return network_; }
     IPower& Power() override { return power_; }
     IClipboard& Clipboard() override { return clipboard_; }
@@ -67,6 +69,7 @@ private:
     WindowsLibrary library_;
     WindowsMonitor monitor_;
     WindowsAudio audio_;
+    WindowsVideo video_;
     WindowsNetwork network_;
     WindowsPower power_;
     WindowsClipboard clipboard_;
@@ -81,6 +84,7 @@ private:
     std::optional<PowerInfo> lastPower_;
     std::string lastResolutions_;
     std::string lastAudioFp_;
+    std::string lastVideoFp_;
 };
 
 } // namespace bps::platform

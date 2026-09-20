@@ -2709,22 +2709,125 @@ Rectangle {
             // roster from the same model. Main Output is protected upstream
             // (OutputListModel::removeOutput refuses it and its Delete
             // affordance is hidden), so the wall always keeps a primary.
-            Grid {
+            // Tile sizing revision: rowCount() isn't notifyable from QML,
+            // so bump a counter on roster changes — every tile's width
+            // binding reads it and re-evaluates when outputs come and go
+            // (same pattern as ScreenForm's displayRev).
+            property int wallRev: 0
+            Connections {
+                target: OutputListModel
+                function onRowsInserted() { right_column.wallRev++ }
+                function onRowsRemoved() { right_column.wallRev++ }
+            }
+
+            // Paged monitor wall — max 4 tiles (2×2) per page; output 5+
+            // lands on the next page and the wall SWIPES to it (snap-one-
+            // item Flickable), with dot indicators below. One output still
+            // gets the full-width preview tile; 2–4 share a 2×2 page.
+            // Slots are computed positions (page = index/capacity) so a
+            // single Repeater feeds every page.
+            Flickable {
                 id: monitorWall
 
-                x: 12
+                anchors.horizontalCenter: parent.horizontalCenter
+
                 // Below the 39px monitors_header (restores the original
                 // composition — the header paints over the wall otherwise).
                 y: 51
-                width: 376
 
-                columns: 2
-                rowSpacing: 11
-                columnSpacing: 12
+                readonly property int count: right_column.wallRev >= 0 ? OutputListModel.rowCount() : 0
+                // Page capacity: a lone output gets a hero page of its own.
+                readonly property int perPage: count === 1 ? 1 : 4
+                readonly property int pageCount: Math.max(1, Math.ceil(count / perPage))
+                readonly property real pageW: count === 1 ? 376 : 376
+                readonly property real slotW: count === 1 ? 376 : 182
+                readonly property real slotH: count === 1
+                                             ? 6 + (slotW - 12) * 9 / 16 + 6 + 16 + 6
+                                             : 143
+
+                width: 376
+                height: pageCount === 1 ? slotH
+                                        : 2 * slotH + 11
+                contentWidth: pageCount * pageW
+                contentHeight: height
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                flickDeceleration: 2000
+                interactive: pageCount > 1
+
+                property int currentPage: 0
+                // Page snap (Flickable has no snapMode): when a drag or a
+                // flick ends, settle on the nearest page with a short ease.
+                // contentX writes from these handlers are programmatic, not
+                // user drags, so no fighting occurs.
+                function snapToPage() {
+                    const target = Math.max(0, Math.min(pageCount - 1, Math.round(contentX / pageW)))
+                    currentPage = target
+                    snapAnim.to = target * pageW
+                    snapAnim.restart()
+                }
+                onDragEnded: snapToPage()
+                onFlickEnded: snapToPage()
+
+                NumberAnimation {
+                    id: snapAnim
+                    target: monitorWall
+                    property: "contentX"
+                    duration: 180
+                    easing.type: Easing.OutCubic
+                }
+
+                function goTo(page) {
+                    currentPage = Math.max(0, Math.min(pageCount - 1, page))
+                    snapAnim.to = currentPage * pageW
+                    snapAnim.restart()
+                }
 
                 Repeater {
                     model: OutputListModel
-                    delegate: OutputMonitorTile {}
+
+                    delegate: OutputMonitorTile {
+                        required property int index
+
+                        x: {
+                            const perPage = monitorWall.perPage
+                            const page = monitorWall.count === 1 ? 0 : Math.floor(index / perPage)
+                            const slot = monitorWall.count === 1 ? 0 : index % perPage
+                            return page * monitorWall.pageW + (slot % 2) * (monitorWall.slotW + 12)
+                        }
+                        y: {
+                            const perPage = monitorWall.perPage
+                            const slot = monitorWall.count === 1 ? 0 : index % perPage
+                            return Math.floor(slot / 2) * (monitorWall.slotH + 11)
+                        }
+                        width: monitorWall.slotW
+                    }
+                }
+            }
+
+            // Page dots — one per page, current page lit; click to swipe.
+            Row {
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: monitorWall.y + monitorWall.height + 6
+                visible: monitorWall.pageCount > 1
+                spacing: 6
+
+                Repeater {
+                    model: monitorWall.pageCount
+
+                    delegate: Rectangle {
+                        required property int index
+                        width: 6; height: 6; radius: 3
+                        color: index === monitorWall.currentPage ? "#6c5ce7" : "#2b2e3d"
+                        Behavior on color { ColorAnimation { duration: 120 } }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            anchors.margins: -4
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: monitorWall.goTo(parent.index)
+                        }
+                    }
                 }
             }
 
@@ -2782,7 +2885,7 @@ Rectangle {
             Image {
                 id: line_2
 
-                y: monitorWall.y + monitorWall.implicitHeight + 11
+                y: monitorWall.y + monitorWall.height + (monitorWall.pageCount > 1 ? 22 : 11)
 
                 source: Qt.resolvedUrl("assets/line_2.png")
             }
@@ -2798,11 +2901,14 @@ Rectangle {
             Rectangle {
                 id: clock_panel
 
-                // Tracks the wall's bottom edge so extra outputs push the
-                // clock down instead of overlapping it.
-                y: monitorWall.y + monitorWall.implicitHeight + 12
+                // Always the BOTTOM region: the top edge follows the wall
+                // (extra outputs push it down) and the panel stretches to
+                // the column's bottom edge — the time block never drifts
+                // up into a dead zone when the wall is short.
+                y: monitorWall.y + monitorWall.height + (monitorWall.pageCount > 1 ? 23 : 12)
 
-                height: 439
+                height: parent.height - y
+
                 width: 400
 
                 color: "#0f1015"
@@ -2810,8 +2916,12 @@ Rectangle {
                 Rectangle {
                     id: digital_clock_group
 
-                    x: 24
-                    y: 135
+                    // Dynamic centering — was fixed x/y in the old 439px
+                    // panel, which drifted off-balance as soon as the
+                    // panel's height became content-driven.
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenterOffset: -48
 
                     height: 88
                     width: 352
@@ -2858,8 +2968,9 @@ Rectangle {
                 Rectangle {
                     id: clock_actions
 
-                    x: 24
-                    y: 243
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenterOffset: 55
 
                     height: 61
                     width: 352

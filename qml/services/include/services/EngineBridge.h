@@ -8,6 +8,9 @@
 #include <qqml.h>
 
 #include "core/events/EventBus.hpp"
+#include "platform/IAudio.hpp"
+#include "platform/IMonitor.hpp"
+#include "platform/IVideo.hpp"
 
 class QJSEngine;
 class QQmlEngine;
@@ -45,6 +48,28 @@ class EngineBridge : public QObject
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY stackChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY stackChanged)
     Q_PROPERTY(bool booted READ booted NOTIFY bootedChanged)
+    // Real hardware, enumerated by the engine's own platform layer (audio
+    // via the PAL's IAudio — WinMM waveIn/waveOut on Windows — displays via
+    // IMonitor) — the AV settings dialogs' device selects feed from these
+    // instead of mock rosters.
+    // Enumerated at boot and re-enumerated automatically on the kernel's
+    // hot-plug events (platform.device_connected / device_removed /
+    // monitor_connected / monitor_disconnected).
+    Q_PROPERTY(QVariantList audioDevices READ audioDevices NOTIFY devicesChanged)
+    Q_PROPERTY(QVariantList screenDevices READ screenDevices NOTIFY devicesChanged)
+    // Real video-capture devices (Media Foundation on Windows): each entry
+    // { id, label, value, modes: ["1080p60", …], maxFps } — modes are the
+    // device's actual capability list and maxFps the device-wide ceiling
+    // the UI greys anything faster against (0 = unknown → no gate).
+    Q_PROPERTY(QVariantList videoDevices READ videoDevices NOTIFY devicesChanged)
+    // NDI network sources, discovered by the ENGINE's own broadcast stack
+    // (BroadcastEngine's NDI provider, which runtime-loads the NDI SDK).
+    // Entries: { id, label, value, url }. ndiAvailable is false when the SDK
+    // is absent (ndiStatus then carries the reason); ndiSources is empty
+    // until the discovery cache warms up (~1s) — the UI re-queries.
+    Q_PROPERTY(QVariantList ndiSources READ ndiSources NOTIFY devicesChanged)
+    Q_PROPERTY(bool ndiAvailable READ ndiAvailable NOTIFY devicesChanged)
+    Q_PROPERTY(QString ndiStatus READ ndiStatus NOTIFY devicesChanged)
 
 public:
     static EngineBridge &instance();
@@ -65,6 +90,25 @@ public:
     Q_INVOKABLE QString bootError() const;
     Q_INVOKABLE QStringList bootLog() const;
     Q_INVOKABLE QString health() const;
+    // One-line boot report for the startup toast: systems count + how many
+    // real audio devices / displays the engine's platform layer enumerated.
+    // Empty until boot() runs. QML reads it in Component.onCompleted —
+    // events published before QML loads have no subscribers, so the summary
+    // is pulled, not pushed.
+    Q_INVOKABLE QString bootSummary() const { return bootSummary_; }
+    // Re-enumerate the platform's audio + display devices (QML-invokable so
+    // a screen can force a refresh when it opens). Safe before boot — yields
+    // empty lists when the PAL has no backend installed.
+    Q_INVOKABLE void refreshDevices();
+    // Each entry: { id, label, value } — value mirrors label because the AV
+    // board stores the human-readable sublabel on its rows; ids ride along
+    // for the future capture-graph plumbing.
+    QVariantList audioDevices() const { return audioDevices_; }
+    QVariantList screenDevices() const { return screenDevices_; }
+    QVariantList videoDevices() const { return videoDevices_; }
+    QVariantList ndiSources() const { return ndiSources_; }
+    bool ndiAvailable() const { return ndiAvailable_; }
+    QString ndiStatus() const { return ndiStatus_; }
     // Called from main.cpp on QGuiApplication::aboutToQuit — orderly
     // teardown of the 29 systems (threads joined, database flushed) instead
     // of letting process exit cut them off mid-flight.
@@ -103,11 +147,16 @@ signals:
     // internal traffic.
     void engineEvent(const QString &topic, const QVariantMap &payload);
 
+    // Emitted whenever the device lists are (re)enumerated — boot and every
+    // platform hot-plug event.
+    void devicesChanged();
+
 private:
     explicit EngineBridge(QObject *parent = nullptr);
     Q_DISABLE_COPY(EngineBridge)
 
     QString bootError_;
+    QString bootSummary_;
 
     // ---- Engine → UI relay (see startRelay in EngineBridge.cpp) ----------
     // The kernel drives everything; the UI only relays. Attaches a Logger
@@ -116,6 +165,15 @@ private:
     // queued invoke before touching the UI-side EventBus.
     void startRelay();
     void stopRelay();
+
+    // GUI-thread-only device enumeration into audioDevices_/screenDevices_.
+    void enumerateDevices();
+    QVariantList audioDevices_;
+    QVariantList screenDevices_;
+    QVariantList videoDevices_;
+    QVariantList ndiSources_;
+    bool ndiAvailable_ = false;
+    QString ndiStatus_;
 
     std::vector<bps::Subscription> relaySubs_;
     QVariantList recentEngineEvents_;   // ring capped at kMaxRecentEvents

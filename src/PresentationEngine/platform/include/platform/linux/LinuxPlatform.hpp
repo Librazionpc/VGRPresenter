@@ -9,6 +9,7 @@
 #include "LinuxLibrary.hpp"
 #include "LinuxMonitor.hpp"
 #include "LinuxAudio.hpp"
+#include "LinuxVideo.hpp"
 #include "LinuxNetwork.hpp"
 #include "LinuxPower.hpp"
 #include "LinuxClipboard.hpp"
@@ -43,6 +44,7 @@ public:
     ILibrary& Library() override { return library_; }
     IMonitor& Monitor() override { return monitor_; }
     IAudio& Audio() override { return audio_; }
+    IVideo& Video() override { return video_; }
     INetwork& Network() override { return network_; }
     IPower& Power() override { return power_; }
     IClipboard& Clipboard() override { return clipboard_; }
@@ -65,6 +67,7 @@ private:
     LinuxLibrary library_;
     LinuxMonitor monitor_;
     LinuxAudio audio_;
+    LinuxVideo video_;
     LinuxNetwork network_;
     LinuxPower power_;
     LinuxClipboard clipboard_;
@@ -79,6 +82,7 @@ private:
     std::optional<PowerInfo> lastPower_;      // for power-change events
     std::string lastResolutions_;             // for resolution-change events
     std::string lastAudioFp_;                 // for audio hot-plug events
+    std::string lastVideoFp_;                 // for video hot-plug events
 };
 
 } // namespace bps::platform

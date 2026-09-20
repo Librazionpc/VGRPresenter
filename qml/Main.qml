@@ -21,11 +21,28 @@ ApplicationWindow {
     // is accepted but doesn't switch the view.
     property string currentView: "show"
 
-    // TEMP A/B probe: hide the window-root cursor catcher (set
-    // VGR_NO_CATCHER=1 in the environment) to test whether its HoverHandler
-    // is what suppresses MouseArea hover-exit delivery. REMOVE WITH THE
-    // A/B RESULT.
-    property bool probeNoCatcher: hoverProbeNoCatcher
+    // Previous-run crash report, delivered on the standard notification
+    // pipeline the moment QML is alive. (See main.cpp: the CrashHandler can
+    // only leave a log file from inside a dying process — publishing to the
+    // bus it may have crashed is unsafe by design — so this is the UI half
+    // of that contract. Rotation in ConsumePendingCrashSummary makes it
+    // exactly-once per crash.)
+    Component.onCompleted: {
+        // Previous-run crash report — exactly-once (rotated aside at read).
+        if (typeof pendingCrashSummary !== "undefined" && pendingCrashSummary !== "") {
+            EventBus.notify(
+                qsTr("Recovered from an unexpected shutdown last run (%1). Details were written to the crash log.")
+                    .arg(pendingCrashSummary),
+                "error", qsTr("Stability"), "ui.crash.recovered")
+        }
+        // Boot report with REAL platform facts: the engine's device
+        // enumeration ran during boot, before any QML existed, so the
+        // "engine.boot" event had no subscriber — the summary is pulled
+        // here instead of pushed.
+        const boot = EngineBridge.bootSummary()
+        if (boot !== "")
+            EventBus.notify(boot, "success", qsTr("Engine"), "engine.boot")
+    }
 
     // Screens first (opaque, fill the window), then the shared header strip
     // and the menu layer on top — AppMenuBar must sit above AppHeader because

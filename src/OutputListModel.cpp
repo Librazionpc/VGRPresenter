@@ -18,62 +18,35 @@ OutputListModel::OutputListModel(QObject *parent)
 {
     const QList<OutputContentToggle> content = defaultContent();
 
-    // Assign the seeded outputs to real displays where available — the
-    // roster starts grounded in the actual machine, like FreeShow.
+    // The ONE mandatory output: the primary display — every show needs a
+    // way to put content on the main screen. Everything else (stage,
+    // nursery, stream overlays…) is user-added; no more hardcoded demo
+    // roster. Its res/refresh read from the actual primary screen so the
+    // card shows the machine's real mode, not a mock 1920×1080@60.
     const QList<QScreen *> screens = QGuiApplication::screens();
+    const QScreen *primary = QGuiApplication::primaryScreen();
+    if (!primary && !screens.isEmpty())
+        primary = screens.first();
 
     OutputItem main;
     main.name = QStringLiteral("Main Output");
     main.badge = QStringLiteral("LIVE 1");
     main.kind = QStringLiteral("HDMI");
-    main.res = QStringLiteral("1920×1080");
-    main.refresh = QStringLiteral("60 Hz");
+    if (primary) {
+        const QSize mode = primary->size();
+        const qreal refresh = primary->refreshRate();
+        main.res = QStringLiteral("%1×%2").arg(mode.width()).arg(mode.height());
+        main.refresh = refresh > 0 ? QStringLiteral("%1 Hz").arg(qRound(refresh))
+                                   : QStringLiteral("60 Hz");
+        main.screenName = primary->name();
+    } else {
+        main.res = QStringLiteral("1920×1080");
+        main.refresh = QStringLiteral("60 Hz");
+    }
     main.active = true;
     main.styleIndex = 0;
     main.content = content;
-    if (!screens.isEmpty())
-        main.screenName = screens.first()->name();
     m_outputs.append(main);
-
-    OutputItem stage;
-    stage.name = QStringLiteral("Stage Screen");
-    stage.badge = QStringLiteral("STAGE 1");
-    stage.kind = QStringLiteral("HDMI");
-    stage.res = QStringLiteral("1280×720");
-    stage.refresh = QStringLiteral("60 Hz");
-    stage.styleIndex = 0;
-    stage.content = content;
-    if (screens.size() > 1)
-        stage.screenName = screens.at(1)->name();
-    m_outputs.append(stage);
-
-    OutputItem nursery;
-    nursery.name = QStringLiteral("Nursery Display");
-    nursery.badge = QStringLiteral("NURSERY");
-    nursery.kind = QStringLiteral("HDMI");
-    nursery.res = QStringLiteral("1280×800");
-    nursery.refresh = QStringLiteral("60 Hz");
-    nursery.styleIndex = 0;
-    nursery.content = content;
-    if (screens.size() > 2)
-        nursery.screenName = screens.at(2)->name();
-    m_outputs.append(nursery);
-
-    OutputItem overlay;
-    overlay.name = QStringLiteral("Stream Overlay");
-    overlay.badge = QStringLiteral("OBS FEED");
-    overlay.kind = QStringLiteral("STREAM");
-    overlay.res = QStringLiteral("1920×1080");
-    overlay.refresh = QStringLiteral("30 Hz");
-    overlay.styleIndex = 0;
-    // A stream overlay typically only carries the lower content — keep
-    // camera/clock on, drop the heavier kinds as a sensible default.
-    overlay.content = content;
-    for (OutputContentToggle &toggle : overlay.content) {
-        if (toggle.key == QStringLiteral("media") || toggle.key == QStringLiteral("shape"))
-            toggle.enabled = false;
-    }
-    m_outputs.append(overlay);
 }
 
 QList<OutputContentToggle> OutputListModel::defaultContent()

@@ -285,6 +285,12 @@ Result<void> ProductionGraph::SetEnabled(std::string_view id, bool enabled) {
     return Ok();
 }
 
+Result<void> ProductionGraph::RenameNode(std::string_view id, std::string_view name) {
+    if (auto r = EnsureNode(id); !r.ok()) return r;
+    nodes_[std::string(id)].displayName = std::string(name);
+    return Ok();
+}
+
 Result<void> ProductionGraph::SetSourceState(std::string_view id, SourceState state) {
     if (auto r = EnsureNode(id); !r.ok()) return r;
     nodes_[std::string(id)].sourceState = state;

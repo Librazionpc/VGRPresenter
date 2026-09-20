@@ -5,6 +5,8 @@
 #include "core/logging/Logger.hpp"
 #include "core/events/Events.hpp"
 #include "modules/project/UndoRedoManager.hpp"
+#include "modules/broadcast/BroadcastEngine.hpp"
+#include "platform/PlatformAccessor.hpp"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -14,6 +16,7 @@
 #include <QQmlEngine>
 #include <QPointer>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QVariantMap>
 
 #include <atomic>
@@ -137,6 +140,11 @@ bool EngineBridge::boot()
     // shutdown() BEFORE Kernel::Shutdown() tears its systems down.
     startRelay();
 
+    // Real hardware roster, straight from the PAL — the AV board's device
+    // selects read audioDevices/screenDevices instead of mock lists, and the
+    // hot-plug subscriptions above keep them current from here on.
+    enumerateDevices();
+
     // REPLAY the kernel's CURRENT state into the relay. The Booting → Running
     // transition was published on the engine's bus DURING Boot() — before any
     // relay subscriber existed — so without this replay every consumer's
@@ -157,6 +165,25 @@ bool EngineBridge::boot()
     }
 
     bootError_.clear();
+    // Startup summary for the UI's boot toast: what booted AND what the
+    // platform layer found — real device counts, so "loaded" is a fact, not
+    // a hope. Names listed (up to a few) make it informative at a glance.
+    {
+        QStringList audioNames;
+        for (const QVariant &v : audioDevices_) {
+            audioNames << v.toMap().value("label").toString();
+            if (audioNames.size() >= 3) break;
+        }
+        QStringList screenNames;
+        for (const QVariant &v : screenDevices_) {
+            screenNames << v.toMap().value("label").toString();
+            if (screenNames.size() >= 3) break;
+        }
+        bootSummary_ = QStringLiteral("Engine booted (%1 systems) · %2 audio device(s): %3 · %4 display(s): %5")
+            .arg(bps::Kernel::Instance().BootLog().size())
+            .arg(audioDevices_.size()).arg(audioNames.join(QStringLiteral(", ")).toHtmlEscaped())
+            .arg(screenDevices_.size()).arg(screenNames.join(QStringLiteral(", ")).toHtmlEscaped());
+    }
     EventBus::instance().publish(QStringLiteral("engine.boot"), QVariantMap{
         {QStringLiteral("level"), QStringLiteral("success")},
         {QStringLiteral("title"), QStringLiteral("Engine")},
@@ -301,6 +328,116 @@ QString qstr(const std::string &s) { return QString::fromStdString(s); }
 
 } // namespace
 
+// Enumerates the REAL hardware through the engine's own platform layer —
+// the PAL's IAudio (WinMM waveIn/waveOut on Windows) for capture/output
+// devices, IMonitor for connected displays, IVideo (Media Foundation) for
+// cameras, and the BroadcastEngine's NDI provider for network sources.
+// GUI-thread-only (touches the QVariantList members QML binds to); called
+// from boot() and from the hot-plug relay handlers below. Safe when no PAL
+// backend is installed (yields empty lists — QML keeps its own fallback
+// roster then).
+void EngineBridge::enumerateDevices()
+{
+    audioDevices_.clear();
+    screenDevices_.clear();
+    videoDevices_.clear();
+    if (bps::platform::PlatformAccessor::Installed()) {
+        auto &platform = bps::platform::PlatformAccessor::Get();
+        for (const auto &d : platform.Audio().Enumerate()) {
+            const QString name = qstr(d.name);
+            audioDevices_.append(QVariantMap{
+                {QStringLiteral("id"), qstr(d.id)},
+                {QStringLiteral("label"), name},
+                {QStringLiteral("value"), name},   // AV board stores the readable sublabel
+                {QStringLiteral("isInput"), d.isInput},
+                {QStringLiteral("isDefault"), d.isDefault},
+                // Real endpoint truth from WASAPI (0 = unknown): the
+                // dialogs' Channels rows and meter strip-count read these.
+                {QStringLiteral("channels"), int(d.channels)},
+                {QStringLiteral("sampleRateHz"), int(d.sampleRateHz)},
+            });
+        }
+        for (const auto &m : platform.Monitor().Enumerate()) {
+            const QString name = qstr(m.name);
+            screenDevices_.append(QVariantMap{
+                {QStringLiteral("id"), qstr(m.id)},
+                {QStringLiteral("label"), name.isEmpty() ? qstr(m.id) : name},
+                {QStringLiteral("value"), name.isEmpty() ? qstr(m.id) : name},
+                {QStringLiteral("primary"), m.primary},
+                {QStringLiteral("widthPx"), m.widthPx},
+                {QStringLiteral("heightPx"), m.heightPx},
+            });
+        }
+        // Video capture: REAL device + mode lists from the PAL's IVideo
+        // (Media Foundation on Windows). Mode labels are OBS-style
+        // "<W>x<H>p<FPS>" (29.97 kept fractional); maxFps is the device's
+        // own ceiling — the UI greys any offered mode faster than it.
+        for (const auto &d : platform.Video().Enumerate()) {
+            const QString name = qstr(d.name);
+            QStringList modes;
+            for (const auto &m : d.modes) {
+                for (const uint32_t fps : m.fpsRates) {
+                    modes.append(QStringLiteral("%1x%2p%3")
+                                     .arg(m.width)
+                                     .arg(m.height)
+                                     .arg(fps % 10 == 7 && fps > 20
+                                              ? QString::number(fps / 10.0, 'f', 2)
+                                              : QString::number(fps)));
+                }
+            }
+            videoDevices_.append(QVariantMap{
+                {QStringLiteral("id"), qstr(d.id)},
+                {QStringLiteral("label"), name},
+                {QStringLiteral("value"), name},   // AV board stores the readable sublabel
+                {QStringLiteral("modes"), modes},
+                {QStringLiteral("maxFps"), int(d.maxFps)},
+            });
+        }
+
+        // NDI network sources through the ENGINE's own broadcast stack (the
+        // NDI provider runtime-loads the SDK; when it's absent this yields
+        // an empty list and an explanatory flag — never a mock roster).
+        // Providers register at kernel boot — before that there is no stack
+        // to ask, so the status says so instead of surfacing an internal
+        // "provider not found" error.
+        ndiSources_.clear();
+        ndiAvailable_ = false;
+        ndiStatus_.clear();
+        if (booted()) {
+            auto &broadcast = bps::broadcast::BroadcastEngine::Instance();
+            ndiAvailable_ = broadcast.NdiAvailable();
+            if (ndiAvailable_) {
+                auto sources = broadcast.DiscoverNdiSources();
+                if (sources.ok()) {
+                    for (const auto &s : sources.value()) {
+                        const QString nm = qstr(s.name);
+                        ndiSources_.append(QVariantMap{
+                            {QStringLiteral("id"), qstr(s.urlAddress)},
+                            {QStringLiteral("label"), nm},
+                            {QStringLiteral("value"), nm},
+                            {QStringLiteral("url"), qstr(s.urlAddress)},
+                        });
+                    }
+                    // First discovery pass after the finder's creation is
+                    // usually empty (the SDK browses in the background) —
+                    // one deferred re-query lets the cache warm up without
+                    // blocking this one.
+                    if (ndiSources_.isEmpty())
+                        QTimer::singleShot(1200, this, [this]() { if (booted()) enumerateDevices(); });
+                } else {
+                    ndiAvailable_ = false;
+                    ndiStatus_ = QString::fromStdString(sources.error().message);
+                }
+            } else {
+                ndiStatus_ = QStringLiteral("NDI SDK not available on this machine");
+            }
+        }
+    }
+    emit devicesChanged();
+}
+
+void EngineBridge::refreshDevices() { enumerateDevices(); }
+
 void EngineBridge::startRelay()
 {
     auto &bus = bps::EventBus::Instance();
@@ -362,6 +499,44 @@ void EngineBridge::startRelay()
         [relay](const bps::events::ResourcePressureHigh &e) {
             relay("engine.resource.pressure_high", QStringLiteral("warning"),
                   QStringLiteral("Resource pressure"), QStringLiteral("%1 running high").arg(qstr(e.resource)));
+        }));
+
+    // ---- Platform hot plug -------------------------------------------------
+    // The kernel's platform watcher drains IPlatform::PollChanges() and
+    // publishes DeviceConnected/DeviceRemoved (audio fingerprint diff) and
+    // MonitorConnected/MonitorDisconnected. Each one re-enumerates the
+    // device lists (so every open select reflects the hardware the instant
+    // it changes) and surfaces the change as a standard engine event.
+    auto deviceChange = [self](const char *topic, QString title, QString message) {
+        QMetaObject::invokeMethod(self, [self, topic = QString::fromLatin1(topic),
+                                         title = std::move(title), message = std::move(message)]() mutable {
+            self->enumerateDevices();
+            self->ingestEngineEvent(topic, QVariantMap{
+                {QStringLiteral("level"), QStringLiteral("info")},
+                {QStringLiteral("title"), title},
+                {QStringLiteral("message"), message},
+            });
+        }, Qt::QueuedConnection);
+    };
+    relaySubs_.push_back(bus.Subscribe<bps::events::DeviceConnected>(
+        [deviceChange](const bps::events::DeviceConnected &e) {
+            deviceChange("platform.device_connected", QStringLiteral("Audio device"),
+                         QStringLiteral("%1 connected").arg(qstr(e.device)));
+        }));
+    relaySubs_.push_back(bus.Subscribe<bps::events::DeviceRemoved>(
+        [deviceChange](const bps::events::DeviceRemoved &e) {
+            deviceChange("platform.device_removed", QStringLiteral("Audio device"),
+                         QStringLiteral("%1 removed").arg(qstr(e.device)));
+        }));
+    relaySubs_.push_back(bus.Subscribe<bps::events::MonitorConnected>(
+        [deviceChange](const bps::events::MonitorConnected &e) {
+            deviceChange("platform.monitor_connected", QStringLiteral("Display"),
+                         QStringLiteral("%1 connected").arg(qstr(e.monitorId)));
+        }));
+    relaySubs_.push_back(bus.Subscribe<bps::events::MonitorDisconnected>(
+        [deviceChange](const bps::events::MonitorDisconnected &e) {
+            deviceChange("platform.monitor_disconnected", QStringLiteral("Display"),
+                         QStringLiteral("%1 disconnected").arg(qstr(e.monitorId)));
         }));
 
     // ---- Display / outputs -------------------------------------------------

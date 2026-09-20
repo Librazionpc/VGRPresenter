@@ -28,6 +28,7 @@ public:
     ILibrary& Library() override { return library_; }
     IMonitor& Monitor() override { return monitor_; }
     IAudio& Audio() override { return audio_; }
+    IVideo& Video() override { return video_; }
     INetwork& Network() override { return network_; }
     IPower& Power() override { return power_; }
     IClipboard& Clipboard() override { return clipboard_; }
@@ -136,6 +137,10 @@ private:
         }
         std::string Fingerprint() const override { return {}; }
     };
+    struct StubVideo final : IVideo {
+        std::vector<VideoDeviceInfo> Enumerate() const override { return {}; }
+        std::string Fingerprint() const override { return {}; }
+    };
     struct StubNetwork final : INetwork {
         std::string Hostname() const override { return {}; }
         std::vector<NetworkAdapterInfo> Adapters() const override { return {}; }
@@ -217,6 +222,7 @@ private:
     StubLibrary library_;
     StubMonitor monitor_;
     StubAudio audio_;
+    StubVideo video_;
     StubNetwork network_;
     StubPower power_;
     StubClipboard clipboard_;

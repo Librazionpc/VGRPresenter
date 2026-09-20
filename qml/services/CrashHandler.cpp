@@ -7,6 +7,7 @@
 
 #include <cstdio>
 #include <csignal>
+#include <ctime>
 #include <string>
 
 #if defined(_WIN32)
@@ -37,10 +38,13 @@ LONG WINAPI HandleSEH(EXCEPTION_POINTERS *info)
         FILE *f = std::fopen(g_crashLogPath.c_str(), "a");
         if (f) {
             AppendLine(f, "---- UNHANDLED SEH EXCEPTION ----");
-            char buf[128];
-            std::snprintf(buf, sizeof(buf), "code=0x%08lx address=%p",
+            char buf[192];
+            const std::time_t now = std::time(nullptr);
+            char ts[32];
+            std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", std::localtime(&now));
+            std::snprintf(buf, sizeof(buf), "code=0x%08lx address=%p at=%s",
                           static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode),
-                          info->ExceptionRecord->ExceptionAddress);
+                          info->ExceptionRecord->ExceptionAddress, ts);
             AppendLine(f, buf);
 
             void *frames[32];
@@ -63,8 +67,11 @@ void HandleSignal(int sig)
         FILE *f = std::fopen(g_crashLogPath.c_str(), "a");
         if (f) {
             AppendLine(f, "---- UNHANDLED SIGNAL ----");
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), "signal=%d", sig);
+            char buf[96];
+            const std::time_t now = std::time(nullptr);
+            char ts[32];
+            std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", std::localtime(&now));
+            std::snprintf(buf, sizeof(buf), "signal=%d at=%s", sig, ts);
             AppendLine(f, buf);
 
             void *frames[32];
@@ -79,6 +86,48 @@ void HandleSignal(int sig)
 #endif
 
 } // namespace
+
+QString ConsumePendingCrashSummary()
+{
+    // Delivered-exactly-once: read the crash log, summarize its LAST record,
+    // then rotate it aside so the next launch starts clean. Runs on the GUI
+    // thread at first QML access — normal file I/O is fine here.
+    if (g_crashLogPath.empty())
+        return {};
+    FILE *f = std::fopen(g_crashLogPath.c_str(), "rb");
+    if (!f)
+        return {};
+    std::string contents;
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+        contents.append(buf, n);
+    std::fclose(f);
+
+    if (contents.find("UNHANDLED") == std::string::npos) {
+        // Log exists but holds no crash record (header-only/legacy) — leave it.
+        return {};
+    }
+
+    // Last "code=" / "signal=" line is the summary of the most recent crash.
+    QString summary;
+    size_t pos = contents.rfind("code=");
+    const size_t sigPos = contents.rfind("signal=");
+    if (sigPos != std::string::npos && (pos == std::string::npos || sigPos > pos))
+        pos = sigPos;
+    if (pos != std::string::npos) {
+        const size_t end = contents.find('\n', pos);
+        summary = QString::fromStdString(
+            contents.substr(pos, end == std::string::npos ? std::string::npos : end - pos));
+        summary = summary.trimmed();
+    }
+
+    // Rotate: crash-<epoch>.log next to the original.
+    const QString rotated = QString::fromStdString(g_crashLogPath)
+                                + QStringLiteral(".%1.log").arg(QDateTime::currentSecsSinceEpoch());
+    QDir().rename(QString::fromStdString(g_crashLogPath), rotated);
+    return summary;
+}
 
 void InstallCrashHandler()
 {

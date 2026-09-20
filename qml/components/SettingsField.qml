@@ -10,6 +10,9 @@ Column {
     id: root
 
     property string label: ""
+    // Two-column forms embed the field beside their own label — hide this
+    // component's caption line entirely (no reserved empty line).
+    property bool showLabel: true
     property alias text: input.text
     // Stream keys render as dots — pass TextInput.Password.
     property alias echoMode: input.echoMode
@@ -24,6 +27,7 @@ Column {
     spacing: 6
 
     Text {
+        visible: root.showLabel
         text: root.label
         color: Theme.textSecondary
         font.family: Theme.fontFamily

@@ -27,6 +27,19 @@ Item {
     // `shown`), not merely constructed.
     property bool active: false
 
+    // SIGNAL gate — the meter only moves when the caller says a source is
+    // actually passing audio (a real device picked in the dialog). With no
+    // signal the bars sit at their baseline: a dead meter, not a fake one.
+    property bool live: false
+
+    // Source volume (0-100) — shapes the wave's AMPLITUDE so the visuals
+    // track the dial: 0 = flat baseline (no level, no visible signal even
+    // when live), 100 = the full bar range. The jitter stays the same
+    // rhythm; its height envelope is what the volume drives.
+    property real volume: 100
+
+    readonly property real volFactor: Math.max(0, Math.min(100, volume)) / 100
+
     readonly property int barW: 6
     readonly property int barGap: 3
     readonly property int barCount: 20
@@ -54,11 +67,14 @@ Item {
             property real cycle: 0
             readonly property real phase: bar.index * 0.37
 
-            height: 6 + (root.height - 6) * Math.abs(Math.sin(Math.PI * (cycle + phase)))
+            height: root.live && root.volFactor > 0
+                    ? 6 + (root.height - 6) * root.volFactor
+                          * Math.abs(Math.sin(Math.PI * (cycle + phase)))
+                    : 6
 
             Timer {
                 interval: 150
-                running: root.active
+                running: root.active && root.live
                 repeat: true
                 onTriggered: bar.cycle = (bar.cycle + 0.13) % 2
             }

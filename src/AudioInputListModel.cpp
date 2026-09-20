@@ -2,6 +2,17 @@
 
 #include <algorithm>
 
+static QVariantList routingVariant(const QList<QList<int>> &routes)
+{
+    QVariantList perChannel;
+    for (const QList<int> &route : routes) {
+        QVariantList cell;
+        for (int bus : route) cell.append(bus);
+        perChannel.append(cell);
+    }
+    return perChannel;
+}
+
 QList<AudioEffect> AudioInputListModel::defaultEffects()
 {
     // Defaults matching the reference rack
@@ -35,67 +46,14 @@ static QVariantMap effectToVariant(const AudioEffect &effect)
 AudioInputListModel::AudioInputListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
-    // Seeded roster so the routing board has something to route from on
-    // first run (same rationale as OutputListModel's seeded outputs —
-    // StyleListModel/SlideListModel start empty because those are pure user
-    // content, but a mixer with nothing plugged in doesn't demonstrate
-    // anything).
+    // Starts EMPTY: the board shows the machine's real audio devices (via
+    // EngineBridge.audioDevices), not a hardcoded demo roster — every source
+    // on the board is one the user added. (The old seed rows were mock data;
+    // with the engine PAL now enumerating real hardware they were removed.)
     //
-    // Row ORDER is a stored contract: BusListModel seeds its routing by row
-    // index (Master routes {0,1,3}, etc.), so inserting or reordering these
-    // rows silently rewires every bus.
-    AudioInputItem media;
-    media.name = QStringLiteral("Media Player");
-    media.kind = QStringLiteral("media");
-    media.sublabel = QStringLiteral("Playlists & tracks");
-    media.level = 60;
-    media.effects = defaultEffects();
-    m_inputs.append(media);
-
-    AudioInputItem worship;
-    worship.name = QStringLiteral("Worship Mix");
-    worship.kind = QStringLiteral("media");
-    worship.level = 82;
-    worship.effects = defaultEffects();
-    m_inputs.append(worship);
-
-    AudioInputItem preService;
-    preService.name = QStringLiteral("Pre-service");
-    preService.kind = QStringLiteral("media");
-    preService.level = 45;
-    preService.muted = true;
-    preService.effects = defaultEffects();
-    m_inputs.append(preService);
-
-    AudioInputItem mic1;
-    mic1.name = QStringLiteral("Mic 1 · Lavalier");
-    mic1.kind = QStringLiteral("device");
-    mic1.level = 70;
-    mic1.effects = defaultEffects();
-    m_inputs.append(mic1);
-
-    AudioInputItem mic2;
-    mic2.name = QStringLiteral("Mic 2 · Handheld");
-    mic2.kind = QStringLiteral("device");
-    mic2.level = 55;
-    mic2.muted = true;
-    mic2.effects = defaultEffects();
-    m_inputs.append(mic2);
-
-    AudioInputItem lineIn;
-    lineIn.name = QStringLiteral("Line In · Pulpit");
-    lineIn.kind = QStringLiteral("device");
-    lineIn.level = 50;
-    lineIn.effects = defaultEffects();
-    m_inputs.append(lineIn);
-
-    AudioInputItem desktop;
-    desktop.name = QStringLiteral("Desktop Audio");
-    desktop.kind = QStringLiteral("device");
-    desktop.sublabel = QStringLiteral("System sounds");
-    desktop.level = 65;
-    desktop.effects = defaultEffects();
-    m_inputs.append(desktop);
+    // Row ORDER is a stored contract: BusListModel routes reference rows by
+    // index, so removing a row shifts them (no remap exists yet — routes can
+    // go stale after a removal; a known limitation, see KNOWN_ISSUES.md).
 }
 
 int AudioInputListModel::rowCount(const QModelIndex &parent) const
@@ -117,6 +75,19 @@ QVariant AudioInputListModel::data(const QModelIndex &index, int role) const
     case SublabelRole: return item.sublabel;
     case LevelRole: return item.level;
     case MutedRole: return item.muted;
+    case ModeRole: return item.mode;
+    case DelayMsRole: return item.delayMs;
+    case ChannelsRole: return item.channels;
+    case RoutingAutoRole: return item.routingAuto;
+    case RoutingRole: {
+        QVariantList perChannel;
+        for (const QList<int> &route : item.channelRoutes) {
+            QVariantList cell;
+            for (int bus : route) cell.append(bus);
+            perChannel.append(cell);
+        }
+        return perChannel;
+    }
     case EffectsRole: {
         QVariantList list;
         for (const AudioEffect &effect : item.effects)
@@ -135,6 +106,11 @@ QHash<int, QByteArray> AudioInputListModel::roleNames() const
         { SublabelRole, "sublabel" },
         { LevelRole, "level" },
         { MutedRole, "muted" },
+        { ModeRole, "mode" },
+        { DelayMsRole, "delayMs" },
+        { ChannelsRole, "channels" },
+        { RoutingAutoRole, "routingAuto" },
+        { RoutingRole, "routing" },
         { EffectsRole, "effects" },
     };
 }
@@ -239,6 +215,125 @@ void AudioInputListModel::setMuted(int index, bool muted)
     emit dataChanged(changed, changed, { MutedRole });
 }
 
+void AudioInputListModel::setMode(int index, int mode)
+{
+    if (index < 0 || index >= m_inputs.size())
+        return;
+    const int clamped = std::clamp(mode, 0, 3);
+    if (m_inputs[index].mode == clamped)
+        return;
+
+    m_inputs[index].mode = clamped;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { ModeRole });
+}
+
+void AudioInputListModel::setDelayMs(int index, int delayMs)
+{
+    if (index < 0 || index >= m_inputs.size())
+        return;
+    const int clamped = std::clamp(delayMs, 0, 1000);
+    if (m_inputs[index].delayMs == clamped)
+        return;
+
+    m_inputs[index].delayMs = clamped;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { DelayMsRole });
+}
+
+void AudioInputListModel::setChannels(int index, int channels)
+{
+    if (index < 0 || index >= m_inputs.size())
+        return;
+    const int clamped = std::clamp(channels, 1, 8);
+    if (m_inputs[index].channels == clamped)
+        return;
+
+    m_inputs[index].channels = clamped;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { ChannelsRole });
+}
+
+QVariantMap AudioInputListModel::getRouting(int index) const
+{
+    if (index < 0 || index >= m_inputs.size())
+        return {};
+
+    const AudioInputItem &item = m_inputs.at(index);
+    QVariantList perChannel;
+    for (const QList<int> &route : item.channelRoutes) {
+        QVariantList cell;
+        for (int bus : route) cell.append(bus);
+        perChannel.append(cell);
+    }
+    return {
+        { "auto", item.routingAuto },
+        { "channels", item.channels },
+        { "routes", perChannel },
+    };
+}
+
+void AudioInputListModel::setRoutingAuto(int index, bool auto_)
+{
+    if (index < 0 || index >= m_inputs.size())
+        return;
+    if (m_inputs[index].routingAuto == auto_)
+        return;
+
+    m_inputs[index].routingAuto = auto_;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { RoutingAutoRole });
+}
+
+void AudioInputListModel::toggleChannelRoute(int index, int channel, int busIndex)
+{
+    if (index < 0 || index >= m_inputs.size())
+        return;
+    AudioInputItem &item = m_inputs[index];
+    if (channel < 0 || channel >= item.channels || busIndex < 0)
+        return;
+
+    // Route lists are sparse to the channel count — extend on first touch.
+    while (item.channelRoutes.size() <= channel)
+        item.channelRoutes.append(QList<int>());
+
+    QList<int> &route = item.channelRoutes[channel];
+    const int at = route.indexOf(busIndex);
+    if (at >= 0)
+        route.removeAt(at);
+    else
+        route.append(busIndex);
+
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { RoutingRole });
+}
+
+void AudioInputListModel::setChannelRoutes(int index, const QVariantList &perChannel)
+{
+    if (index < 0 || index >= m_inputs.size())
+        return;
+
+    AudioInputItem &item = m_inputs[index];
+    QList<QList<int>> parsed;
+    for (const QVariant &entry : perChannel) {
+        QList<int> route;
+        const QVariantList cell = entry.toList();
+        for (const QVariant &v : cell) {
+            bool ok = false;
+            const int bus = v.toInt(&ok);
+            if (ok && bus >= 0)
+                route.append(bus);
+        }
+        parsed.append(route);
+    }
+
+    if (parsed == item.channelRoutes)
+        return;
+    item.channelRoutes = parsed;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { RoutingRole });
+}
+
 static AudioEffect *findEffect(QList<AudioEffect> &effects, const QString &key)
 {
     for (AudioEffect &effect : effects) {
@@ -302,6 +397,11 @@ QVariantMap AudioInputListModel::getInput(int index) const
         { "sublabel", item.sublabel },
         { "level", item.level },
         { "muted", item.muted },
+        { "mode", item.mode },
+        { "delayMs", item.delayMs },
+        { "channels", item.channels },
+        { "routingAuto", item.routingAuto },
+        { "routing", routingVariant(item.channelRoutes) },
         { "effects", effects },
     };
 }

@@ -9,6 +9,7 @@ project(VGRPresenterUI VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_AUTOMOC ON)
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -200,6 +201,7 @@ if(WIN32)
         ${BPS_ROOT}/platform/windows/WindowsLibrary.cpp
         ${BPS_ROOT}/platform/windows/WindowsMonitor.cpp
         ${BPS_ROOT}/platform/windows/WindowsAudio.cpp
+        ${BPS_ROOT}/platform/windows/WindowsVideo.cpp
         ${BPS_ROOT}/platform/windows/WindowsNetwork.cpp
         ${BPS_ROOT}/platform/windows/WindowsPower.cpp
         ${BPS_ROOT}/platform/windows/WindowsClipboard.cpp
@@ -273,8 +275,9 @@ else()
 endif()
 if(WIN32)
     # Win32 subsystem libraries used by the Windows PAL backends (COM dialogs
-    # need ole32; IPC needs ws2_32).
-    target_link_libraries(engine_core PUBLIC ws2_32 iphlpapi winmm shell32 user32 shcore ole32)
+    # need ole32; IPC needs ws2_32; MF video enumeration needs mfplat/mfuuid
+    # + runtimeobject for the activation factory).
+    target_link_libraries(engine_core PUBLIC ws2_32 iphlpapi winmm shell32 user32 shcore ole32 mfplat mf mfuuid runtimeobject)
     # _WIN32_WINNT/WINVER gate which Win32 APIs <windows.h> and friends
     # actually declare — left undefined, MinGW's headers default to an old
     # baseline and silently omit Vista+ APIs the Windows PAL backends use
@@ -405,6 +408,3 @@ target_link_libraries(appVGRPresenterUI
 # resolves). Without either, the include is skipped and the generated
 # registration code fails with "EventBus was not declared in this scope".
 target_include_directories(appVGRPresenterUI PRIVATE src qml/services/include qml/services/include/services)
-# TEMP hover A/B probe: private Qt platform API for the in-process input
-# driver (remove with the --hoverprobe block in src/main.cpp).
-target_include_directories(appVGRPresenterUI PRIVATE "C:/Qt/6.11.1/mingw_64/include/QtGui/6.11.1/QtGui")

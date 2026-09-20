@@ -128,6 +128,9 @@ Item {
                 anchors.fill: parent
                 anchors.margins: -6
                 cursorShape: Qt.PointingHandCursor
+                // Same as LevelDial: the slider lives in scrollable dialogs
+                // — the Flickable must not steal a thumb drag mid-gesture.
+                preventStealing: true
                 onPressed: root.dragStarted()
                 onReleased: root.dragFinished()
                 drag.target: thumb

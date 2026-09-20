@@ -82,13 +82,6 @@ Item {
             Behavior on color { ColorAnimation { duration: 100 } }
         }
 
-        // TEMP A/B probe — REMOVE WITH THE A/B RESULT.
-        MouseArea {
-            id: abProbeArea
-            anchors.fill: parent
-            hoverEnabled: true
-            onContainsMouseChanged: console.log("[ABPROBE] tab", tabRoot.tabKey, "containsMouse=", containsMouse)
-        }
         PositionHoverArea {
             id: tabHover
             anchors.fill: parent

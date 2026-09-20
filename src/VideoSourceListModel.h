@@ -5,25 +5,35 @@
 #include <QVariantMap>
 #include <qqml.h>
 
-// One video source available for routing — a camera, a screen capture, or a
-// plain media file. Settings · Audio & Video's right column ("VIDEO
-// SOURCES"). Mirrors AudioInputListModel except for level: only MEDIA rows
-// carry a volume (media players have one; a camera/screen feed doesn't —
-// its level lives on the bus it routes into).
+// One video source available for routing — a camera, a screen capture, a
+// plain media file, or an NDI network feed. Settings · Audio & Video's
+// right column ("VIDEO
+// SOURCES"). Mirrors AudioInputListModel except for level: only rows whose
+// feed carries audio (MEDIA files and NDI streams — NDI embeds audio with
+// its video frames) carry a volume; camera/screen feeds are silent (their
+// level lives on the bus they route into).
 struct VideoSourceItem
 {
     QString name;
-    // "camera" | "screen" | "media" — the three source kinds (capture
-    // devices, screen capture, plain media files); Add/Edit kind chips.
+    // "camera" | "screen" | "media" | "ndi" — the source kinds (capture
+    // devices, screen capture, plain media files, NDI network sources);
+    // Add/Edit kind chips.
     QString kind = QStringLiteral("camera");
     // Display caption under the name ("PTZ · Wide", "HDMI in", "MP4 · 4K").
     QString sublabel;
+    // Capture mode ("1080p60", "720p29.97", "4Kp30" — OBS-style device
+    // modes). Empty = unset; the dialogs' preview pill falls back to a
+    // nominal readout. A real device's mode list belongs to the engine's
+    // video PAL once it exists; until then this is the user's pick from a
+    // curated set.
+    QString mode;
     // Mute is meaningful for MEDIA rows (they carry audio); camera/screen
     // feeds have no audio of their own to mute.
     bool muted = false;
-    // Media-only volume, 0-100. Ignored (and shown as no slider) for
-    // camera/screen kinds.
-    qreal level = 75;
+    // Volume for rows whose feed carries audio — media files and NDI
+    // streams (NDI embeds audio with its video), 0-100. Ignored (and shown
+    // as no slider) for camera/screen kinds.
+    qreal level = 0;   // silence by default — a new source starts muted-down
 };
 
 // QML singleton backing Settings · Audio & Video's Video Sources column and
@@ -40,6 +50,7 @@ public:
         NameRole = Qt::UserRole + 1,
         KindRole,
         SublabelRole,
+        ModeRole,
         MutedRole,
         LevelRole,
     };
@@ -62,6 +73,9 @@ public:
     Q_INVOKABLE void renameSource(int index, const QString &name);
     Q_INVOKABLE void setKind(int index, const QString &kind);
     Q_INVOKABLE void setSublabel(int index, const QString &sublabel);
+    // Capture mode (OBS-style "1080p60"…) — the video dialogs' Resolution
+    // picker; empty string = unset.
+    Q_INVOKABLE void setMode(int index, const QString &mode);
     Q_INVOKABLE void setMuted(int index, bool muted);
     Q_INVOKABLE void setLevel(int index, qreal level);
 

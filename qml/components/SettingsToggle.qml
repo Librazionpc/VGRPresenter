@@ -8,9 +8,11 @@ import VGRPresenterUI
 // dark inset track + white knob when off, knob glides between the two.
 //
 // Controlled-component convention, same as LabeledSlider: `checked` is
-// owned by the consumer — the toggle flips it itself (a bare preference
-// row wants self-contained behavior) but also emits `toggled` so a
-// consumer can react or override.
+// OWNED BY THE CONSUMER — this control never self-assigns it (a self-flip
+// destroys the consumer's `checked` binding on first click and, with a
+// consumer that also flips in onToggled, double-applies the change — the
+// "toggle behaves erratically" bug class). It only REPORTS via toggled();
+// every consumer flips its own state there.
 Rectangle {
     id: root
 
@@ -39,9 +41,6 @@ Rectangle {
     MouseArea {
         anchors.fill: parent
         cursorShape: Qt.PointingHandCursor
-        onClicked: {
-            root.checked = !root.checked
-            root.toggled()
-        }
+        onClicked: root.toggled()   // consumer flips `checked` — see header
     }
 }

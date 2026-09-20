@@ -52,6 +52,9 @@ public:
 
     // --- Node configuration ---
     Result<void> SetEnabled(std::string_view id, bool enabled);
+    // Display-name change (rename flows through the graph so every view of
+    // the node sees one truth).
+    Result<void> RenameNode(std::string_view id, std::string_view name);
     Result<void> SetSourceState(std::string_view id, SourceState state);
     Result<void> SetSceneState(std::string_view id, SceneState state);
     Result<void> SetVolume(std::string_view id, const VolumeControl& vol);

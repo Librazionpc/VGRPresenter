@@ -136,9 +136,19 @@ Item {
             // automatic blink is specifically a property of the default cursor,
             // not something TextEdit keeps driving once you supply your own.
             cursorDelegate: Rectangle {
+                id: caret
                 width: 2
                 color: "#ffffff"
+                // Blink ONLY while the field is actually being edited. The
+                // old delegate ran a loops: Animation.Infinite blink for the
+                // item's whole lifetime — an animation ticking on the scene
+                // graph forever (frame pacing + battery cost) even on a
+                // dozen idle, unfocused labels. Anchored blink instead:
+                // restarts on focus/position changes, holds fully visible
+                // when not editing.
+                opacity: displayText.activeFocus && displayText.cursorVisible ? 1 : 0
                 SequentialAnimation on opacity {
+                    running: displayText.activeFocus
                     loops: Animation.Infinite
                     PropertyAnimation { to: 0; duration: 500 }
                     PropertyAnimation { to: 1; duration: 500 }

@@ -16,6 +16,7 @@
 #include "ILibrary.hpp"
 #include "IMonitor.hpp"
 #include "IAudio.hpp"
+#include "IVideo.hpp"
 #include "INetwork.hpp"
 #include "IPower.hpp"
 #include "IClipboard.hpp"
@@ -134,6 +135,10 @@ public:
     virtual ILibrary& Library() = 0;
     virtual IMonitor& Monitor() = 0;
     virtual IAudio& Audio() = 0;
+    // Video-capture discovery (cameras/capture cards + their real mode
+    // lists). Same discovery-only scope as Audio(); streaming/capture I/O
+    // belongs to the future capture feature module.
+    virtual IVideo& Video() = 0;
     virtual INetwork& Network() = 0;
     virtual IPower& Power() = 0;
     virtual IClipboard& Clipboard() = 0;

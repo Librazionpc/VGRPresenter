@@ -39,9 +39,27 @@ struct AudioInputItem
     // Display caption under the name ("System sounds", "120 BPM · click").
     QString sublabel;
     // 0-100 — a settable level, not a live meter (mock backend, no real
-    // audio engine anywhere in this app).
-    qreal level = 75;
+    // audio engine anywhere in this app). Defaults to 0: silence until the
+    // user raises it — a new source must never appear "live" on its own.
+    qreal level = 0;
     bool muted = false;
+    // Path mode — the Add/Edit dialog's Off / On / Auto Off / Auto On
+    // segmented control (0..3). Off until manually enabled by default.
+    int mode = 0;
+    // Hardware latency compensation in milliseconds (the dialog's Delay
+    // stepper). 0..1000, step 10 in the UI.
+    int delayMs = 0;
+    // Channel count — defaults to 2 (the reference's two channel rows);
+    // drives the dialogs' Channels block rows and the signal monitor's
+    // strip count (1 = mono, 2 = L/R stereo). Not user-adjustable in the
+    // dialogs — a device's real channel count belongs to the engine.
+    int channels = 2;
+    // Routing matrix (the Routing… modal): per-input-channel lists of bus
+    // row indices that channel feeds. Auto mode overrides the matrix
+    // visually (every channel → every bus) without touching stored data —
+    // toggling Auto off reveals the manual pattern again.
+    bool routingAuto = false;
+    QList<QList<int>> channelRoutes;
     QList<AudioEffect> effects;
 };
 
@@ -61,6 +79,11 @@ public:
         SublabelRole,
         LevelRole,
         MutedRole,
+        ModeRole,
+        DelayMsRole,
+        ChannelsRole,
+        RoutingAutoRole,
+        RoutingRole,
         EffectsRole,
     };
     Q_ENUM(Role)
@@ -87,6 +110,21 @@ public:
     Q_INVOKABLE void setSublabel(int index, const QString &sublabel);
     Q_INVOKABLE void setLevel(int index, qreal level);
     Q_INVOKABLE void setMuted(int index, bool muted);
+    // Path mode (clamped 0..3), latency compensation (clamped 0..1000 ms)
+    // and channel count (clamped 1..8) — the pro-audio form's rows.
+    Q_INVOKABLE void setMode(int index, int mode);
+    Q_INVOKABLE void setDelayMs(int index, int delayMs);
+    Q_INVOKABLE void setChannels(int index, int channels);
+
+    // Routing matrix — the Routing… modal's data. getRouting returns
+    // { auto, channels, buses, routes } in one read (buses are BusListModel
+    // rows, read by QML separately); toggles are per cell. setChannelRoutes
+    // batch-writes a whole matrix (the Add dialog's buffered state),
+    // replacing whatever was stored.
+    Q_INVOKABLE QVariantMap getRouting(int index) const;
+    Q_INVOKABLE void setRoutingAuto(int index, bool auto_);
+    Q_INVOKABLE void toggleChannelRoute(int index, int channel, int busIndex);
+    Q_INVOKABLE void setChannelRoutes(int index, const QVariantList &perChannel);
 
     // Effects rack writes — per-effect by key, bounded-checked like every
     // other setter, no-op when unchanged, dataChanged({EffectsRole}).

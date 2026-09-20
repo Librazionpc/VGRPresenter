@@ -35,6 +35,21 @@ Rectangle {
     property int maxHeight: 0
 
     signal itemActivated(string label)
+
+    // Scroll the item list by `step` px (clamped) — the catcher calls this
+    // for wheels over the anchor control, so a wheel on the open combobox's
+    // box scrolls the MENU's options, never the dialog/page behind it.
+    // Sign convention (both callers): pass the RAW wheel delta per notch
+    // (angleDelta.y / 3, pixelDelta.y when the device gives pixels) —
+    // scrolling DOWN arrives negative and must move contentY toward the
+    // bottom, same as the standard `contentY -= angleDelta` idiom. The old
+    // extra negation here inverted every dropdown's scroll direction.
+    function scrollList(step) {
+        if (!itemFlick || itemFlick.contentHeight <= itemFlick.height)
+            return
+        const maxY = itemFlick.contentHeight - itemFlick.height
+        itemFlick.contentY = Math.max(0, Math.min(maxY, itemFlick.contentY - step))
+    }
     // Hover in/out of a non-divider row — `rowItem` is the row's own
     // Rectangle, in THIS panel's coordinate space, so a consumer that wants
     // to open a flyout submenu next to it can map from a known-good item
@@ -57,17 +72,64 @@ Rectangle {
     // is correct for ANY parent, so no call site needs to know where its
     // menu is declared. One implementation of the map + clamp dance
     // instead of a copy per menu site.
+    // Remembered anchor so the open menu FOLLOWS its field: scrolling the
+    // page moves the box, and the menu tracks it (native combobox behavior)
+    // instead of floating detached — or being dismissed outright.
+    property Item anchorItem: null
+    property real anchorLocalX: 0
+    property real anchorLocalY: 0
+
     function openAt(sourceItem, x, y, bounds) {
-        const p = sourceItem.mapToItem(root.parent, x, y)
-        if (bounds) {
-            const bp = root.parent.mapFromItem(bounds, 0, 0)
-            root.x = Math.max(bp.x, Math.min(p.x, bp.x + bounds.width - root.width))
-            root.y = Math.max(bp.y, Math.min(p.y, bp.y + bounds.height - root.height))
-        } else {
-            root.x = p.x
-            root.y = p.y
-        }
+        // Window-root reparenting: the panel lifts OUT of its declaration
+        // context (a clipped, scrolling dialog container) to the window's
+        // contentItem. Parented in-place it was clipped by ancestor `clip`
+        // rects and scrolled with the dialog's Flickable — panels read as
+        // transparent/overdrawn garbage and fought the dialog's own
+        // scroller. At the root, the panel floats above everything (z is
+        // relative to window-level siblings) and nothing clips it.
+        root.anchorItem = sourceItem
+        root.anchorLocalX = x
+        root.anchorLocalY = y
+        const contentItem = sourceItem.Window.contentItem
+        if (contentItem && root.parent !== contentItem)
+            root.parent = contentItem
+        root.z = 10000
+        _placeAt(sourceItem.mapToItem(root.parent, x, y),
+                 bounds ? bounds : root.Window.contentItem)
         root.visible = true
+    }
+
+    function _placeAt(parentPos, bounds) {
+        if (bounds && root.parent) {
+            const bp = root.parent.mapFromItem(bounds, 0, 0)
+            root.x = Math.max(bp.x, Math.min(parentPos.x, bp.x + bounds.width - root.width))
+            root.y = Math.max(bp.y, Math.min(parentPos.y, bp.y + bounds.height - root.height))
+        } else {
+            root.x = parentPos.x
+            root.y = parentPos.y
+        }
+    }
+
+    // Coalesced follow: when the anchor (or an ancestor scroller) moves,
+    // re-derive the window-space anchor point and re-place, clamped as at
+    // open. Throttled to the next frame — one wheel batch can move the
+    // anchor many times.
+    Timer {
+        id: anchorFollow
+        interval: 0
+        repeat: false
+        onTriggered: {
+            if (!root.visible || !root.anchorItem) return
+            const p = root.anchorItem.mapToItem(root.parent, root.anchorLocalX, root.anchorLocalY)
+            root._placeAt(p, root.Window.contentItem)
+        }
+    }
+
+    Connections {
+        enabled: root.visible && root.anchorItem !== null
+        target: root.anchorItem
+        function onXChanged() { anchorFollow.restart() }
+        function onYChanged() { anchorFollow.restart() }
     }
 
     // Matches Theme.space4 — see x/y note below.
@@ -130,6 +192,22 @@ Rectangle {
             boundsBehavior: Flickable.StopAtBounds
             interactive: root.maxHeight > 0 && contentHeight > height
 
+            // Contained wheels: wheels over the list scroll THE LIST —
+            // anything the list can't take (fits without scrolling, or at
+            // its end) is absorbed here too, never forwarded to the
+            // dialog/page behind the popup. (The catcher keeps wheels that
+            // miss the menu from reaching the page; it must not inherit
+            // these.)
+            WheelHandler {
+                enabled: root.visible
+                onWheel: (ev) => {
+                    ev.accepted = true
+                    // Raw delta — wheel-down is negative and scrolls the
+                    // list downward (see scrollList's sign convention).
+                    root.scrollList(ev.angleDelta.y / 3)
+                }
+            }
+
             Column {
                 id: itemList
                 width: parent.width
@@ -161,7 +239,10 @@ Rectangle {
                                 id: itemRow
                                 width: itemList.width
                                 height: 34
-                                color: itemArea.hovered
+                                // Disabled entries (e.g. capture modes a
+                                // device's max fps can't reach) sit greyed
+                                // with no hover wash and swallow activation.
+                                color: !modelData.disabled && itemArea.hovered
                                        ? (modelData.danger ? "#24ff4d3d" /* Theme.danger @ 14% */
                                                            : "#232530" /* Theme.border */)
                                        : "transparent"
@@ -171,7 +252,8 @@ Rectangle {
                                     x: root.insetPad
                                     anchors.verticalCenter: parent.verticalCenter
                                     text: modelData.label
-                                    color: modelData.danger ? "#ff6b61" /* Theme.dangerLight */ : "#e2e8f0" /* Theme.textPrimary */
+                                    color: modelData.disabled ? "#5c6475" /* Theme.textMuted */
+                                        : modelData.danger ? "#ff6b61" /* Theme.dangerLight */ : "#e2e8f0" /* Theme.textPrimary */
                                     font.family: "Inter" // Theme.fontFamily
                                     font.pixelSize: 13 // Theme.textMd
                                     font.weight: Font.Medium
@@ -197,7 +279,7 @@ Rectangle {
                                 PositionHoverArea {
                                     id: itemArea
                                     anchors.fill: parent
-                                    onClicked: root.itemActivated(modelData.label)
+                                    onClicked: if (!modelData.disabled) root.itemActivated(modelData.label)
                                     onEntered: root.itemHovered(modelData.label, true, itemRow)
                                     onExited: root.itemHovered(modelData.label, false, itemRow)
                                 }

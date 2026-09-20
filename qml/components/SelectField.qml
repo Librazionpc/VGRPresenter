@@ -20,6 +20,9 @@ Item {
     id: root
 
     property string label: ""
+    // Two-column forms embed the field beside their own label — hide this
+    // component's caption line entirely (no reserved empty line).
+    property bool showLabel: true
     property string value: ""
     property string placeholder: ""
     // [{ label: "...", value: "..." }] — value falls back to label.
@@ -39,6 +42,7 @@ Item {
         spacing: 6
 
         Text {
+            visible: root.showLabel
             text: root.label
             color: Theme.textSecondary
             font.family: Theme.fontFamily
@@ -96,7 +100,11 @@ Item {
             const list = []
             for (let i = 0; i < root.options.length; ++i) {
                 const o = root.options[i]
-                list.push({ label: o.label, value: o.value !== undefined ? o.value : o.label })
+                // `disabled` rides along (info-only rows — e.g. the NDI
+                // "not enabled yet" notice — render dimmed and refuse
+                // activation inside DropdownPanel).
+                list.push({ label: o.label, value: o.value !== undefined ? o.value : o.label,
+                            disabled: o.disabled === true })
             }
             return list
         }
@@ -116,9 +124,16 @@ Item {
         }
     }
 
-    // Click/scroll outside closes the open menu (same contract the row
-    // context menus use).
+    // Click/scroll contract: click-outside closes; scrolling does NOT —
+    // this is a field-attached combobox, so the page scrolls under the open
+    // menu and the menu rides along with its field (native combobox feel).
+    // closesOnWheel: false opts out of MenuCatcher's scroll-dismiss (which
+    // made the dropdown vanish on the first wheel tick — it reads as the
+    // dropdown "disappearing" the moment you scroll the settings page);
+    // wheelTarget forwards the scroll to the page Flickable the field sits
+    // in.
     MenuCatcher {
         menu: menu
+        closesOnWheel: false
     }
 }

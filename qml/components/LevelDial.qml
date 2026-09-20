@@ -84,22 +84,42 @@ Item {
             id: dragArea
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
+            // The dial lives inside scrollable dialogs — without this the
+            // Flickable steals the drag a few pixels in and the page scrolls
+            // mid-adjustment (the "scroller changes while adjusting volume"
+            // bug).
+            preventStealing: true
 
-            onPressed: {
+            onPressed: (mouse) => {
                 root.dragStarted()
                 setFromPosition(mouse.x, mouse.y)
             }
             onPositionChanged: (mouse) => setFromPosition(mouse.x, mouse.y)
             onReleased: root.dragFinished()
+            onCanceled: root.dragFinished()
 
             function setFromPosition(px, py) {
                 // Screen coords → knob-local, then atan2 with 0° pointing up
                 // and positive clockwise (matching the pointer's sweep).
+                //
+                // DEAD-ZONE handling — the sweep spans -135°..+135°, so the
+                // bottom 90° is unreachable. Raw atan2 wraps through it:
+                // dragging just past the lower-left stop lands at ~±180°,
+                // and naive clamping of THAT would snap to +135 → the dial
+                // JUMPED TO 100% on a small anti-clockwise overshoot.
+                // Hardware-knob end stops instead: angles in the dead zone
+                // hold the NEAREST stop (-180..-135 → -135 → 0%; +135..+180
+                // → +135 → 100%), so overshooting a stop never changes the
+                // value — and never wraps to the opposite end.
                 const dx = px - knob.width / 2
                 const dy = py - knob.height / 2
-                let deg = Math.atan2(dx, -dy) * 180 / Math.PI
-                deg = Math.max(-135, Math.min(135, deg))
-                root.moved(root.minValue + (deg + 135) / 270 * (root.maxValue - root.minValue))
+                const deg = Math.atan2(dx, -dy) * 180 / Math.PI
+                let stopAngle = deg
+                if (deg < -135)
+                    stopAngle = -135   // dead zone: hold the lower stop (0%)
+                else if (deg > 135)
+                    stopAngle = 135    // dead zone: hold the upper stop (100%)
+                root.moved(root.minValue + (stopAngle + 135) / 270 * (root.maxValue - root.minValue))
             }
         }
     }

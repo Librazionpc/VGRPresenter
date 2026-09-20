@@ -45,13 +45,47 @@ Item {
         function onRowsRemoved() { root.modelsRev++ }
     }
 
+    // ---- Routing matrix modal — shared by the Add + Edit audio dialogs.
+    // Which dialog opened it decides where Apply lands: edit writes the
+    // model row directly; add writes the buffered pre-row state (consumed
+    // by submitAddSource).
+    property string routingModalFor: ""   // "add" | "edit"
+    RoutingMatrixModal {
+        id: routingModal
+        busRev: root.modelsRev
+        onApplied: (autoRoute, routes) => {
+            if (root.routingModalFor === "edit" && root.editAudioIndex >= 0) {
+                AudioInputListModel.setRoutingAuto(root.editAudioIndex, autoRoute)
+                const lists = []
+                for (let c = 0; c < root.editAudioEffectiveChannels; c++)
+                    lists.push(routes[c] !== undefined ? routes[c] : [])
+                AudioInputListModel.setChannelRoutes(root.editAudioIndex, lists)
+            } else if (root.routingModalFor === "add") {
+                root.addSourceRoutingAuto = autoRoute
+                root.addSourceRoutes = routes
+            }
+        }
+    }
+
     // ---- Edit Audio Input dialog ----
     property int editAudioIndex: -1
     property string editAudioName: ""
     property string editAudioKind: "device"
     property string editAudioSublabel: ""
-    property real editAudioLevel: 75
+    property real editAudioLevel: 0   // silence by default — meter reflects it
     property bool editAudioMuted: false
+    // Pro-audio form state — Mode / Delay / Channels (the reference mock's
+    // rows), persisted on the model like level/muted.
+    property int editAudioMode: 0
+    property int editAudioDelayMs: 0
+    property int editAudioChannels: 2
+    // Effective channel rows shown: the ENGINE's per-device truth (WASAPI
+    // mix format) wins when the row names a known device; the stored count
+    // covers media rows and unknown devices.
+    readonly property int editAudioEffectiveChannels: {
+        const n = root.editAudioKind === "device" ? root.deviceChannels(root.editAudioSublabel) : 0
+        return n > 0 ? n : root.editAudioChannels
+    }
     // Which rack chip is open in the effects editor.
     property string editAudioSelectedEffect: ""
     // The selected input's effect list, live from the model — effects edits
@@ -71,11 +105,10 @@ Item {
         root.editAudioSublabel = data.sublabel
         root.editAudioLevel = data.level
         root.editAudioMuted = data.muted
+        root.editAudioMode = data.mode !== undefined ? data.mode : 0
+        root.editAudioDelayMs = data.delayMs !== undefined ? data.delayMs : 0
+        root.editAudioChannels = data.channels !== undefined ? data.channels : 2
         root.editAudioSelectedEffect = ""
-        // SettingsToggle self-flips its `checked` on click, which breaks any
-        // consumer binding after the first use — re-sync it per open so a
-        // previously-clicked toggle can't show a stale state for this row.
-        editAudioMuteToggle.checked = root.editAudioMuted
     }
     function saveEditAudio() {
         if (root.editAudioIndex < 0)
@@ -85,6 +118,9 @@ Item {
         AudioInputListModel.setSublabel(root.editAudioIndex, root.editAudioSublabel)
         AudioInputListModel.setLevel(root.editAudioIndex, root.editAudioLevel)
         AudioInputListModel.setMuted(root.editAudioIndex, root.editAudioMuted)
+        AudioInputListModel.setMode(root.editAudioIndex, root.editAudioMode)
+        AudioInputListModel.setDelayMs(root.editAudioIndex, root.editAudioDelayMs)
+        AudioInputListModel.setChannels(root.editAudioIndex, root.editAudioChannels)
         root.editAudioIndex = -1
     }
 
@@ -101,8 +137,23 @@ Item {
     property string addSourceName: ""
     property string addSourceKind: "device"
     property string addSourceSublabel: ""
-    property real addSourceLevel: 75
+    property string addSourceVideoMode: ""   // video rows' capture mode
+    property real addSourceLevel: 0   // silence by default — meter reflects it
     property bool addSourceMuted: false
+    // Pro-audio form state — Mode / Delay / Channels, written through the
+    // setters after addInput() like every other collected value.
+    property int addSourceMode: 0
+    property int addSourceDelayMs: 0
+    property int addSourceChannels: 2
+    // Same engine-truth precedence as the Edit dialog (see there).
+    readonly property int addSourceEffectiveChannels: {
+        const n = root.addSourceKind === "device" ? root.deviceChannels(root.addSourceSublabel) : 0
+        return n > 0 ? n : root.addSourceChannels
+    }
+    // Buffered routing-matrix state (the Routing… modal writes here; no
+    // row exists until submit) — { channelIndex: [busIndex, ...] }.
+    property bool addSourceRoutingAuto: false
+    property var addSourceRoutes: ({})
     property var addSourceEffects: []
     property string addSourceSelectedEffect: ""
 
@@ -111,20 +162,34 @@ Item {
     // specific hardware is the row's own identity, not its kind) or media.
     readonly property var audioKinds: [
         { key: "device", label: qsTr("Device") },
-        { key: "media", label: qsTr("Media") }
+        { key: "media", label: qsTr("Media") },
+        { key: "ndi", label: qsTr("NDI") }
     ]
 
     // Device/media pick lists for the audio dialogs' second field — the
     // field's LABEL follows the kind ("Device" vs "Media") and so do its
-    // options. Device rows name real hardware; media rows name a content
-    // source. (Mock rosters until real QAudioDevice enumeration lands.)
-    readonly property var deviceOptions: [
-        { label: qsTr("Built-in Microphone") },
-        { label: qsTr("External USB Microphone") },
-        { label: qsTr("Line In · Rear Panel") },
-        { label: qsTr("Stereo Mix") },
-        { label: qsTr("Desktop Audio") }
-    ]
+    // options. Device options come from the ENGINE's real platform
+    // enumeration (EngineBridge.audioDevices — the PAL's WinMM IAudio,
+    // live-refreshed on hot-plug events); the static fallback only covers a
+    // system where the PAL reports nothing. Media rows name a content
+    // source.
+    readonly property var engineAudioDevices: {
+        const list = EngineBridge.audioDevices.filter(d => d.isInput)
+        return list.map(d => ({ label: d.label, value: d.value,
+                                channels: d.channels !== undefined ? d.channels : 0,
+                                sampleRateHz: d.sampleRateHz !== undefined ? d.sampleRateHz : 0 }))
+    }
+    // Real channel count of the picked device (0 = unknown/no pick): the
+    // dialogs' Channels rows follow it — the engine's WASAPI query is the
+    // source of truth, not a UI stepper.
+    function deviceChannels(sublabel) {
+        if (!sublabel) return 0
+        const hit = engineAudioDevices.find(d => d.value === sublabel)
+        return hit ? hit.channels : 0
+    }
+    readonly property var deviceOptions: engineAudioDevices.length > 0
+        ? engineAudioDevices
+        : [{ label: qsTr("No input device found") }]
     readonly property var mediaSourceOptions: [
         { label: qsTr("Playlists & tracks") },
         { label: qsTr("Media File") },
@@ -133,22 +198,115 @@ Item {
     readonly property var videoKinds: [
         { key: "camera", label: qsTr("Camera") },
         { key: "screen", label: qsTr("Screen") },
-        { key: "media", label: qsTr("Media") }
+        { key: "media", label: qsTr("Media") },
+        { key: "ndi", label: qsTr("NDI") }
+    ]    // Capture modes for the video dialogs' Resolution picker. The ENGINE
+    // owns the list now: modes come from the picked device's real Media
+    // Foundation capability set (EngineBridge.videoDevices), and its maxFps
+    // greys any offered mode the hardware can't reach. These statics only
+    // cover non-camera kinds (screen/media) and the no-device fallback.
+    readonly property var videoModes: [
+        "4Kp29.97", "2560x1440p29.97", "1080p60", "1080p29.97",
+        "1280x960p29.97", "960x540p29.97", "720p29.97", "640x480p29.97",
+        "640x360p29.97"
     ]
+
+    // Real video-capture roster from the engine (Media Foundation).
+    readonly property var engineVideoDevices: EngineBridge.videoDevices
+    function videoDevice(name) {
+        if (!name) return null
+        const hit = engineVideoDevices.find(d => d.value === name)
+        return hit || null
+    }
+    // Device-select options for a video row's Source: REAL cameras for the
+    // camera kind, the ENGINE's discovered NDI sources for the ndi kind;
+    // screen capture and media keep their own option sets.
+    readonly property var cameraOptions: engineVideoDevices.length > 0
+        ? engineVideoDevices
+        : [{ label: qsTr("No camera found") }]
+    // Screens: REAL displays from the engine's monitor PAL (EngineBridge
+    // enumerates them at boot and on hot-plug), labelled with the
+    // resolution each one runs at. Value stays the display's readable name
+    // (what a row stores as its sublabel). No displays = one honest dimmed
+    // row, never a mock roster.
+    readonly property var screenOptions: {
+        const list = []
+        for (let i = 0; i < EngineBridge.screenDevices.length; ++i) {
+            const s = EngineBridge.screenDevices[i]
+            let label = s.label
+            if (s.widthPx > 0 && s.heightPx > 0)
+                label += qsTr(" · %1 × %2").arg(s.widthPx).arg(s.heightPx)
+            if (s.primary)
+                label += qsTr(" · primary")
+            list.push({ label: label, value: s.label })
+        }
+        if (list.length === 0)
+            list.push({ label: qsTr("No displays found"), disabled: true })
+        return list
+    }
+    // NDI roster: the engine's discovery results, or one honest row saying
+    // why the list is empty (SDK absent vs still browsing).
+    readonly property var ndiOptions: {
+        if (!EngineBridge.ndiAvailable)
+            return [{ label: qsTr("NDI not enabled yet — check plugin"),
+                      disabled: true }]
+        if (EngineBridge.ndiSources.length === 0)
+            return [{ label: qsTr("No NDI sources found on the network"),
+                      disabled: true }]
+        return EngineBridge.ndiSources
+    }
+
+    // Audio NDI inputs draw from the same roster — NDI sources carry audio
+    // as well as video.
+    function audioSourceOptions(kind) {
+        if (kind === "media") return mediaSourceOptions
+        if (kind === "ndi") return ndiOptions
+        return deviceOptions
+    }
+    function videoSourceOptions(kind) {
+        if (kind === "camera") return cameraOptions
+        if (kind === "screen") return screenOptions
+        if (kind === "ndi") return ndiOptions
+        return mediaSourceOptions
+    }
+    // Kinds whose feed carries audio — media files and NDI streams (NDI
+    // embeds audio with its video frames). These get the Volume slider and
+    // a MUTE pill; camera/screen feeds are silent and pause instead.
+    function videoKindHasAudio(kind) {
+        return kind === "media" || kind === "ndi"
+    }
+    // Modes + fps ceiling for the picked device (camera rows only — screen
+    // and media have no per-device capability list yet).
+    function videoModesFor(name) {
+        const d = videoDevice(name)
+        return (d && d.modes && d.modes.length > 0) ? d.modes : videoModes
+    }
+    function videoMaxFpsFor(name) {
+        const d = videoDevice(name)
+        return d ? d.maxFps : 0
+    }
 
     function openAddSource(type) {
         root.addSourceType = type
         root.addSourceName = ""
         root.addSourceKind = type === "audio" ? "device" : "camera"
         root.addSourceSublabel = ""
-        root.addSourceLevel = 75
+        root.addSourceVideoMode = ""
+        root.addSourceLevel = 0
         root.addSourceMuted = false
+        root.addSourceMode = 0
+        root.addSourceDelayMs = 0
+        root.addSourceChannels = 2
+        root.addSourceRoutingAuto = false
+        root.addSourceRoutes = ({})
         // Seed the rack from the model's template (no row exists yet to read
         // from — defaultEffectsTemplate() is the pre-row snapshot).
         root.addSourceEffects = AudioInputListModel.defaultEffectsTemplate()
         root.addSourceSelectedEffect = ""
-        addSourceMuteToggle.checked = root.addSourceMuted
         root.addSourceShown = true
+        // Real roster, fresh from the engine (a camera plugged in since boot
+        // shows up the moment the dialog opens).
+        EngineBridge.refreshDevices()
     }
 
     function submitAddSource() {
@@ -160,6 +318,14 @@ Item {
             AudioInputListModel.setSublabel(idx, root.addSourceSublabel)
             AudioInputListModel.setLevel(idx, root.addSourceLevel)
             AudioInputListModel.setMuted(idx, root.addSourceMuted)
+            AudioInputListModel.setMode(idx, root.addSourceMode)
+            AudioInputListModel.setDelayMs(idx, root.addSourceDelayMs)
+            AudioInputListModel.setChannels(idx, root.addSourceEffectiveChannels)
+            AudioInputListModel.setRoutingAuto(idx, root.addSourceRoutingAuto)
+            const routeLists = []
+            for (let c = 0; c < root.addSourceEffectiveChannels; c++)
+                routeLists.push(root.addSourceRoutes[c] !== undefined ? root.addSourceRoutes[c] : [])
+            AudioInputListModel.setChannelRoutes(idx, routeLists)
             for (const e of root.addSourceEffects) {
                 AudioInputListModel.setEffectEnabled(idx, e.key, e.enabled)
                 AudioInputListModel.setEffectValue(idx, e.key, e.value)
@@ -167,8 +333,10 @@ Item {
         } else {
             VideoSourceListModel.addSourceWith(root.addSourceName, root.addSourceKind,
                                                root.addSourceSublabel,
-                                               root.addSourceKind === "media" ? root.addSourceLevel : 75,
+                                               root.addSourceLevel,
                                                root.addSourceMuted)
+            VideoSourceListModel.setMode(VideoSourceListModel.rowCount() - 1,
+                                         root.addSourceVideoMode)
         }
         root.addSourceShown = false
     }
@@ -178,6 +346,7 @@ Item {
     property string editVideoName: ""
     property string editVideoKind: "camera"
     property string editVideoSublabel: ""
+    property string editVideoMode: ""
     property bool editVideoMuted: false
     property real editVideoLevel: 75
 
@@ -187,8 +356,10 @@ Item {
         root.editVideoName = data.name
         root.editVideoKind = data.kind
         root.editVideoSublabel = data.sublabel
+        root.editVideoMode = data.mode !== undefined ? data.mode : ""
         root.editVideoMuted = data.muted
         root.editVideoLevel = data.level
+        EngineBridge.refreshDevices()
     }
     function saveEditVideo() {
         if (root.editVideoIndex < 0)
@@ -196,6 +367,7 @@ Item {
         VideoSourceListModel.renameSource(root.editVideoIndex, root.editVideoName)
         VideoSourceListModel.setKind(root.editVideoIndex, root.editVideoKind)
         VideoSourceListModel.setSublabel(root.editVideoIndex, root.editVideoSublabel)
+        VideoSourceListModel.setMode(root.editVideoIndex, root.editVideoMode)
         VideoSourceListModel.setMuted(root.editVideoIndex, root.editVideoMuted)
         VideoSourceListModel.setLevel(root.editVideoIndex, root.editVideoLevel)
         root.editVideoIndex = -1
@@ -777,7 +949,8 @@ Item {
                                 x: 28; y: 48
                                 width: board.colW - 90
                                 value: inRow.level
-                                fillColor: Theme.success
+                                // Color follows the VALUE (VU zones) — the
+                                // old hardcoded green read "safe" at 100.
                             }
 
                             Text {
@@ -962,6 +1135,9 @@ Item {
                                 x: 12; y: 48
                                 width: board.busColW - 90
                                 value: busRow.level
+                                // Buses tint by TYPE (categorical), not by
+                                // level — an explicit fixed color.
+                                fixedColor: true
                                 fillColor: busRow.typeColor
                             }
 
@@ -1036,7 +1212,7 @@ Item {
                                 font.weight: Font.Bold
                             }
                             Text {
-                                text: qsTr("cams · screen · media")
+                                text: qsTr("cams · screen · media · ndi")
                                 color: Theme.textMuted
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.textXs
@@ -1068,7 +1244,8 @@ Item {
                             // Mute exists on EVERY video row: media mute
                             // silences its audio, camera/screen mute blacks
                             // the feed out at the bus it feeds.
-                            readonly property bool isMedia: vidRow.kind === "media"
+                            readonly property bool hasAudio: vidRow.kind === "media"
+                                                             || vidRow.kind === "ndi"
 
                             width: board.vidColW
                             height: board.vidRowH
@@ -1123,7 +1300,7 @@ Item {
                             // preview thumb — the pill slots immediately
                             // left of it (anchoring to the card's right
                             // edge put it UNDER the thumb, invisible).
-                            // Its audio LEVEL meter stays media-only
+                            // Its audio LEVEL meter stays audio-only
                             // (camera/screen have no audio track to meter).
                             MutePill {
                                 id: vidMutePill
@@ -1132,8 +1309,9 @@ Item {
                                 anchors.topMargin: 10
                                 muted: vidRow.muted
                                 // A camera/screen feed isn't "muted" when
-                                // off, it's paused — only media carries audio.
-                                offLabel: vidRow.isMedia ? qsTr("MUTE") : qsTr("PAUSED")
+                                // off, it's paused — media and NDI carry
+                                // audio to mute.
+                                offLabel: vidRow.hasAudio ? qsTr("MUTE") : qsTr("PAUSED")
                                 accent: Theme.info
                                 accentLight: Theme.infoLight
                                 onToggleRequested: VideoSourceListModel.setMuted(vidRow.index, !vidRow.muted)
@@ -1143,7 +1321,7 @@ Item {
                                 x: 28
                                 anchors.bottom: parent.bottom
                                 anchors.bottomMargin: 14
-                                visible: vidRow.isMedia
+                                visible: vidRow.hasAudio
                                 // Stop short of the Edit link's hover area.
                                 width: vidThumb.x - 28 - 44
                                 value: vidRow.level
@@ -1193,6 +1371,33 @@ Item {
                                         anchors.centerIn: parent
                                         width: 6; height: 6; radius: 3
                                         color: Theme.textMuted
+                                    }
+                                }
+
+                                // NDI — broadcast ripples (center dot +
+                                // two rings) for network sources.
+                                Item {
+                                    anchors.centerIn: parent
+                                    visible: vidRow.kind === "ndi"
+
+                                    Rectangle {
+                                        anchors.centerIn: parent
+                                        width: 5; height: 5; radius: 2.5
+                                        color: Theme.textMuted
+                                    }
+                                    Rectangle {
+                                        anchors.centerIn: parent
+                                        width: 16; height: 16; radius: 8
+                                        color: "transparent"
+                                        border.width: 1.4
+                                        border.color: Theme.textMuted
+                                    }
+                                    Rectangle {
+                                        anchors.centerIn: parent
+                                        width: 26; height: 26; radius: 13
+                                        color: "transparent"
+                                        border.width: 1.2
+                                        border.color: Theme.textMuted
                                     }
                                 }
 
@@ -1401,50 +1606,41 @@ Item {
         onCancelled: root.editAudioIndex = -1
         onAccepted: root.saveEditAudio()
 
-        // The meter only ticks while the dialog is actually open, not while
-        // it merely exists (LevelMeterPreview.active gates its Timer).
-        LevelMeterPreview {
-            anchors.horizontalCenter: parent.horizontalCenter
-            active: editAudioDialog.shown
-        }
-
+        // (The signal pane was removed per design review — the dialog now
+        // opens straight on the pro-audio form, matching the reference.
+        // The mic mute button lived in that pane; muted stays in the model
+        // and the channel meters still honor it, but there is no mute
+        // control in this dialog until a row surface lands.)
         Row {
             width: parent.width
             spacing: Theme.space4
 
-            LevelDial {
-                id: editAudioDial
-                width: 120
-                anchors.top: parent.top
-                value: root.editAudioLevel
-                minValue: 0
-                maxValue: 100
-                label: qsTr("Input level")
-                onMoved: (v) => root.editAudioLevel = v
-            }
+            // The dial is gone from this dialog — the pro-audio form's
+            // Volume row (ProAudioForm, below the fields) owns level now.
 
             Column {
                 anchors.top: parent.top
-                width: parent.width - 120 - Theme.space4
+                width: parent.width
                 spacing: Theme.space4
 
-                SettingsField {
+                // Kind row — FIRST, on the same rail: the Source row's
+                // label and options below follow this selection.
+                Item {
                     width: parent.width
-                    label: qsTr("Name")
-                    text: root.editAudioName
-                    onTextEdited: (t) => root.editAudioName = t
-                }
+                    height: 26
 
-                Column {
-                    width: parent.width
-                    spacing: Theme.space2
                     Text {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Kind")
                         color: Theme.textSecondary
                         font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textXs
+                        font.pixelSize: Theme.textSm
                     }
                     Row {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 76
+                        anchors.verticalCenter: parent.verticalCenter
                         spacing: Theme.space2
                         Repeater {
                             model: root.audioKinds
@@ -1452,43 +1648,55 @@ Item {
                                 required property var modelData
                                 label: modelData.label
                                 selected: root.editAudioKind === modelData.key
-                                onPicked: root.editAudioKind = modelData.key
+                                onPicked: {
+                                    root.editAudioKind = modelData.key
+                                    // The old pick belongs to the previous kind.
+                                    root.editAudioSublabel = ""
+                                }
                             }
                         }
                     }
                 }
 
-                // Label + options follow the kind: "Device" with hardware
-                // picks, or "Media" with content picks — the box shows the
-                // stored choice (device/media source) from a scrollable list.
-                SelectField {
+                // Pro-audio form — the reference layout: Name / Source on
+                // a shared 76px label rail, then Mode, a section divider,
+                // Delay, Volume, Channels (checkbox rows + pill meters +
+                // green gain knobs).
+                ProAudioForm {
                     width: parent.width
-                    label: root.editAudioKind === "media" ? qsTr("Media") : qsTr("Device")
-                    value: root.editAudioSublabel
-                    placeholder: root.editAudioKind === "media" ? qsTr("Select media…") : qsTr("Select a device…")
-                    options: root.editAudioKind === "media" ? root.mediaSourceOptions : root.deviceOptions
-                    onValuePicked: (v) => root.editAudioSublabel = v
+                    nameText: root.editAudioName
+                    onNameEdited: (t) => root.editAudioName = t
+                    sourceLabel: qsTr("Source")
+                    sourceValue: root.editAudioSublabel
+                    sourceOptions: root.audioSourceOptions(root.editAudioKind)
+                    onSourcePicked: (v) => root.editAudioSublabel = v
+                    mode: root.editAudioMode
+                    delayMs: root.editAudioDelayMs
+                    volume: root.editAudioLevel
+                    muted: root.editAudioMuted
+                    channels: root.editAudioEffectiveChannels
+                    // Fake-signal hook: slider amplitude reads as the rows'
+                    // meter fill until real telemetry lands.
+                    meterLevel: root.editAudioLevel / 100
+                    onModeEdited: (m) => root.editAudioMode = m
+                    onDelayEdited: (ms) => root.editAudioDelayMs = ms
+                    onVolumeEdited: (v) => root.editAudioLevel = v
+                    onChannelsEdited: (n) => root.editAudioChannels = n
+                    onRoutingClicked: {
+                        // Edit: load straight off the model row.
+                        const rt = AudioInputListModel.getRouting(root.editAudioIndex)
+                        routingModalFor = "edit"
+                        routingModal.channelCount = root.editAudioEffectiveChannels
+                        routingModal.inputName = root.editAudioName
+                        routingModal.autoRoute = rt.auto !== undefined ? rt.auto : false
+                        const map = {}
+                        const lists = rt.routes !== undefined ? rt.routes : []
+                        for (let c = 0; c < lists.length; c++) map[c] = lists[c]
+                        routingModal.routes = map
+                        routingModal.open()
+                    }
                 }
 
-                Item {
-                    width: parent.width
-                    height: 34
-                    Text {
-                        anchors.left: parent.left
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: qsTr("Muted")
-                        color: Theme.textSecondary
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textSm
-                    }
-                    SettingsToggle {
-                        id: editAudioMuteToggle
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        checked: root.editAudioMuted
-                        onToggled: root.editAudioMuted = !root.editAudioMuted
-                    }
-                }
             }
         }
 
@@ -1558,174 +1766,81 @@ Item {
             label: qsTr("Name")
             text: root.editVideoName
             onTextEdited: (t) => root.editVideoName = t
-        }
-
-        Column {
-            width: parent.width
-            spacing: Theme.space2
-            Text {
-                text: qsTr("Kind")
-                color: Theme.textSecondary
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textXs
-            }
-            Row {
+        }            Column {
+                width: parent.width
                 spacing: Theme.space2
-                Repeater {
-                    model: root.videoKinds
-                    delegate: SelectableChip {
-                        required property var modelData
-                        label: modelData.label
-                        selected: root.editVideoKind === modelData.key
-                        onPicked: root.editVideoKind = modelData.key
+                Text {
+                    text: qsTr("Kind")
+                    color: Theme.textSecondary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.textXs
+                }
+                Row {
+                    spacing: Theme.space2
+                    Repeater {
+                        model: root.videoKinds
+                        delegate: SelectableChip {
+                            required property var modelData
+                            label: modelData.label
+                            selected: root.editVideoKind === modelData.key
+                            onPicked: {
+                                root.editVideoKind = modelData.key
+                                // The old pick belongs to the previous kind.
+                                root.editVideoSublabel = ""
+                                root.editVideoMode = ""
+                            }
+                        }
                     }
                 }
             }
+
+        // ---- Preview (all kinds) — the SHARED VideoPreviewPane component:
+        // 16:9 pane, kind glyphs, MUTE/PAUSED pill, Resolution mode pill and
+        // the kind hint live there ONCE; both video dialogs bind their own
+        // state onto it.
+        VideoPreviewPane {
+            width: parent.width
+            kind: root.editVideoKind
+            muted: root.editVideoMuted
+            mode: root.editVideoMode
+            modes: root.editVideoKind === "camera"
+                   ? root.videoModesFor(root.editVideoSublabel)
+                   : root.videoModes
+            maxFps: root.editVideoKind === "camera"
+                    ? root.videoMaxFpsFor(root.editVideoSublabel) : 0
+            onMutedToggled: root.editVideoMuted = !root.editVideoMuted
+            onModePicked: (m) => root.editVideoMode = m
         }
 
-        // ---- Preview (all kinds) — decorative, same mock convention as
-        // the board cards' thumbs: the kind's glyph in a real 16:9 pane,
-        // with the LIVE/PAUSED status and a decorative resolution readout
-        // overlaid on the pane itself rather than living in separate rows.
-        Column {
+        // Volume for kinds whose feed carries audio — media files and
+        // NDI streams (NDI embeds audio with its video). A plain line
+        // meter with its value, not the fuller dial + animated-bar
+        // treatment the Edit Audio dialog gets: this is a supplementary
+        // control on a VIDEO dialog, kept simple on purpose.
+        LabeledSlider {
             width: parent.width
-            spacing: Theme.space2
-
-            Text {
-                text: qsTr("Preview")
-                color: Theme.textSecondary
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textXs
-            }
-
-            Rectangle {
-                id: editVideoPreview
-                width: parent.width
-                height: width * 9 / 16
-                radius: Theme.radiusMd
-                color: "#0d0f16"
-                border.width: 1
-                border.color: Theme.border
-                clip: true
-
-                Item {
-                    anchors.centerIn: parent
-                    visible: root.editVideoKind === "camera"
-                    width: 64; height: 64
-
-                    Rectangle {
-                        anchors.centerIn: parent
-                        width: 44; height: 44; radius: 22
-                        color: "transparent"
-                        border.width: 3
-                        border.color: Theme.textMuted
-                    }
-                    Rectangle {
-                        anchors.centerIn: parent
-                        width: 14; height: 14; radius: 7
-                        color: Theme.textMuted
-                    }
-                }
-
-                Item {
-                    anchors.centerIn: parent
-                    visible: root.editVideoKind === "screen"
-                    width: 80; height: 60
-
-                    Rectangle {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.top: parent.top
-                        width: 64; height: 42; radius: 3
-                        color: "transparent"
-                        border.width: 2.4
-                        border.color: Theme.textMuted
-                    }
-                    Rectangle {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.bottom: parent.bottom
-                        width: 24; height: 3; radius: 1.5
-                        color: Theme.textMuted
-                    }
-                }
-
-                Shape {
-                    anchors.centerIn: parent
-                    visible: root.editVideoKind === "media"
-                    width: 40; height: 46
-                    preferredRendererType: Shape.CurveRenderer
-
-                    ShapePath {
-                        fillColor: Theme.textMuted
-                        strokeColor: "transparent"
-                        startX: 0; startY: 0
-                        PathLine { x: 0; y: 46 }
-                        PathLine { x: 40; y: 23 }
-                        PathLine { x: 0; y: 0 }
-                    }
-                }
-
-                // The pill IS the toggle — same convention as every card on
-                // the board, so there's no separate toggle row below. A
-                // camera/screen feed isn't "muted" when off, it's paused;
-                // only media carries audio to mute.
-                MutePill {
-                    anchors.left: parent.left
-                    anchors.top: parent.top
-                    anchors.leftMargin: 10
-                    muted: root.editVideoMuted
-                    offLabel: root.editVideoKind === "media" ? qsTr("MUTE") : qsTr("PAUSED")
-                    accent: Theme.info
-                    accentLight: Theme.infoLight
-                    onToggleRequested: root.editVideoMuted = !root.editVideoMuted
-                }
-
-                // Decorative resolution/frame-rate readout — no real video
-                // engine anywhere in this app, same mock convention as the
-                // level meters.
-                Pill {
-                    anchors.left: parent.left
-                    anchors.bottom: parent.bottom
-                    anchors.leftMargin: 10
-                    anchors.bottomMargin: 10
-                    text: qsTr("1080p · 60fps")
-                    tint: false
-                    fontSize: 9
-                }
-            }
-
-            // Kind-specific hint: media mutes audio, camera/screen pauses
-            // the feed itself.
-            Text {
-                width: parent.width
-                text: root.editVideoKind === "media"
-                      ? qsTr("Muting silences this media's audio track.")
-                      : qsTr("Pausing blacks this feed out at the bus it feeds — cameras and screens carry no audio track.")
-                color: Theme.textMuted
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textXs
-                wrapMode: Text.WordWrap
-            }
-
-            // Media-only volume — a plain line meter with its value, not
-            // the fuller dial + animated-bar treatment the Edit Audio
-            // dialog gets: this is a supplementary control on a VIDEO
-            // dialog, kept simple on purpose.
-            LabeledSlider {
-                width: parent.width
-                visible: root.editVideoKind === "media"
-                label: qsTr("Volume")
-                suffix: "%"
-                value: root.editVideoLevel
-                onMoved: (v) => root.editVideoLevel = v
-            }
+            visible: root.videoKindHasAudio(root.editVideoKind)
+            label: qsTr("Volume")
+            suffix: "%"
+            value: root.editVideoLevel
+            onMoved: (v) => root.editVideoLevel = v
         }
 
-        SettingsField {
+        // Source — REAL hardware selects, kind-driven (camera = the
+        // engine's Media Foundation roster). Picking a device resets the
+        // mode pick: the old mode may not exist on the new device.
+        SelectField {
             width: parent.width
-            label: qsTr("Device")
-            placeholder: qsTr("e.g. “PTZ Camera · SDI 1”")
-            text: root.editVideoSublabel
-            onTextEdited: (t) => root.editVideoSublabel = t
+            label: qsTr("Source")
+            placeholder: root.editVideoKind === "camera" && root.engineVideoDevices.length === 0
+                         ? qsTr("No camera found")
+                         : qsTr("Pick a source")
+            options: root.videoSourceOptions(root.editVideoKind)
+            value: root.editVideoSublabel
+            onValuePicked: (v) => {
+                root.editVideoSublabel = v
+                root.editVideoMode = ""
+            }
         }
 
         Row {
@@ -1939,52 +2054,38 @@ Item {
             }
         }
 
-        // Meter + dial + mute — audio only. Meter ticks only while open.
-        Row {
+        // Audio fields — one column (the pro-audio form, then Kind).
+        // CAUTION: this was once a Row with two full-width Columns — QML
+        // pushed the second outside the dialog, clipping the whole form
+        // into invisible blank space. (The signal pane above the form was
+        // removed per design review; same mute note as the Edit dialog.)
+        Column {
             width: parent.width
             spacing: Theme.space4
             visible: root.addSourceType === "audio"
 
             Column {
-                spacing: Theme.space2
-
-                LevelMeterPreview {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    active: addSourceDialog.shown && root.addSourceType === "audio"
-                }
-
-                LevelDial {
-                    width: 120
-                    value: root.addSourceLevel
-                    minValue: 0
-                    maxValue: 100
-                    label: qsTr("Input level")
-                    onMoved: (v) => root.addSourceLevel = v
-                }
-            }
-
-            Column {
-                width: parent.width - 120 - Theme.space4
+                width: parent.width
                 spacing: Theme.space4
 
-                SettingsField {
+                // Kind row — FIRST, on the same rail: the Source row's
+                // label and options below follow this selection.
+                Item {
                     width: parent.width
-                    label: qsTr("Name")
-                    placeholder: qsTr("e.g. “Mic 3 · Podium”")
-                    text: root.addSourceName
-                    onTextEdited: (t) => root.addSourceName = t
-                }
+                    height: 26
 
-                Column {
-                    width: parent.width
-                    spacing: Theme.space2
                     Text {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Kind")
                         color: Theme.textSecondary
                         font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textXs
+                        font.pixelSize: Theme.textSm
                     }
                     Row {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 76
+                        anchors.verticalCenter: parent.verticalCenter
                         spacing: Theme.space2
                         Repeater {
                             model: root.audioKinds
@@ -1992,42 +2093,50 @@ Item {
                                 required property var modelData
                                 label: modelData.label
                                 selected: root.addSourceKind === modelData.key
-                                onPicked: root.addSourceKind = modelData.key
+                                onPicked: {
+                                    root.addSourceKind = modelData.key
+                                    // The old pick belongs to the previous kind.
+                                    root.addSourceSublabel = ""
+                                }
                             }
                         }
                     }
                 }
 
-                // Same kind-following select as Edit — Device/Media label
-                // and options swap with the kind chips above.
-                SelectField {
+                // Pro-audio form — the reference layout (Name / Source on
+                // the shared label rail, Mode, Delay, Volume, Channels).
+                ProAudioForm {
                     width: parent.width
-                    label: root.addSourceKind === "media" ? qsTr("Media") : qsTr("Device")
-                    value: root.addSourceSublabel
-                    placeholder: root.addSourceKind === "media" ? qsTr("Select media…") : qsTr("Select a device…")
-                    options: root.addSourceKind === "media" ? root.mediaSourceOptions : root.deviceOptions
-                    onValuePicked: (v) => root.addSourceSublabel = v
+                    nameText: root.addSourceName
+                    onNameEdited: (t) => root.addSourceName = t
+                    sourceLabel: qsTr("Source")
+                    sourceValue: root.addSourceSublabel
+                    sourceOptions: root.audioSourceOptions(root.addSourceKind)
+                    onSourcePicked: (v) => root.addSourceSublabel = v
+                    mode: root.addSourceMode
+                    delayMs: root.addSourceDelayMs
+                    volume: root.addSourceLevel
+                    muted: root.addSourceMuted
+                    channels: root.addSourceEffectiveChannels
+                    // Fake-signal hook: slider amplitude reads as the rows'
+                    // meter fill until real telemetry lands.
+                    meterLevel: root.addSourceLevel / 100
+                    onModeEdited: (m) => root.addSourceMode = m
+                    onDelayEdited: (ms) => root.addSourceDelayMs = ms
+                    onVolumeEdited: (v) => root.addSourceLevel = v
+                    onChannelsEdited: (n) => root.addSourceChannels = n
+                    onRoutingClicked: {
+                        // Add: no row yet — load the buffered state.
+                        routingModalFor = "add"
+                        routingModal.channelCount = root.addSourceEffectiveChannels
+                        routingModal.inputName = root.addSourceName !== ""
+                                ? root.addSourceName : qsTr("New source")
+                        routingModal.autoRoute = root.addSourceRoutingAuto
+                        routingModal.routes = root.addSourceRoutes
+                        routingModal.open()
+                    }
                 }
 
-                Item {
-                    width: parent.width
-                    height: 34
-                    Text {
-                        anchors.left: parent.left
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: qsTr("Muted")
-                        color: Theme.textSecondary
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textSm
-                    }
-                    SettingsToggle {
-                        id: addSourceMuteToggle
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        checked: root.addSourceMuted
-                        onToggled: root.addSourceMuted = !root.addSourceMuted
-                    }
-                }
             }
         }
 
@@ -2062,139 +2171,62 @@ Item {
                             required property var modelData
                             label: modelData.label
                             selected: root.addSourceKind === modelData.key
-                            onPicked: root.addSourceKind = modelData.key
+                            onPicked: {
+                                root.addSourceKind = modelData.key
+                                // The old pick belongs to the previous kind.
+                                root.addSourceSublabel = ""
+                                root.addSourceVideoMode = ""
+                            }
                         }
                     }
                 }
             }
 
-            // ---- Preview — same layout as the Edit Video dialog: the
-            // kind's glyph in a real 16:9 pane, with the LIVE/PAUSED status
-            // and a decorative resolution readout overlaid on the pane
-            // itself. Moved up, right under Kind, ahead of Device.
-            Column {
+            // Source — REAL hardware for the camera kind (the engine's Media
+            // Foundation roster), screen/media option sets otherwise.
+            SelectField {
                 width: parent.width
-                spacing: Theme.space2
-
-                Text {
-                    text: qsTr("Preview")
-                    color: Theme.textSecondary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textXs
-                }
-
-                Rectangle {
-                    id: addSourceVideoPreview
-                    width: parent.width
-                    height: width * 9 / 16
-                    radius: Theme.radiusMd
-                    color: "#0d0f16"
-                    border.width: 1
-                    border.color: Theme.border
-                    clip: true
-
-                    Item {
-                        anchors.centerIn: parent
-                        visible: root.addSourceKind === "camera"
-                        width: 64; height: 64
-
-                        Rectangle {
-                            anchors.centerIn: parent
-                            width: 44; height: 44; radius: 22
-                            color: "transparent"
-                            border.width: 3
-                            border.color: Theme.textMuted
-                        }
-                        Rectangle {
-                            anchors.centerIn: parent
-                            width: 14; height: 14; radius: 7
-                            color: Theme.textMuted
-                        }
-                    }
-
-                    Item {
-                        anchors.centerIn: parent
-                        visible: root.addSourceKind === "screen"
-                        width: 80; height: 60
-
-                        Rectangle {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            anchors.top: parent.top
-                            width: 64; height: 42; radius: 3
-                            color: "transparent"
-                            border.width: 2.4
-                            border.color: Theme.textMuted
-                        }
-                        Rectangle {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            anchors.bottom: parent.bottom
-                            width: 24; height: 3; radius: 1.5
-                            color: Theme.textMuted
-                        }
-                    }
-
-                    Shape {
-                        anchors.centerIn: parent
-                        visible: root.addSourceKind === "media"
-                        width: 40; height: 46
-                        preferredRendererType: Shape.CurveRenderer
-
-                        ShapePath {
-                            fillColor: Theme.textMuted
-                            strokeColor: "transparent"
-                            startX: 0; startY: 0
-                            PathLine { x: 0; y: 46 }
-                            PathLine { x: 40; y: 23 }
-                            PathLine { x: 0; y: 0 }
-                        }
-                    }
-
-                    // The pill IS the toggle — same convention as the board
-                    // cards and the Edit Video dialog. A camera/screen feed
-                    // isn't "muted" when off, it's paused.
-                    MutePill {
-                        anchors.left: parent.left
-                        anchors.top: parent.top
-                        anchors.leftMargin: 10
-                        muted: root.addSourceMuted
-                        offLabel: root.addSourceKind === "media" ? qsTr("MUTE") : qsTr("PAUSED")
-                        accent: Theme.info
-                        accentLight: Theme.infoLight
-                        onToggleRequested: root.addSourceMuted = !root.addSourceMuted
-                    }
-
-                    // Decorative resolution/frame-rate readout — no real
-                    // video engine anywhere in this app.
-                    Pill {
-                        anchors.left: parent.left
-                        anchors.bottom: parent.bottom
-                        anchors.leftMargin: 10
-                        anchors.bottomMargin: 10
-                        text: qsTr("1080p · 60fps")
-                        tint: false
-                        fontSize: 9
-                    }
-                }
-
-                // Media-only volume — a plain line meter with its value,
-                // not the fuller dial + animated-bar treatment the audio
-                // side gets: kept simple on this video dialog.
-                LabeledSlider {
-                    width: parent.width
-                    visible: root.addSourceKind === "media"
-                    label: qsTr("Volume")
-                    suffix: "%"
-                    value: root.addSourceLevel
-                    onMoved: (v) => root.addSourceLevel = v
+                label: qsTr("Source")
+                placeholder: root.addSourceKind === "camera" && root.engineVideoDevices.length === 0
+                             ? qsTr("No camera found")
+                             : qsTr("Pick a source")
+                options: root.videoSourceOptions(root.addSourceKind)
+                value: root.addSourceSublabel
+                onValuePicked: (v) => {
+                    root.addSourceSublabel = v
+                    // A new device is a new capability set — the old mode
+                    // pick may not exist on it.
+                    root.addSourceVideoMode = ""
                 }
             }
 
-            SettingsField {
+            // ---- Preview — the SHARED VideoPreviewPane component (the
+            // same instance the Edit Video dialog uses): pane, glyphs,
+            // MUTE/PAUSED pill, mode pill live there once. No hint here —
+            // the Add column is tighter.
+            VideoPreviewPane {
                 width: parent.width
-                label: qsTr("Device")
-                placeholder: qsTr("e.g. “PTZ Camera · SDI 1”")
-                text: root.addSourceSublabel
-                onTextEdited: (t) => root.addSourceSublabel = t
+                showHint: false
+                kind: root.addSourceKind
+                muted: root.addSourceMuted
+                mode: root.addSourceVideoMode
+                modes: root.videoModesFor(root.addSourceSublabel)
+                maxFps: root.videoMaxFpsFor(root.addSourceSublabel)
+                onMutedToggled: root.addSourceMuted = !root.addSourceMuted
+                onModePicked: (m) => root.addSourceVideoMode = m
+            }
+
+            // Volume for audio-carrying kinds (media, NDI) — a plain
+            // line meter with its value, not the fuller dial +
+            // animated-bar treatment the audio side gets: kept simple
+            // on this video dialog.
+            LabeledSlider {
+                width: parent.width
+                visible: root.videoKindHasAudio(root.addSourceKind)
+                label: qsTr("Volume")
+                suffix: "%"
+                value: root.addSourceLevel
+                onMoved: (v) => root.addSourceLevel = v
             }
         }
 

@@ -126,20 +126,27 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         std::vector<NdiSourceInfo> out;
         if (!api_.initialize || !api_.find_create_v2) return out;
-        NdiFindCreateT cfg;
-        std::memset(&cfg, 0, sizeof(cfg));
-        cfg.show_local_sources = 0;   // remote sources only (local is the send instance)
-        NdiFindInstance find = api_.find_create_v2(&cfg);
-        if (!find) return out;
+        // The finder is PERSISTENT: NDI's discovery browses the network in a
+        // background thread and find_get_current_sources only reports the
+        // cache it has accumulated so far — a create/query/destroy finder
+        // per call would read an always-fresh (always empty) cache and never
+        // see a single source on a real network. Created once here; the SDK
+        // keeps refreshing it; destroyed in ShutdownProvider.
+        if (!find_) {
+            NdiFindCreateT cfg;
+            std::memset(&cfg, 0, sizeof(cfg));
+            cfg.show_local_sources = 0;   // remote sources only (local is the send instance)
+            find_ = api_.find_create_v2(&cfg);
+            if (!find_) return out;
+        }
         uint32_t count = 0;
-        const NdiSourceT* srcs = api_.find_get_current_sources(find, &count);
+        const NdiSourceT* srcs = api_.find_get_current_sources(find_, &count);
         for (uint32_t i = 0; i < count && srcs; ++i) {
             NdiSourceInfo info;
             if (srcs[i].p_ndi_name) info.name = srcs[i].p_ndi_name;
             if (srcs[i].p_url_address) info.urlAddress = srcs[i].p_url_address;
             if (!info.name.empty()) out.push_back(std::move(info));
         }
-        api_.find_destroy(find);
         return out;
     }
 
@@ -277,6 +284,8 @@ public:
 
     Result<void> ShutdownProvider() override {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (find_ && api_.find_destroy) api_.find_destroy(find_);
+        find_ = nullptr;
         for (auto& [id, inst] : sends_) if (api_.send_destroy) api_.send_destroy(inst);
         sends_.clear();
         for (auto& [id, inst] : recvs_) if (api_.recv_destroy) api_.recv_destroy(inst);
@@ -300,13 +309,15 @@ private:
         if (libHandle_) return Ok();
         auto& platform = platform::PlatformAccessor::Get();
         auto& loader = platform.Library();
-        // Try the versioned name first, then the unversioned one.
-        auto h = loader.Load("libndi.so.5");
+        // Windows ships the SDK as Processing.NDI.Lib.x64.dll; Linux as the
+        // versioned/unversioned libndi.so. Try every name — the loader just
+        // fails on whichever aren't present.
+        auto h = loader.Load("Processing.NDI.Lib.x64.dll");
+        if (!h.ok()) h = loader.Load("libndi.so.5");
         if (!h.ok()) h = loader.Load("libndi.so");
         if (!h.ok())
             return Error::Make(Err::Broadcast_SdkLoadFailed, kNdiModule,
-                               "NDI SDK not installed (libndi not found): " +
-                                   h.error().message);
+                               "NDI SDK not installed: " + h.error().message);
         libHandle_ = h.value();
         NdiApi api{};
         auto sym = [&](void** out, const char* name) {
@@ -347,6 +358,7 @@ private:
     mutable std::mutex mutex_;
     NdiApi api_{};
     platform::ILibrary::Handle libHandle_ = nullptr;
+    NdiFindInstance find_ = nullptr;   // persistent discovery cache (see DiscoverSources)
     uint64_t seq_ = 0;
     std::map<std::string, NdiSendInstance, std::less<>> sends_;
     std::map<std::string, std::string, std::less<>> sendNames_;

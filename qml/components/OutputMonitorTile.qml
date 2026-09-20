@@ -10,6 +10,13 @@ import VGRPresenterUI
 // Same visual contract the Edit tab's inline card had: live = danger-red
 // border + LIVE badge + play glyph; disabled = dimmed; preview area shows
 // the checkered "empty" texture until real per-output thumbnails exist.
+//
+// SCALABLE, not fixed: the tile fills whatever width its wall assigns (one
+// output takes the whole column, two split it) and the internals are
+// anchored — the preview pane holds a true 16:9, the badge/name scale
+// proportionally — so a big tile looks composed, not a stretched 182px
+// card. Height derives from the width (pane + footer); the caller may
+// still set both explicitly (Edit's ITEMS tab keeps its compact cells).
 Rectangle {
     id: root
 
@@ -19,8 +26,9 @@ Rectangle {
     required property bool active
     required property bool isEnabled
 
-    width: 182
-    height: 143
+    // Caller sets width (or anchors); height follows as pane + footer.
+    implicitWidth: 182
+    implicitHeight: 6 + previewPane.height + 6 + 16 + 6
     radius: 8
     // Live = danger-red border; inactive = visible slate border so an off
     // tile reads as "inactive", not just black.
@@ -31,11 +39,13 @@ Rectangle {
     opacity: root.isEnabled ? 1 : 0.45
     Behavior on opacity { NumberAnimation { duration: 120 } }
 
+    // 16:9 preview pane — always inset 6px, always the right aspect.
     Rectangle {
+        id: previewPane
         x: 6
         y: 6
-        width: 170
-        height: 110
+        width: parent.width - 12
+        height: width * 9 / 16
         clip: true
         radius: 4
         color: root.active ? "#101116" : "#1a1c26"
@@ -45,7 +55,7 @@ Rectangle {
         Rectangle {
             x: 6
             y: 6
-            height: 16
+            height: Math.max(16, previewPane.height * 0.14)
             width: badgeRow.width + 16
             radius: 4
             color: root.active ? "#33ff4d3d" : "#262833"
@@ -73,22 +83,23 @@ Rectangle {
             }
         }
 
-        // Play glyph for whichever output is actually live.
+        // Play glyph for whichever output is actually live — scales with
+        // the pane so it stays centered and proportionate at any size.
         IconGlyph {
             visible: root.active
             anchors.centerIn: parent
             name: "playCircle"
             color: "#ff4d3d"
-            implicitWidth: 28
-            implicitHeight: 28
+            implicitWidth: Math.max(28, previewPane.height * 0.25)
+            implicitHeight: implicitWidth
         }
     }
 
-    // Footer: output name.
+    // Footer: output name — anchored to the pane's bottom, full width.
     Item {
         x: 6
-        y: 120
-        width: 170
+        y: previewPane.y + previewPane.height + 6
+        width: parent.width - 12
         height: 16
 
         Text {

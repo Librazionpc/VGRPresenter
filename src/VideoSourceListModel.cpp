@@ -5,13 +5,11 @@
 VideoSourceListModel::VideoSourceListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
-    // Seeded roster matching the reference image — see
-    // AudioInputListModel's constructor for why this list starts non-empty.
-    m_sources.append({ QStringLiteral("Cam 1"), QStringLiteral("camera"), QStringLiteral("PTZ · Wide"), false, 75 });
-    m_sources.append({ QStringLiteral("Cam 2"), QStringLiteral("camera"), QStringLiteral("Fixed · Close-up"), false, 75 });
-    m_sources.append({ QStringLiteral("Audience Cam"), QStringLiteral("camera"), QStringLiteral("Fixed · Wide"), false, 75 });
-    m_sources.append({ QStringLiteral("Screen Capture"), QStringLiteral("screen"), QStringLiteral("HDMI in"), false, 75 });
-    m_sources.append({ QStringLiteral("Video File"), QStringLiteral("media"), QStringLiteral("MP4 · 4K"), true, 60 });
+    // Starts EMPTY — no seeded cards. Cameras/screens come from the ENGINE's
+    // video PAL (Media Foundation enumeration; the dialogs' Device selects
+    // read EngineBridge.videoDevices), so a hardcoded mock roster would lie
+    // about the hardware. Media rows are user-added via Add Source.
+    // (AudioInputListModel keeps its seeded roster by explicit decision.)
 }
 
 int VideoSourceListModel::rowCount(const QModelIndex &parent) const
@@ -31,6 +29,7 @@ QVariant VideoSourceListModel::data(const QModelIndex &index, int role) const
     case NameRole: return item.name;
     case KindRole: return item.kind;
     case SublabelRole: return item.sublabel;
+    case ModeRole: return item.mode;
     case MutedRole: return item.muted;
     case LevelRole: return item.level;
     default: return {};
@@ -43,6 +42,7 @@ QHash<int, QByteArray> VideoSourceListModel::roleNames() const
         { NameRole, "name" },
         { KindRole, "kind" },
         { SublabelRole, "sublabel" },
+        { ModeRole, "mode" },
         { MutedRole, "muted" },
         { LevelRole, "level" },
     };
@@ -59,7 +59,7 @@ void VideoSourceListModel::addSourceWith(const QString &name, const QString &kin
     const int row = m_sources.size();
     beginInsertRows(QModelIndex(), row, row);
     m_sources.append({ name.isEmpty() ? QStringLiteral("New Source %1").arg(row + 1) : name,
-                       kind, sublabel, muted, level });
+                       kind, sublabel, QString(), muted, level });
     endInsertRows();
 }
 
@@ -127,6 +127,18 @@ void VideoSourceListModel::setSublabel(int index, const QString &sublabel)
     emit dataChanged(changed, changed, { SublabelRole });
 }
 
+void VideoSourceListModel::setMode(int index, const QString &mode)
+{
+    if (index < 0 || index >= m_sources.size())
+        return;
+    if (m_sources[index].mode == mode)
+        return;
+
+    m_sources[index].mode = mode;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { ModeRole });
+}
+
 void VideoSourceListModel::setMuted(int index, bool muted)
 {
     if (index < 0 || index >= m_sources.size())
@@ -165,6 +177,7 @@ QVariantMap VideoSourceListModel::getSource(int index) const
         { "name", item.name },
         { "kind", item.kind },
         { "sublabel", item.sublabel },
+        { "mode", item.mode },
         { "muted", item.muted },
         { "level", item.level },
     };

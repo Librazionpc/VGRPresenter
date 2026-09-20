@@ -159,6 +159,15 @@ std::vector<OsEvent> WindowsPlatform::PollChanges() {
     }
     lastAudioFp_ = audioFp;
 
+    // Video-capture hot-plug: same fingerprint convention as audio — the
+    // MF device roster's ids change when a camera/capture card plugs in.
+    std::string videoFp = video_.Fingerprint();
+    if (!lastVideoFp_.empty() && videoFp != lastVideoFp_) {
+        events.push_back({OsEventType::DeviceConnected,
+                          "video device configuration changed"});
+    }
+    lastVideoFp_ = videoFp;
+
     return events;
 }
 
