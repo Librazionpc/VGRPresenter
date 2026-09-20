@@ -14,6 +14,11 @@
 // level lives on the bus they route into).
 struct VideoSourceItem
 {
+    // Stable identity — survives row removals (rows after it shift; this
+    // doesn't). BusListModel routes key graph edges on it, so removing a
+    // row never shifts another row's routes. Assigned at add/duplicate
+    // time; never persisted (the roster is session-owned) and never shown.
+    QString id;
     QString name;
     // "camera" | "screen" | "media" | "ndi" — the source kinds (capture
     // devices, screen capture, plain media files, NDI network sources);
@@ -37,8 +42,14 @@ struct VideoSourceItem
 };
 
 // QML singleton backing Settings · Audio & Video's Video Sources column and
-// the routing a BusListModel bus stores against it (by row index — same
-// convention as AudioInputListModel / OutputItem::styleIndex).
+// the routing a BusListModel bus stores against it.
+//
+// ROUTING KEYS ON STABLE IDS, NOT ROWS: BusListModel's graph edges are cut
+// to "vsrc:<id>" nodes (one per row, created on demand). Row indices exist
+// only at the QML boundary — toggleVideoRoute takes a row, the models
+// translate to ids internally, so deleting a row can never shift anyone
+// else's routes. Static accessors let the models translate across each
+// other (all QML-singleton instances; created before any routing call runs).
 class VideoSourceListModel : public QAbstractListModel
 {
     Q_OBJECT
@@ -46,6 +57,15 @@ class VideoSourceListModel : public QAbstractListModel
     QML_SINGLETON
 
 public:
+    // C++ access to the QML-created singleton (null until QML constructs
+    // it) — the cross-model translation entry points below are only ever
+    // called from routing flows, which run after the screen exists.
+    static VideoSourceListModel *Instance() { return s_instance; }
+
+    // Row <-> stable id. rowForStableId returns -1 when the id belongs to a
+    // removed row — callers treat that as "no such route".
+    static QString stableIdForRow(int row);
+    static int rowForStableId(const QString &id);
     enum Role {
         NameRole = Qt::UserRole + 1,
         KindRole,
@@ -57,6 +77,7 @@ public:
     Q_ENUM(Role)
 
     explicit VideoSourceListModel(QObject *parent = nullptr);
+    ~VideoSourceListModel() override;
 
     int rowCount(const QModelIndex &parent = QModelIndex()) const override;
     QVariant data(const QModelIndex &index, int role) const override;
@@ -83,5 +104,8 @@ public:
     Q_INVOKABLE QVariantMap getSource(int index) const;
 
 private:
+    static inline VideoSourceListModel *s_instance = nullptr;
+
     QList<VideoSourceItem> m_sources;
+    int m_nextId = 1;   // stable-id counter ("v<n>" — unique per row, ever)
 };

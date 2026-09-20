@@ -63,6 +63,29 @@ Rectangle {
     // edit), while the slide list stays fully live (adding a slide is the
     // way out).
     readonly property bool hasActiveSlide: slideModel.activeSlideId > 0
+    // UI self-test helper (Main.qml scenario): resolve a named item into
+    // WINDOW coordinates by recursively walking this screen's item tree.
+    // C++ findChild can't reach some QML-created items (Repeater delegates
+    // exist — the row dump proves it — but are invisible to QObject-name
+    // search), so the QML side does the walking. Invisible branches are
+    // skipped so a closed menu/modal resolves to null, not a stale point.
+    function selfTestItemCenter(name) {
+        let found = null
+        function walk(item) {
+            if (found || !item || item.visible === false)
+                return
+            if (item.objectName === name) {
+                const p = item.mapToItem(null,
+                                         item.width / 2, item.height / 2)
+                found = Qt.point(p.x, p.y)
+                return
+            }
+            for (let i = 0; i < item.children.length; ++i)
+                walk(item.children[i])
+        }
+        walk(root)
+        return found
+    }
 
     // TEMP DIAGNOSTIC — reproduce "type text, exit, re-enter and type more,
     // undo WHILE still in that second edit session" exactly. Flip to true
@@ -909,6 +932,7 @@ Rectangle {
     // (x: 1040). 754 lands exactly on rightPanel's left edge.
     Rectangle {
         id: mCanvas
+        objectName: "selfTestCanvas"   // UI self-test grab target (Main.qml scenario)
         x: 286
         y: 308
         height: 428
@@ -1883,6 +1907,7 @@ Rectangle {
 
     Rectangle {
         id: addContentChip
+        objectName: "selfTestAddContent" // UI self-test click target
         x: 286
         y: 838
         height: 46
@@ -1915,6 +1940,7 @@ Rectangle {
 
     Rectangle {
         id: addContentMenu
+        objectName: "selfTestChips"   // UI self-test grab target (Main.qml scenario)
         x: 344
         y: 837
         height: 46
@@ -1925,16 +1951,20 @@ Rectangle {
         radius: 14
         visible: root.addMenuOpen
 
+        // Centered, not hand-pinned x:10: 7 chips × 48 + 6 gaps × 4 = 360
+        // wide inside a 388-wide menu — a 10px left inset left 18px hanging
+        // on the right (the whole content block read shifted left). centerIn
+        // keeps the row optically centered whatever the roster does next.
         Row {
             id: contentTypeRow
-            x: 10
-            y: 6
+            anchors.centerIn: parent
             spacing: 4
 
             Repeater {
                 model: root.contentTypes
                 delegate: Rectangle {
                     id: typeChip
+                    objectName: "selfTestChip" + index // UI self-test target
                     required property var modelData
                     required property int index
                     readonly property bool active: chipHover.hoveredIndex === index
@@ -1945,13 +1975,28 @@ Rectangle {
                     border.width: typeChip.active ? 1 : 0
                     border.color: "#406c5ce7"
                     color: typeChip.active ? "#206c5ce7" : "#1b1e2a"
-                    Behavior on color { ColorAnimation { duration: 100 } }
-                    Behavior on border.width { NumberAnimation { duration: 100 } }
+                    // NO Behavior animations here: at slow hand speed the
+                    // 100ms fades on adjacent chips fired for every boundary
+                    // crossing and read as shimmer/flicker ("slow down your
+                    // mouse" was the exact reproduction). Instant switching
+                    // makes the highlight a hard swap — nothing to see at
+                    // any speed.
 
+                    // Two fixed vertical bands inside the 34px pill — icon
+                    // band y 3..17 (14px), label band y 19..31 (12px) — 3px
+                    // off the top and bottom edges. The old offsets (icon
+                    // y:4, label y:22 with NO height) let the label's natural
+                    // ~11px line box run to the pill's bottom edge and the
+                    // whole block read 1px low/left-of-center. Explicit band
+                    // heights + verticalAlignment pin each glyph INSIDE its
+                    // band so neither the 12px "Aa" line box nor the 8px
+                    // label line box can drift with font metrics.
                     Text {
-                        y: 4
+                        y: 3
+                        height: 14
                         width: parent.width
                         horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
                         color: typeChip.active ? "#9b8ff5" : "#9aa0b5"
                         font.family: "Inter"
                         font.pixelSize: 12
@@ -1962,24 +2007,34 @@ Rectangle {
                         visible: typeChip.modelData.icon === "text"
                     }
                     IconGlyph {
-                        y: 4
+                        y: 3
                         anchors.horizontalCenter: parent.horizontalCenter
                         name: typeChip.modelData.icon
                         color: typeChip.active ? "#9b8ff5" : "#9aa0b5"
                         visible: typeChip.modelData.icon !== "text"
-                        // "media"/"audio" use the older, smaller Figma-export
-                        // play/music glyphs (native ~8-9px) rather than the
-                        // Lucide 24-grid family the other five icons come
-                        // from (scaled to ~14px) — without this they read
-                        // visibly smaller/thinner next to camera/shape/timer/
-                        // clock in the same row. Scaled from center, so this
-                        // doesn't shift its already-centered position.
-                        scale: (typeChip.modelData.icon === "play" || typeChip.modelData.icon === "music") ? 1.6 : 1
+                        // Explicit box + origin, not implicit: with only
+                        // implicitWidth/Height, the root-level scale below
+                        // has measured its center from a 0x0 box on some
+                        // builds — play/music (1.6×) then drew up-left of
+                        // the pill entirely (the "icons are out" report)
+                        // while the 1× icons hid the defect. Same lesson as
+                        // AppHeader.qml's gear: explicit width/height first,
+                        // THEN centerIn/scale compute from real geometry.
+                        width: 14
+                        height: 14
+                        transformOrigin: Item.Center
+                        // No per-icon scale: all seven kinds now draw
+                        // from the same Lucide 24-grid family (play/music
+                        // re-authored natively — the old Figma-export
+                        // glyphs needed boosts that fattened their strokes
+                        // and made them read oversized).
                     }
                     Text {
-                        y: 22
+                        y: 19
+                        height: 12
                         width: parent.width
                         horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
                         color: typeChip.active ? "#eef1f8" : "#6b7080"
                         font.family: "Inter"
                         font.pixelSize: 8
@@ -1993,12 +2048,31 @@ Rectangle {
         // doesn't allow its own children to use anchors.fill/left/right/etc,
         // since it positions them itself; anchors.fill: contentTypeRow from
         // outside the Row works fine.
+        // Covers the WHOLE menu, not just the row: sized to the row exactly,
+        // the menu's 6px padding bands above/below are hover dead zones —
+        // pointer truth crossing the row's top/bottom edge read outside →
+        // hoveredIndex −1 → the highlight blinked OFF for the crossing — the
+        // "first hover flickers" report. zoneRow tells the area to map x
+        // into the row's frame, so any point over the menu is a live zone
+        // (columnar: one x → one chip) and the highlight only resets when
+        // the pointer truly leaves the menu. onClicked re-checks the press
+        // actually landed in the row's band, so padding clicks are no-ops
+        // rather than acting on whatever chip that column happens to hold.
         ZoneHoverArea {
             id: chipHover
-            anchors.fill: contentTypeRow
+            anchors.fill: parent
             container: contentTypeRow
+            zoneRow: contentTypeRow
             cursorShape: Qt.PointingHandCursor
-            onClicked: {
+            // Formal parameter, not injected `mouse` — parameter injection
+            // into signal handlers is deprecated and logs a warning toast
+            // on every open (surfaced by the self-test grab).
+            onClicked: (mouse) => {
+                // The row band inside this menu: y 6..40 (menu 46 tall,
+                // row 34 tall, centered). Outside it the press is on
+                // padding — never act on it.
+                if (mouse.y < 6 || mouse.y > 40)
+                    return
                 if (hoveredIndex < 0)
                     return
                 const kind = root.contentTypes[hoveredIndex].kind
@@ -2343,19 +2417,18 @@ Rectangle {
             anchors.fill: parent
             visible: root.rightPanelTab === "items"
 
-        Grid {
+        // The SAME wall the Show screen's right column renders — the shared
+        // MonitorWall component (hero page for a lone output, 2×2 paging,
+        // snap swipe, dots), not a private Grid hosting the tiles directly:
+        // "the same monitors" had come to mean same tiles, different hosting,
+        // which rendered visibly differently per surface (this tab stayed a
+        // flat 182px two-column grid while Show grew hero/paging). y=62
+        // keeps the tab's own top spacing; width matches the Show wall's
+        // 376 so tiles are pixel-identical across surfaces.
+        MonitorWall {
             x: 12
             y: 62
-            columns: 2
-            rowSpacing: 11
-            columnSpacing: 12
-
-            Repeater {
-                model: OutputListModel                // The shared monitor tile (qml/components/OutputMonitorTile.qml)
-                // — same component the Show screen's monitor wall renders, so
-                // renames/toggles/edits land in both places from one file.
-                delegate: OutputMonitorTile {}
-            }
+            width: 376
         }
 
         Text {

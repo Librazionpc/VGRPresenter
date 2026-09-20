@@ -8,8 +8,10 @@
 // give atomic live changes.
 
 #include "core/common/Common.hpp"
+#include "core/config/Json.hpp"
 #include "modules/production/ProductionTypes.hpp"
 
+#include <functional>
 #include <map>
 #include <set>
 #include <string>
@@ -59,6 +61,9 @@ public:
     Result<void> SetSceneState(std::string_view id, SceneState state);
     Result<void> SetVolume(std::string_view id, const VolumeControl& vol);
     Result<VolumeControl> Volume(std::string_view id) const;
+    // Free-form node metadata (serialized with the graph; see NodeInfo::meta).
+    Result<void> SetMeta(std::string_view id, std::string_view key,
+                         std::string_view value);
     Result<void> SetLayout(std::string_view id, ChannelLayout layout);
     Result<void> AddProcessing(std::string_view id, const ProcessingStage& stage);
     Result<void> ClearProcessing(std::string_view id);
@@ -101,6 +106,21 @@ public:
     size_t NodeCount() const;
     size_t EdgeCount() const;
 
+    // --- Persistence (full-graph durability) ---
+    // Serialize captures EVERYTHING user-visible: all nodes (kind, signal,
+    // role, name, enabled, states, volume, layout, processing, cost, meta),
+    // all routing edges, all output configs + assignments, all bus scenes
+    // and named production snapshots. Restore() rebuilds exactly that state
+    // on an empty graph. Auto-save: InstallSaver registers a sink invoked
+    // after every successful mutation (except during BeginEdit windows —
+    // commit saves once); ProductionEngine wires it to the kernel's
+    // DatabaseManager so the graph survives restarts.
+    Result<json::Value> Serialize() const;
+    Result<void> Restore(const json::Value& doc);
+    // Flush a pending auto-save immediately (called at engine shutdown).
+    Result<void> PersistDirty();
+    void InstallSaver(std::function<void(json::Value)> saver);
+
     // --- Atomic live changes (user brief §23, §24) ---
     // BeginEdit snapshots state; CommitEdit validates the current graph and
     // keeps it (errors roll back); RollbackEdit restores the snapshot.
@@ -120,6 +140,7 @@ public:
 private:
     static std::string NextId(const std::map<std::string, NodeInfo, std::less<>>& nodes,
                               std::string_view kind, std::string_view requested);
+    void QueuePersist();   // run the installed saver (skipped during edits)
     Result<void> EnsureNode(std::string_view id) const;
     bool Reachable(std::string_view from, std::string_view to,
                    const std::map<std::string, std::set<std::string>, std::less<>>& edges) const;
@@ -145,6 +166,8 @@ private:
     std::map<std::string, ProductionSnapshot, std::less<>> baseSnapshots_;
     bool inEdit_ = false;
     uint64_t nodeSeq_ = 0;
+
+    std::function<void(json::Value)> saver_;   // auto-save sink (engine wires the DB)
 };
 
 } // namespace bps::production

@@ -212,6 +212,7 @@ Item {
                 }
 
                 Rectangle {
+                    objectName: "selfTestAddShape" // UI self-test click target
                     width: 100
                     height: 32
                     radius: 9

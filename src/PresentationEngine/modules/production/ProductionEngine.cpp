@@ -1,5 +1,6 @@
 #include "modules/production/ProductionEngine.hpp"
 
+#include "core/database/DatabaseManager.hpp"
 #include "core/events/EventBus.hpp"
 #include "core/logging/Logger.hpp"
 
@@ -58,6 +59,31 @@ Result<void> ProductionEngine::Initialize() {
     if (initialized_.load()) return Ok();
     initialized_.store(true);
     WireEvents();
+
+    // --- Graph persistence (kernel owns the state, the DB owns the bytes) ---
+    // Restore the last saved graph, then keep it saved: every successful
+    // graph mutation re-serializes through the saver into the kernel's
+    // DatabaseManager (the DB flushes to disk at its own shutdown, and the
+    // engine flushes a final save at its Shutdown).
+    auto& db = DatabaseManager::Instance();
+    if (auto doc = db.Get("production", "graph"); doc.ok() && !doc.value().isNull()) {
+        if (auto r = graph_.Restore(doc.value()); r.ok())
+            Logger::Instance().Info("production graph restored (" +
+                                        std::to_string(graph_.NodeCount()) + " nodes)",
+                                    kModule);
+        else
+            Logger::Instance().Warning("production graph restore failed: " +
+                                           r.error().message,
+                                       kModule);
+    }
+    graph_.InstallSaver([](json::Value doc) {
+        auto& db2 = DatabaseManager::Instance();
+        (void)db2.Put("production", "graph", std::move(doc));
+        // Durable per mutation: the flush writes the DB file, so even a hard
+        // process kill only loses the mutation in flight. Graph edits are
+        // user-click paced — a small write each time is the right trade.
+        (void)db2.Flush();
+    });
     return Ok();
 }
 
@@ -81,6 +107,10 @@ Result<void> ProductionEngine::Stop() {
 
 Result<void> ProductionEngine::Shutdown() {
     UnwireEvents();
+    // Final save before the DatabaseManager flushes (kernel tears services
+    // down in registration order — production before database — so this is
+    // the last chance to capture any tail mutations).
+    (void)graph_.PersistDirty();
     initialized_.store(false);
     running_.store(false);
     return Ok();

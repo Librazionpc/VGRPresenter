@@ -350,6 +350,8 @@ file(GLOB_RECURSE APP_ASSET_FILES
 
 qt_add_executable(appVGRPresenterUI
     src/main.cpp
+    src/SelfTestDriver.h
+    src/SelfTestDriver.cpp
     qml/services/include/services/EventBus.h
     qml/services/EventBus.cpp
     qml/services/include/services/CrashHandler.h

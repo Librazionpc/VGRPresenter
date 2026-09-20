@@ -72,6 +72,8 @@ int main(int argc, char** argv) {
         else if (a == "--battery") opts.resourceMode = ResourceMode::Battery;
         else if (a == "--ipc" && i + 1 < argc)
             opts.ipcPort = static_cast<uint16_t>(std::atoi(argv[++i]));
+        else if (a == "--data" && i + 1 < argc)
+            opts.dataDir = argv[++i];   // persistent DB (kernel.json) under this dir
         else if (a == "--hold" && i + 1 < argc)
             holdSeconds = std::atoi(argv[++i]);
     }

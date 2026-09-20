@@ -98,6 +98,7 @@ void TestFlowModel();
 void TestFlowEngine();
 void TestProductionGraph();
 void TestProductionEngine();
+void TestProductionPersistence();
 void TestRecordingEngine();
 void TestBroadcastEngine();
 void TestBroadcastSenders();

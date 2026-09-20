@@ -1,4 +1,5 @@
 #include <QGuiApplication>
+#include <QQuickWindow>
 #include <QDebug>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -10,6 +11,7 @@
 #include "services/CrashHandler.h"
 #include "services/EngineBridge.h"
 #include "services/EventBus.h"
+#include "SelfTestDriver.h"
 
 namespace {
 
@@ -96,6 +98,18 @@ int main(int argc, char *argv[])
         QStringLiteral("pendingCrashSummary"), ConsumePendingCrashSummary());
 
     engine.loadFromModule("VGRPresenterUI", "Main");
+
+    // TEMPORARY diagnostic (kept, env-gated): UI self-test driver. With
+    // VGR_SELFTEST=1 the Main.qml scenario can drive the real app with REAL
+    // cursor moves (genuine OS hover events) + synthetic clicks, and grab
+    // any named item to a PNG for offline pixel sampling — pixel truth for
+    // rendering-layer bug reports that property traces can never see.
+    // Inert (not even instantiated) without the env var.
+    SelfTestDriver selfTestDriver;
+    if (qEnvironmentVariableIsSet("VGR_SELFTEST") && !engine.rootObjects().isEmpty()) {
+        selfTestDriver.setWindow(qobject_cast<QQuickWindow *>(engine.rootObjects().first()));
+        engine.rootContext()->setContextProperty(QStringLiteral("SelfTest"), &selfTestDriver);
+    }
 
     // A safety net for exceptions that escape the event loop (e.g. from a
     // future engine-bridge call) — logs and exits cleanly instead of letting

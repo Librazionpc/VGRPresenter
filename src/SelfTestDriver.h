@@ -1,0 +1,52 @@
+#pragma once
+
+// TEMPORARY diagnostic machinery (kept, env-gated): the UI self-test driver.
+// Lets an env-gated QML scenario drive the REAL app — real OS cursor moves
+// (QCursor::setPos, so genuine WM hover/enter/exit events deliver exactly as
+// they do for a user's hand) and real synthetic clicks — then grab any QML
+// item to a PNG for offline pixel sampling.
+//
+// Why: rendering-layer bug reports ("shape canvas items paint nothing", "chip
+// row highlight flickers") survived every property-level trace with clean
+// data; what those traces can never see is PIXELS. This driver produces
+// them: drive the flow, grab the item, sample the PNG offline.
+//
+// Hard-gated behind VGR_SELFTEST=1 — main.cpp only instantiates/exports the
+// driver when that env var is set, so a normal launch never sees it.
+// Registered into QML as `SelfTest` with invokables:
+//   move(x, y)          — real cursor move to window-local logical (x, y)
+//   click(x, y)         — move + left down/up at that point
+//   grab(itemName, path)— window.findItem<objectName=itemName> -> PNG
+//   quit()              — clean Qt.quit()
+// (x, y) are in window coordinates at the app's 1440x900 logical size —
+// the same space every fixed layout coordinate in this app is written in.
+
+#include <QObject>
+#include <QPointF>
+#include <QString>
+
+class QQuickWindow;
+
+class SelfTestDriver : public QObject
+{
+    Q_OBJECT
+public:
+    explicit SelfTestDriver(QObject *parent = nullptr);
+
+    // The window whose local coordinate space move/click/grab speak. Set
+    // right after engine load, from main.cpp.
+    void setWindow(QQuickWindow *window);
+
+    Q_INVOKABLE void move(double x, double y);
+    Q_INVOKABLE void click(double x, double y);
+    // Self-locating variants: resolve an item's center by objectName in
+    // window coordinates, so the scenario never depends on hand-typed
+    // pixel positions that drift when the UI layout changes.
+    Q_INVOKABLE QPointF itemCenter(const QString &objectName);
+    Q_INVOKABLE void clickItem(const QString &objectName);
+    Q_INVOKABLE bool grab(const QString &itemName, const QString &pngPath);
+    Q_INVOKABLE void quit();
+
+private:
+    QQuickWindow *m_window = nullptr;
+};

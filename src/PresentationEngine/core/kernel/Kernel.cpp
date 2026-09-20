@@ -276,7 +276,13 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     (void)services.Register<DriverManager>(&drivers);
 
     auto& db = DatabaseManager::Instance();
-    if (auto r = db.Open(options.dataDir); !r.ok()) return FailBoot(r.error());
+    // Open() takes a FILE path; dataDir is a directory. Name the database
+    // inside it (an empty dataDir stays in-memory). Passing the bare dir
+    // used to collide with the UI's own "enginedata" directory of the same
+    // path, making every persist fail silently.
+    const std::string dbFile =
+        options.dataDir.empty() ? std::string{} : options.dataDir + "/kernel.json";
+    if (auto r = db.Open(dbFile); !r.ok()) return FailBoot(r.error());
     (void)services.Register<DatabaseManager>(&db);
 
     // ---- 13. Content & Asset Management (Phase 3, docs/specs/13) ----

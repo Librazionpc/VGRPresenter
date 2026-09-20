@@ -177,9 +177,21 @@ Item {
 
     Component {
         id: musicC
+        // Lucide "music" on the NATIVE 24 grid — same family, scale, and
+        // 2px stroke as camera/clock/timer/shape, so it matches them
+        // everywhere with NO per-consumer scale boost (the old 9px export
+        // glyph needed 1.6×/1.3× boosts that also fattened its strokes —
+        // "the media audio icons are too big").
         StrokeIcon {
-            width: 9; height: 9
-            svgPath: "M 3 7.5 L 3 1 L 9 0 L 9 6.5 M 3 7.5 C 3 8.328427076339722 2.3284270763397217 9 1.5 9 C 0.6715728640556335 9 0 8.328427076339722 0 7.5 C 0 6.6715728640556335 0.6715728640556335 6 1.5 6 C 2.3284270763397217 6 3 6.6715728640556335 3 7.5 Z M 9 6.5 C 9 7.328427076339722 8.328427076339722 8 7.5 8 C 6.6715728640556335 8 6 7.328427076339722 6 6.5 C 6 5.6715728640556335 6.6715728640556335 5 7.5 5 C 8.328427076339722 5 9 5.6715728640556335 9 6.5 Z"
+            width: 24; height: 24; scale: 0.5833 // 14/24
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 9 18 L 9 5 L 21 3 L 21 16 M 9 18 A 3 3 0 1 0 3 18 A 3 3 0 1 0 9 18 M 21 16 A 3 3 0 1 0 15 16 A 3 3 0 1 0 21 16" }
+            }
         }
     }
 
@@ -197,9 +209,20 @@ Item {
 
     Component {
         id: playC
-        FillIcon {
-            width: 8; height: 9
-            svgPath: "M 0 1.0002304296146796 C 0 0.8242881310285464 0.04632834597266171 0.6514468130225394 0.1344584035227467 0.49915853390607945 C 0.2225884610728317 0.3468702547896195 0.34934774115207246 0.22052685298362776 0.5019370784515489 0.13288568305758774 C 0.6545264157510253 0.04524451313154773 0.8275432973060747 0 1.003517796589478 0 C 1.179492295872881 0 1.3521941580105123 0.04761252409988084 1.504184842173567 0.13628745355382385 L 7.50342070790257 3.635056998416793 C 7.654821159118948 3.7228910511616786 7.7805138396052795 3.84891533583123 7.8679359380336535 4.00053502900992 C 7.9553580364620275 4.15215472218861 8.001448406938437 4.32405951923572 8.00160026550293 4.499068798405053 C 8.001752124067423 4.674078077574385 7.955959863935468 4.8460622180753665 7.8688010268378115 4.997833341774561 C 7.781642189740155 5.149604465473755 7.656168821664965 5.275846337459151 7.504921021782327 5.36394290155996 L 1.504184842173567 8.863712710348146 C 1.3521941580105123 8.952387639802089 1.179492295872881 8.999397009830902 1.003517796589478 8.999994278331213 C 0.8275432973060747 9.000591546831524 0.6545264157510253 8.954755412367557 0.5019370784515489 8.867114242441517 C 0.34934774115207246 8.779473072515476 0.2225884610728317 8.653129894212173 0.1344584035227467 8.500841615095712 C 0.04632834597266171 8.348553335979252 0 8.175711630568587 0 7.9997693319824545 Z"
+        // Lucide "play" on the NATIVE 24 grid — STROKED, replacing the old
+        // filled Figma triangle: a filled glyph reads visibly bigger/heavier
+        // than every stroked sibling at any shared size. Now matches the
+        // camera/clock/timer/shape family 1:1 with no scale boost.
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 5 3 L 19 12 L 5 21 L 5 3 Z" }
+            }
         }
     }
 

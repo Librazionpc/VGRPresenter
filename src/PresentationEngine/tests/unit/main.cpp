@@ -134,6 +134,7 @@ static const Suite kSuites[] = {
     {"flow", "flow", TestFlowEngine},
     {"production", "graph", TestProductionGraph},
     {"production", "engine", TestProductionEngine},
+    {"production", "persistence", TestProductionPersistence},
     {"recording", "recording", TestRecordingEngine},
     {"broadcast", "broadcast", TestBroadcastEngine},
     {"broadcast", "broadcast", TestBroadcastSenders},

@@ -153,6 +153,11 @@ struct NodeInfo {
     ResourceCost cost;
     SignalInfo signal;
     std::string fallbackId;       // source fallback (user brief §18)
+    // Free-form metadata carried with the node — used by persistence (the
+    // serialized graph round-trips it verbatim) and by higher layers that
+    // need to hang policy on a node (e.g. the UI's bus "type" routing
+    // policy on bus plane pairs). Never interpreted by the graph itself.
+    std::map<std::string, std::string, std::less<>> meta;
 };
 
 // A named bus scene (user brief §5, §6): switching scenes re-activates the

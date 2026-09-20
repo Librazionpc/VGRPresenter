@@ -2,6 +2,7 @@
 
 #include <QAbstractListModel>
 #include <QList>
+#include <QString>
 #include <QVariantMap>
 #include <QVariantList>
 #include <qqml.h>
@@ -19,13 +20,17 @@
 // `type` ("audio" | "video" | "both") is the routing POLICY on top (which
 // rosters may route in), not the nodes' existence.
 //
-// Routing is stored as graph EDGES from roster source nodes ("ain:<row>"
-// for AudioInputListModel rows, "vin:<row>" for VideoSourceListModel rows)
-// into the bus's plane node — created on demand at first route. Same
-// index-into-roster convention as before (and its same staleness caveat:
-// rows shift, edges don't follow).
+//   - Routing is stored as graph EDGES from stable per-source nodes
+//     ("asrc:<AudioInputItem::id>" for audio rows, "vsrc:<VideoSourceItem::id>"
+//     for video rows) into the bus's plane node — created on demand at first
+//     route. Edges key on the source's STABLE ID, not its roster row, so
+//     deleting a roster row can never shift another row's routes (the
+//     removed row's own edges are cut by its model on removal).
 struct BusItem
 {
+    // Stable identity = the engine node number ("bus:<id>#a"/"bus:<id>#v")
+    // — survives row removals; the routing matrix stores THESE, not rows.
+    int id = 0;
     QString name;
     // "audio" | "video" | "both" — which input roster(s) this bus ACCEPTS
     // routing from. The reference image only shows audio-only and
@@ -50,6 +55,16 @@ class BusListModel : public QAbstractListModel
     QML_SINGLETON
 
 public:
+    // C++ access to the QML-created singleton (null until QML constructs
+    // it) — the cross-model translation entry points below are only ever
+    // called from routing flows, which run after the screen exists.
+    static BusListModel *Instance() { return s_instance; }
+
+    // Bus row <-> stable bus number (BusItem::id). rowForBusNumber returns
+    // -1 when the bus was removed — callers treat that as "no such route".
+    static int busNumberAt(int row);
+    static int rowForBusNumber(int busNumber);
+
     enum Role {
         NameRole = Qt::UserRole + 1,
         TypeRole,
@@ -61,6 +76,7 @@ public:
     Q_ENUM(Role)
 
     explicit BusListModel(QObject *parent = nullptr);
+    ~BusListModel() override;
 
     int rowCount(const QModelIndex &parent = QModelIndex()) const override;
     QVariant data(const QModelIndex &index, int role) const override;
@@ -85,14 +101,34 @@ public:
     Q_INVOKABLE QVariantMap getBus(int index) const;
 
 private:
+    static inline BusListModel *s_instance = nullptr;
+
     // Engine-backed plumbing: create the graph nodes + cache row (returns
     // the new row); pull one row's name/level/muted/routes back from the
-    // graph. The model starts EMPTY — buses exist only once created (user
-    // + Add, or a future engine-side creator); nothing is seeded app-side.
+    // graph. The model starts EMPTY app-side; the constructor then rebuilds
+    // rows from whatever the engine's graph holds (restored from the
+    // kernel's persisted production document) — the graph is the only
+    // truth, across restarts too.
     int createBusRow(const QString &name, const QString &type,
                      qreal level, bool muted);
     void pullRow(int row);
+    void rebuildFromGraph();
+
+public:
+    // Edge cleanup invoked by the roster models when a source row is
+    // REMOVED: cuts every graph edge from that source's stable node(s)
+    // (asrc:<id> / vsrc:<id>) and refreshes the affected rows. No-ops when
+    // the source was never routed.
+    void cutAudioSourceEdges(const QString &stableId);
+    void cutVideoSourceEdges(const QString &stableId);
+
+private:
+    // Stable-id graph node id for a roster row; empty on a bad row. Video
+    // additionally gets the node pulled out of any other bus by the 1:1
+    // rule at connect time.
+    static QString audioSourceNodeId(int rosterRow);
+    static QString videoSourceNodeId(int rosterRow);
 
     QList<BusItem> m_buses;
-    int m_nextBus = 1;   // engine node id counter ("bus:<n>#a" / "bus:<n>#v")
+    int m_nextBus = 1;   // stable bus number / engine node id counter
 };

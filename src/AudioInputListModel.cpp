@@ -1,5 +1,7 @@
 #include "AudioInputListModel.h"
 
+#include "BusListModel.h"
+
 #include <algorithm>
 
 static QVariantList routingVariant(const QList<QList<int>> &routes)
@@ -46,6 +48,7 @@ static QVariantMap effectToVariant(const AudioEffect &effect)
 AudioInputListModel::AudioInputListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
+    s_instance = this;
     // Starts EMPTY: the board shows the machine's real audio devices (via
     // EngineBridge.audioDevices), not a hardcoded demo roster — every source
     // on the board is one the user added. (The old seed rows were mock data;
@@ -54,6 +57,29 @@ AudioInputListModel::AudioInputListModel(QObject *parent)
     // Row ORDER is a stored contract: BusListModel routes reference rows by
     // index, so removing a row shifts them (no remap exists yet — routes can
     // go stale after a removal; a known limitation, see KNOWN_ISSUES.md).
+}
+
+AudioInputListModel::~AudioInputListModel()
+{
+    if (s_instance == this)
+        s_instance = nullptr;
+}
+
+QString AudioInputListModel::stableIdForRow(int row)
+{
+    if (!s_instance || row < 0 || row >= s_instance->m_inputs.size())
+        return {};
+    return s_instance->m_inputs.at(row).id;
+}
+
+int AudioInputListModel::rowForStableId(const QString &id)
+{
+    if (!s_instance || id.isEmpty())
+        return -1;
+    for (int i = 0; i < s_instance->m_inputs.size(); ++i)
+        if (s_instance->m_inputs.at(i).id == id)
+            return i;
+    return -1;   // removed row — callers treat as "no such route"
 }
 
 int AudioInputListModel::rowCount(const QModelIndex &parent) const
@@ -120,6 +146,7 @@ void AudioInputListModel::addInput()
     const int row = m_inputs.size();
     beginInsertRows(QModelIndex(), row, row);
     AudioInputItem added;
+    added.id = QStringLiteral("a%1").arg(m_nextId++);
     added.name = QStringLiteral("New Input %1").arg(row + 1);
     added.effects = defaultEffects();
     m_inputs.append(added);
@@ -130,6 +157,13 @@ void AudioInputListModel::removeInput(int index)
 {
     if (index < 0 || index >= m_inputs.size())
         return;
+
+    // Cut this source's routing edges BEFORE the row disappears: routes key
+    // on the row's stable id, so nothing shifts or goes stale — other rows'
+    // routes are untouched by construction.
+    const QString id = m_inputs.at(index).id;
+    if (BusListModel *buses = BusListModel::Instance())
+        buses->cutAudioSourceEdges(id);
 
     beginRemoveRows(QModelIndex(), index, index);
     m_inputs.removeAt(index);
@@ -144,6 +178,7 @@ int AudioInputListModel::duplicateInput(int index)
     const int row = m_inputs.size();
     beginInsertRows(QModelIndex(), row, row);
     AudioInputItem copy = m_inputs.at(index);
+    copy.id = QStringLiteral("a%1").arg(m_nextId++);   // fresh identity — routing does NOT copy
     copy.name = QStringLiteral("%1 · copy").arg(copy.name);
     // Mute is a state, not a property of the source — a copy starts live
     // (same rule as OutputListModel's duplicates).
@@ -263,7 +298,13 @@ QVariantMap AudioInputListModel::getRouting(int index) const
     QVariantList perChannel;
     for (const QList<int> &route : item.channelRoutes) {
         QVariantList cell;
-        for (int bus : route) cell.append(bus);
+        // Stored values are stable BUS NUMBERS; QML consumes rows —
+        // translate here. A number whose bus row is gone drops out.
+        for (int busNo : route) {
+            const int busRow = BusListModel::rowForBusNumber(busNo);
+            if (busRow >= 0)
+                cell.append(busRow);
+        }
         perChannel.append(cell);
     }
     return {
@@ -292,17 +333,24 @@ void AudioInputListModel::toggleChannelRoute(int index, int channel, int busInde
     AudioInputItem &item = m_inputs[index];
     if (channel < 0 || channel >= item.channels || busIndex < 0)
         return;
+    // QML passes a bus ROW; store the bus's stable NUMBER (rows shift on
+    // removal, numbers don't).
+    if (BusListModel *buses = BusListModel::Instance(); !buses)
+        return;
+    const int busNo = BusListModel::busNumberAt(busIndex);
+    if (busNo < 0)
+        return;
 
     // Route lists are sparse to the channel count — extend on first touch.
     while (item.channelRoutes.size() <= channel)
         item.channelRoutes.append(QList<int>());
 
     QList<int> &route = item.channelRoutes[channel];
-    const int at = route.indexOf(busIndex);
+    const int at = route.indexOf(busNo);
     if (at >= 0)
         route.removeAt(at);
     else
-        route.append(busIndex);
+        route.append(busNo);
 
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { RoutingRole });
@@ -315,14 +363,18 @@ void AudioInputListModel::setChannelRoutes(int index, const QVariantList &perCha
 
     AudioInputItem &item = m_inputs[index];
     QList<QList<int>> parsed;
+    if (BusListModel *buses = BusListModel::Instance(); !buses)
+        return;
     for (const QVariant &entry : perChannel) {
         QList<int> route;
         const QVariantList cell = entry.toList();
         for (const QVariant &v : cell) {
             bool ok = false;
-            const int bus = v.toInt(&ok);
-            if (ok && bus >= 0)
-                route.append(bus);
+            const int busRow = v.toInt(&ok);
+            // QML passes rows — store stable bus numbers.
+            const int busNo = ok ? BusListModel::busNumberAt(busRow) : -1;
+            if (busNo >= 0)
+                route.append(busNo);
         }
         parsed.append(route);
     }

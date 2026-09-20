@@ -1,5 +1,7 @@
 #include "VideoSourceListModel.h"
 
+#include "BusListModel.h"
+
 #include <algorithm>
 
 VideoSourceListModel::VideoSourceListModel(QObject *parent)
@@ -10,6 +12,29 @@ VideoSourceListModel::VideoSourceListModel(QObject *parent)
     // read EngineBridge.videoDevices), so a hardcoded mock roster would lie
     // about the hardware. Media rows are user-added via Add Source.
     // (AudioInputListModel keeps its seeded roster by explicit decision.)
+}
+
+VideoSourceListModel::~VideoSourceListModel()
+{
+    if (s_instance == this)
+        s_instance = nullptr;
+}
+
+QString VideoSourceListModel::stableIdForRow(int row)
+{
+    if (!s_instance || row < 0 || row >= s_instance->m_sources.size())
+        return {};
+    return s_instance->m_sources.at(row).id;
+}
+
+int VideoSourceListModel::rowForStableId(const QString &id)
+{
+    if (!s_instance || id.isEmpty())
+        return -1;
+    for (int i = 0; i < s_instance->m_sources.size(); ++i)
+        if (s_instance->m_sources.at(i).id == id)
+            return i;
+    return -1;   // removed row — callers treat as "no such route"
 }
 
 int VideoSourceListModel::rowCount(const QModelIndex &parent) const
@@ -58,8 +83,15 @@ void VideoSourceListModel::addSourceWith(const QString &name, const QString &kin
 {
     const int row = m_sources.size();
     beginInsertRows(QModelIndex(), row, row);
-    m_sources.append({ name.isEmpty() ? QStringLiteral("New Source %1").arg(row + 1) : name,
-                       kind, sublabel, QString(), muted, level });
+    VideoSourceItem added;
+    added.id = QStringLiteral("v%1").arg(m_nextId++);
+    added.name = name.isEmpty() ? QStringLiteral("New Source %1").arg(row + 1) : name;
+    added.kind = kind;
+    added.sublabel = sublabel;
+    added.mode = QString();
+    added.muted = muted;
+    added.level = level;
+    m_sources.append(added);
     endInsertRows();
 }
 
@@ -71,6 +103,7 @@ int VideoSourceListModel::duplicateSource(int index)
     const int row = m_sources.size();
     beginInsertRows(QModelIndex(), row, row);
     VideoSourceItem copy = m_sources.at(index);
+    copy.id = QStringLiteral("v%1").arg(m_nextId++);   // fresh identity — routing does NOT copy
     copy.name = QStringLiteral("%1 · copy").arg(copy.name);
     // Mute is a state, not a property of the source — a copy starts live
     // (same rule as OutputListModel's duplicates).
@@ -84,6 +117,13 @@ void VideoSourceListModel::removeSource(int index)
 {
     if (index < 0 || index >= m_sources.size())
         return;
+
+    // Cut this source's routing edges BEFORE the row disappears: routes key
+    // on the row's stable id, so nothing shifts or goes stale — other rows'
+    // routes are untouched by construction.
+    const QString id = m_sources.at(index).id;
+    if (BusListModel *buses = BusListModel::Instance())
+        buses->cutVideoSourceEdges(id);
 
     beginRemoveRows(QModelIndex(), index, index);
     m_sources.removeAt(index);

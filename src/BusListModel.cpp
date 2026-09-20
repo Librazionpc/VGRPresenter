@@ -1,11 +1,17 @@
 #include "BusListModel.h"
 
+#include "AudioInputListModel.h"
+#include "VideoSourceListModel.h"
+
 #include <QDebug>
 #include <QSet>
+#include <utility>
 
 #include "modules/production/ProductionEngine.hpp"
 
 #include <algorithm>
+#include <cstring>
+#include <set>
 
 // The engine owns the buses. Every row here is a live view of bus nodes in
 // the kernel's production graph (docs/specs/27 — ProductionEngine owns the
@@ -19,12 +25,13 @@
 //     existence.
 //   - Level 0-100 maps linearly onto the plane nodes' gainDb -60..0 dB;
 //     mute is the node's VolumeControl::mute.
-//   - A route is a graph EDGE from a roster source node ("ain:<row>" for
-//     AudioInputListModel rows, "vin:<row>" for VideoSourceListModel rows)
-//     into the matching plane node. Source nodes are created on demand at
-//     first route. Audio routes are additive (mixing); video routes are
-//     strictly 1:1 (a bus renders exactly one frame source) — enforced
-//     here, exactly as before.
+//   - A route is a graph EDGE from a stable per-source node ("asrc:<id>"/
+//     "vsrc:<id>" — the source row's STABLE id, not its roster row) into
+//     the matching plane node. Source nodes are created on demand at first
+//     route; deleting a roster row cuts only its own edges (the roster
+//     model calls back), so no other row's routes ever shift. Audio routes
+//     are additive (mixing); video routes are strictly 1:1 (a bus renders
+//     exactly one frame source) — enforced here, exactly as before.
 //
 // The model starts EMPTY: no buses exist until the user adds one (+ Add)
 // or the engine creates them. Nothing is seeded app-side — the graph is the
@@ -40,6 +47,12 @@ bps::production::ProductionGraph &graph()
 // UI 0-100  <->  engine gainDb -60..0 dB, linear. 0 reads as silence,
 // 100 as unity — matching the board's "buses open silent, user raises".
 constexpr double kSilentDb = -60.0;
+
+// Stable per-source graph node ids: a source ROUTE is an edge from a node
+// named after the source row's stable id (never its roster row), so routes
+// survive every roster reorder/removal.
+constexpr const char *kAudioSourcePrefix = "asrc:";
+constexpr const char *kVideoSourcePrefix = "vsrc:";
 
 qreal levelFromDb(double db)
 {
@@ -59,38 +72,40 @@ QVariantList toVariantList(const QList<int> &indices)
     return list;
 }
 
-// Routes of one plane: the "ain:<i>"/"vin:<i>" nodes feeding it, numerically
-// sorted (the graph stores ids alphabetically — "ain:10" would precede
-// "ain:2").
-QList<int> routesFromGraph(const std::string &planeNodeId, const char *prefix)
+// Routes of one plane: the stable "asrc:<id>"/"vsrc:<id>" source nodes
+// feeding it. Reported as ROSTER ROWS (the QML contract): each upstream id
+// is translated through the owning roster model — a source whose row was
+// removed drops out (its edges get cut on removal anyway; this is the
+// belt to those braces). Ordering is irrelevant to consumers (membership
+// tests), but keep upstream order for stable output.
+QList<int> audioRoutesFromGraph(const std::string &planeNodeId)
 {
     QList<int> out;
-    const std::string needle = std::string(prefix) + ":";
+    constexpr const char *needle = "asrc:";
     for (const auto &up : graph().Upstream(planeNodeId)) {
         if (up.starts_with(needle)) {
-            try {
-                out.append(std::stoi(up.substr(needle.size())));
-            } catch (const std::exception &) {
-                // Malformed id — ignore; a route row that isn't ours.
-            }
+            const int row = AudioInputListModel::rowForStableId(
+                QString::fromStdString(up.substr(std::strlen(needle))));
+            if (row >= 0 && !out.contains(row))
+                out.append(row);
         }
     }
-    std::sort(out.begin(), out.end());
-    out.erase(std::unique(out.begin(), out.end()), out.end());
     return out;
 }
 
-// The roster source node for row `i` — created at first route (idempotent).
-void ensureRosterSource(const char *prefix, int i, bps::production::SignalType type)
+QList<int> videoRoutesFromGraph(const std::string &planeNodeId)
 {
-    const std::string id = std::string(prefix) + ":" + std::to_string(i);
-    if (!graph().HasNode(id)) {
-        const char *kind = std::string(prefix) == "ain" ? "Audio Input " : "Video Source ";
-        auto r = graph().AddSource(id, kind + std::to_string(i + 1), type);
-        if (!r.ok())
-            qWarning() << "BusListModel: AddSource" << id.c_str() << "failed:"
-                       << r.error().message.c_str();
+    QList<int> out;
+    constexpr const char *needle = "vsrc:";
+    for (const auto &up : graph().Upstream(planeNodeId)) {
+        if (up.starts_with(needle)) {
+            const int row = VideoSourceListModel::rowForStableId(
+                QString::fromStdString(up.substr(std::strlen(needle))));
+            if (row >= 0 && !out.contains(row))
+                out.append(row);
+        }
     }
+    return out;
 }
 
 bool feedsFrom(const std::string &planeNodeId, const std::string &sourceId)
@@ -110,8 +125,143 @@ void logIfFailed(const char *op, const auto &r)
 BusListModel::BusListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
-    // Empty by design — see the header note. Buses appear only through
-    // addBus/duplicateBus (or a future engine-side creator).
+    s_instance = this;
+    rebuildFromGraph();
+}
+
+BusListModel::~BusListModel()
+{
+    if (s_instance == this)
+        s_instance = nullptr;
+}
+
+int BusListModel::busNumberAt(int row)
+{
+    if (!s_instance || row < 0 || row >= s_instance->m_buses.size())
+        return -1;
+    return s_instance->m_buses.at(row).id;
+}
+
+int BusListModel::rowForBusNumber(int busNumber)
+{
+    if (!s_instance)
+        return -1;
+    for (int i = 0; i < s_instance->m_buses.size(); ++i)
+        if (s_instance->m_buses.at(i).id == busNumber)
+            return i;
+    return -1;   // removed bus — callers treat as "no such route"
+}
+
+// Stable graph node id for a roster row — derived from the row's stable id
+// ("asrc:a3" / "vsrc:v7"), so it survives every row shift. Empty on a bad
+// or not-yet-constructed roster (routing runs only after the screen exists).
+QString BusListModel::audioSourceNodeId(int rosterRow)
+{
+    const QString id = AudioInputListModel::stableIdForRow(rosterRow);
+    return id.isEmpty() ? QString()
+                        : QString::fromLatin1(kAudioSourcePrefix) + id;
+}
+
+QString BusListModel::videoSourceNodeId(int rosterRow)
+{
+    const QString id = VideoSourceListModel::stableIdForRow(rosterRow);
+    return id.isEmpty() ? QString()
+                        : QString::fromLatin1(kVideoSourcePrefix) + id;
+}
+
+void BusListModel::cutAudioSourceEdges(const QString &stableId)
+{
+    if (stableId.isEmpty())
+        return;
+    const std::string node = std::string(kAudioSourcePrefix) + stableId.toStdString();
+    if (!graph().HasNode(node))
+        return;   // never routed — nothing to cut
+
+    QList<int> touched;
+    for (int row = 0; row < m_buses.size(); ++row) {
+        if (graph().Disconnect(node, m_buses.at(row).engineId.toStdString()).ok())
+            touched.append(row);
+    }
+    for (const int row : std::as_const(touched)) {
+        pullRow(row);
+        const QModelIndex changed = index(row);
+        emit dataChanged(changed, changed, { RoutedAudioInputsRole });
+    }
+}
+
+void BusListModel::cutVideoSourceEdges(const QString &stableId)
+{
+    if (stableId.isEmpty())
+        return;
+    const std::string node = std::string(kVideoSourcePrefix) + stableId.toStdString();
+    if (!graph().HasNode(node))
+        return;   // never routed — nothing to cut
+
+    QList<int> touched;
+    for (int row = 0; row < m_buses.size(); ++row) {
+        if (graph().Disconnect(node, m_buses.at(row).engineIdVideo.toStdString()).ok())
+            touched.append(row);
+    }
+    for (const int row : std::as_const(touched)) {
+        pullRow(row);
+        const QModelIndex changed = index(row);
+        emit dataChanged(changed, changed, { RoutedVideoSourcesRole });
+    }
+}
+
+// The graph (already restored from the kernel's persisted production doc by
+// the time QML constructs this singleton) is rebuilt into rows here. Row
+// order follows the paired-plane node ids' numeric suffix so a restored
+// board looks exactly like the one the user left. Only planes whose twin
+// still exists form a row — a crashed remove can't strand a half-bus.
+void BusListModel::rebuildFromGraph()
+{
+    std::set<int> seen;
+    const auto collect = [&](const char *planeSuffix) {
+        for (const auto &id : graph().NodeIds()) {
+            const std::string s = id;
+            if (!s.starts_with("bus:") || !s.ends_with(planeSuffix))
+                continue;
+            const size_t numStart = 4;   // after "bus:"
+            const size_t numEnd = s.find('#');
+            if (numEnd == std::string::npos || numEnd <= numStart)
+                continue;
+            int n = 0;
+            try {
+                n = std::stoi(s.substr(numStart, numEnd - numStart));
+            } catch (const std::exception &) {
+                continue;   // not one of ours
+            }
+            seen.insert(n);
+        }
+    };
+    collect("#a");
+    collect("#v");
+
+    for (int n : seen) {
+        const std::string a = "bus:" + std::to_string(n) + "#a";
+        const std::string v = "bus:" + std::to_string(n) + "#v";
+        if (!graph().HasNode(a) || !graph().HasNode(v))
+            continue;   // half-bus from an interrupted remove — skip
+
+        BusItem item;
+        item.id = n;   // stable identity = the engine node number
+        item.engineId = QString::fromStdString(a);
+        item.engineIdVideo = QString::fromStdString(v);
+        m_nextBus = std::max(m_nextBus, n + 1);
+
+        // The UI's routing-policy type lives engine-side as node meta
+        // (survives restarts with the rest of the graph).
+        if (auto r = graph().GetNode(a); r.ok())
+            item.type = QString::fromStdString(
+                r.value().meta.count("uiBusType") ? r.value().meta.at("uiBusType")
+                                                  : "audio");
+        m_buses.append(item);
+    }
+
+    // Second pass: pull live values (level/mute/routes) per row.
+    for (int row = 0; row < m_buses.size(); ++row)
+        pullRow(row);
 }
 
 int BusListModel::createBusRow(const QString &name, const QString &type,
@@ -123,7 +273,9 @@ int BusListModel::createBusRow(const QString &name, const QString &type,
     item.level = level;
     item.muted = muted;
 
-    const std::string base = "bus:" + std::to_string(m_nextBus++);
+    const int busNo = m_nextBus++;
+    const std::string base = "bus:" + std::to_string(busNo);
+    item.id = busNo;   // stable identity — the routing matrix stores this
     item.engineId = QString::fromStdString(base + "#a");
     item.engineIdVideo = QString::fromStdString(base + "#v");
 
@@ -137,6 +289,13 @@ int BusListModel::createBusRow(const QString &name, const QString &type,
                                                 name.toStdString(),
                                                 bps::production::BusRole::Custom,
                                                 bps::production::SignalType::Video));
+    // The routing-policy type rides engine-side as node meta so it comes
+    // back with the graph on the next boot. (After AddBus — SetMeta needs
+    // the node to exist.)
+    logIfFailed("SetMeta(audio)",
+                graph().SetMeta(item.engineId.toStdString(), "uiBusType", type.toStdString()));
+    logIfFailed("SetMeta(video)",
+                graph().SetMeta(item.engineIdVideo.toStdString(), "uiBusType", type.toStdString()));
     // Buses open silent (level 0 = -60 dB) unless the caller says otherwise.
     const bps::production::VolumeControl v{ dbFromLevel(level), muted, false, 0.0, 0.0 };
     logIfFailed("SetVolume(audio)", graph().SetVolume(item.engineId.toStdString(), v));
@@ -159,8 +318,8 @@ void BusListModel::pullRow(int row)
         item.name = QString::fromStdString(r.value().displayName);
     // `type` stays cached: it's this model's routing policy, mirrored onto
     // both plane nodes (which always exist).
-    item.routedAudioInputs = routesFromGraph(item.engineId.toStdString(), "ain");
-    item.routedVideoSources = routesFromGraph(item.engineIdVideo.toStdString(), "vin");
+    item.routedAudioInputs = audioRoutesFromGraph(item.engineId.toStdString());
+    item.routedVideoSources = videoRoutesFromGraph(item.engineIdVideo.toStdString());
 }
 
 int BusListModel::rowCount(const QModelIndex &parent) const
@@ -265,18 +424,30 @@ void BusListModel::setType(int index, const QString &type)
         return;
 
     m_buses[index].type = type;
-    // A route to a roster the bus no longer accepts from is dead weight —
-    // drop the EDGE (the graph, not just the cache). Audio sources fit
-    // EVERY bus (a video bus carries the feed with its embedded audio —
-    // matches QML's sourceFitsBus, the one compat rule), so only video
-    // routes are ever dropped, when the type narrows to pure audio.
+    // Persist the policy engine-side (meta), then drop routes the narrowed
+    // type no longer accepts: a route to a roster the bus no longer accepts
+    // from is dead weight. Audio sources fit EVERY bus (a video bus carries
+    // the feed with its embedded audio — matches QML's sourceFitsBus, the
+    // one compat rule), so only video routes are ever dropped, when the
+    // type narrows to pure audio.
+    logIfFailed("SetMeta(audio)",
+                graph().SetMeta(m_buses[index].engineId.toStdString(), "uiBusType",
+                                type.toStdString()));
+    logIfFailed("SetMeta(video)",
+                graph().SetMeta(m_buses[index].engineIdVideo.toStdString(), "uiBusType",
+                                type.toStdString()));
     QList<int> roles = { TypeRole };
     if (type != QStringLiteral("video") && type != QStringLiteral("both")
         && !m_buses[index].routedVideoSources.isEmpty()) {
-        for (int i : std::as_const(m_buses[index].routedVideoSources))
-            logIfFailed("Disconnect(policy)",
-                        graph().Disconnect("vin:" + std::to_string(i),
-                                           m_buses[index].engineIdVideo.toStdString()));
+        // Drop routes the narrowed type no longer accepts. routedVideoSources
+        // holds ROSTER ROWS — re-derive their stable nodes to disconnect.
+        for (int row : std::as_const(m_buses[index].routedVideoSources)) {
+            const QString node = videoSourceNodeId(row);
+            if (!node.isEmpty())
+                logIfFailed("Disconnect(policy)",
+                            graph().Disconnect(node.toStdString(),
+                                               m_buses[index].engineIdVideo.toStdString()));
+        }
         roles.append(RoutedVideoSourcesRole);
     }
 
@@ -331,14 +502,23 @@ void BusListModel::toggleAudioRoute(int busIndex, int inputIndex)
 {
     if (busIndex < 0 || busIndex >= m_buses.size())
         return;
+    // QML passes a roster ROW; the edge keys on the row's STABLE id node —
+    // a bad/vanished row has no node and nothing to route.
+    const QString srcQ = audioSourceNodeId(inputIndex);
+    if (srcQ.isEmpty())
+        return;
     BusItem &item = m_buses[busIndex];
-    const std::string src = "ain:" + std::to_string(inputIndex);
+    const std::string src = srcQ.toStdString();
     const std::string plane = item.engineId.toStdString();
 
-    if (feedsFrom(plane, src))
+    if (feedsFrom(plane, src)) {
         logIfFailed("Disconnect(audio)", graph().Disconnect(src, plane));
-    else {
-        ensureRosterSource("ain", inputIndex, bps::production::SignalType::Audio);
+    } else {
+        if (!graph().HasNode(src)) {
+            logIfFailed("AddSource(audio)",
+                        graph().AddSource(src, "Audio Source",
+                                          bps::production::SignalType::Audio));
+        }
         logIfFailed("Connect(audio)", graph().Connect(src, plane,
                                                       bps::production::SignalType::Audio));
     }
@@ -358,7 +538,12 @@ void BusListModel::toggleVideoRoute(int busIndex, int sourceIndex)
     // renders on exactly ONE bus. Enforced at the GRAPH level: the new
     // source is disconnected from every bus's video plane, then — unless
     // the toggle is a remove — connected into this bus's video plane.
-    const std::string src = "vin:" + std::to_string(sourceIndex);
+    // QML passes a roster ROW; the edge keys on the row's STABLE id node —
+    // a bad/vanished row has no node and nothing to route.
+    const QString srcQ = videoSourceNodeId(sourceIndex);
+    if (srcQ.isEmpty())
+        return;
+    const std::string src = srcQ.toStdString();
 
     QSet<int> touchedRows;
     bool wasOnThisBus = false;
@@ -371,7 +556,11 @@ void BusListModel::toggleVideoRoute(int busIndex, int sourceIndex)
     }
 
     if (!wasOnThisBus) {
-        ensureRosterSource("vin", sourceIndex, bps::production::SignalType::Video);
+        if (!graph().HasNode(src)) {
+            logIfFailed("AddSource(video)",
+                        graph().AddSource(src, "Video Source",
+                                          bps::production::SignalType::Video));
+        }
         if (graph().Connect(src, m_buses[busIndex].engineIdVideo.toStdString(),
                             bps::production::SignalType::Video).ok())
             touchedRows.insert(busIndex);

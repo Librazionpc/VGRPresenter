@@ -30,6 +30,12 @@ struct AudioEffect
 // (VGRPresenter_Settings_Audio_Video.qml's "AUDIO INPUTS" list).
 struct AudioInputItem
 {
+    // Stable identity — survives row removals (rows after it shift; this
+    // doesn't). BusListModel routes key graph edges on it, and the routing
+    // matrix stores bus numbers against it, so neither follows row order.
+    // Assigned at add/duplicate time; never persisted (rosters are
+    // session-owned) and never shown.
+    QString id;
     QString name;
     // "device" | "media" — a real sound device (mic, line in, system/output
     // capture — anything the OS mixer sees) or a plain media player; drives
@@ -54,18 +60,28 @@ struct AudioInputItem
     // strip count (1 = mono, 2 = L/R stereo). Not user-adjustable in the
     // dialogs — a device's real channel count belongs to the engine.
     int channels = 2;
-    // Routing matrix (the Routing… modal): per-input-channel lists of bus
-    // row indices that channel feeds. Auto mode overrides the matrix
-    // visually (every channel → every bus) without touching stored data —
-    // toggling Auto off reveals the manual pattern again.
+    // Routing matrix (the Routing… modal): per-input-channel lists of BUS
+    // NUMBERS (BusItem::id — stable) that channel feeds, NOT row indices —
+    // rows shift on removal, bus numbers don't. QML still passes/receives
+    // rows (the model translates at the boundary, its one translation job).
+    // Auto mode overrides the matrix visually (every channel → every bus)
+    // without touching stored data — toggling Auto off reveals the manual
+    // pattern again.
     bool routingAuto = false;
     QList<QList<int>> channelRoutes;
     QList<AudioEffect> effects;
 };
 
 // QML singleton backing Settings · Audio & Video's Audio Inputs column and
-// the routing a BusListModel bus stores against it (by row index — same
-// convention as OutputItem::styleIndex into StyleListModel).
+// the routing a BusListModel bus stores against it.
+//
+// ROUTING KEYS ON STABLE IDS, NOT ROWS: BusListModel's graph edges are cut
+// to "asrc:<id>" nodes (one per row, created on demand), and the per-channel
+// matrix stores bus numbers. Row indices exist only at the QML boundary —
+// toggleChannelRoute/toggleAudioRoute take rows, the models translate to
+// ids/numbers internally, so deleting a row can never shift anyone else's
+// routes. Static accessors let the three models translate across themselves
+// (all QML-singleton instances; created before any routing call runs).
 class AudioInputListModel : public QAbstractListModel
 {
     Q_OBJECT
@@ -73,6 +89,15 @@ class AudioInputListModel : public QAbstractListModel
     QML_SINGLETON
 
 public:
+    // C++ access to the QML-created singleton (null until QML constructs
+    // it) — the cross-model translation entry points below are only ever
+    // called from routing flows, which run after the screen exists.
+    static AudioInputListModel *Instance() { return s_instance; }
+
+    // Row <-> stable id. rowForStableId returns -1 when the id belongs to a
+    // removed row — callers treat that as "no such route".
+    static QString stableIdForRow(int row);
+    static int rowForStableId(const QString &id);
     enum Role {
         NameRole = Qt::UserRole + 1,
         KindRole,
@@ -89,6 +114,7 @@ public:
     Q_ENUM(Role)
 
     explicit AudioInputListModel(QObject *parent = nullptr);
+    ~AudioInputListModel() override;
 
     // The reference's rack defaults — Gain/EQ/Compressor/Reverb on,
     // Limiter/Noise Gate/Delay off. Shared by the seeds, addInput() and the
@@ -141,5 +167,8 @@ public:
     Q_INVOKABLE QVariantMap getInput(int index) const;
 
 private:
+    static inline AudioInputListModel *s_instance = nullptr;
+
     QList<AudioInputItem> m_inputs;
+    int m_nextId = 1;   // stable-id counter ("a<n>" — unique per row, ever)
 };

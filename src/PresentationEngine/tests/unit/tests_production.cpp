@@ -41,6 +41,56 @@ struct ProdEvents {
 };
 } // namespace
 
+// Full-graph persistence: Serialize -> Restore -> Serialize produces the
+// same document (round-trip), and a restored graph behaves like the original
+// (routing, volume, meta, edges). Also covers auto-save firing on mutation.
+void TestProductionPersistence() {
+    pr::ProductionGraph g;
+
+    // Build a representative graph: sources, bus pair, edge, volume, meta.
+    CHECK(g.AddSource("cam1", "Camera 1", pr::SignalType::Video).ok());
+    CHECK(g.AddSource("ain:0", "Audio Input 1", pr::SignalType::Audio).ok());
+    CHECK(g.AddBus("bus:1#a", "Master", pr::BusRole::Custom, pr::SignalType::Audio).ok());
+    CHECK(g.AddBus("bus:1#v", "Master", pr::BusRole::Custom, pr::SignalType::Video).ok());
+    CHECK(g.Connect("ain:0", "bus:1#a", pr::SignalType::Audio).ok());
+    CHECK(g.Connect("cam1", "bus:1#v", pr::SignalType::Video).ok());
+    const pr::VolumeControl vol{-12.5, true, false, 0.25, 0.0};
+    CHECK(g.SetVolume("bus:1#a", vol).ok());
+    CHECK(g.SetMeta("bus:1#a", "uiBusType", "both").ok());
+    CHECK(g.SetMeta("bus:1#v", "uiBusType", "both").ok());
+
+    auto doc = g.Serialize();
+    CHECK(doc.ok());
+    const std::string blob = doc.value().ToString();
+    CHECK(blob.find("bus:1#a") != std::string::npos);
+
+    // Round-trip: a fresh graph restores to the same serialized form.
+    pr::ProductionGraph g2;
+    auto parsed = bps::json::Parse(blob);
+    CHECK(parsed.ok());
+    CHECK(g2.Restore(parsed.value()).ok());
+    auto doc2 = g2.Serialize();
+    CHECK(doc2.ok());
+    CHECK(doc2.value().ToString() == blob);   // stable round-trip
+
+    // Restored state behaves like the original.
+    CHECK(g2.HasNode("bus:1#a") && g2.HasNode("bus:1#v"));
+    auto v = g2.Volume("bus:1#a");
+    CHECK(v.ok() && v.value().gainDb == vol.gainDb && v.value().mute);
+    CHECK(g2.Upstream("bus:1#a").size() == 1);
+    CHECK(g2.Upstream("bus:1#v").size() == 1);
+    auto node = g2.GetNode("bus:1#a");
+    CHECK(node.ok() && node.value().meta.at("uiBusType") == "both");
+
+    // Auto-save: mutations invoke the installed saver.
+    int saves = 0;
+    g2.InstallSaver([&](bps::json::Value) { ++saves; });
+    CHECK(g2.RenameNode("bus:1#a", "Master Rename").ok());
+    CHECK(saves == 1);
+    CHECK(g2.RemoveNode("bus:1#v").ok());
+    CHECK(saves == 2);
+}
+
 void TestProductionGraph() {
     pr::ProductionGraph g;
 
