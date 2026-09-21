@@ -228,11 +228,32 @@ Result<IFilesystem::FileMetadata> FilesystemImpl::Metadata(std::string_view path
         if (ec) return FsError("file_size", path, ec);
         m.sizeBytes = static_cast<uint64_t>(size);
     }
+#if defined(_WIN32)
+    // std::filesystem on MinGW reports file times to the whole second (via stat), so two writes in the
+    // same second look identical - "is this newer than that" cannot be answered. Windows itself keeps
+    // 100 ns; ask for that.
+    {
+        WIN32_FILE_ATTRIBUTE_DATA data;
+        const fs::path native(path);
+        if (GetFileAttributesExW(native.c_str(), GetFileExInfoStandard, &data)) {
+            ULARGE_INTEGER ticks;
+            ticks.LowPart = data.ftLastWriteTime.dwLowDateTime;
+            ticks.HighPart = data.ftLastWriteTime.dwHighDateTime;
+            constexpr unsigned long long kUnixEpochTicks = 116444736000000000ULL;   // 1601 -> 1970, in 100 ns
+            if (ticks.QuadPart >= kUnixEpochTicks) {
+                m.modifiedEpochNs = static_cast<int64_t>((ticks.QuadPart - kUnixEpochTicks) * 100ULL);
+                return m;
+            }
+        }
+    }
+#endif
     auto mtime = fs::last_write_time(fs::path(path), ec);
-    if (!ec)
-        m.modifiedEpochNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                mtime.time_since_epoch())
-                                .count();
+    if (!ec) {
+        // file_clock's epoch is not the Unix epoch (on Windows it is 1601, and nanoseconds since
+        // then overflow int64), so convert to the system clock before counting.
+        const auto sys = std::chrono::clock_cast<std::chrono::system_clock>(mtime);
+        m.modifiedEpochNs = std::chrono::duration_cast<std::chrono::nanoseconds>(sys.time_since_epoch()).count();
+    }
     return m;
 }
 

@@ -32,11 +32,14 @@ Item {
     // both tabs, only the label follows the library.
     property string sidebarLabel: qsTr("Bibles")
     property string newEntryLabel: qsTr("New scripture")
+    // The tab bar's search for this tab: only the books whose name contains it are listed.
+    property string filter: ""
 
     // Compact metrics — sized for the 760×353 media_table dock the tabs
     // live in. Exposed as properties so a wider host (full-window pane)
     // only overrides numbers.
-    property int sidebarW: 150
+    // The sidebar owns its width (drag its divider); the columns beside it follow.
+    readonly property int sidebarW: sidebar.width
     property int booksW: 130
     readonly property int versesX: sidebarW + booksW
     property int previewW: 260
@@ -112,11 +115,12 @@ Item {
     }
 
     // ---- Sidebar (collections / Bibles) ---------------------------------
-    Rectangle {
+    LibrarySidebar {
         id: sidebar
-        x: 0; y: 0
-        width: root.sidebarW; height: parent.height
-        color: "#0f1015"
+        height: parent.height
+        defaultWidth: 150
+        minWidth: 120
+        maxWidth: 320
 
         Rectangle {
             x: 8; y: 8; width: parent.width - 16; height: 27
@@ -155,39 +159,10 @@ Item {
                 font.family: Theme.fontFamily; font.pixelSize: 11
             }
         }
-        // The "+ New …" pill (reference's "+ New collection" box).
-        Rectangle {
-            x: 8; y: parent.height - 40; width: parent.width - 16; height: 32
-            color: newPillMouse.containsMouse ? "#1e1f28" : "#12131a"
-            border.color: Theme.border; border.width: 1; radius: 6
-            MouseArea {
-                id: newPillMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-            }
-            Row {
-                anchors.centerIn: parent
-                spacing: 6
-                Shape {
-                    width: 8.17; height: 8.17
-                    anchors.verticalCenter: parent.verticalCenter
-                    preferredRendererType: Shape.CurveRenderer
-                    ShapePath {
-                        fillColor: "transparent"
-                        strokeColor: Theme.danger
-                        strokeWidth: 2
-                        capStyle: ShapePath.RoundCap
-                        PathSvg { path: "M 0 4.08 L 8.17 4.08 M 4.08 0 L 4.08 8.17" }
-                    }
-                }
-                Text {
-                    text: root.newEntryLabel
-                    color: Theme.textSecondary
-                    font.family: Theme.fontFamily; font.pixelSize: 11
-                    anchors.verticalCenter: parent.verticalCenter
-                }
-            }
+        // The "+ New ..." pill (reference's "+ New collection" box).
+        SidebarAddButton {
+            x: 8; y: parent.height - 40; width: parent.width - 16
+            text: root.newEntryLabel
         }
     }
 
@@ -208,7 +183,9 @@ Item {
                 Repeater {
                     model: {
                         const g = root.groups[root.currentGroup]
-                        return g ? g.items : []
+                        const all = g ? g.items : []
+                        const needle = root.filter.trim().toLowerCase()
+                        return needle === "" ? all : all.filter((b) => String(b.name).toLowerCase().indexOf(needle) >= 0)
                     }
                     delegate: Item {
                         required property var modelData

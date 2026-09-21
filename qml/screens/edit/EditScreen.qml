@@ -2163,65 +2163,9 @@ Rectangle {
             cursorShape: Qt.ArrowCursor
         }
 
-        Rectangle {
-            x: 12
-            y: 6
-            height: 64
-            width: 256
-            border.color: "#252836"
-            border.width: 1
-            color: "#171924"
-            radius: 10
-
-            Rectangle {
-                x: 8
-                y: 8
-                height: 34
-                width: 34
-                border.color: "#3a4a7a"
-                border.width: 1
-                color: "#1a2240"
-                radius: 8
-
-                Text {
-                    anchors.centerIn: parent
-                    color: "#7b9eff"
-                    font.family: "Inter"
-                    font.pixelSize: 9
-                    font.weight: Font.Bold
-                    text: qsTr("VGR")
-                }
-            }
-            Text {
-                x: 50
-                y: 13
-                color: "#eef1f8"
-                font.family: "Inter"
-                font.pixelSize: 12
-                font.weight: Font.DemiBold
-                text: qsTr("Sunday Service")
-            }
-            Text {
-                x: 50
-                y: 32
-                color: "#8a8fa3"
-                font.family: "Inter"
-                font.pixelSize: 9
-                text: qsTr("%1 slide(s)").arg(slideListRepeater.count)
-            }
-            Text {
-                x: 236
-                y: 24
-                color: "#8a8fa3"
-                font.family: "Inter"
-                font.pixelSize: 11
-                text: "⌄"
-            }
-        }
-
         Text {
             x: 12
-            y: 80
+            y: 12
             color: "#5c6475"
             font.family: "Inter"
             font.pixelSize: 10
@@ -2231,9 +2175,9 @@ Rectangle {
         Flickable {
             id: slideListFlick
             x: 12
-            y: 98
+            y: 30
             width: 256
-            height: leftPanel.height - 98 - 12
+            height: leftPanel.height - 30 - 12
             clip: true
             contentWidth: width
             contentHeight: slideListColumn.height

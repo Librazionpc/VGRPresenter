@@ -14,6 +14,8 @@
 #include "services/CrashHandler.h"
 #include "services/EngineBridge.h"
 #include "services/SearchService.h"
+#include "services/MediaLibraryService.h"
+#include "services/MediaThumbnailProvider.h"
 #include "services/EventBus.h"
 #ifdef VGR_ENABLE_SELFTEST
 #include "SelfTestDriver.h"
@@ -108,6 +110,7 @@ int main(int argc, char *argv[])
         // A Bible import may still be running on its own thread; let it finish before
         // the engine's systems are torn down under it.
         SearchService::instance().shutdown();
+        MediaLibraryService::instance().shutdown();   // folder scans in progress
         EngineBridge::instance().shutdown();
     });
 
@@ -131,6 +134,9 @@ int main(int argc, char *argv[])
     // once.
     engine.rootContext()->setContextProperty(
         QStringLiteral("pendingCrashSummary"), ConsumePendingCrashSummary());
+
+    // Video preview frames for the Media tab (image://mediathumb/<path>).
+    engine.addImageProvider(QStringLiteral("mediathumb"), new MediaThumbnailProvider);
 
     engine.loadFromModule("VGRPresenterUI", "Main");
 

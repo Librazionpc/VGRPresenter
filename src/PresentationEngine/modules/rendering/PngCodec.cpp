@@ -336,4 +336,68 @@ Result<RgbaImage> DecodePng(const uint8_t* data, size_t len) {
 #endif  // BPS_HAVE_ZLIB
 }
 
+// ---------------------------------------------------------------------------
+// Encoder
+// ---------------------------------------------------------------------------
+
+Result<std::vector<uint8_t>> EncodePngRgba8(const uint8_t* rgba, int width, int height) {
+    if (!rgba || width <= 0 || height <= 0)
+        return Error::Make(Err::InvalidArgument, "PngCodec", "empty image");
+#ifndef BPS_HAVE_ZLIB
+    return Error::Make(Err::Unsupported, "PngCodec", "PNG encoding needs zlib");
+#else
+    const size_t stride = static_cast<size_t>(width) * 4;
+    std::vector<uint8_t> raw;
+    raw.reserve((stride + 1) * static_cast<size_t>(height));
+    for (int y = 0; y < height; ++y) {
+        raw.push_back(0);   // filter type 0 (None) for every row
+        raw.insert(raw.end(), rgba + static_cast<size_t>(y) * stride,
+                   rgba + (static_cast<size_t>(y) + 1) * stride);
+    }
+    uLongf packedSize = compressBound(static_cast<uLong>(raw.size()));
+    std::vector<uint8_t> packed(packedSize);
+    if (compress2(packed.data(), &packedSize, raw.data(), static_cast<uLong>(raw.size()), 6) != Z_OK)
+        return Error::Make(Err::IoError, "PngCodec", "deflate failed");
+    packed.resize(packedSize);
+
+    std::vector<uint8_t> out = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    auto put32 = [&](uint32_t v) {
+        out.push_back(static_cast<uint8_t>(v >> 24));
+        out.push_back(static_cast<uint8_t>(v >> 16));
+        out.push_back(static_cast<uint8_t>(v >> 8));
+        out.push_back(static_cast<uint8_t>(v));
+    };
+    auto chunk = [&](const char* type, const std::vector<uint8_t>& data) {
+        put32(static_cast<uint32_t>(data.size()));
+        const size_t typeAt = out.size();
+        out.insert(out.end(), type, type + 4);
+        out.insert(out.end(), data.begin(), data.end());
+        // CRC covers the type and the data. (Not called for an empty payload: zlib's crc32 treats
+        // a null buffer as "start over" and returns 0.)
+        uLong crc = ::crc32(0L, out.data() + typeAt, 4);
+        if (!data.empty()) crc = ::crc32(crc, data.data(), static_cast<uInt>(data.size()));
+        put32(static_cast<uint32_t>(crc));
+    };
+
+    std::vector<uint8_t> ihdr;
+    auto hdr32 = [&](uint32_t v) {
+        ihdr.push_back(static_cast<uint8_t>(v >> 24));
+        ihdr.push_back(static_cast<uint8_t>(v >> 16));
+        ihdr.push_back(static_cast<uint8_t>(v >> 8));
+        ihdr.push_back(static_cast<uint8_t>(v));
+    };
+    hdr32(static_cast<uint32_t>(width));
+    hdr32(static_cast<uint32_t>(height));
+    ihdr.push_back(8);   // bit depth
+    ihdr.push_back(6);   // colour type: RGBA
+    ihdr.push_back(0);   // compression
+    ihdr.push_back(0);   // filter method
+    ihdr.push_back(0);   // no interlace
+    chunk("IHDR", ihdr);
+    chunk("IDAT", packed);
+    chunk("IEND", {});
+    return Result<std::vector<uint8_t>>{std::move(out)};
+#endif
+}
+
 } // namespace bps::rendering

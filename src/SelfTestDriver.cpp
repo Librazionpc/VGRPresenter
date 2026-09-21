@@ -16,6 +16,35 @@
 // so every hover/enter/exit path in the app sees exactly what a user's hand
 // produces — the only faithful way to exercise hover code from a script.
 
+namespace {
+
+// The first item called `name` in the window's VISUAL tree. QObject::findChild follows the QObject
+// parent chain, which misses delegates a Repeater/Loader creates (they hang off the item they are
+// laid out in, not off the Repeater), so the tab bar's tabs were reported as "no item named ...".
+QQuickItem *findItem(QQuickItem *root, const QString &name)
+{
+    if (!root)
+        return nullptr;
+    if (root->objectName() == name)
+        return root;
+    const auto children = root->childItems();
+    for (QQuickItem *child : children)
+        if (QQuickItem *found = findItem(child, name))
+            return found;
+    return nullptr;
+}
+
+QQuickItem *lookup(QQuickWindow *window, const QString &name)
+{
+    if (!window)
+        return nullptr;
+    if (auto *item = window->findChild<QQuickItem *>(name))
+        return item;
+    return findItem(window->contentItem(), name);
+}
+
+} // namespace
+
 SelfTestDriver::SelfTestDriver(QObject *parent)
     : QObject(parent)
 {
@@ -58,7 +87,7 @@ bool SelfTestDriver::grab(const QString &itemName, const QString &pngPath)
         return false;
     QQuickItem *item = itemName.isEmpty()
         ? m_window->contentItem()
-        : m_window->findChild<QQuickItem *>(itemName);
+        : lookup(m_window, itemName);
     if (!item) {
         qWarning() << "SelfTestDriver: no item named" << itemName;
         return false;
@@ -82,7 +111,7 @@ QPointF SelfTestDriver::itemCenter(const QString &objectName)
 {
     if (!m_window)
         return QPointF();
-    QQuickItem *item = m_window->findChild<QQuickItem *>(objectName);
+    QQuickItem *item = lookup(m_window, objectName);
     if (!item) {
         qWarning() << "SelfTestDriver: no item named" << objectName;
         return QPointF();

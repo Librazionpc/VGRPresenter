@@ -128,6 +128,11 @@ ApplicationWindow {
         case "setting":
             window.openSettings(r.key)
             break
+        case "media":
+            // Show it in the Media tab, found by its name.
+            window.currentView = "show"
+            showScreen.showInLibrary("media", r.title)
+            break
         case "bible": {
             // A verse becomes a slide in the working show.
             ShowService.ensureShow(qsTr("Untitled show"))
@@ -300,7 +305,7 @@ ApplicationWindow {
         interval: 500
         onTriggered: {
             SelfTest.grab("selfTestTablePane", "shot_tab_table.png")
-            SelfTest.clickItem("selfTestTab_overlays")
+            SelfTest.clickItem("selfTestTab_soon")
             selfTestStage16.restart()
         }
     }
@@ -322,6 +327,7 @@ ApplicationWindow {
             SelfTest.quit()
         }
     }
+
 
 
     // ---- Settings overlay ----

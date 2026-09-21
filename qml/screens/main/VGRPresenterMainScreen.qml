@@ -26,6 +26,18 @@ Rectangle {
     // opens the app-wide search (SearchService) for it.
     signal searchRequested()
 
+    // Opens a dock tab with a search already typed in it ("media" + a name = that media file, found).
+    // The app-wide search uses this to take you to what it found.
+    function showInLibrary(pane, query) {
+        for (let i = 0; i < media_tab_bar.tabs.length; ++i) {
+            if (media_tab_bar.tabs[i].pane === pane) {
+                media_tab_bar.currentTab = i
+                media_tab_bar.setSearch(query)
+                return
+            }
+        }
+    }
+
     Rectangle {
         id: workspace_body
 
@@ -36,7 +48,14 @@ Rectangle {
         // region (slate / monitors) is the same 54% of the height it was designed with.
         height: parent.height - 48
         width: parent.width
-        readonly property real topHeight: Math.max(460, Math.round(height * 0.54))
+        // Where the top region ends and the library dock begins. Drag the splitter on that
+        // edge to change it (topOverride, in px; -1 = the default 54%, restored by double-click);
+        // it can't leave room for less than the top region's content or the dock's tab bar.
+        property real topOverride: -1
+        readonly property real minTop: 320
+        readonly property real maxTop: Math.max(minTop, height - 220)
+        readonly property real topHeight: Math.max(minTop, Math.min(maxTop,
+            topOverride > 0 ? topOverride : Math.max(460, Math.round(height * 0.54))))
 
         color: "transparent"
 
@@ -1301,6 +1320,7 @@ Rectangle {
                         visible: media_tab_bar.currentPane === "scripture"
                         width: parent.width; height: parent.height
                         sidebarLabel: qsTr("Bibles")
+                        filter: media_tab_bar.searches.scripture !== undefined ? media_tab_bar.searches.scripture : ""
                         newEntryLabel: qsTr("New scripture")
                     }
                     LibraryBrowserPane {
@@ -1308,24 +1328,21 @@ Rectangle {
                         visible: media_tab_bar.currentPane === "table"
                         width: parent.width; height: parent.height
                         sidebarLabel: qsTr("Collections")
+                        filter: media_tab_bar.searches.table !== undefined ? media_tab_bar.searches.table : ""
                         newEntryLabel: qsTr("New sermon")
                     }
                     MediaLibraryPane {
                         id: mediaPane
                         objectName: "selfTestMediaPane"
                         visible: media_tab_bar.currentPane === "media"
+                        filter: media_tab_bar.searches.media !== undefined ? media_tab_bar.searches.media : ""
                         width: parent.width; height: parent.height
-                        // Playlists section mirrors the ENGINE's shows library
-                        // (the same feed the Shows table renders) — one source
-                        // of truth, no duplicated roster.
-                        playlists: {
-                            const shows = ShowService.libraryShows
-                            const out = []
-                            for (let i = 0; i < shows.length; ++i)
-                                out.push({ name: shows[i].name,
-                                           modified: Qt.formatDate(new Date(shows[i].modifiedMs), "dddd d, MMMM yyyy") })
-                            return out
-                        }
+                    }
+                    OverlaysPane {
+                        objectName: "selfTestOverlaysPane"
+                        visible: media_tab_bar.currentPane === "overlays"
+                        filter: media_tab_bar.searches.overlays !== undefined ? media_tab_bar.searches.overlays : ""
+                        width: parent.width; height: parent.height
                     }
                     LibraryComingSoonPane {
                         objectName: "selfTestSoonPane"
@@ -1430,7 +1447,7 @@ Rectangle {
                         ShowService.removeLibraryCategory(list[i].name)
                     }
 
-                    Rectangle {
+                    LibrarySidebar {
                         id: categories_sidebar
 
                         visible: media_tab_bar.currentPane === "shows"
@@ -1438,16 +1455,6 @@ Rectangle {
                         y: 0
 
                         height: parent.height
-                        width: 320
-
-                        color: "#0f1015"
-
-                        Rectangle {
-                            anchors.right: parent.right
-                            width: 1
-                            height: parent.height
-                            color: "#232530"
-                        }
 
                         Column {
                             x: 8
@@ -1792,16 +1799,16 @@ Rectangle {
 
                     // The original shows table — visible only on the Shows
                     // tab; the other tabs' panes replace it above. Shifted
-                    // right of the categories sidebar (320 + 12 margins).
+                    // right of the categories sidebar (its width + 12 margins).
                     Rectangle {
                         id: table_row_header
 
                         visible: media_tab_bar.currentPane === "shows"
-                        x: 332
+                        x: categories_sidebar.width + 12
                         y: 12
 
                         height: 21
-                        width: parent.width - 344
+                        width: parent.width - categories_sidebar.width - 24
 
                         color: "transparent"
 
@@ -1848,13 +1855,13 @@ Rectangle {
                         id: table_body
 
                         visible: media_tab_bar.currentPane === "shows"
-                        x: 332
+                        x: categories_sidebar.width + 12
                         y: 35
 
                         // Grows with the pane; the footer (bound below)
                         // stays pinned to the bottom.
                         height: parent.height - 98
-                        width: parent.width - 344
+                        width: parent.width - categories_sidebar.width - 24
 
                         clip: true
                         color: "transparent"
@@ -1871,10 +1878,16 @@ Rectangle {
                         readonly property var shownShows: {
                             media_table.libRev   // re-read on engine republish
                             const cat = media_table.currentCategory
-                            if (cat === 0)
-                                return ShowService.libraryShows
-                            const name = media_table.showCategories[cat - 1].name
-                            return ShowService.libraryShowsIn(name)
+                            const inCategory = cat === 0 ? ShowService.libraryShows
+                                : ShowService.libraryShowsIn(media_table.showCategories[cat - 1].name)
+                            // The tab bar's Shows search: the ENGINE's library search (name or category), best first.
+                            const query = media_tab_bar.searches.shows !== undefined ? media_tab_bar.searches.shows.trim() : ""
+                            if (query === "")
+                                return inCategory
+                            const wanted = ShowService.searchLibrary(query)
+                            const inScope = {}
+                            inCategory.forEach((s) => { inScope[s.path] = true })
+                            return wanted.filter((s) => inScope[s.path] === true)
                         }
                         Repeater {
                             model: table_body.shownShows
@@ -1946,11 +1959,11 @@ Rectangle {
                         id: dock_footer
 
                         visible: media_tab_bar.currentPane === "shows"
-                        x: 332
+                        x: categories_sidebar.width + 12
                         y: parent.height - 61
 
                         height: 31
-                        width: parent.width - 344
+                        width: parent.width - categories_sidebar.width - 24
 
                         color: "transparent"
 
@@ -2272,6 +2285,17 @@ Rectangle {
             LiveClock {
                 id: showClockTicker
             }
+        }
+
+        // ---- Divider between the top region and the library dock: drag to resize, double-click
+        // for the default (the same SplitHandle every sidebar uses).
+        SplitHandle {
+            vertical: false
+            value: workspace_body.topHeight
+            minValue: workspace_body.minTop
+            maxValue: workspace_body.maxTop
+            onDragged: (v) => workspace_body.topOverride = v
+            onResetRequested: workspace_body.topOverride = -1
         }
     }
 }

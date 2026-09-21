@@ -12,12 +12,19 @@ Item {
     // Line width of the stroked (StrokeIcon) glyphs — lower it when the glyph is
     // enlarged with `scale` so the line keeps its weight.
     property real strokeWidth: 1.5
+    // The glyphs draw at their own natural sizes (the mic at 24 px, the camera and speaker at 14),
+    // so icons of different kinds never line up. With fit, a glyph drawn on the Lucide 24-unit grid
+    // (mic, micOff, camera, volume2, clock, timer...) is scaled so that grid fills this item instead -
+    // use it where icons of different kinds sit side by side. (Not for the smaller hand-sized glyphs
+    // such as folder or search: their natural size is not a 24 grid.)
+    property bool fit: false
+    // The glyphs drawn on the Lucide 24-unit grid (the ones `fit` can scale). The others are hand-sized.
+    readonly property bool grid24: ["camera", "mic", "micOff", "volume2", "clock", "play", "bookOpen", "wrench", "music", "star", "info", "cash", "lock"].indexOf(name) >= 0
     implicitWidth: 14
     implicitHeight: 14
 
-    Loader {
-        anchors.fill: parent
-        sourceComponent: {
+    // The component that draws `name`.
+    readonly property var glyph: {
             switch (root.name) {
             case "search": return searchC
             case "fileText": return fileTextC
@@ -43,11 +50,41 @@ Item {
             case "mic": return micC
             case "micOff": return micOffC
             case "volume2": return volume2C
+            case "bookOpen": return bookOpenC
+            case "wrench": return wrenchC
             case "clock": return clockC
             case "timer": return timerC
             case "shape": return shapeC
+            case "star": return starC
+            case "info": return infoC
+            case "cash": return cashC
+            case "lock": return lockC
             default: return dotC
             }
+    }
+
+    // Hand-sized glyphs: the loaded item is resized to this box and centred in it.
+    Loader {
+        active: !root.grid24
+        anchors.fill: parent
+        sourceComponent: root.glyph
+    }
+
+    // Lucide 24-grid glyphs. Their path is drawn on a 24 x 24 design box, so the item has to KEEP that size: a
+    // Loader that filled a smaller box would resize it, the path's centre would stop being the box's centre, and the
+    // glyph would sit low and to the right of where it is placed (that is what made the camera / mic / speaker
+    // look misaligned beside their labels). It is centred here and, with `fit`, scaled so its grid fills this item;
+    // without `fit` it keeps its own built-in scale (14/24 for most, 1 for the mic).
+    Item {
+        visible: root.grid24
+        anchors.centerIn: parent
+        width: 24; height: 24
+        scale: (root.fit && gridGlyph.item) ? Math.min(root.width, root.height) / (24 * gridGlyph.item.scale) : 1
+        Loader {
+            id: gridGlyph
+            active: root.grid24
+            width: 24; height: 24
+            sourceComponent: root.glyph
         }
     }
 
@@ -257,6 +294,38 @@ Item {
     }
 
     Component {
+        id: bookOpenC
+        // Lucide "book-open" (24 grid): two facing pages.
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 12 7 v 14 M 3 18 a 1 1 0 0 1 -1 -1 V 4 a 1 1 0 0 1 1 -1 h 5 a 4 4 0 0 1 4 4 a 4 4 0 0 1 4 -4 h 5 a 1 1 0 0 1 1 1 v 13 a 1 1 0 0 1 -1 1 h -6 a 3 3 0 0 0 -3 3 a 3 3 0 0 0 -3 -3 z" }
+            }
+        }
+    }
+
+    Component {
+        id: wrenchC
+        // Lucide "wrench" (24 grid): a spanner.
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 14.7 6.3 a 1 1 0 0 0 0 1.4 l 1.6 1.6 a 1 1 0 0 0 1.4 0 l 3.77 -3.77 a 6 6 0 0 1 -7.94 7.94 l -6.91 6.91 a 2.12 2.12 0 0 1 -3 -3 l 6.91 -6.91 a 6 6 0 0 1 7.94 -7.94 l -3.76 3.76 z" }
+            }
+        }
+    }
+
+    Component {
         id: micOffC
         StrokeIcon {
             width: 24; height: 24
@@ -326,6 +395,66 @@ Item {
                 capStyle: ShapePath.RoundCap
                 joinStyle: ShapePath.RoundJoin
                 PathSvg { path: "M 22 8 L 16 12 L 22 16 L 22 8 Z M 2 8 C 2 6.9 2.9 6 4 6 L 14 6 C 15.1 6 16 6.9 16 8 L 16 16 C 16 17.1 15.1 18 14 18 L 4 18 C 2.9 18 2 17.1 2 16 L 2 8 Z" }
+            }
+        }
+    }
+
+    Component {
+        id: starC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 12 2 L 15.09 8.26 L 22 9.27 L 17 14.14 L 18.18 21.02 L 12 17.77 L 5.82 21.02 L 7 14.14 L 2 9.27 L 8.91 8.26 Z" }
+            }
+        }
+    }
+
+    Component {
+        id: infoC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 12 2 A 10 10 0 1 0 12 22 A 10 10 0 1 0 12 2 M 12 16 L 12 12 M 12 8 L 12.01 8" }
+            }
+        }
+    }
+
+    Component {
+        id: cashC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 3 6 L 21 6 A 1 1 0 0 1 22 7 L 22 17 A 1 1 0 0 1 21 18 L 3 18 A 1 1 0 0 1 2 17 L 2 7 A 1 1 0 0 1 3 6 Z M 12 9 A 3 3 0 1 0 12 15 A 3 3 0 1 0 12 9 M 6 12 L 6.01 12 M 18 12 L 18.01 12" }
+            }
+        }
+    }
+
+    Component {
+        id: lockC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 6 11 L 18 11 A 1 1 0 0 1 19 12 L 19 20 A 1 1 0 0 1 18 21 L 6 21 A 1 1 0 0 1 5 20 L 5 12 A 1 1 0 0 1 6 11 Z M 7 11 L 7 7 A 5 5 0 0 1 17 7 L 17 11" }
             }
         }
     }

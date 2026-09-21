@@ -22,6 +22,14 @@ Column {
     // User-driven edits only (not programmatic `text =` assignments) — the
     // dialog pattern: load once on open, write back through this.
     signal textEdited(string text)
+    // Enter pressed in the field.
+    signal accepted()
+
+    // Puts the caret in the field (selecting what is there), for a dialog that opens on it.
+    function focusInput() {
+        input.forceActiveFocus()
+        input.selectAll()
+    }
 
     width: 200
     spacing: 6
@@ -68,6 +76,7 @@ Column {
             clip: true
             selectByMouse: true
             onTextEdited: root.textEdited(input.text)
+            onAccepted: root.accepted()
         }
 
         Text {

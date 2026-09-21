@@ -31,7 +31,8 @@ ModalCard {
         "overlay":  { group: qsTr("Overlays"),   badge: qsTr("OVERLAY"),  color: "#c46ce7" },
         "category": { group: qsTr("Categories"), badge: qsTr("CATEGORY"), color: "#8a94a6" },
         "setting":  { group: qsTr("Settings"),   badge: qsTr("SETTING"),  color: "#8a94a6" },
-        "song":     { group: qsTr("Songs"),      badge: qsTr("SONG"),     color: "#e06c8a" }
+        "song":     { group: qsTr("Songs"),      badge: qsTr("SONG"),     color: "#e06c8a" },
+        "media":    { group: qsTr("Media"),      badge: qsTr("MEDIA"),    color: "#e08a4a" }
     })
 
     function openSearch() {

@@ -1,6 +1,7 @@
 #include "services/SearchService.h"
 
 #include "services/EngineBridge.h"
+#include "services/MediaLibraryService.h"
 #include "services/EventBus.h"
 #include "services/ShowService.h"
 
@@ -338,6 +339,21 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
 
     // ---- Settings -------------------------------------------------------------------
     out += settingsMatches(text, limit);
+
+    // ---- Media: images and videos by name (the media library's folders) ------------------------
+    {
+        int n = 0;
+        for (const QVariant &v : MediaLibraryService::instance().items(QString(), text)) {
+            if (n++ >= limit) break;
+            const QVariantMap m = v.toMap();
+            const QString mediaKind = m.value(QStringLiteral("kind")).toString();
+            out.append(makeResult(QStringLiteral("media"), m.value(QStringLiteral("name")).toString(),
+                                  (mediaKind == QLatin1String("video") ? QObject::tr("Video")
+                                   : mediaKind == QLatin1String("audio") ? QObject::tr("Audio") : QObject::tr("Image")) + QStringLiteral(" \u00b7 ")
+                                      + QFileInfo(m.value(QStringLiteral("folder")).toString()).fileName(),
+                                  m.value(QStringLiteral("id")).toString(), m.value(QStringLiteral("path")).toString()));
+        }
+    }
 
     // ---- Songs (engine) -------------------------------------------------------------
     if (text.size() >= 2) {
