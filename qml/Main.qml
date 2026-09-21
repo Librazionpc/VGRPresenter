@@ -76,6 +76,11 @@ ApplicationWindow {
         }
         // The Projects panel's search box / "Quick search" button: the same app-wide search.
         onSearchRequested: quickSearch.openSearch()
+        // A card's Edit action in the Overlays / Templates tab: the Edit screen edits that overlay / template.
+        onDesignEditRequested: (kind, id) => {
+            if (editScreen.openDesign(kind, id))
+                window.currentView = "edit"
+        }
     }
 
     EditScreen {
@@ -83,6 +88,15 @@ ApplicationWindow {
         anchors.fill: parent
         anchors.topMargin: window.headerExtra
         visible: window.currentView === "edit"
+        // Done in the overlay / template editor: back to the library it came from.
+        onDesignClosed: window.currentView = "show"
+    }
+
+    // A design is only edited while the Edit screen is showing: leaving it (the Show tab) closes it, and the show that was
+    // open comes back on the canvas.
+    onCurrentViewChanged: {
+        if (window.currentView !== "edit")
+            editScreen.closeDesign()
     }
 
     // Opens the Settings dialog — the one entry point both the header's
@@ -122,6 +136,7 @@ ApplicationWindow {
             window.currentView = "edit"
             break
         case "slide":
+            editScreen.closeDesign()
             window.currentView = "edit"
             editScreen.session.refresh(r.id)
             break
@@ -314,21 +329,52 @@ ApplicationWindow {
         interval: 500
         onTriggered: {
             SelfTest.grab("selfTestSoonPane", "shot_tab_soon.png")
-            // Quit on a LATER tick: grabToImage saves asynchronously, and
-            // quitting this frame killed the last save (missing soon shot).
+            SelfTest.clickItem("selfTestTab_templates")
             selfTestStage17.restart()
         }
     }
     Timer {
         id: selfTestStage17
+        interval: 500
+        onTriggered: {
+            SelfTest.grab("selfTestTemplatesPane", "shot_tab_templates.png")
+            selfTestEv1.restart() // TEMP DIAGNOSTIC
+            window.openSettings("general")
+            selfTestStage18.restart()
+        }
+    }
+    Timer {
+        id: selfTestStage18
+        interval: 500
+        onTriggered: {
+            SelfTest.grab("selfTestSettingsShell", "shot_settings_general.png")
+            // Quit on a LATER tick: grabToImage saves asynchronously, and
+            // quitting this frame killed the last save (missing soon shot).
+            selfTestStage19.restart()
+        }
+    }
+    Timer {
+        id: selfTestStage19
         interval: 400
         onTriggered: {
+            if (selfTestEv1.busy) { selfTestStage18.restart(); return } // TEMP DIAGNOSTIC
             console.log("[SELFTEST] done")
             SelfTest.quit()
         }
     }
 
 
+
+
+    Timer { id: selfTestEv1; property bool busy: true; property string oid: ""; property string tid: ""; interval: 700; onTriggered: { settingsScrim.visible = false; oid = OverlayLibraryService.createDesign("Probe overlay", ""); SelfTest.clickItem("selfTestTab_overlays"); selfTestEv2.restart() } } // TEMP DIAGNOSTIC
+    Timer { id: selfTestEv2; interval: 900; onTriggered: { SelfTest.grab("selfTestOverlaysPane", "shot_ed_0_library.png"); const c = SelfTest.itemCenter("selfTestDesignCard_Probe overlay"); SelfTest.move(c.x, c.y); selfTestEv3.restart() } } // TEMP DIAGNOSTIC
+    Timer { id: selfTestEv3; interval: 700; onTriggered: { SelfTest.clickItem("selfTestDesignEdit_Probe overlay"); selfTestEv4.restart() } } // TEMP DIAGNOSTIC
+    Timer { id: selfTestEv4; interval: 1200; onTriggered: { SelfTest.grab("", "shot_ed_1_overlay_edit.png"); console.log("[SELFTEST] view=" + window.currentView + " designMode=" + editScreen.designMode + " kind=" + editScreen.session.designKind); editScreen.addScreenTreatment("vignette"); selfTestEv5.restart() } } // TEMP DIAGNOSTIC
+    Timer { id: selfTestEv5; interval: 1600; onTriggered: { SelfTest.grab("", "shot_ed_2_vignette.png"); console.log("[SELFTEST] overlay blocks=" + JSON.stringify(OverlayLibraryService.design(selfTestEv1.oid).blocks.map(b => b.kind + "@" + b.x + "," + b.width))); SelfTest.clickItem("selfTestDesignDone"); selfTestEv6.restart() } } // TEMP DIAGNOSTIC
+    Timer { id: selfTestEv6; interval: 900; onTriggered: { console.log("[SELFTEST] after Done view=" + window.currentView + " designMode=" + editScreen.designMode); selfTestEv1.tid = TemplateLibraryService.duplicateDesign("tpl-default"); editScreen.openDesign("template", selfTestEv1.tid); window.currentView = "edit"; selfTestEv7.restart() } } // TEMP DIAGNOSTIC
+    Timer { id: selfTestEv7; interval: 1200; onTriggered: { SelfTest.grab("", "shot_ed_3_template.png"); const items = editScreen.session.slideStore.current.items; console.log("[SELFTEST] template items=" + items.length + " bind0=" + (items.length ? items[0].bind : "-")); if (items.length) { items[0].x += 7; editScreen.session.scheduleFlush() } selfTestEv8.restart() } } // TEMP DIAGNOSTIC
+    Timer { id: selfTestEv8; interval: 1600; onTriggered: { const t = TemplateLibraryService.design(selfTestEv1.tid); console.log("[SELFTEST] template saved block0 x=" + t.blocks[0].x + " bind=" + t.blocks[0].bind + " blocks=" + t.blocks.length); editScreen.closeDesign(); window.currentView = "show"; selfTestEv9.restart() } } // TEMP DIAGNOSTIC
+    Timer { id: selfTestEv9; interval: 800; onTriggered: { console.log("[SELFTEST] closed designMode=" + editScreen.designMode + " view=" + window.currentView); OverlayLibraryService.deleteDesign(selfTestEv1.oid); TemplateLibraryService.deleteDesign(selfTestEv1.tid); console.log("[SELFTEST] cleaned overlays=" + OverlayLibraryService.totalCount + " templates=" + TemplateLibraryService.totalCount); selfTestEv1.busy = false } } // TEMP DIAGNOSTIC
 
     // ---- Settings overlay ----
     // Shared ModalScrim: click-dismisses, and consumes wheel events so a
@@ -342,6 +388,7 @@ ApplicationWindow {
 
         ModalShell {
             id: settingsShell
+            objectName: "selfTestSettingsShell"
             anchors.centerIn: parent
             currentKey: window.settingsSection
             onSectionSelected: (key) => window.settingsSection = key

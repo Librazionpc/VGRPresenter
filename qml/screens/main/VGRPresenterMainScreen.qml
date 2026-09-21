@@ -25,6 +25,9 @@ Rectangle {
     // The Projects panel's search box or the "Quick search" button was used — Main.qml
     // opens the app-wide search (SearchService) for it.
     signal searchRequested()
+    // A card's Edit action in the Overlays / Templates tab: open design `id` (`kind` = "overlay" | "template") in the
+    // Edit screen (Main.qml switches to it).
+    signal designEditRequested(string kind, string id)
 
     // Opens a dock tab with a search already typed in it ("media" + a name = that media file, found).
     // The app-wide search uses this to take you to what it found.
@@ -1338,10 +1341,22 @@ Rectangle {
                         filter: media_tab_bar.searches.media !== undefined ? media_tab_bar.searches.media : ""
                         width: parent.width; height: parent.height
                     }
-                    OverlaysPane {
+                    DesignLibraryPane {
                         objectName: "selfTestOverlaysPane"
                         visible: media_tab_bar.currentPane === "overlays"
+                        service: OverlayLibraryService
+                        noun: "overlay"
+                        onDesignOpenRequested: (id) => vGRPresenter_Main_Screen.designEditRequested("overlay", id)
                         filter: media_tab_bar.searches.overlays !== undefined ? media_tab_bar.searches.overlays : ""
+                        width: parent.width; height: parent.height
+                    }
+                    DesignLibraryPane {
+                        objectName: "selfTestTemplatesPane"
+                        visible: media_tab_bar.currentPane === "templates"
+                        service: TemplateLibraryService
+                        noun: "template"
+                        onDesignOpenRequested: (id) => vGRPresenter_Main_Screen.designEditRequested("template", id)
+                        filter: media_tab_bar.searches.templates !== undefined ? media_tab_bar.searches.templates : ""
                         width: parent.width; height: parent.height
                     }
                     LibraryComingSoonPane {

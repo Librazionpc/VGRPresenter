@@ -43,6 +43,7 @@ bps::presentation::Category categoryFromVariant(const QVariantMap &category);
 bps::presentation::Overlay overlayFromVariant(const QVariantMap &overlay);
 bps::presentation::Slide slideFromVariant(const QVariantMap &slide);
 bps::presentation::ContentBlock blockFromVariant(const QVariantMap &block);
+QVariantMap blockToVariant(const bps::presentation::ContentBlock &block);
 
 bps::presentation::SlideTemplate templateFromVariant(const QVariantMap &tmpl);
 QVariantMap templateToVariant(const bps::presentation::SlideTemplate &tmpl);

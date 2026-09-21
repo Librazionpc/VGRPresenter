@@ -18,7 +18,7 @@ Rectangle {
         { label: "Shows",     icon: "play",            pane: "shows" },
         { label: "Media",     icon: "layoutDashboard", pane: "media" },
         { label: "Overlays",  icon: "layers",          pane: "overlays" },
-        { label: "Templates", icon: "layoutTemplate",  pane: "soon" },
+        { label: "Templates", icon: "layoutTemplate",  pane: "templates" },
         { label: "Scripture", icon: "bookOpen",        pane: "scripture" },
         { label: "The Table", icon: "bookOpen",        pane: "table" },
         { label: "Calendar",  icon: "calendar",        pane: "soon" },

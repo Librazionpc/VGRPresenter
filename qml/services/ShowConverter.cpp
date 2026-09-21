@@ -227,6 +227,11 @@ bp::ContentBlock ShowConverter::blockFromVariant(const QVariantMap &b)
     return ::blockFromVariant(b);
 }
 
+QVariantMap ShowConverter::blockToVariant(const bp::ContentBlock &b)
+{
+    return ::blockToVariant(b);
+}
+
 bp::Presentation ShowConverter::fromVariant(const QVariantMap &show)
 {
     bp::Presentation out;

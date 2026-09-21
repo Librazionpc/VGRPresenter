@@ -101,6 +101,7 @@ void TestMediaLibraryNestedFolders();
 void TestThumbnailCache();
 void TestThumbnailCacheConcurrency();
 void TestOverlayLibrary();
+void TestTemplateLibrary();
 void TestVgrFormat();
 void TestSceneComposition();
 void TestBibleResolver();

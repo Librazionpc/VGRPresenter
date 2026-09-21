@@ -1,23 +1,34 @@
 import QtQuick
 import VGRPresenterUI
 
-// The Overlays library tab: a resizable sidebar (All / Unlabeled / your categories) and a grid of
-// overlay cards.
+// A DESIGN LIBRARY tab: a resizable sidebar (All / Unlabeled / your categories) and a grid of design
+// cards. One component serves every library the app keeps - the dock's OVERLAYS tab and TEMPLATES tab
+// are two instances with different `service` singletons:
 //
-// The ENGINE owns everything shown here (OverlayLibraryService -> bps::overlays::OverlayLibrary): the
-// categories (Visuals comes with the app), the overlays, the rules for what may be renamed or removed. This file
-// only lists them and asks the service to change them.
+//   Overlays:  OverlayLibraryService   (ships the "Visuals" category and its overlays)
+//   Templates: TemplateLibraryService  (ships FreeShow's starter set: Song, Presentation, Scripture)
+//
+// The ENGINE owns everything shown here (bps::library::DesignLibrary): the categories, the designs, the
+// rules for what may be renamed or removed. This file only lists them and asks the service to change them.
 //
 //   All / Unlabeled / a category ... the cards in it; the tab bar's search narrows them by name.
 //   New category ................... the sidebar's foot button.
-//   New overlay .................... the floating button; it files the new overlay in the selected category.
-//   On a card ...................... file it in a category, rename, duplicate, delete (see OverlayCard).
+//   New <design> ................... the floating button; it files the new design in the selected category.
+//   On a card ...................... open it in the Edit screen, file it in a category, rename,
+//                                    duplicate, delete (see DesignCard).
 //
-// Same building blocks as the Media tab: LibrarySidebar, SidebarRow, SidebarAddButton.
+// Every pane always shows All, Unlabeled and the CATEGORIES line — the sample layout.
 Item {
     id: root
 
-    // The dock tab bar's Overlays search: only overlays whose name matches (the engine's search).
+    // The singleton this tab browses (OverlayLibraryService or TemplateLibraryService).
+    property var service: null
+    // The noun in the UI's strings ("overlay", "template").
+    property string noun: "overlay"
+
+    property var categoryNames: ({})          // per-service label overrides, unused by default
+
+    // The dock tab bar's search: only designs whose name matches (the engine's search).
     property string filter: ""
     readonly property string query: filter.trim()
 
@@ -25,28 +36,29 @@ Item {
     property string selection: "all"   // "all" | "unlabeled" | a category's id
     readonly property bool categorySelected: selection !== "all" && selection !== "unlabeled"
     readonly property string listFilter: selection === "all" ? ""
-                                       : (selection === "unlabeled" ? OverlayLibraryService.unlabeledFilter : selection)
+                                       : (selection === "unlabeled" ? service.unlabeledFilter : selection)
+
 
     property var gridItems: []
-    function reload() { gridItems = OverlayLibraryService.overlays(listFilter, query) }
+    function reload() { gridItems = service.designs(listFilter, query) }
     onSelectionChanged: reload()
     onQueryChanged: reload()
     Component.onCompleted: reload()
 
     function categoryExists(id) {
-        const list = OverlayLibraryService.categories
+        const list = service.categories
         for (let i = 0; i < list.length; ++i)
             if (list[i].id === id) return true
         return false
     }
     function categoryName(id) {
-        const list = OverlayLibraryService.categories
+        const list = service.categories
         for (let i = 0; i < list.length; ++i)
             if (list[i].id === id) return list[i].name
         return ""
     }
     Connections {
-        target: OverlayLibraryService
+        target: root.service
         function onChanged() {
             // A category that was removed can't stay selected.
             if (root.categorySelected && !root.categoryExists(root.selection))
@@ -59,43 +71,46 @@ Item {
     LiveClock { id: ticker; running: root.visible }
 
     // ---- the dialogs and menu the actions use -------------------------------------
-    // What the name dialog is for: "category" (new), "overlay" (new), "rename" (an overlay).
+    // What the name dialog is for: "category" (new), "design" (new), "rename" (a design).
     property string nameFor: ""
-    property string nameTarget: ""   // the overlay being renamed
+    property string nameTarget: ""   // the design being renamed
     function askName(what, title, initial, target) {
         nameFor = what
         nameTarget = target === undefined ? "" : target
         nameDialog.title = title
-        nameDialog.placeholder = what === "category" ? qsTr("Category name") : qsTr("Overlay name")
+        nameDialog.placeholder = what === "category" ? qsTr("Category name") : qsTr("%1 name").arg(root.noun)
         nameDialog.confirmLabel = what === "rename" ? qsTr("Rename") : qsTr("Create")
-        nameDialog.allowEmpty = what === "overlay"   // an empty name gets "Overlay", "Overlay 2", ...
+        nameDialog.allowEmpty = what === "design"   // an empty name gets "Overlay", "Overlay 2", ...
         nameDialog.open(initial)
     }
     function nameAccepted(text) {
         if (nameFor === "category") {
-            const id = OverlayLibraryService.createCategory(text)
+            const id = service.createCategory(text)
             if (id !== "") root.selection = id
-        } else if (nameFor === "overlay") {
-            OverlayLibraryService.createOverlay(text, root.categorySelected ? root.selection : "")
+        } else if (nameFor === "design") {
+            service.createDesign(text, root.categorySelected ? root.selection : "")
         } else if (nameFor === "rename") {
-            OverlayLibraryService.renameOverlay(nameTarget, text)
+            service.renameDesign(nameTarget, text)
         }
     }
 
-    property string deleteTarget: ""     // an overlay id, or a category id when deletingCategory
+    property string deleteTarget: ""     // a design id, or a category id when deletingCategory
     property bool deletingCategory: false
     property string deleteName: ""
 
     // The "file it in..." menu: opened by a card's folder button, positioned under it.
-    property string menuOverlay: ""
+    property string menuDesign: ""
     property string menuCurrent: ""
-    function openCategoryMenu(overlay, anchorItem) {
+    function openCategoryMenu(design, anchorItem) {
         const p = anchorItem.mapToItem(root, 0, anchorItem.height + 4)
-        menuOverlay = overlay.id
-        menuCurrent = overlay.category
+        menuDesign = design.id
+        menuCurrent = design.category
         categoryMenu.x = Math.max(4, Math.min(root.width - categoryMenu.width - 4, p.x + anchorItem.width - categoryMenu.width))
         categoryMenu.y = Math.max(4, Math.min(root.height - categoryMenu.height - 4, p.y))
     }
+
+    // What opening a design in the Edit screen means here (the host - the main screen - overrides it).
+    signal designOpenRequested(string id)
 
     // ---- Sidebar --------------------------------------------------------------
     LibrarySidebar {
@@ -110,20 +125,20 @@ Item {
             spacing: 2
 
             SidebarRow {
-                objectName: "selfTestOverlayRow_all"
+                objectName: "selfTestDesignRow_all"
                 width: parent.width
                 icon: "layoutDashboard"
                 label: qsTr("All")
-                count: String(OverlayLibraryService.totalCount)
+                count: String(service.totalCount)
                 selected: root.selection === "all"
                 onClicked: root.selection = "all"
             }
             SidebarRow {
-                objectName: "selfTestOverlayRow_unlabeled"
+                objectName: "selfTestDesignRow_unlabeled"
                 width: parent.width
                 icon: "layers"
                 label: qsTr("Unlabeled")
-                count: String(OverlayLibraryService.unlabeledCount)
+                count: String(service.unlabeledCount)
                 selected: root.selection === "unlabeled"
                 onClicked: root.selection = "unlabeled"
             }
@@ -155,10 +170,10 @@ Item {
                 spacing: 2
 
                 Repeater {
-                    model: OverlayLibraryService.categories
+                    model: service.categories
                     delegate: SidebarRow {
                         required property var modelData
-                        objectName: "selfTestOverlayRow_" + modelData.name
+                        objectName: "selfTestDesignRow_" + modelData.name
                         width: categoryColumn.width
                         icon: modelData.icon
                         label: modelData.name
@@ -169,7 +184,7 @@ Item {
                         onClicked: root.selection = modelData.id
                         onRemoveRequested: {
                             if (modelData.count === 0) {
-                                OverlayLibraryService.deleteCategory(modelData.id)
+                                service.deleteCategory(modelData.id)
                             } else {
                                 root.deleteTarget = modelData.id
                                 root.deleteName = modelData.name
@@ -183,7 +198,7 @@ Item {
         }
 
         SidebarAddButton {
-            objectName: "selfTestOverlayNewCategory"
+            objectName: "selfTestDesignNewCategory"
             x: 8
             y: parent.height - 40
             width: parent.width - 16
@@ -214,16 +229,17 @@ Item {
             // The card's 16:9 preview (its width less the 12 px of margins) plus the name bar.
             cellHeight: Math.round((cellWidth - 12) * 9 / 16) + 12 + 30
 
-            delegate: OverlayCard {
+            delegate: DesignCard {
                 required property var modelData
-                objectName: "selfTestOverlayCard_" + modelData.name
+                objectName: "selfTestDesignCard_" + modelData.name
                 width: grid.cellWidth
                 height: grid.cellHeight
-                overlay: modelData
+                design: modelData
                 now: ticker.now
+                onEditRequested: root.designOpenRequested(modelData.id)
                 onCategoryRequested: (anchorItem) => root.openCategoryMenu(modelData, anchorItem)
-                onRenameRequested: root.askName("rename", qsTr("Rename overlay"), modelData.name, modelData.id)
-                onDuplicateRequested: OverlayLibraryService.duplicateOverlay(modelData.id)
+                onRenameRequested: root.askName("rename", qsTr("Rename %1").arg(root.noun), modelData.name, modelData.id)
+                onDuplicateRequested: service.duplicateDesign(modelData.id)
                 onDeleteRequested: {
                     root.deleteTarget = modelData.id
                     root.deleteName = modelData.name
@@ -254,41 +270,21 @@ Item {
                 text: root.query !== ""
                       ? qsTr("Nothing named “%1”.").arg(root.query)
                       : (root.selection === "all"
-                         ? qsTr("No overlays yet. Make one with New overlay below.")
+                         ? qsTr("No %1s yet. Make one with the button below.").arg(root.noun)
                          : (root.selection === "unlabeled"
-                            ? qsTr("Every overlay is in a category.")
-                            : qsTr("Nothing in “%1” yet. New overlay adds one here.").arg(root.categoryName(root.selection))))
+                            ? qsTr("Every %1 is in a category.").arg(root.noun)
+                            : qsTr("Nothing in “%1” yet. The button below adds one here.").arg(root.categoryName(root.selection))))
                 color: Theme.textMuted
                 font.family: Theme.fontFamily; font.pixelSize: 12
             }
         }
 
-        // Brings back default overlays that were deleted (a no-op toast when nothing is missing).
-        Text {
-            objectName: "selfTestOverlayRestore"
-            x: 12
-            anchors.bottom: parent.bottom
-            anchors.bottomMargin: 22
-            text: qsTr("Restore default overlays")
-            color: restoreHover.hovered ? Theme.textPrimary : Theme.textMuted
-            font.family: Theme.fontFamily; font.pixelSize: 11
-            font.underline: restoreHover.hovered
-            PositionHoverArea {
-                id: restoreHover
-                anchors.fill: parent
-                onClicked: {
-                    const n = OverlayLibraryService.restoreDefaults()
-                    EventBus.notify(n > 0 ? qsTr("Brought back %n default overlay(s).", "", n)
-                                          : qsTr("All the default overlays are already here."),
-                                    "info", qsTr("Overlays"), "overlays.restore")
-                }
-            }
-        }
+        // (Restore what ships lives in Settings · General · Libraries.)
 
-        // The floating "New overlay" button.
+        // The floating "New <design>" button.
         Rectangle {
-            id: newOverlay
-            objectName: "selfTestOverlayNew"
+            id: newDesign
+            objectName: "selfTestDesignNew"
             anchors.right: parent.right
             anchors.rightMargin: 22
             anchors.bottom: parent.bottom
@@ -310,7 +306,7 @@ Item {
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: qsTr("New overlay")
+                    text: qsTr("New %1").arg(root.noun)
                     color: "#ffffff"
                     font.family: Theme.fontFamily; font.pixelSize: 12; font.weight: Font.DemiBold
                 }
@@ -318,7 +314,7 @@ Item {
             PositionHoverArea {
                 id: newHover
                 anchors.fill: parent
-                onClicked: root.askName("overlay", qsTr("New overlay"), "")
+                onClicked: root.askName("design", qsTr("New %1").arg(root.noun), "")
             }
         }
     }
@@ -327,14 +323,14 @@ Item {
     MouseArea {
         // Click anywhere else to close it.
         anchors.fill: parent
-        visible: root.menuOverlay !== ""
+        visible: root.menuDesign !== ""
         z: 20
-        onClicked: root.menuOverlay = ""
+        onClicked: root.menuDesign = ""
     }
     Rectangle {
         id: categoryMenu
-        objectName: "selfTestOverlayCategoryMenu"
-        visible: root.menuOverlay !== ""
+        objectName: "selfTestDesignCategoryMenu"
+        visible: root.menuDesign !== ""
         z: 21
         width: 200
         height: menuColumn.height + 12
@@ -358,10 +354,10 @@ Item {
             }
             Repeater {
                 // "" is "Unlabeled".
-                model: [{ id: "", name: qsTr("Unlabeled"), icon: "layers" }].concat(OverlayLibraryService.categories)
+                model: [{ id: "", name: qsTr("Unlabeled"), icon: "layers" }].concat(service.categories)
                 delegate: SidebarRow {
                     required property var modelData
-                    objectName: "selfTestOverlayMenu_" + modelData.name
+                    objectName: "selfTestDesignMenu_" + modelData.name
                     width: menuColumn.width
                     icon: modelData.icon
                     label: modelData.name
@@ -369,9 +365,9 @@ Item {
                     onClicked: {
                         // Close first: the change rebuilds this menu's rows (this one included), and nothing
                         // after the call may reach into a row that is gone.
-                        const overlayId = root.menuOverlay
-                        root.menuOverlay = ""
-                        OverlayLibraryService.setOverlayCategory(overlayId, modelData.id)
+                        const designId = root.menuDesign
+                        root.menuDesign = ""
+                        service.setDesignCategory(designId, modelData.id)
                     }
                 }
             }
@@ -387,15 +383,16 @@ Item {
     ConfirmDialog {
         id: confirm
         z: 30
-        title: root.deletingCategory ? qsTr("Delete category?") : qsTr("Delete overlay?")
+        title: root.deletingCategory ? qsTr("Delete category?") : qsTr("Delete %1?").arg(root.noun)
         message: root.deletingCategory
-                 ? qsTr("“%1” is removed. Its overlays are kept and become unlabeled.").arg(root.deleteName)
-                 : qsTr("“%1” is deleted. This can't be undone (a default overlay can be brought back with Restore default overlays).").arg(root.deleteName)
+                 ? qsTr("“%1” is removed. Its %2s are kept and become unlabeled.").arg(root.deleteName, root.noun)
+                 : (qsTr("“%1” is deleted. This can't be undone.").arg(root.deleteName)
+                    + qsTr(" A default %1 can be brought back in Settings · General.").arg(root.noun))
         confirmLabel: qsTr("Delete")
         onConfirmed: {
             confirm.close()
-            if (root.deletingCategory) OverlayLibraryService.deleteCategory(root.deleteTarget)
-            else OverlayLibraryService.deleteOverlay(root.deleteTarget)
+            if (root.deletingCategory) service.deleteCategory(root.deleteTarget)
+            else service.deleteDesign(root.deleteTarget)
         }
         onDismissed: confirm.close()
     }

@@ -45,6 +45,16 @@ Rectangle {
     }
     readonly property var session: showSession
 
+    // ---- Designs: the same screen edits an overlay or a template from a library ----
+    // While a design is open (ShowSession.openDesign) the canvas, undo, inspector and text panel edit IT, the slide list is
+    // replaced by DesignPanel, and every engine call goes to the library instead of the show. Nothing else changes.
+    readonly property bool designMode: showSession.designMode
+    // Opens design `id` of `kind` ("overlay" | "template"); false if it does not exist.
+    function openDesign(kind, id) { return showSession.openDesign(kind, id) }
+    function closeDesign() { showSession.closeDesign() }
+    // Done was pressed: the design is closed and the host should take the user back to the library.
+    signal designClosed()
+
     // Every settled edit (and every undo/redo) is sent on to the engine.
     Connections {
         target: canvasHistory
@@ -476,7 +486,7 @@ Rectangle {
     // item's style now (see clockContent/timerContent below), so these
     // controls are genuinely live for them, not just for text/shape.
     readonly property bool primarySelectedSupportsFill: root.primarySelectedItemStyle === null
-        || ["text", "shape", "clock", "timer"].includes(root.primarySelectedItemStyle.kind)
+        || ["text", "shape", "clock", "timer", "vignette", "corners"].includes(root.primarySelectedItemStyle.kind)
 
     // ---- Alignment-guide snapping helpers ----
     // Pure geometry math (modeled after FreeShow's src/frontend/components/
@@ -735,6 +745,21 @@ Rectangle {
         return item
     }
 
+    // Adds a whole-screen treatment (overlay designs): a vignette tinting the edges or corners cut round. It covers the
+    // stage; its colour is the item's background and meta.inset says how far in it reaches (DesignPanel edits that).
+    function addScreenTreatment(kind) {
+        const item = root.addCanvasItem(kind)
+        if (!item)
+            return null
+        item.x = 0
+        item.y = 0
+        item.width = mCanvas.width
+        item.height = mCanvas.height
+        item.style.backgroundColor = kind === "vignette" ? "#ffffff" : "#000000"
+        item.meta = { inset: kind === "vignette" ? 100 : 20 }
+        return item
+    }
+
     // Finds the live Repeater delegate for a given item key — items are
     // dynamically created (no fixed/named id the way the old title/verse/
     // ref/date objects had), so reaching one from outside the Repeater means
@@ -769,7 +794,7 @@ Rectangle {
     property bool timerModalOpen: false
     property bool clockModalOpen: false
     property bool shapeModalOpen: false
-    readonly property var contentTypes: [
+    readonly property var baseContentTypes: [
         // `icon` is an IconGlyph name (qml/components/IconGlyph.qml — Lucide
         // path data), not a Text glyph: the old "⏱"/"◷"/"◎" unicode
         // strings had no glyph coverage in Inter and rendered as missing-
@@ -783,6 +808,13 @@ Rectangle {
         { kind: "timer",  icon: "timer",   label: "Timer" },
         { kind: "clock",  icon: "clock",   label: "Clock" }
     ]
+    // What the Add menu offers. An OVERLAY also gets the two whole-screen treatments only overlays use.
+    readonly property var contentTypes: root.designMode && showSession.designKind === "overlay"
+        ? root.baseContentTypes.concat([
+            { kind: "vignette", icon: "layers",         label: "Vignette" },
+            { kind: "corners",  icon: "layoutTemplate", label: "Corners" }
+        ])
+        : root.baseContentTypes
 
     // ---- Middle toolbar ----
     Rectangle {
@@ -998,37 +1030,11 @@ Rectangle {
         // sits behind slideBgLayer so it reads through wherever the slide
         // background is transparent or less than fully opaque, and gets
         // fully covered once a solid, fully-opaque background is chosen.
-        //
-        // Fixed whole-pixel tile size (16px), not width/columns — a
-        // fractional size (e.g. 760/48 ≈ 15.83px) still looks uneven even
-        // with exact index-based positioning, because the renderer snaps
-        // each tile's fractional edges to the physical pixel grid
-        // independently, and adjacent tiles can round differently. A whole-
-        // pixel size rounds identically every time, so every tile is
-        // pixel-for-pixel uniform. columns/rows overshoot the canvas
-        // slightly (ceil, not exact division) and mCanvas's clip:true crops
-        // the small remainder — invisible, and no worse than a partial tile
-        // would look anyway.
-        Item {
+        // The shared Checkerboard component (also on design previews) —
+        // same shades, same fixed-tile rule, one definition.
+        Checkerboard {
             id: checkerGrid
             anchors.fill: parent
-            readonly property int tileSize: 16
-            readonly property int columns: Math.ceil(width / tileSize)
-            readonly property int rows: Math.ceil(height / tileSize)
-
-            Repeater {
-                model: checkerGrid.columns * checkerGrid.rows
-                delegate: Rectangle {
-                    required property int index
-                    readonly property int col: index % checkerGrid.columns
-                    readonly property int row: Math.floor(index / checkerGrid.columns)
-                    x: col * checkerGrid.tileSize
-                    y: row * checkerGrid.tileSize
-                    width: checkerGrid.tileSize
-                    height: checkerGrid.tileSize
-                    color: (row + col) % 2 === 0 ? "#2a2c38" : "#15161d"
-                }
-            }
         }
 
         // Decorative alignment-grid dots — declared here, before
@@ -1714,6 +1720,34 @@ Rectangle {
                     }
                 }
 
+                // Vignette / corners (overlay designs): drawn by the SAME DesignPreview the library cards use, so the canvas and the
+                // card can never disagree about what they look like.
+                Item {
+                    id: screenContent
+                    visible: canvasItemObject.modelData.kind === "vignette" || canvasItemObject.modelData.kind === "corners"
+                    anchors.fill: parent
+
+                    DesignPreview {
+                        anchors.fill: parent
+                        blocks: [{
+                            kind: canvasItemObject.modelData.kind, x: 0, y: 0, width: 754, height: 428,
+                            meta: canvasItemObject.modelData.meta,
+                            style: { backgroundColor: canvasItemObject.style.backgroundColor.toString() }
+                        }]
+                    }
+
+                    CanvasDragArea {
+                        anchors.fill: parent
+                        onMoved: (dx, dy, snapDisabled) => {
+                            if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
+                                root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
+                            root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
+                        }
+                        onDragFinished: root.endCanvasDrag()
+                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers)
+                    }
+                }
+
                 // Generic placeholder for every other kind — its own
                 // icon/label from root.contentTypes, not just the bare kind
                 // name, so Media/Audio/Shape at least read as visually
@@ -1728,7 +1762,7 @@ Rectangle {
                         }
                         return { icon: "?", label: canvasItemObject.modelData.kind }
                     }
-                    visible: !["text", "camera", "clock", "timer", "shape"].includes(canvasItemObject.modelData.kind)
+                    visible: !["text", "camera", "clock", "timer", "shape", "vignette", "corners"].includes(canvasItemObject.modelData.kind)
                     anchors.fill: parent
                     color: "#1a1c26"
                     border.color: "#3a4155"
@@ -1979,7 +2013,8 @@ Rectangle {
         x: 344
         y: root.height - 63
         height: 46
-        width: 388
+        // 7 chips x 48 + 6 gaps x 4 = 360 plus 14 of padding a side; an overlay has two more chips.
+        width: contentTypeRow.width + 28
         border.color: "#2a2f3a"
         border.width: 1
         color: "#151824"
@@ -2127,6 +2162,8 @@ Rectangle {
                     root.clockModalOpen = true
                 else if (kind === "shape")
                     root.shapeModalOpen = true
+                else if (kind === "vignette" || kind === "corners")
+                    root.addScreenTreatment(kind)
                 else
                     root.addCanvasItem(kind)
             }
@@ -2254,6 +2291,24 @@ Rectangle {
             y: slideListFlick.y
             height: slideListFlick.height
             flickable: slideListFlick
+        }
+
+        // A design (overlay / template) has no slides: while one is open this panel takes the slide list's place and shows
+        // what the design IS. Declared last so it covers the list.
+        DesignPanel {
+            anchors.fill: parent
+            visible: root.designMode
+            z: 10
+            service: showSession.designService
+            designId: showSession.designId
+            kind: showSession.designKind
+            item: root.primarySelectedItem
+            undoHook: root.pushUndoSnapshot
+            focusHook: function () { mCanvas.forceActiveFocus() }
+            onDoneRequested: {
+                root.closeDesign()
+                root.designClosed()
+            }
         }
     }
 

@@ -41,6 +41,13 @@ Item {
     // True while the pointer is over the area. Bind visuals to this exactly
     // like the old containsMouse.
     property bool hovered: false
+    // Walk the ancestor chain for hidden/disabled ancestors. Leave true on
+    // top-level surfaces (dropdown rows, tabs). Turn FALSE for a hover area
+    // nested inside a parent whose visibility IS a hover state (a card's
+    // action row shown while the card is hovered): there the walk reads the
+    // very hover that hides the row and the two bindings notify each other
+    // in circles (the "shownChain binding loop" spam).
+    property bool checkAncestors: true
     // Cursor pushed to AppCursor while hovered. Set showCursor: false on a
     // hover-only surface that must not claim the cursor.
     property bool showCursor: true
@@ -56,7 +63,11 @@ Item {
     // a modal scrim appearing) re-evaluates this and clears the hover —
     // without needing the hover-exit events this build never delivers.
     readonly property bool shownChain: {
-        let o = root
+        if (!root.visible || root.enabled === false)
+            return false
+        if (!checkAncestors)
+            return true
+        let o = root.parent
         while (o) {
             if (o.visible === false || o.enabled === false)
                 return false

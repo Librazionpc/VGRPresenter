@@ -28,6 +28,19 @@ QtObject {
     // dialog lives there so it can appear over any screen). Unset = proceed.
     property var askUnsaved: null
 
+    // What the engine calls go to. Normally the open SHOW (ShowService); while the Edit screen is editing a DESIGN (an
+    // overlay or a template from a library) it is that design (DesignBackend), which answers the same calls. Every slide and
+    // item action below goes through this, so the screen edits a design with exactly the code it edits a slide with.
+    property var backend: ShowService
+    // Set while a design is open (see openDesign).
+    property bool designMode: false
+    property string designKind: ""        // "overlay" | "template"
+    property string designId: ""
+    property var designService: null
+    property DesignBackend designBackend: DesignBackend { }
+    // The show slide that was open before a design was, to come back to it.
+    property string _slideBeforeDesign: ""
+
     // What was last sent to the engine per slide (UI slide id -> signature), so a
     // flush of an unchanged slide is a no-op and never marks the show modified.
     property var _flushed: ({})
@@ -66,7 +79,7 @@ QtObject {
     }
 
     function ensureDocument() {
-        ShowService.ensureShow(qsTr("Untitled show"))
+        session.backend.ensureShow(qsTr("Untitled show"))
     }
 
     // ---- UI -> engine ----------------------------------------------------------
@@ -86,7 +99,7 @@ QtObject {
         const signature = JSON.stringify(patch)
         if (session._flushed[slideId] === signature)
             return true
-        if (!ShowService.updateSlide(eid, patch))
+        if (!session.backend.updateSlide(eid, patch))
             return false
         session._flushed[slideId] = signature
         return true
@@ -103,7 +116,7 @@ QtObject {
     function scheduleFlush() {
         if (session._applying)
             return
-        ShowService.markShowDirty()
+        session.backend.markShowDirty()
         flushTimer.restart()
     }
 
@@ -126,7 +139,7 @@ QtObject {
     // current one); `fallbackIndex` = where to land if the current one was deleted.
     function refresh(selectEngineId, fallbackIndex) {
         session._applying = true
-        const show = ShowService.currentShow
+        const show = session.backend.currentShow
         const result = session.slideModel.syncFromEngine(show.slides)
         result.removed.forEach((id) => {
             session.slideStore.dropSlide(id)
@@ -171,7 +184,7 @@ QtObject {
     function addSlide() {
         session.ensureDocument()
         session.flushSlide(session.slideStore.activeSlideId)
-        const eid = ShowService.addSlide({})
+        const eid = session.backend.addSlide({})
         if (eid !== "")
             session.refresh(eid)
     }
@@ -181,7 +194,7 @@ QtObject {
         if (eid === "")
             return
         session.flushSlide(session.slideModel.slideIdAt(index))   // copy what is on screen
-        if (ShowService.duplicateSlide(eid) !== "")
+        if (session.backend.duplicateSlide(eid) !== "")
             session.refresh("")
     }
 
@@ -189,7 +202,7 @@ QtObject {
         const eid = session.slideModel.engineIdAt(index)
         if (eid === "")
             return
-        if (ShowService.removeSlide(eid))
+        if (session.backend.removeSlide(eid))
             session.refresh("", index)
     }
 
@@ -204,16 +217,16 @@ QtObject {
             return null
         if (copyFrom) {
             session.flushSlide(session.slideStore.activeSlideId)
-            const key = ShowService.duplicateBlock(sid, copyFrom.key)
+            const key = session.backend.duplicateBlock(sid, copyFrom.key)
             if (key === "")
                 return null
-            const block = ShowService.blockOf(sid, key)
+            const block = session.backend.blockOf(sid, key)
             const item = session.slideStore.itemFromBlock(block)
             session.slideStore.addItem(item)
             session._rememberFlushed(session.slideStore.activeSlideId)
             return item
         }
-        const key = ShowService.addBlock(sid, { kind: kind, text: "", x: x, y: y, width: width, height: height })
+        const key = session.backend.addBlock(sid, { kind: kind, text: "", x: x, y: y, width: width, height: height })
         if (key === "")
             return null
         const item = session.slideStore.createItem(kind, "", x, y, width, height, null, key)
@@ -224,7 +237,52 @@ QtObject {
     function removeItems(keys) {
         const sid = session.activeEngineId()
         if (sid !== "")
-            keys.forEach((k) => ShowService.removeBlock(sid, k))
+            keys.forEach((k) => session.backend.removeBlock(sid, k))
+    }
+
+    // ---- designs: the Edit screen editing an overlay / template --------------------------------------
+
+    // Opens a design from a library (kind "overlay" | "template") on the canvas. The show that was open is sent to the
+    // engine first and comes back untouched when the design is closed. Opening another design while one is open just
+    // saves the first.
+    function openDesign(kind, id) {
+        const service = kind === "template" ? TemplateLibraryService : OverlayLibraryService
+        if (service.design(id).id === undefined)
+            return false
+        session.flushAll()   // the show's (or the previous design's) on-screen state goes to the engine
+        if (!session.designMode)
+            session._slideBeforeDesign = session.activeEngineId()
+        session.designBackend.service = service
+        session.designBackend.designId = id
+        session.designService = service
+        session.designKind = kind
+        session.designId = id
+        session.backend = session.designBackend
+        session.designMode = true
+        session.applyShow(session.backend.currentShow)
+        return true
+    }
+
+    // Leaves the design (its edits are already saved) and puts the show back on the canvas. No-op when no design is open.
+    function closeDesign() {
+        if (!session.designMode)
+            return
+        session.flushAll()
+        session.designMode = false
+        session.backend = ShowService
+        session.designBackend.designId = ""
+        session.designService = null
+        session.designKind = ""
+        session.designId = ""
+        if (ShowService.hasShow) {
+            session.applyShow(ShowService.currentShow)
+            const back = session._slideBeforeDesign !== "" ? session.slideModel.indexOfEngineId(session._slideBeforeDesign) : -1
+            if (back >= 0)
+                session.slideModel.selectSlide(back)
+        } else {
+            session.applyShow({ slides: [] })   // nothing open: an empty canvas, as at launch
+        }
+        session._slideBeforeDesign = ""
     }
 
     // ---- show document actions ------------------------------------------------------
@@ -239,6 +297,7 @@ QtObject {
 
     // "New show": a fresh engine document with one empty slide.
     function newShow() {
+        session.closeDesign()
         session.guardUnsaved(function () {
             session._applying = true
             session.canvasHistory.abandonPending()
@@ -247,7 +306,7 @@ QtObject {
             session.slideModel.clear()
             session._flushed = ({})
             session._applying = false
-            const eid = ShowService.addSlide({})
+            const eid = session.backend.addSlide({})
             if (eid !== "")
                 session.refresh(eid)
             ShowService.markShowClean()   // nothing worth prompting about yet
@@ -256,6 +315,7 @@ QtObject {
     }
 
     function openShow() {
+        session.closeDesign()
         session.guardUnsaved(function () {
             const path = ShowService.pickShowToOpen()
             if (path === "")
@@ -269,6 +329,7 @@ QtObject {
     // Opens a library path directly (shows-table row click) — the same
     // unsaved-changes guard as the picker flow.
     function openShowPath(path) {
+        session.closeDesign()
         session.guardUnsaved(function () {
             const result = ShowService.openShowFile(path)
             if (result.ok)
@@ -278,6 +339,10 @@ QtObject {
 
     // Returns true when the show ended up saved.
     function saveShow() {
+        if (session.designMode) {   // a design saves as it goes: Save just makes sure the last edit is in
+            session.flushAll()
+            return true
+        }
         if (!ShowService.hasShow)
             return false
         session.flushAll()
@@ -287,6 +352,10 @@ QtObject {
     }
 
     function saveShowAs() {
+        if (session.designMode) {
+            session.flushAll()
+            return true
+        }
         session.ensureDocument()
         session.flushAll()
         const path = ShowService.pickShowSavePath(ShowService.showName)

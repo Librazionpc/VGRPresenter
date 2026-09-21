@@ -653,6 +653,65 @@ Item {
                 PrefRow { label: qsTr("Show notifications"); toggle: true; key: "showNotifications" }
                 PrefRow { label: qsTr("Log level"); valueText: qsTr("Info"); chevron: true; last: true }
             }
+
+            // The design libraries (the dock's Overlays / Templates tabs): brings back what ships
+            // after the user deleted it. The engine fills in what is missing; nothing else is touched.
+            component RestoreRow: Item {
+                id: restoreRow
+                property string label: ""
+                property string service: "overlays"   // which library to restore
+                width: parent.width
+                height: 40
+
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: restoreRow.label
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.textSm
+                }
+                Rectangle {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 64
+                    height: 26
+                    radius: Theme.radiusSm
+                    color: restoreArea.containsMouse ? Theme.chip : Theme.inset
+                    border.color: Theme.border
+                    border.width: 1
+                    Behavior on color { ColorAnimation { duration: 100 } }
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: qsTr("Restore")
+                        color: Theme.textSecondary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 10
+                    }
+
+                    MouseArea {
+                        id: restoreArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            const noun = restoreRow.service === "templates" ? qsTr("template") : qsTr("overlay")
+                            const n = restoreRow.service === "templates"
+                                      ? TemplateLibraryService.restoreDefaults()
+                                      : OverlayLibraryService.restoreDefaults()
+                            EventBus.notify(n > 0 ? qsTr("Brought back %n default %1(s).", "", n).arg(noun)
+                                                  : qsTr("All the default %1s are already here.").arg(noun),
+                                            "info", qsTr("Settings"), "settings.libraries.restore")
+                        }
+                    }
+                }
+            }
+
+            SettingsSection {
+                title: qsTr("Libraries")
+                RestoreRow { label: qsTr("Restore default overlays"); service: "overlays" }
+                RestoreRow { label: qsTr("Restore default templates"); service: "templates" }
+            }
         }
     }
 

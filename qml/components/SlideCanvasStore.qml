@@ -152,8 +152,10 @@ QtObject {
     }
 
     function cloneItem(src, offsetX, offsetY) {
-        return store.createItem(src.kind, src.text, src.x + offsetX, src.y + offsetY,
-                                src.width, src.height, src.style)
+        const copy = store.createItem(src.kind, src.text, src.x + offsetX, src.y + offsetY,
+                                      src.width, src.height, src.style)
+        copy.bind = src.bind
+        return copy
     }
 
     // ---- Undo/redo support (EditScreen.qml) -----------------------------
@@ -178,6 +180,7 @@ QtObject {
         return items.map((it) => ({
             key: it.key, kind: it.kind, text: it.text,
             x: it.x, y: it.y, width: it.width, height: it.height,
+            bind: it.bind,
             meta: it.meta,
             style: {
                 padding: it.style.padding, backgroundColor: it.style.backgroundColor.toString(),
@@ -197,7 +200,8 @@ QtObject {
     function itemFromBlock(d) {
         const item = store.canvasItemComponent.createObject(null, {
             key: d.key, kind: d.kind, text: d.text,
-            x: d.x, y: d.y, width: d.width, height: d.height
+            x: d.x, y: d.y, width: d.width, height: d.height,
+            bind: d.bind !== undefined ? d.bind : ""
         })
         item.meta = d.meta !== undefined ? d.meta : ({})
         if (d.style) {

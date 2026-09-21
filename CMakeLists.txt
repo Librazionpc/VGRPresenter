@@ -155,8 +155,9 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/media/ThumbnailCache.cpp
     ${BPS_ROOT}/modules/media/FrameSource.cpp
     ${BPS_ROOT}/modules/media/WindowsFrameSource.cpp
-    # Overlay library: the user's overlays and their categories (the dock's Overlays tab)
-    ${BPS_ROOT}/modules/overlays/OverlayLibrary.cpp
+    # Design libraries: the user's overlays and templates, filed in categories (the dock's Overlays / Templates tabs)
+    ${BPS_ROOT}/modules/library/DesignLibrary.cpp
+    ${BPS_ROOT}/modules/library/DesignCatalogs.cpp
     # Native .vgr format (docs/specs/22)
     ${BPS_ROOT}/modules/vgr/VgrFormat.cpp
     ${BPS_ROOT}/modules/vgr/VgrFile.cpp
@@ -331,7 +332,7 @@ set(BPS_UNIT_TEST_SOURCES
     ${BPS_ROOT}/tests/unit/tests_presentation.cpp
     ${BPS_ROOT}/tests/unit/tests_search.cpp
     ${BPS_ROOT}/tests/unit/tests_media.cpp
-    ${BPS_ROOT}/tests/unit/tests_overlays.cpp
+    ${BPS_ROOT}/tests/unit/tests_library.cpp
     ${BPS_ROOT}/tests/unit/tests_vgr.cpp
     ${BPS_ROOT}/tests/unit/tests_scene.cpp
     ${BPS_ROOT}/tests/unit/tests_bible.cpp
@@ -346,7 +347,7 @@ target_link_libraries(bps_unit_tests PRIVATE engine_core)
 bps_enable_warnings(bps_unit_tests)
 add_test(NAME unit COMMAND bps_unit_tests)
 foreach(phase core cams modules notify project adaptive rendering display
-              presentation search media overlays vgr scene bible song flow production recording broadcast)
+              presentation search media library vgr scene bible song flow production recording broadcast)
     add_test(NAME unit_${phase} COMMAND bps_unit_tests ${phase})
 endforeach()
 
@@ -385,8 +386,8 @@ qt_add_executable(appVGRPresenterUI
     qml/services/MediaLibraryService.cpp
     qml/services/include/services/MediaThumbnailProvider.h
     qml/services/MediaThumbnailProvider.cpp
-    qml/services/include/services/OverlayLibraryService.h
-    qml/services/OverlayLibraryService.cpp
+    qml/services/include/services/DesignLibraryService.h
+    qml/services/DesignLibraryService.cpp
     qml/models/include/models/SlideListModel.h
     qml/models/SlideListModel.cpp
     qml/models/include/models/OutputListModel.h
