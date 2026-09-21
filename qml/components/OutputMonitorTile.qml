@@ -39,7 +39,11 @@ Rectangle {
     opacity: root.isEnabled ? 1 : 0.45
     Behavior on opacity { NumberAnimation { duration: 120 } }
 
-    // 16:9 preview pane — always inset 6px, always the right aspect.
+    // 16:9 preview pane — always inset 6px, always the right aspect. The pane
+    // is TRANSPARENT by default (an output shows whatever is behind it until
+    // content is on air), so it draws the shared transparency checkerboard
+    // (same texture as the Edit canvas and the design-card previews) instead
+    // of a solid placeholder colour.
     Rectangle {
         id: previewPane
         x: 6
@@ -48,7 +52,14 @@ Rectangle {
         height: width * 9 / 16
         clip: true
         radius: 4
-        color: root.active ? "#101116" : "#1a1c26"
+        color: "transparent"
+
+        Checkerboard {
+            anchors.fill: parent
+            tileSize: 9
+            shadeA: "#3a3c48"
+            shadeB: "#25262f"
+        }
 
         // LIVE badge in the danger red (#ff4d3d family) when on air — same
         // pill the Screens settings card renders; neutral dark chip otherwise.

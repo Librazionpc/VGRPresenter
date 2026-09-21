@@ -16,6 +16,8 @@
 #include <QStandardPaths>
 #include <QUrl>
 
+#include <algorithm>
+
 namespace bp = bps::presentation;
 
 namespace {
@@ -149,6 +151,7 @@ void ShowService::newShowDocument(const QString &name)
 {
     if (auto doc = showDocument()) {
         doc->New(name.toStdString());
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("Show"), QStringLiteral("New show '%1'").arg(name));
         emit showChanged();
     }
 }
@@ -176,6 +179,7 @@ bool ShowService::saveShowFile(const QVariantMap &show, const QString &path)
         reportError(QStringLiteral("Couldn't save the show"), message(saved.error()));
         return false;
     }
+    EngineBridge::write(QStringLiteral("info"), QStringLiteral("Show"), QStringLiteral("Saved '%1' to %2").arg(QString::fromStdString(doc->Snapshot().name), QString::fromStdString(doc->Path())));
     EventBus::instance().notify(QStringLiteral("Saved to %1").arg(QString::fromStdString(doc->Path())),
                                 QStringLiteral("success"), QStringLiteral("Show saved"),
                                 QStringLiteral("show.saved"));
@@ -200,6 +204,7 @@ bool ShowService::saveCurrentShow(const QString &path, bool quiet)
         reportError(QStringLiteral("Couldn't save the show"), message(saved.error()));
         return false;
     }
+    EngineBridge::write(QStringLiteral("info"), QStringLiteral("Show"), QStringLiteral("%1 '%2' to %3").arg(quiet ? QStringLiteral("Auto-saved") : QStringLiteral("Saved"), QString::fromStdString(doc->Snapshot().name), QString::fromStdString(doc->Path())));
     if (!quiet)
         EventBus::instance().notify(QStringLiteral("Saved to %1").arg(QString::fromStdString(doc->Path())),
                                     QStringLiteral("success"), QStringLiteral("Show saved"),
@@ -243,6 +248,142 @@ QString ShowService::pickShowSavePath(const QString &defaultName)
     return r.ok() && r.value() ? QString::fromStdString(*r.value()) : QString();
 }
 
+QVariantMap ShowService::peekShow(const QString &path) const
+{
+    // The show that is open in the editor is read as it is there (unsaved edits included), not from the older copy on disk.
+    if (auto open = showDocument(); open && open->HasDocument() && !path.isEmpty()
+        && QDir::fromNativeSeparators(QString::fromStdString(open->Path())).compare(QDir::fromNativeSeparators(path), Qt::CaseInsensitive) == 0)
+        return { { QStringLiteral("ok"), true }, { QStringLiteral("error"), QString() }, { QStringLiteral("show"), ShowConverter::toVariant(open->Snapshot()) } };
+    bp::PresentationDocument peek;
+    auto opened = peek.Open(vgrPath(path));
+    if (!opened.ok())
+        return { { QStringLiteral("ok"), false }, { QStringLiteral("error"), message(opened.error()) } };
+    return { { QStringLiteral("ok"), true }, { QStringLiteral("error"), QString() }, { QStringLiteral("show"), ShowConverter::toVariant(peek.Snapshot()) } };
+}
+
+bool ShowService::editShow(const QString &path, const QString &title, const std::function<bps::Result<void>(bp::Presentation &)> &change)
+{
+    if (!EngineBridge::instance().booted() || path.isEmpty())
+        return false;
+    const QString wanted = QDir::fromNativeSeparators(path);
+
+    // The show that is open in the editor takes it into the open document (unsaved, like any other edit).
+    auto open = showDocument();
+    if (open && open->HasDocument() && QDir::fromNativeSeparators(QString::fromStdString(open->Path())).compare(wanted, Qt::CaseInsensitive) == 0)
+        return applyEdit(title, change);
+
+    bp::PresentationDocument file;
+    if (auto opened = file.Open(vgrPath(path)); !opened.ok()) {
+        reportError(title, message(opened.error()));
+        return false;
+    }
+    bp::Presentation show = file.Snapshot();
+    if (auto changed = change(show); !changed.ok()) {
+        reportError(title, message(changed.error()));
+        return false;
+    }
+    file.Replace(std::move(show));
+    if (auto saved = file.Save(vgrPath(path)); !saved.ok()) {
+        reportError(title, message(saved.error()));
+        return false;
+    }
+    if (library_ && wanted.startsWith(QDir::fromNativeSeparators(libraryPath_), Qt::CaseInsensitive))
+        refreshLibrary();
+    return true;
+}
+
+bool ShowService::setNextTimer(const QString &path, double seconds)
+{
+    const bool done = editShow(path, QStringLiteral("Couldn't set the next timer"), [&](bp::Presentation &s) { return bp::ShowEditor::SetNextTimer(s, seconds); });
+    if (done)
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("Show"), QStringLiteral("Next timer %1 s on %2").arg(seconds).arg(path));
+    return done;
+}
+
+QVariantMap ShowService::editSlides(const QString &path, const QString &op, const QStringList &slideIds, const QVariantMap &args)
+{
+    using Editor = bp::ShowEditor;
+    std::vector<std::string> ids;
+    for (const QString &id : slideIds) ids.push_back(id.toStdString());
+    const QString title = QStringLiteral("Couldn't change the slides");
+    QStringList made;
+    size_t replaced = 0;
+    bool ok = false;
+
+    if (op == QLatin1String("hidden")) {
+        ok = editShow(path, title, [&](bp::Presentation &s) { return Editor::SetSlidesHidden(s, ids, args.value(QStringLiteral("hidden")).toBool()); });
+    } else if (op == QLatin1String("group")) {
+        ok = editShow(path, title, [&](bp::Presentation &s) { return Editor::SetSlidesGroup(s, ids, args.value(QStringLiteral("group")).toString().toStdString()); });
+    } else if (op == QLatin1String("title")) {
+        ok = editShow(path, title, [&](bp::Presentation &s) -> bps::Result<void> {
+            if (ids.empty()) return bps::Error::Make(bps::Err::InvalidArgument, "ShowService", "no slide was chosen");
+            for (const std::string &id : ids) {
+                auto it = std::find_if(s.slides.begin(), s.slides.end(), [&](const bp::Slide &x) { return x.id == id; });
+                if (it == s.slides.end()) return bps::Error::Make(bps::Err::NotFound, "ShowService", "no slide '" + id + "' in this show");
+                it->title = args.value(QStringLiteral("title")).toString().toStdString();
+            }
+            return bps::Ok();
+        });
+    } else if (op == QLatin1String("format")) {
+        const QString kind = args.value(QStringLiteral("kind")).toString();
+        Editor::TextFormat format = Editor::TextFormat::Uppercase;
+        if (kind == QLatin1String("lowercase")) format = Editor::TextFormat::Lowercase;
+        else if (kind == QLatin1String("capitalize")) format = Editor::TextFormat::Capitalize;
+        else if (kind == QLatin1String("trim")) format = Editor::TextFormat::Trim;
+        ok = editShow(path, title, [&](bp::Presentation &s) { return Editor::FormatSlidesText(s, ids, format); });
+    } else if (op == QLatin1String("replace")) {
+        ok = editShow(path, title, [&](bp::Presentation &s) -> bps::Result<void> {
+            auto r = Editor::ReplaceInSlides(s, ids, args.value(QStringLiteral("find")).toString().toStdString(), args.value(QStringLiteral("replace")).toString().toStdString(),
+                                             args.value(QStringLiteral("caseSensitive")).toBool());
+            if (!r.ok()) return r.error();
+            replaced = r.value();
+            return bps::Ok();
+        });
+    } else if (op == QLatin1String("split")) {
+        ok = editShow(path, title, [&](bp::Presentation &s) -> bps::Result<void> {
+            auto r = Editor::SplitSlidesInHalf(s, ids);
+            if (!r.ok()) return r.error();
+            for (const std::string &id : r.value()) made.append(QString::fromStdString(id));
+            return bps::Ok();
+        });
+    } else if (op == QLatin1String("merge")) {
+        ok = editShow(path, title, [&](bp::Presentation &s) { return Editor::MergeSlides(s, ids); });
+    } else if (op == QLatin1String("duplicate")) {
+        ok = editShow(path, title, [&](bp::Presentation &s) -> bps::Result<void> {
+            if (ids.empty()) return bps::Error::Make(bps::Err::InvalidArgument, "ShowService", "no slide was chosen");
+            for (const std::string &id : ids) {
+                auto r = Editor::DuplicateSlide(s, id);
+                if (!r.ok()) return r.error();
+                made.append(QString::fromStdString(r.value()));
+            }
+            return bps::Ok();
+        });
+    } else if (op == QLatin1String("remove")) {
+        ok = editShow(path, title, [&](bp::Presentation &s) -> bps::Result<void> {
+            if (ids.empty()) return bps::Error::Make(bps::Err::InvalidArgument, "ShowService", "no slide was chosen");
+            for (const std::string &id : ids)
+                if (auto r = Editor::RemoveSlide(s, id); !r.ok()) return r;
+            return bps::Ok();
+        });
+    } else if (op == QLatin1String("transition")) {
+        static const QStringList kinds = { QStringLiteral("fade"), QStringLiteral("slide"), QStringLiteral("push"), QStringLiteral("zoom"), QStringLiteral("wipe"), QStringLiteral("crossfade"), QStringLiteral("custom") };
+        const int kind = std::max(0, static_cast<int>(kinds.indexOf(args.value(QStringLiteral("kind")).toString())));
+        ok = editShow(path, title, [&](bp::Presentation &s) { return Editor::SetSlidesTransition(s, ids, static_cast<bp::TransitionKind>(kind), args.value(QStringLiteral("ms"), 500).toDouble()); });
+    } else if (op == QLatin1String("outputs")) {
+        std::vector<std::string> outputs;
+        for (const QVariant &o : args.value(QStringLiteral("outputs")).toList()) outputs.push_back(o.toString().toStdString());
+        ok = editShow(path, title, [&](bp::Presentation &s) { return Editor::SetSlidesOutputs(s, ids, outputs); });
+    } else if (op == QLatin1String("timer")) {
+        ok = editShow(path, QStringLiteral("Couldn't set the next timer"), [&](bp::Presentation &s) { return Editor::SetNextTimer(s, args.value(QStringLiteral("seconds")).toDouble(), ids); });
+    } else {
+        reportError(title, QStringLiteral("There is no slide operation '%1'.").arg(op));
+    }
+
+    if (ok)
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("Show"), QStringLiteral("Slide %1 on %2 slide(s) of %3").arg(op).arg(slideIds.size()).arg(path));
+    return { { QStringLiteral("ok"), ok }, { QStringLiteral("made"), made }, { QStringLiteral("replaced"), static_cast<int>(replaced) } };
+}
+
 QVariantMap ShowService::openShowFile(const QString &path)
 {
 
@@ -256,6 +397,7 @@ QVariantMap ShowService::openShowFile(const QString &path)
         reportError(QStringLiteral("Couldn't open the show"), why);
         return { { QStringLiteral("ok"), false }, { QStringLiteral("error"), why } };
     }
+    EngineBridge::write(QStringLiteral("info"), QStringLiteral("Show"), QStringLiteral("Opened '%1' from %2").arg(QString::fromStdString(doc->Snapshot().name), path));
     emit showChanged();
     return { { QStringLiteral("ok"), true },
              { QStringLiteral("error"), QString() },
@@ -464,6 +606,7 @@ bool ShowService::updateSlide(const QString &id, const QVariantMap &patch)
         }
         if (has("background")) merged.background = str("background");
         if (has("categoryId")) merged.categoryId = str("categoryId");
+        if (has("nextTimer")) merged.durationMs = std::clamp(patch.value(QStringLiteral("nextTimer")).toDouble(), 0.0, 3600.0) * 1000.0;
         if (has("blocks")) {
             merged.blocks.clear();
             for (const QVariant &b : patch.value(QStringLiteral("blocks")).toList())
@@ -653,6 +796,7 @@ void ShowService::refreshLibrary()
         if (auto r = lib->Refresh(); !r.ok())
             reportError(QStringLiteral("Couldn't read the show library"), message(r.error()));
         publishLibrary();
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("Library"), QStringLiteral("Show library scanned: %1 show(s) in %2").arg(libraryShows().size()).arg(libraryPath_));
     }
 }
 

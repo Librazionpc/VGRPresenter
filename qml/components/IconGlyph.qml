@@ -19,7 +19,7 @@ Item {
     // such as folder or search: their natural size is not a 24 grid.)
     property bool fit: false
     // The glyphs drawn on the Lucide 24-unit grid (the ones `fit` can scale). The others are hand-sized.
-    readonly property bool grid24: ["camera", "mic", "micOff", "volume2", "clock", "play", "bookOpen", "wrench", "music", "star", "info", "cash", "lock"].indexOf(name) >= 0
+    readonly property bool grid24: ["camera", "mic", "micOff", "volume2", "clock", "play", "bookOpen", "wrench", "music", "star", "info", "cash", "lock", "sliders", "zoomIn", "gridView", "listView", "textLines", "download", "pencil", "flag", "link", "typeCase", "blend", "ban", "copy", "trash"].indexOf(name) >= 0
     implicitWidth: 14
     implicitHeight: 14
 
@@ -34,6 +34,23 @@ Item {
             case "chevronDown": return chevronDownC
             case "chevronUp": return chevronUpC
             case "check": return checkC
+            case "arrowLeft": return arrowLeftC
+            case "sliders": return slidersC
+            case "zoomIn": return zoomInC
+            case "download": return downloadC
+            case "ban": return banC
+            case "blend": return blendC
+            case "copy": return copyC
+            case "flag": return flagC
+            case "link": return linkC
+            case "pencil": return pencilC
+            case "trash": return trashC
+            case "typeCase": return typeCaseC
+            case "gridView": return gridViewC
+            case "listView": return listViewC
+            case "textLines": return textLinesC
+            case "minus": return minusC
+            case "moreVertical": return moreVerticalC
             case "settings": return settingsC
             case "presentation": return presentationC
             case "penTool": return penToolC
@@ -121,6 +138,207 @@ Item {
         StrokeIcon {
             width: 8; height: 4.5
             svgPath: "M 0 4.5 L 4 0 L 8 4.5"
+        }
+    }
+
+    // Lucide "sliders-horizontal" on the 24 grid: three tracks with a knob each (a "tune" / options button).
+    Component {
+        id: slidersC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24, like the other 24-grid glyphs
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 21 4 L 14 4 M 10 4 L 3 4 M 21 12 L 12 12 M 8 12 L 3 12 M 21 20 L 16 20 M 12 20 L 3 20 M 14 2 L 14 6 M 8 10 L 8 14 M 16 18 L 16 22" }
+            }
+        }
+    }
+
+    // The slide menu's icons (Lucide, 24 grid).
+    Component {
+        id: banC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"; strokeColor: root.color; strokeWidth: 2
+                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 22 12 A 10 10 0 1 0 2 12 A 10 10 0 1 0 22 12 M 4.93 4.93 L 19.07 19.07" }
+            }
+        }
+    }
+
+    Component {
+        id: blendC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"; strokeColor: root.color; strokeWidth: 2
+                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 15 9 A 6 6 0 1 0 3 9 A 6 6 0 1 0 15 9 M 21 15 A 6 6 0 1 0 9 15 A 6 6 0 1 0 21 15" }
+            }
+        }
+    }
+
+    Component {
+        id: copyC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"; strokeColor: root.color; strokeWidth: 2
+                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 20 8 L 10 8 A 2 2 0 0 0 8 10 L 8 20 A 2 2 0 0 0 10 22 L 20 22 A 2 2 0 0 0 22 20 L 22 10 A 2 2 0 0 0 20 8 Z M 4 16 C 2.9 16 2 15.1 2 14 L 2 4 C 2 2.9 2.9 2 4 2 L 14 2 C 15.1 2 16 2.9 16 4" }
+            }
+        }
+    }
+
+    Component {
+        id: flagC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"; strokeColor: root.color; strokeWidth: 2
+                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 4 15 S 5 14 8 14 S 13 16 16 16 S 20 15 20 15 L 20 3 S 19 4 16 4 S 11 2 8 2 S 4 3 4 3 Z M 4 22 L 4 15" }
+            }
+        }
+    }
+
+    Component {
+        id: linkC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"; strokeColor: root.color; strokeWidth: 2
+                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 10 13 A 5 5 0 0 0 17.54 13.54 L 20.54 10.54 A 5 5 0 0 0 13.47 3.47 L 11.75 5.18 M 14 11 A 5 5 0 0 0 6.46 10.46 L 3.46 13.46 A 5 5 0 0 0 10.53 20.53 L 12.24 18.82" }
+            }
+        }
+    }
+
+    Component {
+        id: pencilC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"; strokeColor: root.color; strokeWidth: 2
+                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 17 3 A 2.85 2.83 0 1 1 21 7 L 7.5 20.5 L 2 22 L 3.5 16.5 Z M 15 5 L 19 9" }
+            }
+        }
+    }
+
+    Component {
+        id: trashC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"; strokeColor: root.color; strokeWidth: 2
+                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 3 6 L 21 6 M 19 6 L 19 20 C 19 21 18 22 17 22 L 7 22 C 6 22 5 21 5 20 L 5 6 M 8 6 L 8 4 C 8 3 9 2 10 2 L 14 2 C 15 2 16 3 16 4 L 16 6 M 10 11 L 10 17 M 14 11 L 14 17" }
+            }
+        }
+    }
+
+    Component {
+        id: typeCaseC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"; strokeColor: root.color; strokeWidth: 2
+                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 4 7 L 4 4 L 20 4 L 20 7 M 9 20 L 15 20 M 12 4 L 12 20" }
+            }
+        }
+    }
+
+    // Lucide "download": the import icon.
+    Component {
+        id: downloadC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"; strokeColor: root.color; strokeWidth: 2
+                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 21 15 L 21 19 A 2 2 0 0 1 19 21 L 5 21 A 2 2 0 0 1 3 19 L 3 15 M 7 10 L 12 15 L 17 10 M 12 15 L 12 3" }
+            }
+        }
+    }
+
+    // Lucide "zoom-in".
+    Component {
+        id: zoomInC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"; strokeColor: root.color; strokeWidth: 2
+                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 19 11 A 8 8 0 1 0 3 11 A 8 8 0 1 0 19 11 M 21 21 L 16.65 16.65 M 11 8 L 11 14 M 8 11 L 14 11" }
+            }
+        }
+    }
+
+    // Nine small squares: the slide grid view.
+    Component {
+        id: gridViewC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M 3 3 H 8 V 8 H 3 Z M 9.5 3 H 14.5 V 8 H 9.5 Z M 16 3 H 21 V 8 H 16 Z M 3 9.5 H 8 V 14.5 H 3 Z M 9.5 9.5 H 14.5 V 14.5 H 9.5 Z M 16 9.5 H 21 V 14.5 H 16 Z M 3 16 H 8 V 21 H 3 Z M 9.5 16 H 14.5 V 21 H 9.5 Z M 16 16 H 21 V 21 H 16 Z"
+        }
+    }
+
+    // Lucide "list": the slide list view.
+    Component {
+        id: listViewC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"; strokeColor: root.color; strokeWidth: 2
+                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 8 6 L 21 6 M 8 12 L 21 12 M 8 18 L 21 18 M 3 6 L 3.01 6 M 3 12 L 3.01 12 M 3 18 L 3.01 18" }
+            }
+        }
+    }
+
+    // Lucide "align-left": the lyrics (text only) view.
+    Component {
+        id: textLinesC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"; strokeColor: root.color; strokeWidth: 2
+                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 21 6 L 3 6 M 15 12 L 3 12 M 17 18 L 3 18" }
+            }
+        }
+    }
+
+    // A minus: zoom out.
+    Component {
+        id: minusC
+        StrokeIcon {
+            width: 8.17; height: 1
+            svgPath: "M 0 0.5 L 8.1676 0.5"
+        }
+    }
+
+    // A long arrow pointing left: "back".
+    Component {
+        id: arrowLeftC
+        StrokeIcon {
+            width: 14; height: 11
+            svgPath: "M 14 5.5 L 1 5.5 M 5.5 1 L 1 5.5 L 5.5 10"
+        }
+    }
+
+    // Three dots, one above the other: a "more" menu.
+    Component {
+        id: moreVerticalC
+        FillIcon {
+            width: 3.2; height: 13
+            svgPath: "M 3.1 1.6 A 1.5 1.5 0 1 0 0.1 1.6 A 1.5 1.5 0 1 0 3.1 1.6 Z M 3.1 6.5 A 1.5 1.5 0 1 0 0.1 6.5 A 1.5 1.5 0 1 0 3.1 6.5 Z M 3.1 11.4 A 1.5 1.5 0 1 0 0.1 11.4 A 1.5 1.5 0 1 0 3.1 11.4 Z"
         }
     }
 

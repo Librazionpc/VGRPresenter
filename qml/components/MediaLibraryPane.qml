@@ -15,6 +15,10 @@ import VGRPresenterUI
 Item {
     id: root
 
+    // A tile was clicked / double-clicked: { type: "image"|"video"|"audio", ref: path, name }.
+    signal itemActivated(var item)
+    signal itemOpened(var item)
+
     // Reactivity bridge (same pattern as AudioVideoScreen): plain Q_INVOKABLE rowCount()/get*()
     // reads aren't tracked by QML's binding system, so this counter is the honest dependency -
     // bumped by all three models, referenced by the count bindings below.
@@ -256,6 +260,8 @@ Item {
                 name: modelData.name
                 path: modelData.path
                 kind: modelData.kind
+                onActivated: root.itemActivated({ type: modelData.kind, ref: modelData.path, name: modelData.name })
+                onOpened: root.itemOpened({ type: modelData.kind, ref: modelData.path, name: modelData.name })
             }
         }
         AppScrollBar {

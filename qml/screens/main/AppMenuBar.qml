@@ -42,6 +42,8 @@ Item {
     signal saveShowRequested()
     signal saveShowAsRequested()
     signal quickSearchRequested()
+    // File > Import: the Import screen (every file format the engine reads).
+    signal importRequested()
     function activateItem(menuName, label) {
         closeMenu()
         if (label === "Settings" || label === "Preferences…")
@@ -56,6 +58,8 @@ Item {
             root.saveShowAsRequested()
         else if (label === "Quick search…")
             root.quickSearchRequested()
+        else if (label === "Import…")
+            root.importRequested()
     }
 
     readonly property var logoMenuItems: [

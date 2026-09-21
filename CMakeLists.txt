@@ -134,6 +134,7 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/presentation/PresentationCues.cpp
     ${BPS_ROOT}/modules/presentation/PresentationTimeline.cpp
     ${BPS_ROOT}/modules/presentation/PresentationNavigator.cpp
+    ${BPS_ROOT}/modules/presentation/ScriptureSlides.cpp
     ${BPS_ROOT}/modules/presentation/PresentationValidator.cpp
     ${BPS_ROOT}/modules/presentation/PresentationCompiler.cpp
     ${BPS_ROOT}/modules/presentation/SceneBuilder.cpp
@@ -160,10 +161,17 @@ set(BPS_CORE_SOURCES
     # Design libraries: the user's overlays and templates, filed in categories (the dock's Overlays / Templates tabs)
     ${BPS_ROOT}/modules/library/DesignLibrary.cpp
     ${BPS_ROOT}/modules/library/DesignCatalogs.cpp
+    ${BPS_ROOT}/modules/library/TheTableLibrary.cpp
+    # Projects (FreeShow's Projects panel): folders, projects, their items, and what may be dropped where
+    ${BPS_ROOT}/modules/library/ProjectLibrary.cpp
     # App settings (Settings > General / Smart Config), the hardware report, backups and crash recovery
     ${BPS_ROOT}/modules/settings/AppSettings.cpp
     ${BPS_ROOT}/modules/settings/SmartConfig.cpp
     ${BPS_ROOT}/modules/settings/DataProtection.cpp
+    # Importing (FreeShow's formats): the format list, the plain-text lyric converter, and turning imports into shows
+    ${BPS_ROOT}/modules/import/SongText.cpp
+    ${BPS_ROOT}/modules/import/ImportEngine.cpp
+    ${BPS_ROOT}/modules/presentation/LiveOutputController.cpp
     ${BPS_ROOT}/modules/settings/Telemetry.cpp
     # Native .vgr format (docs/specs/22)
     ${BPS_ROOT}/modules/vgr/VgrFormat.cpp
@@ -341,7 +349,9 @@ set(BPS_UNIT_TEST_SOURCES
     ${BPS_ROOT}/tests/unit/tests_search.cpp
     ${BPS_ROOT}/tests/unit/tests_media.cpp
     ${BPS_ROOT}/tests/unit/tests_library.cpp
+    ${BPS_ROOT}/tests/unit/tests_projects.cpp
     ${BPS_ROOT}/tests/unit/tests_settings.cpp
+    ${BPS_ROOT}/tests/unit/tests_import.cpp
     ${BPS_ROOT}/tests/unit/tests_vgr.cpp
     ${BPS_ROOT}/tests/unit/tests_scene.cpp
     ${BPS_ROOT}/tests/unit/tests_bible.cpp
@@ -350,6 +360,7 @@ set(BPS_UNIT_TEST_SOURCES
     ${BPS_ROOT}/tests/unit/tests_production.cpp
     ${BPS_ROOT}/tests/unit/tests_recording.cpp
     ${BPS_ROOT}/tests/unit/tests_broadcast.cpp
+    ${BPS_ROOT}/tests/unit/tests_thetable.cpp
     ${BPS_ROOT}/tests/unit/tests_telemetry.cpp
 )
 add_executable(bps_unit_tests ${BPS_UNIT_TEST_SOURCES})
@@ -357,7 +368,7 @@ target_link_libraries(bps_unit_tests PRIVATE engine_core)
 bps_enable_warnings(bps_unit_tests)
 add_test(NAME unit COMMAND bps_unit_tests)
 foreach(phase core cams modules notify project adaptive rendering display
-              presentation search media library settings vgr scene bible song flow production recording broadcast)
+              presentation search media library settings import vgr scene bible song flow production recording broadcast)
     add_test(NAME unit_${phase} COMMAND bps_unit_tests ${phase})
 endforeach()
 
@@ -388,6 +399,8 @@ qt_add_executable(appVGRPresenterUI
     qml/services/EngineBridge.cpp
     qml/services/include/services/ShowConverter.h
     qml/services/ShowConverter.cpp
+    qml/services/include/services/LiveOutputService.h
+    qml/services/LiveOutputService.cpp
     qml/services/include/services/TelemetryService.h
     qml/services/TelemetryService.cpp
     qml/services/include/services/ShowService.h
@@ -400,10 +413,18 @@ qt_add_executable(appVGRPresenterUI
     qml/services/MediaThumbnailProvider.cpp
     qml/services/include/services/TextFormatService.h
     qml/services/TextFormatService.cpp
+    qml/services/include/services/TheTableService.h
+    qml/services/TheTableService.cpp
     qml/services/include/services/DesignLibraryService.h
     qml/services/DesignLibraryService.cpp
     qml/services/include/services/SettingsService.h
     qml/services/SettingsService.cpp
+    qml/services/include/services/ScriptureService.h
+    qml/services/ScriptureService.cpp
+    qml/services/include/services/ImportService.h
+    qml/services/ImportService.cpp
+    qml/services/include/services/ProjectService.h
+    qml/services/ProjectService.cpp
     qml/models/include/models/SlideListModel.h
     qml/models/SlideListModel.cpp
     qml/models/include/models/OutputListModel.h

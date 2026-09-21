@@ -73,6 +73,13 @@ struct BibleVersion {
     std::vector<BibleVerse> verses;                      // flattened, canonical order
 };
 
+// --- A Bible's table of contents: what a picker needs without copying the whole text ------------------------
+struct BookOutline {
+    BibleBook book;
+    std::vector<int> chapters;      // the chapter numbers present, ascending
+    std::vector<int> verseCounts;   // how many verses each of those chapters has
+};
+
 // --- Passage reference (docs/specs/24 §Reference Resolution) -----------------------
 struct PassageRef {
     std::string bookId;

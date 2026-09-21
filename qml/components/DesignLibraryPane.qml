@@ -110,6 +110,9 @@ Item {
 
     // What opening a design in the Edit screen means here (the host - the main screen - overrides it).
     signal designOpenRequested(string id)
+    // A card was clicked / double-clicked (overlays only): the centre page shows it / the open project takes it.
+    signal designActivated(string id, string name)
+    signal designOpened(string id, string name)
 
     // ---- Sidebar --------------------------------------------------------------
     LibrarySidebar {
@@ -235,6 +238,9 @@ Item {
                 height: grid.cellHeight
                 design: modelData
                 now: ticker.now
+                dragKind: root.noun === "overlay" ? "overlay" : ""
+                onActivated: root.designActivated(modelData.id, modelData.name)
+                onOpened: root.designOpened(modelData.id, modelData.name)
                 onEditRequested: root.designOpenRequested(modelData.id)
                 onCategoryRequested: (anchorItem) => root.openCategoryMenu(modelData, anchorItem)
                 onRenameRequested: root.askName("rename", qsTr("Rename %1").arg(root.noun), modelData.name, modelData.id)

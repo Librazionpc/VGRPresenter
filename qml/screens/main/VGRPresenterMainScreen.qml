@@ -25,9 +25,23 @@ Rectangle {
     // The Projects panel's search box or the "Quick search" button was used — Main.qml
     // opens the app-wide search (SearchService) for it.
     signal searchRequested()
+    // The Projects panel's + button > Import: Main.qml opens the Import screen.
+    signal importRequested()
     // A card's Edit action in the Overlays / Templates tab: open design `id` (`kind` = "overlay" | "template") in the
     // Edit screen (Main.qml switches to it).
     signal designEditRequested(string kind, string id)
+    // What the centre page shows (FreeShow's activeShow): a project item, or a show clicked in the Shows table. null = the splash.
+    property var centerItem: null
+    // Opening a project puts its first item there; clicking another item in the panel puts that one.
+    Connections {
+        target: ProjectService
+        function onActiveChanged() {
+            if (ProjectService.activeProjectId !== "" && ProjectService.activeIndex >= 0)
+                vGRPresenter_Main_Screen.centerItem = ProjectService.activeItem
+        }
+    }
+    // The Scripture tab's "Convert to show": the show's name and its slides ([{ title, background, blocks }]), built by the engine.
+    signal scriptureShowRequested(string name, var slides)
 
     // Opens a dock tab with a search already typed in it ("media" + a name = that media file, found).
     // The app-wide search uses this to take you to what it found.
@@ -80,719 +94,25 @@ Rectangle {
 
                 color: "transparent"
 
-                Rectangle {
-                    id: section_header
 
-                    x: 12
-                    y: 12
-
-                    height: 15
-                    width: 256
-
-                    color: "transparent"
-
-                    Text {
-                        id: projects
-
-                        height: 15
-                        width: 66
-
-                        color: "#8a94a6"
-                        font.capitalization: Font.AllUppercase
-                        font.family: "Inter"
-                        font.pixelSize: 12
-                        font.weight: Font.Bold
-                        horizontalAlignment: Text.AlignLeft
-                        text: qsTr("Projects")
-                        textFormat: Text.PlainText
-                        verticalAlignment: Text.AlignTop
-                    }
-                    Rectangle {
-                        id: search
-
-                        x: 242
-                        y: 0.50
-
-                        height: 14
-                        width: 14
-
-                        clip: true
-                        color: "transparent"
-
-                        Shape {
-                            id: _vector_4
-
-                            x: 1.75
-                            y: 1.75
-
-                            height: 10.50
-                            width: 10.50
-
-                            ShapePath {
-                                id: _vector_4_ShapePath0
-
-                                fillColor: "#00000000"
-                                strokeColor: "#8a94a6"
-                                strokeWidth: 2
-
-                                PathSvg {
-                                    id: _vector_4_ShapePath0_PathSvg0
-
-                                    path: "M 10.500091552734375 10.500091552734375 L 7.96842472041161 7.96842472041161 M 9.333333615901045 4.666666807950523 C 9.333333615901045 7.2439955679252375 7.2439955679252375 9.333333615901045 4.666666807950523 9.333333615901045 C 2.0893377698207902 9.333333615901045 0 7.2439955679252375 0 4.666666807950523 C 0 2.0893377698207902 2.0893377698207902 0 4.666666807950523 0 C 7.2439955679252375 0 9.333333615901045 2.0893377698207902 9.333333615901045 4.666666807950523 Z"
-                                }
-                            }
-                        }
-                    }
-                }
-                Rectangle {
-                    id: projects_search_input
-
-                    x: 12
-                    y: 39
-
-                    height: 31
-                    width: 256
-
-                    border.color: "#232530"
-                    border.width: 1
-                    color: "#0f1015"
-                    radius: 6
-
-                    Rectangle {
-                        id: search_1
-
-                        x: 8
-                        y: 9.50
-
-                        height: 12
-                        width: 12
-
-                        clip: true
-                        color: "transparent"
-
-                        Shape {
-                            id: _vector_5
-
-                            x: 1.50
-                            y: 1.50
-
-                            height: 9
-                            width: 9
-
-                            ShapePath {
-                                id: _vector_5_ShapePath0
-
-                                fillColor: "#00000000"
-                                strokeColor: "#5c6475"
-                                strokeWidth: 2
-
-                                PathSvg {
-                                    id: _vector_5_ShapePath0_PathSvg0
-
-                                    path: "M 9.000078201293945 9.000078201293945 L 6.830078125 6.830078125 M 8 4 C 8 6.209138870239258 6.209138870239258 8 4 8 C 1.790860891342163 8 0 6.209138870239258 0 4 C 0 1.790860891342163 1.790860891342163 0 4 0 C 6.209138870239258 0 8 1.790860891342163 8 4 Z"
-                                }
-                            }
-                        }
-                    }
-                    Text {
-                        id: quick_search_
-
-                        x: 28
-                        y: 8
-
-                        height: 15
-                        width: 221
-
-                        color: "#5c6475"
-                        font.family: "Inter"
-                        font.pixelSize: 12
-                        font.weight: Font.Normal
-                        horizontalAlignment: Text.AlignLeft
-                        text: qsTr("Quick search...")
-                        textFormat: Text.PlainText
-                        verticalAlignment: Text.AlignTop
-                        wrapMode: Text.Wrap
-                    }
-                    // The box opens the app-wide search rather than being a field of its own.
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.IBeamCursor
-                        onClicked: vGRPresenter_Main_Screen.searchRequested()
-                    }
-                }
-                Rectangle {
+                // The real Projects panel: the engine's folders and projects, the open project's items, drag and drop.
+                ProjectsPanel {
                     id: projects_list
+                    objectName: "selfTestProjectsPanel"
 
                     x: 12
-                    y: 82
+                    y: 10
 
-                    height: workspace_body.topHeight - 94
+                    height: workspace_body.topHeight - 22
                     width: 256
 
-                    clip: true
-                    color: "transparent"
-
-                    Rectangle {
-                        id: item_0
-
-                        height: 46
-                        width: 256
-
-                        color: "#00000000"
-                        radius: 6
-
-                        Rectangle {
-                            id: file_text
-
-                            x: 8
-                            y: 8
-
-                            height: 14
-                            width: 14
-
-                            clip: true
-                            color: "transparent"
-
-                            Shape {
-                                id: _vector_6
-
-                                x: 2.33
-                                y: 1.17
-
-                                height: 11.67
-                                width: 9.33
-
-                                ShapePath {
-                                    id: _vector_6_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#5c6475"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_6_ShapePath0_PathSvg0
-
-                                        path: "M 5.832748214543292 0.0000018391015343012394 L 1.1665496429086584 0.0000018391015343012394 C 0.857161430045253 0.000001839101534560312 0.5604449142148962 0.12292792327306676 0.3416744244025606 0.34173783280375647 C 0.12290393459022503 0.5605477423344462 0 0.8573176880143871 0 1.1667616487815597 L 0 10.50084079108426 C 7.770781637552681e-16 10.810284751851432 0.12290393459022503 11.107054454126303 0.3416744244025606 11.325864363656992 C 0.5604449142148962 11.544674273187681 0.857161430045253 11.667600631713867 1.1665496429086584 11.667600631713867 L 8.16584750036061 11.667600631713867 C 8.475235713224015 11.667600631713867 8.771951950927262 11.544674273187681 8.990722440739598 11.325864363656992 C 9.209492930551933 11.107054454126303 9.332397143269267 10.810284751851432 9.332397143269267 10.50084079108426 L 9.332397143269267 3.5002814691293875 M 5.832748214543292 0.0000018391015343012394 C 6.0173863024544305 -0.00029746767182602134 6.200259639097429 0.03593935412302619 6.370836837218325 0.10662550357299545 C 6.54141403533922 0.1773116530229647 6.696325141755713 0.28105059413306155 6.8266487862035605 0.41186811896367437 L 8.919438462878793 2.5050354118636258 C 9.050582660519416 2.635424613314577 9.15459853557324 2.790509345490457 9.225478407782875 2.961332571283399 C 9.296358279992509 3.132155797076341 9.332697579926656 3.3153321431432974 9.332397143269267 3.5002814691293875 M 5.832748214543292 0.0000018391015343012394 L 5.832748214543292 2.91689960157402 C 5.832748214543292 3.071621581957606 5.894200320901958 3.2200064330950413 6.003585565808126 3.3294113878603864 C 6.112970810714294 3.4388163426257314 6.261328929565918 3.500279521888824 6.416023035997621 3.500279521888824 L 9.332397143269267 3.5002814691293875 M 3.499648928725975 4.083659442203628 L 2.3330992858173167 4.083659442203628 M 6.99929785745195 6.417179123462844 L 2.3330992858173167 6.417179123462844 M 6.99929785745195 8.75069880472206 L 2.3330992858173167 8.75069880472206"
-                                    }
-                                }
-                            }
-                        }
-                        Rectangle {
-                            id: item_info
-
-                            x: 30
-                            y: 8
-
-                            height: 30
-                            width: 218
-
-                            color: "transparent"
-
-                            Text {
-                                id: he_Who_Can
-
-                                height: 16
-                                width: 219
-
-                                color: "#e2e8f0"
-                                elide: Text.ElideRight
-                                font.family: "Inter"
-                                font.pixelSize: 13
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("He Who Can")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                            Text {
-                                id: kJV
-
-                                y: 18
-
-                                height: 12
-                                width: 20
-
-                                color: "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 10
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("KJV")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                            }
-                        }
-                    }
-                    Rectangle {
-                        id: item_1
-
-                        y: 50
-
-                        height: 46
-                        width: 256
-
-                        color: "#16171e"
-                        radius: 6
-
-                        Rectangle {
-                            id: file_text_1
-
-                            x: 8
-                            y: 8
-
-                            height: 14
-                            width: 14
-
-                            clip: true
-                            color: "transparent"
-
-                            Shape {
-                                id: _vector_7
-
-                                x: 2.33
-                                y: 1.17
-
-                                height: 11.67
-                                width: 9.33
-
-                                ShapePath {
-                                    id: _vector_7_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#ff4d3d"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_7_ShapePath0_PathSvg0
-
-                                        path: "M 5.832748214543292 0.0000018391015343012394 L 1.1665496429086584 0.0000018391015343012394 C 0.857161430045253 0.000001839101534560312 0.5604449142148962 0.12292792327306676 0.3416744244025606 0.34173783280375647 C 0.12290393459022503 0.5605477423344462 0 0.8573176880143871 0 1.1667616487815597 L 0 10.50084079108426 C 7.770781637552681e-16 10.810284751851432 0.12290393459022503 11.107054454126303 0.3416744244025606 11.325864363656992 C 0.5604449142148962 11.544674273187681 0.857161430045253 11.667600631713867 1.1665496429086584 11.667600631713867 L 8.16584750036061 11.667600631713867 C 8.475235713224015 11.667600631713867 8.771951950927262 11.544674273187681 8.990722440739598 11.325864363656992 C 9.209492930551933 11.107054454126303 9.332397143269267 10.810284751851432 9.332397143269267 10.50084079108426 L 9.332397143269267 3.5002814691293875 M 5.832748214543292 0.0000018391015343012394 C 6.0173863024544305 -0.00029746767182602134 6.200259639097429 0.03593935412302619 6.370836837218325 0.10662550357299545 C 6.54141403533922 0.1773116530229647 6.696325141755713 0.28105059413306155 6.8266487862035605 0.41186811896367437 L 8.919438462878793 2.5050354118636258 C 9.050582660519416 2.635424613314577 9.15459853557324 2.790509345490457 9.225478407782875 2.961332571283399 C 9.296358279992509 3.132155797076341 9.332697579926656 3.3153321431432974 9.332397143269267 3.5002814691293875 M 5.832748214543292 0.0000018391015343012394 L 5.832748214543292 2.91689960157402 C 5.832748214543292 3.071621581957606 5.894200320901958 3.2200064330950413 6.003585565808126 3.3294113878603864 C 6.112970810714294 3.4388163426257314 6.261328929565918 3.500279521888824 6.416023035997621 3.500279521888824 L 9.332397143269267 3.5002814691293875 M 3.499648928725975 4.083659442203628 L 2.3330992858173167 4.083659442203628 M 6.99929785745195 6.417179123462844 L 2.3330992858173167 6.417179123462844 M 6.99929785745195 8.75069880472206 L 2.3330992858173167 8.75069880472206"
-                                    }
-                                }
-                            }
-                        }
-                        Rectangle {
-                            id: item_info_1
-
-                            x: 30
-                            y: 8
-
-                            height: 30
-                            width: 218
-
-                            color: "transparent"
-
-                            Text {
-                                id: trust_In_Jesus
-
-                                height: 16
-                                width: 219
-
-                                color: "#e2e8f0"
-                                elide: Text.ElideRight
-                                font.family: "Inter"
-                                font.pixelSize: 13
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("Trust In Jesus")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                            Text {
-                                id: kJV_1
-
-                                y: 18
-
-                                height: 12
-                                width: 20
-
-                                color: "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 10
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("KJV")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                            }
-                        }
-                    }
-                    Rectangle {
-                        id: item_2
-
-                        y: 100
-
-                        height: 46
-                        width: 256
-
-                        color: "#00000000"
-                        radius: 6
-
-                        Rectangle {
-                            id: file_text_2
-
-                            x: 8
-                            y: 8
-
-                            height: 14
-                            width: 14
-
-                            clip: true
-                            color: "transparent"
-
-                            Shape {
-                                id: _vector_8
-
-                                x: 2.33
-                                y: 1.17
-
-                                height: 11.67
-                                width: 9.33
-
-                                ShapePath {
-                                    id: _vector_8_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#5c6475"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_8_ShapePath0_PathSvg0
-
-                                        path: "M 5.832748214543292 0.0000018391015343012394 L 1.1665496429086584 0.0000018391015343012394 C 0.857161430045253 0.000001839101534560312 0.5604449142148962 0.12292792327306676 0.3416744244025606 0.34173783280375647 C 0.12290393459022503 0.5605477423344462 0 0.8573176880143871 0 1.1667616487815597 L 0 10.50084079108426 C 7.770781637552681e-16 10.810284751851432 0.12290393459022503 11.107054454126303 0.3416744244025606 11.325864363656992 C 0.5604449142148962 11.544674273187681 0.857161430045253 11.667600631713867 1.1665496429086584 11.667600631713867 L 8.16584750036061 11.667600631713867 C 8.475235713224015 11.667600631713867 8.771951950927262 11.544674273187681 8.990722440739598 11.325864363656992 C 9.209492930551933 11.107054454126303 9.332397143269267 10.810284751851432 9.332397143269267 10.50084079108426 L 9.332397143269267 3.5002814691293875 M 5.832748214543292 0.0000018391015343012394 C 6.0173863024544305 -0.00029746767182602134 6.200259639097429 0.03593935412302619 6.370836837218325 0.10662550357299545 C 6.54141403533922 0.1773116530229647 6.696325141755713 0.28105059413306155 6.8266487862035605 0.41186811896367437 L 8.919438462878793 2.5050354118636258 C 9.050582660519416 2.635424613314577 9.15459853557324 2.790509345490457 9.225478407782875 2.961332571283399 C 9.296358279992509 3.132155797076341 9.332697579926656 3.3153321431432974 9.332397143269267 3.5002814691293875 M 5.832748214543292 0.0000018391015343012394 L 5.832748214543292 2.91689960157402 C 5.832748214543292 3.071621581957606 5.894200320901958 3.2200064330950413 6.003585565808126 3.3294113878603864 C 6.112970810714294 3.4388163426257314 6.261328929565918 3.500279521888824 6.416023035997621 3.500279521888824 L 9.332397143269267 3.5002814691293875 M 3.499648928725975 4.083659442203628 L 2.3330992858173167 4.083659442203628 M 6.99929785745195 6.417179123462844 L 2.3330992858173167 6.417179123462844 M 6.99929785745195 8.75069880472206 L 2.3330992858173167 8.75069880472206"
-                                    }
-                                }
-                            }
-                        }
-                        Rectangle {
-                            id: item_info_2
-
-                            x: 30
-                            y: 8
-
-                            height: 30
-                            width: 218
-
-                            color: "transparent"
-
-                            Text {
-                                id: romans_8_1_KJV
-
-                                height: 16
-                                width: 219
-
-                                color: "#e2e8f0"
-                                elide: Text.ElideRight
-                                font.family: "Inter"
-                                font.pixelSize: 13
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("Romans 8:1 - KJV")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                            Text {
-                                id: bible
-
-                                y: 18
-
-                                height: 12
-                                width: 25
-
-                                color: "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 10
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("Bible")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                            }
-                        }
-                    }
-                    Rectangle {
-                        id: item_3
-
-                        y: 150
-
-                        height: 46
-                        width: 256
-
-                        color: "#00000000"
-                        radius: 6
-
-                        Rectangle {
-                            id: file_text_3
-
-                            x: 8
-                            y: 8
-
-                            height: 14
-                            width: 14
-
-                            clip: true
-                            color: "transparent"
-
-                            Shape {
-                                id: _vector_9
-
-                                x: 2.33
-                                y: 1.17
-
-                                height: 11.67
-                                width: 9.33
-
-                                ShapePath {
-                                    id: _vector_9_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#5c6475"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_9_ShapePath0_PathSvg0
-
-                                        path: "M 5.832748214543292 0.0000018391015343012394 L 1.1665496429086584 0.0000018391015343012394 C 0.857161430045253 0.000001839101534560312 0.5604449142148962 0.12292792327306676 0.3416744244025606 0.34173783280375647 C 0.12290393459022503 0.5605477423344462 0 0.8573176880143871 0 1.1667616487815597 L 0 10.50084079108426 C 7.770781637552681e-16 10.810284751851432 0.12290393459022503 11.107054454126303 0.3416744244025606 11.325864363656992 C 0.5604449142148962 11.544674273187681 0.857161430045253 11.667600631713867 1.1665496429086584 11.667600631713867 L 8.16584750036061 11.667600631713867 C 8.475235713224015 11.667600631713867 8.771951950927262 11.544674273187681 8.990722440739598 11.325864363656992 C 9.209492930551933 11.107054454126303 9.332397143269267 10.810284751851432 9.332397143269267 10.50084079108426 L 9.332397143269267 3.5002814691293875 M 5.832748214543292 0.0000018391015343012394 C 6.0173863024544305 -0.00029746767182602134 6.200259639097429 0.03593935412302619 6.370836837218325 0.10662550357299545 C 6.54141403533922 0.1773116530229647 6.696325141755713 0.28105059413306155 6.8266487862035605 0.41186811896367437 L 8.919438462878793 2.5050354118636258 C 9.050582660519416 2.635424613314577 9.15459853557324 2.790509345490457 9.225478407782875 2.961332571283399 C 9.296358279992509 3.132155797076341 9.332697579926656 3.3153321431432974 9.332397143269267 3.5002814691293875 M 5.832748214543292 0.0000018391015343012394 L 5.832748214543292 2.91689960157402 C 5.832748214543292 3.071621581957606 5.894200320901958 3.2200064330950413 6.003585565808126 3.3294113878603864 C 6.112970810714294 3.4388163426257314 6.261328929565918 3.500279521888824 6.416023035997621 3.500279521888824 L 9.332397143269267 3.5002814691293875 M 3.499648928725975 4.083659442203628 L 2.3330992858173167 4.083659442203628 M 6.99929785745195 6.417179123462844 L 2.3330992858173167 6.417179123462844 M 6.99929785745195 8.75069880472206 L 2.3330992858173167 8.75069880472206"
-                                    }
-                                }
-                            }
-                        }
-                        Rectangle {
-                            id: item_info_3
-
-                            x: 30
-                            y: 8
-
-                            height: 30
-                            width: 218
-
-                            color: "transparent"
-
-                            Text {
-                                id: john_3_16_KJV
-
-                                height: 16
-                                width: 219
-
-                                color: "#e2e8f0"
-                                elide: Text.ElideRight
-                                font.family: "Inter"
-                                font.pixelSize: 13
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("John 3:16 - KJV")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                            Text {
-                                id: bible_1
-
-                                y: 18
-
-                                height: 12
-                                width: 25
-
-                                color: "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 10
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("Bible")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                            }
-                        }
-                    }
-                    Rectangle {
-                        id: item_4
-
-                        y: 200
-
-                        height: 46
-                        width: 256
-
-                        color: "#00000000"
-                        radius: 6
-
-                        Rectangle {
-                            id: file_text_4
-
-                            x: 8
-                            y: 8
-
-                            height: 14
-                            width: 14
-
-                            clip: true
-                            color: "transparent"
-
-                            Shape {
-                                id: _vector_10
-
-                                x: 2.33
-                                y: 1.17
-
-                                height: 11.67
-                                width: 9.33
-
-                                ShapePath {
-                                    id: _vector_10_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#5c6475"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_10_ShapePath0_PathSvg0
-
-                                        path: "M 5.832748214543292 0.0000018391015343012394 L 1.1665496429086584 0.0000018391015343012394 C 0.857161430045253 0.000001839101534560312 0.5604449142148962 0.12292792327306676 0.3416744244025606 0.34173783280375647 C 0.12290393459022503 0.5605477423344462 0 0.8573176880143871 0 1.1667616487815597 L 0 10.50084079108426 C 7.770781637552681e-16 10.810284751851432 0.12290393459022503 11.107054454126303 0.3416744244025606 11.325864363656992 C 0.5604449142148962 11.544674273187681 0.857161430045253 11.667600631713867 1.1665496429086584 11.667600631713867 L 8.16584750036061 11.667600631713867 C 8.475235713224015 11.667600631713867 8.771951950927262 11.544674273187681 8.990722440739598 11.325864363656992 C 9.209492930551933 11.107054454126303 9.332397143269267 10.810284751851432 9.332397143269267 10.50084079108426 L 9.332397143269267 3.5002814691293875 M 5.832748214543292 0.0000018391015343012394 C 6.0173863024544305 -0.00029746767182602134 6.200259639097429 0.03593935412302619 6.370836837218325 0.10662550357299545 C 6.54141403533922 0.1773116530229647 6.696325141755713 0.28105059413306155 6.8266487862035605 0.41186811896367437 L 8.919438462878793 2.5050354118636258 C 9.050582660519416 2.635424613314577 9.15459853557324 2.790509345490457 9.225478407782875 2.961332571283399 C 9.296358279992509 3.132155797076341 9.332697579926656 3.3153321431432974 9.332397143269267 3.5002814691293875 M 5.832748214543292 0.0000018391015343012394 L 5.832748214543292 2.91689960157402 C 5.832748214543292 3.071621581957606 5.894200320901958 3.2200064330950413 6.003585565808126 3.3294113878603864 C 6.112970810714294 3.4388163426257314 6.261328929565918 3.500279521888824 6.416023035997621 3.500279521888824 L 9.332397143269267 3.5002814691293875 M 3.499648928725975 4.083659442203628 L 2.3330992858173167 4.083659442203628 M 6.99929785745195 6.417179123462844 L 2.3330992858173167 6.417179123462844 M 6.99929785745195 8.75069880472206 L 2.3330992858173167 8.75069880472206"
-                                    }
-                                }
-                            }
-                        }
-                        Rectangle {
-                            id: item_info_4
-
-                            x: 30
-                            y: 8
-
-                            height: 30
-                            width: 218
-
-                            color: "transparent"
-
-                            Text {
-                                id: romans_10_9_KJV
-
-                                height: 16
-                                width: 219
-
-                                color: "#e2e8f0"
-                                elide: Text.ElideRight
-                                font.family: "Inter"
-                                font.pixelSize: 13
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("Romans 10:9 - KJV")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                            Text {
-                                id: bible_2
-
-                                y: 18
-
-                                height: 12
-                                width: 25
-
-                                color: "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 10
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("Bible")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                            }
-                        }
-                    }
-                    Rectangle {
-                        id: item_5
-
-                        y: 250
-
-                        height: 46
-                        width: 256
-
-                        color: "#00000000"
-                        radius: 6
-
-                        Rectangle {
-                            id: file_text_5
-
-                            x: 8
-                            y: 8
-
-                            height: 14
-                            width: 14
-
-                            clip: true
-                            color: "transparent"
-
-                            Shape {
-                                id: _vector_11
-
-                                x: 2.33
-                                y: 1.17
-
-                                height: 11.67
-                                width: 9.33
-
-                                ShapePath {
-                                    id: _vector_11_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#5c6475"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_11_ShapePath0_PathSvg0
-
-                                        path: "M 5.832748214543292 0.0000018391015343012394 L 1.1665496429086584 0.0000018391015343012394 C 0.857161430045253 0.000001839101534560312 0.5604449142148962 0.12292792327306676 0.3416744244025606 0.34173783280375647 C 0.12290393459022503 0.5605477423344462 0 0.8573176880143871 0 1.1667616487815597 L 0 10.50084079108426 C 7.770781637552681e-16 10.810284751851432 0.12290393459022503 11.107054454126303 0.3416744244025606 11.325864363656992 C 0.5604449142148962 11.544674273187681 0.857161430045253 11.667600631713867 1.1665496429086584 11.667600631713867 L 8.16584750036061 11.667600631713867 C 8.475235713224015 11.667600631713867 8.771951950927262 11.544674273187681 8.990722440739598 11.325864363656992 C 9.209492930551933 11.107054454126303 9.332397143269267 10.810284751851432 9.332397143269267 10.50084079108426 L 9.332397143269267 3.5002814691293875 M 5.832748214543292 0.0000018391015343012394 C 6.0173863024544305 -0.00029746767182602134 6.200259639097429 0.03593935412302619 6.370836837218325 0.10662550357299545 C 6.54141403533922 0.1773116530229647 6.696325141755713 0.28105059413306155 6.8266487862035605 0.41186811896367437 L 8.919438462878793 2.5050354118636258 C 9.050582660519416 2.635424613314577 9.15459853557324 2.790509345490457 9.225478407782875 2.961332571283399 C 9.296358279992509 3.132155797076341 9.332697579926656 3.3153321431432974 9.332397143269267 3.5002814691293875 M 5.832748214543292 0.0000018391015343012394 L 5.832748214543292 2.91689960157402 C 5.832748214543292 3.071621581957606 5.894200320901958 3.2200064330950413 6.003585565808126 3.3294113878603864 C 6.112970810714294 3.4388163426257314 6.261328929565918 3.500279521888824 6.416023035997621 3.500279521888824 L 9.332397143269267 3.5002814691293875 M 3.499648928725975 4.083659442203628 L 2.3330992858173167 4.083659442203628 M 6.99929785745195 6.417179123462844 L 2.3330992858173167 6.417179123462844 M 6.99929785745195 8.75069880472206 L 2.3330992858173167 8.75069880472206"
-                                    }
-                                }
-                            }
-                        }
-                        Rectangle {
-                            id: item_info_5
-
-                            x: 30
-                            y: 8
-
-                            height: 30
-                            width: 218
-
-                            color: "transparent"
-
-                            Text {
-                                id: psalm_23_KJV
-
-                                height: 16
-                                width: 219
-
-                                color: "#e2e8f0"
-                                elide: Text.ElideRight
-                                font.family: "Inter"
-                                font.pixelSize: 13
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("Psalm 23 - KJV")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                            Text {
-                                id: bible_3
-
-                                y: 18
-
-                                height: 12
-                                width: 25
-
-                                color: "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 10
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("Bible")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                            }
-                        }
+                    onItemActivated: (item) => vGRPresenter_Main_Screen.centerItem = item
+                    onItemOpened: (item) => { if (item.type === "show") vGRPresenter_Main_Screen.openShowRequested(item.ref) }
+                    onImportRequested: vGRPresenter_Main_Screen.importRequested()
+                    onSearchRequested: vGRPresenter_Main_Screen.searchRequested()
+                    onDockTabRequested: (tab) => {
+                        const at = media_tab_bar.tabs.findIndex((t) => t.pane === tab)
+                        if (at >= 0) media_tab_bar.currentTab = at
                     }
                 }
             }
@@ -1250,6 +570,15 @@ Rectangle {
                         }
                     }
                 }
+                // What the clicked show / item looks like (FreeShow's centre page); the splash above stays until something is clicked.
+                ShowCenter {
+                    objectName: "selfTestShowCenter"
+                    anchors.fill: parent
+                    visible: vGRPresenter_Main_Screen.centerItem !== null
+                    item: vGRPresenter_Main_Screen.centerItem
+                    onEditRequested: (path) => vGRPresenter_Main_Screen.openShowRequested(path)
+                    onCloseRequested: vGRPresenter_Main_Screen.centerItem = null
+                }
             }
         }
             Rectangle {
@@ -1272,7 +601,11 @@ Rectangle {
                     id: dock_tab_bar
 
                     height: 39
-                    width: parent.width - 400
+                    // Full width (the FreeShow sample): the tab pack hugs the
+                    // left edge and Search sits at the window's right edge —
+                    // the clock panel below the row no longer dictates the
+                    // bar's extent.
+                    width: parent.width
 
                     border.color: "#232530"
                     border.width: 1
@@ -1303,7 +636,9 @@ Rectangle {
                     // Tracks the dock's taller body so every pane (shows
                     // table, browsers, media grid) fills to the bottom.
                     height: parent.height - 39
-                    width: parent.width - 400
+                    // The Scripture tab takes the clock's place: its preview / template column sits at the far right, the
+                    // way FreeShow's does, instead of being squeezed in beside the clock.
+                    width: media_tab_bar.currentPane === "scripture" ? parent.width : parent.width - 400
 
                     clip: true
                     color: "transparent"
@@ -1318,25 +653,39 @@ Rectangle {
                     // rosters (buses/video/audio) + playlists; everything
                     // else gets the consistent coming-soon pane until its
                     // content lands.
-                    LibraryBrowserPane {
+                    ScripturePane {
                         objectName: "selfTestScripturePane"
                         visible: media_tab_bar.currentPane === "scripture"
                         width: parent.width; height: parent.height
-                        sidebarLabel: qsTr("Bibles")
                         filter: media_tab_bar.searches.scripture !== undefined ? media_tab_bar.searches.scripture : ""
-                        newEntryLabel: qsTr("New scripture")
+                        onTemplateEditRequested: (id) => vGRPresenter_Main_Screen.designEditRequested("template", id)
+                        onConvertToShowRequested: (name, slides) => vGRPresenter_Main_Screen.scriptureShowRequested(name, slides)
                     }
                     LibraryBrowserPane {
+                        id: tablePane
                         objectName: "selfTestTablePane"
                         visible: media_tab_bar.currentPane === "table"
                         width: parent.width; height: parent.height
                         sidebarLabel: qsTr("Collections")
                         filter: media_tab_bar.searches.table !== undefined ? media_tab_bar.searches.table : ""
+                        searchHits: {
+                            const q = media_tab_bar.searches.table !== undefined ? media_tab_bar.searches.table : ""
+                            const words = q.trim().split(/\s+/).filter((w) => w.length > 0)
+                            return words.length >= 2 ? TheTableService.search(q) : []
+                        }
                         newEntryLabel: qsTr("New sermon")
+                        Component.onCompleted: tablePane.setLibrary(TheTableService.document)
+                        Connections {
+                            target: TheTableService
+                            function onChanged() { tablePane.setLibrary(TheTableService.document) }
+                        }
+                        onNewEntryActivated: TheTableService.newSermon()
                     }
                     MediaLibraryPane {
                         id: mediaPane
                         objectName: "selfTestMediaPane"
+                        onItemActivated: (item) => vGRPresenter_Main_Screen.centerItem = item
+                        onItemOpened: (item) => ProjectService.dropOnProject("media", [{ ref: item.ref, name: item.name }])
                         visible: media_tab_bar.currentPane === "media"
                         filter: media_tab_bar.searches.media !== undefined ? media_tab_bar.searches.media : ""
                         width: parent.width; height: parent.height
@@ -1346,6 +695,8 @@ Rectangle {
                         visible: media_tab_bar.currentPane === "overlays"
                         service: OverlayLibraryService
                         noun: "overlay"
+                        onDesignActivated: (id, name) => vGRPresenter_Main_Screen.centerItem = { type: "overlay", ref: id, name: name }
+                        onDesignOpened: (id, name) => ProjectService.dropOnProject("overlay", [{ ref: id, name: name }])
                         onDesignOpenRequested: (id) => vGRPresenter_Main_Screen.designEditRequested("overlay", id)
                         filter: media_tab_bar.searches.overlays !== undefined ? media_tab_bar.searches.overlays : ""
                         width: parent.width; height: parent.height
@@ -1945,11 +1296,14 @@ Rectangle {
                                     textFormat: Text.PlainText
                                     verticalAlignment: Text.AlignTop
                                 }
-                                MouseArea {
+                                // Click: the show on the centre page. Double-click: into the open project. Drag: into a project.
+                                DragSource {
                                     id: rowMouse
                                     anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: vGRPresenter_Main_Screen.openShowRequested(modelData.path)
+                                    payload: ({ kind: "show_drawer", items: [{ ref: modelData.path, name: modelData.name }] })
+                                    label: modelData.name
+                                    onActivated: vGRPresenter_Main_Screen.centerItem = { type: "show", ref: modelData.path, name: modelData.name, layout: "" }
+                                    onOpened: ProjectService.dropOnProject("show_drawer", [{ ref: modelData.path, name: modelData.name }])
                                 }
                             }
                         }
@@ -2033,13 +1387,15 @@ Rectangle {
                 Rectangle {
                     id: clock_panel
 
-                    // The band's right region: clock + New show CTA, full band height
-                    // (the FreeShow samples park the clock inside the library band
-                    // at the bottom-right).
+                    // The band's right region: clock + New show CTA. Starts
+                    // BELOW the tab row (the FreeShow sample: the row runs the
+                    // full width above it; the clock lives in the bottom-right
+                    // of the band).
                     x: parent.width - 400
-                    y: 0
+                    y: 39
+                    visible: media_tab_bar.currentPane !== "scripture"   // the Scripture preview takes this spot
 
-                    height: parent.height
+                    height: parent.height - 39
 
                     width: 400
 

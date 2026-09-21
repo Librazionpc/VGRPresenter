@@ -198,6 +198,7 @@ bool SettingsService::setValue(const QString &key, const QVariant &value)
         report(qstr(set.error().message));
         return false;
     }
+    EngineBridge::write(QStringLiteral("info"), QStringLiteral("Settings"), QStringLiteral("%1 = %2").arg(key, value.toString()));
     return true;
 }
 
@@ -367,4 +368,9 @@ bool SettingsService::restoreRecovery(const QString &target)
 bool SettingsService::fileExists(const QString &path) const
 {
     return !path.isEmpty() && bps::platform::PlatformAccessor::Get().Filesystem().IsRegularFile(path.toStdString());
+}
+
+bps::presentation::ScriptureSettings SettingsService::scriptureSettings() const
+{
+    return settings_ ? settings_->Scripture() : bps::presentation::ScriptureSettings{};
 }

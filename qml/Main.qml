@@ -28,6 +28,8 @@ ApplicationWindow {
     // "show" | "edit" | "stage" — Stage has no screen yet, so its tab click
     // is accepted but doesn't switch the view.
     property string currentView: "show"
+    // The window-level layer that carries a drag between panes (DragSource / DropArea); see DragLayer.qml.
+    readonly property var dragLayer: dragLayerItem
 
     // Previous-run crash report, delivered on the standard notification
     // pipeline the moment QML is alive. (See main.cpp: the CrashHandler can
@@ -74,12 +76,23 @@ ApplicationWindow {
             editScreen.openShowPath(path)
             window.currentView = "edit"
         }
-        // The Projects panel's search box / "Quick search" button: the same app-wide search.
+        // The app-wide search (the splash's "Quick search" button).
         onSearchRequested: quickSearch.openSearch()
+        onImportRequested: importDialog.open = true
         // A card's Edit action in the Overlays / Templates tab: the Edit screen edits that overlay / template.
         onDesignEditRequested: (kind, id) => {
             if (editScreen.openDesign(kind, id))
                 window.currentView = "edit"
+        }
+        // The Scripture tab's "Convert to show": a new show with the slides the engine built for the passage, opened on the Edit screen.
+        onScriptureShowRequested: (name, slides) => {
+            editScreen.session.closeDesign()
+            editScreen.session.guardUnsaved(function () {
+                ShowService.newShowDocument(name)
+                slides.forEach((s) => ShowService.addSlide({ title: s.title, background: s.background, blocks: s.blocks }))
+                editScreen.session.applyShow(ShowService.currentShow)
+                window.currentView = "edit"
+            })
         }
     }
 
@@ -103,6 +116,7 @@ ApplicationWindow {
     // A design is only edited while the Edit screen is showing: leaving it (the Show tab) closes it, and the show that was
     // open comes back on the canvas.
     onCurrentViewChanged: {
+        EngineBridge.log("info", "Navigation", "Screen: " + window.currentView)
         if (window.currentView !== "edit")
             editScreen.closeDesign()
     }
@@ -206,6 +220,13 @@ ApplicationWindow {
         onQuickSearchRequested: quickSearch.openSearch()
         onSaveShowRequested: editScreen.saveShow()
         onSaveShowAsRequested: editScreen.saveShowAs()
+        onImportRequested: importDialog.open = true
+    }
+
+    // Ctrl+I: File > Import.
+    Shortcut {
+        sequence: "Ctrl+I"
+        onActivated: importDialog.open = true
     }
 
     // Ctrl+N / O / S / Shift+S — the same actions as the File menu.
@@ -274,6 +295,106 @@ ApplicationWindow {
     // reads AppCursor's point, so this must never be hidden or disabled.
     AppCursorCatcher { }
 
+
+
+    // TEMP PROJECT-PROBE BEGIN
+    Timer {
+        id: projectProbe
+        property int step: 0
+        property string pid: ""
+        property string path: ""
+        property var orig: ({})
+        property var c: null
+        running: typeof SelfTest !== "undefined"
+        interval: 250
+        repeat: true
+        onTriggered: {
+            if (step === 0) {
+                selfTestStage1.running = false
+                projectProbe.interval = 1500
+                orig = { view: SettingsService.values["session.slideView"], cols: SettingsService.values["session.slideColumns"],
+                         last: SettingsService.values["session.lastShowPath"], project: SettingsService.values["session.lastProject"] }
+                console.log("[PROBE] original settings:", JSON.stringify(orig))
+                window.currentView = "show"
+            } else if (step === 4) {
+                const words = ["Amazing grace, how sweet the sound", "That saved a wretch like me", "I once was lost, but now am found", "Was blind, but now I see", "Twas grace that taught my heart to fear", "And grace my fears relieved"]
+                const slides = words.map((w, i) => ({ title: (i % 2 === 0 ? "Verse " : "Chorus ") + (i + 1), background: "#000000",
+                    blocks: [{ kind: "text", text: w, x: 20, y: 120, width: 714, height: 180, bind: "text", meta: { fontSize: 40, align: "center", color: "#ffffff" } }] }))
+                ShowService.newShowDocument("ZZ Probe Timer")
+                slides.forEach((s) => ShowService.addSlide({ title: s.title, background: s.background, blocks: s.blocks }))
+                path = ShowService.libraryPath + "/ZZ Probe Timer.vgr"
+                console.log("[PROBE] saved show:", ShowService.saveShowFile(ShowService.currentShow, path), "slides:", slides.length)
+                pid = ProjectService.createProject("Probe project")
+                ProjectService.addSection("Worship", 0)
+                console.log("[PROBE] dropped:", ProjectService.dropOnProject("show_drawer", [{ ref: path, name: "ZZ Probe Timer" }]))
+                showScreen.centerItem = { type: "show", ref: path, name: "ZZ Probe Timer", layout: "" }
+            } else if (step === 6) {
+                SelfTest.grab("", "shot_ui_show_grid.png")
+            } else if (step === 7) {
+                c = SelfTest.findItem("selfTestShowCenter")
+                console.log("[PROBE] centre page found:", c !== null, "- bar open before the click:", c.barOpen)
+                SelfTest.clickItem("selfTestBarChevron")      // a real mouse click on the chevron
+            } else if (step === 8) {
+                console.log("[PROBE] bar open after the chevron click:", c.barOpen)
+                SelfTest.grab("", "shot_ui_bar_open.png")
+            } else if (step === 9) {
+                SelfTest.clickItem("selfTestBarClock")        // a real mouse click on the clock
+            } else if (step === 10) {
+                console.log("[PROBE] timer popup after the clock click:", c.timerOpen)
+                c.timerSeconds = 8
+            } else if (step === 11) {
+                SelfTest.grab("", "shot_ui_timer_popup.png")
+            } else if (step === 12) {
+                c.applyTimer()
+                console.log("[PROBE] timers after apply:", JSON.stringify(ShowService.peekShow(path).show.slides.map((s) => s.nextTimer)))
+            } else if (step === 13) {
+                SelfTest.grab("", "shot_ui_timer_badges.png")
+            } else if (step === 14) {
+                SettingsService.setValue("session.slideView", "list")
+            } else if (step === 15) {
+                SelfTest.grab("", "shot_ui_list.png")
+            } else if (step === 16) {
+                SettingsService.setValue("session.slideView", "lyrics")
+            } else if (step === 17) {
+                SelfTest.grab("", "shot_ui_lyrics.png")
+            } else if (step === 18) {
+                SettingsService.setValue("session.slideView", "grid")
+                ProjectService.closeProject()
+            } else if (step === 19) {
+                SelfTest.grab("", "shot_ui_tree_fab.png")
+                SelfTest.findItem("selfTestProjectsPanel").openAddMenu()
+            } else if (step === 20) {
+                SelfTest.grab("", "shot_ui_add_menu.png")
+            } else if (step === 21) {
+                SelfTest.findItem("selfTestProjectsPanel").closeMenus()
+            } else if (step === 22) {
+                SelfTest.clickItem("selfTestTab_scripture")
+            } else if (step === 23) {
+                SelfTest.grab("", "shot_ui_scripture.png")
+                SelfTest.findItem("selfTestScripturePane").optionsOpen = true
+            } else if (step === 24) {
+                SelfTest.grab("", "shot_ui_scripture_options.png")
+                SelfTest.findItem("selfTestScripturePane").optionsOpen = false
+            } else if (step === 25) {
+                // the Edit screen's per-slide timer goes through this
+                console.log("[PROBE] open:", JSON.stringify(ShowService.openShowFile(path).ok))
+                const id = ShowService.currentShow.slides[0].id
+                console.log("[PROBE] update slide timer:", ShowService.updateSlide(id, { nextTimer: 5 }), "->", ShowService.slideOf(id).nextTimer)
+            } else if (step === 26) {
+                ProjectService.deleteNode(pid)
+                ShowService.markShowClean()   // (an unsaved show would hold the window open and the run would end by being killed)
+                SettingsService.setValue("session.slideView", orig.view)
+                SettingsService.setValue("session.slideColumns", orig.cols)
+                SettingsService.setValue("session.lastShowPath", String(orig.last).indexOf("Probe") >= 0 ? "" : orig.last)   // (an older probe's leftover)
+                SettingsService.setValue("session.lastProject", orig.project)
+                console.log("[PROBE] restored, done")
+                SelfTest.quit()
+            }
+            step++
+        }
+    }
+    // TEMP PROJECT-PROBE END
+
     // ---- UI self-test scenario (TEMPORARY diagnostic, env-gated) ----------
     // Drives the real UI with real OS cursor moves through SelfTestDriver
     // (main.cpp only wires it when VGR_SELFTEST=1) and grabs PNGs for
@@ -327,6 +448,7 @@ ApplicationWindow {
         interval: 500
         onTriggered: {
             SelfTest.grab("selfTestScripturePane", "shot_tab_scripture.png")
+            SelfTest.grab("", "shot_tab_scripture_full.png")   // whole window: the tab bar row
             SelfTest.clickItem("selfTestTab_table")
             selfTestStage15.restart()
         }
@@ -499,6 +621,17 @@ ApplicationWindow {
                 }
             }
         }
+    }
+
+    // Carries a drag from one pane to another, above everything.
+    DragLayer {
+        id: dragLayerItem
+    }
+
+    // File > Import: every format the engine reads (FreeShow's Import screen). Above the screens and the Settings overlay, below the toasts.
+    ImportDialog {
+        id: importDialog
+        onClosed: importDialog.open = false
     }
 
     // Declared LAST (after the Settings overlay) so a crash/error toast

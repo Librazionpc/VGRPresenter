@@ -60,6 +60,11 @@ public:
     Result<BibleVerse> GetVerse(std::string_view bibleId, std::string_view bookId,
                                 int chapter, int verse) const;
     Result<size_t> VerseCount(std::string_view bibleId) const;
+    // The cheap ways to browse a Bible (GetBible / GetPassage copy the whole text): its details, its books with their
+    // chapter and verse counts, and one chapter.
+    Result<TranslationMetadata> Metadata(std::string_view bibleId) const;
+    Result<std::vector<BookOutline>> Outline(std::string_view bibleId) const;
+    Result<BibleChapter> GetChapter(std::string_view bibleId, std::string_view bookId, int chapter) const;
 
     // --- Reference resolution ---
     Result<PassageRef> ResolveReference(std::string_view text,

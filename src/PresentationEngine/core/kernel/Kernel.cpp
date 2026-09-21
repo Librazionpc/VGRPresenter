@@ -30,6 +30,7 @@
 #include "modules/content/ContentManager.hpp"
 #include "modules/display/DisplayEngine.hpp"
 #include "modules/media/MediaEngine.hpp"
+#include "modules/presentation/LiveOutputController.hpp"
 #include "modules/presentation/PresentationEngine.hpp"
 #include "modules/rendering/RenderEngine.hpp"
 #include "modules/scene/SceneCompositionEngine.hpp"
@@ -430,6 +431,22 @@ Result<void> Kernel::Boot(const BootOptions& options) {
         }
     }
 
+    // ---- 19b. LiveOutputController (Phase 8 live loop) ----
+    // Drives the real pipeline continuously while a show is on air: renders
+    // the PresentationEngine's current slide through the RenderEngine (17) at
+    // the 60Hz target with distribution to every enabled output. Boots after
+    // the PresentationEngine (19) it drives; stops first (its worker must not
+    // outlive the engines it renders through).
+    {
+        auto& live = live::LiveOutputController::Instance();
+        if (auto r = live.Initialize(); !r.ok()) {
+            logger.Warning("LiveOutputController init: " + r.error().message, "Kernel");
+        } else {
+            (void)services.Register<live::LiveOutputController>(&live);
+            AppendBootLog("LiveOutputController");
+        }
+    }
+
     // ---- 20. SearchEngine (Phase 9, docs/specs/20) ----
     // The central knowledge layer: every module asks it "find me the
     // information". Boots after CAMS (13) whose assets it auto-indexes, and
@@ -706,6 +723,8 @@ Result<void> Kernel::ShutdownSystems() {
     (void)scene::SceneCompositionEngine::Instance().Shutdown();
     (void)media::MediaEngine::Instance().Shutdown();
     (void)search::SearchEngine::Instance().Shutdown();
+    // The live render loop (19b) stops before the engines it renders through.
+    (void)live::LiveOutputController::Instance().Shutdown();
     (void)presentation::PresentationEngine::Instance().Shutdown();
     (void)display::DisplayEngine::Instance().Shutdown();
     (void)rendering::RenderEngine::Instance().Shutdown();

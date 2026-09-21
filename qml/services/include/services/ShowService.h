@@ -85,6 +85,29 @@ public:
     // Opens a .vgr show. Returns { ok, error, show }; on failure the current
     // document is untouched and `error` says why (missing, damaged, wrong type).
     Q_INVOKABLE QVariantMap openShowFile(const QString &path);
+    // Reads a show file WITHOUT opening it: the open show, its unsaved changes and its path are left alone (the centre page shows a
+    // project's show this way). { ok, error, show }.
+    Q_INVOKABLE QVariantMap peekShow(const QString &path) const;
+    // The next timer (FreeShow's): every slide of the show at `path` moves on by itself after `seconds` (0 clears it). A show that is
+    // open in the editor takes it as an unsaved edit; any other is changed in its file.
+    Q_INVOKABLE bool setNextTimer(const QString &path, double seconds);
+
+    // What FreeShow's slide menu does, on the slides `slideIds` of the show at `path` (the open show takes it as an unsaved edit, any
+    // other is changed in its file). `op`:
+    //   "hidden"      { hidden: bool }                 disable / enable
+    //   "group"       { group: "verse"... | "" }      change group
+    //   "title"       { title }                        rename (the label under the slide)
+    //   "format"      { kind: "uppercase"|"lowercase"|"capitalize"|"trim" }
+    //   "replace"     { find, replace, caseSensitive }  -> { replaced }
+    //   "split"                                        cut in half -> { made: [ids] }
+    //   "merge"                                        the later slides join the first
+    //   "duplicate"                                    -> { made: [ids] }
+    //   "remove"                                       delete
+    //   "transition"  { kind: "fade"|"slide"|..., ms }
+    //   "outputs"     { outputs: [ids] }               specific outputs (empty = all)
+    //   "timer"       { seconds }                      next timer (0 clears)
+    // Returns { ok, error, made, replaced }.
+    Q_INVOKABLE QVariantMap editSlides(const QString &path, const QString &op, const QStringList &slideIds, const QVariantMap &args = {});
     // The UI edited the show — drives showDirty (the modified marker and the
     // "save changes?" prompt).
     Q_INVOKABLE void markShowDirty();
@@ -195,6 +218,8 @@ private:
     QString applyEditForId(const QString &title,
                            const std::function<bps::Result<std::string>(bps::presentation::Presentation &)> &fn);
     void reportError(const QString &title, const QString &message) const;
+    // One engine edit on the show at `path`: the open show takes it as an unsaved edit, any other is loaded, changed and saved back.
+    bool editShow(const QString &path, const QString &title, const std::function<bps::Result<void>(bps::presentation::Presentation &)> &change);
     void publishLibrary();
 
     QString libraryPath_;

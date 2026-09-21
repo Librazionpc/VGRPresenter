@@ -3,6 +3,8 @@
 //   ./bps_unit_tests bible
 #include "TestHarness.hpp"
 
+#include "modules/presentation/ScriptureSlides.hpp"
+
 void TestBibleResolver() {
     // Reference resolution against the canonical table (no Bible loaded).
     auto r1 = bb::ReferenceResolver::Resolve("John 3:16", {});
@@ -271,3 +273,134 @@ void TestBibleEngine() {
 // ===========================================================================
 // Phase 13 — Song & Lyrics Engine (docs/specs/25)
 // ===========================================================================
+
+// ---------------------------------------------------------------------------
+// The cheap ways to browse a Bible (Scripture tab): details, outline, one chapter.
+// ---------------------------------------------------------------------------
+void TestBibleOutline() {
+    auto& eng = bb::BibleEngine::Instance();
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.Start().ok());
+    const char* xml =
+        "<bible abbrev=\"TST\" name=\"Test Bible\">"
+        "<book bnum=\"43\" bsname=\"JHN\" bname=\"John\">"
+        "<chapter number=\"10\"><verse number=\"1\">ten one</verse><verse number=\"2\">ten two</verse></chapter>"
+        "<chapter number=\"2\"><verse number=\"1\">two one</verse></chapter>"
+        "</book>"
+        "<book bnum=\"1\" bsname=\"GEN\" bname=\"Genesis\">"
+        "<chapter number=\"1\"><verse number=\"1\">In the beginning</verse><verse number=\"2\">and void</verse><verse number=\"3\">let there be light</verse></chapter>"
+        "</book></bible>";
+    auto id = eng.Import(xml, "xml", bb::ImportOptions{std::string("TST"), std::string(), false, true});
+    CHECK(id.ok());
+
+    auto meta = eng.Metadata("TST");
+    CHECK(meta.ok() && meta.value().name == "Test Bible");
+    CHECK(!eng.Metadata("NOPE").ok());
+
+    auto outline = eng.Outline("TST");
+    CHECK(outline.ok() && outline.value().size() == 2);
+    if (outline.ok() && outline.value().size() == 2) {
+        const auto& all = outline.value();
+        auto byId = [&](const char* id) { return std::find_if(all.begin(), all.end(), [&](const bb::BookOutline& o) { return o.book.id == id; }); };
+        auto gen = byId("GEN"), jhn = byId("JHN");
+        CHECK(gen != all.end() && gen->chapters == std::vector<int>{1} && gen->verseCounts == std::vector<int>{3});
+        CHECK(jhn != all.end() && jhn->chapters == std::vector<int>({2, 10}));   // numeric order, not "10" before "2"
+        CHECK(jhn != all.end() && jhn->verseCounts == std::vector<int>({1, 2}));
+    }
+    CHECK(!eng.Outline("NOPE").ok());
+
+    auto chapter = eng.GetChapter("TST", "JHN", 10);
+    CHECK(chapter.ok() && chapter.value().verses.size() == 2 && chapter.value().verses[1].text == "ten two");
+    CHECK(!eng.GetChapter("TST", "JHN", 3).ok() && !eng.GetChapter("NOPE", "JHN", 10).ok());
+    CHECK(eng.RemoveBible("TST").ok());
+}
+
+// ---------------------------------------------------------------------------
+// Scripture on slides (FreeShow's rules): a template with placeholders, filled with the picked verses.
+// ---------------------------------------------------------------------------
+void TestScriptureSlides() {
+    namespace pf = bps::presentation;
+    auto text = [](std::string body, std::string bind = {}, double fontSize = 60) {
+        pf::ContentBlock b;
+        b.kind = "text";
+        b.text = std::move(body);
+        b.bind = std::move(bind);
+        b.width = 1810; b.height = 835;
+        b.metaJson = std::format(R"({{"fontSize":{}}})", fontSize);
+        return b;
+    };
+    const std::vector<pf::ContentBlock> tmpl = {
+        text("{scripture_number} {scripture_text}"), text("{scripture_reference}"), text("{scripture_name}"), text("{scripture_reference_last}"),
+    };
+    auto verse = [](int n, std::string t) { return pf::ScriptureVerse{ n, std::move(t) }; };
+    pf::ScriptureSource src;
+    src.versionName = "King James Version (KJV)"; src.book = "Genesis"; src.bookAbbr = "GEN"; src.chapter = 1;
+    src.verses = { verse(1, "In the beginning God created the heaven and the earth."), verse(2, "And the earth was without form, and void."), verse(3, "And God said, Let there be light.") };
+
+    // ---- references ----
+    CHECK(pf::ScriptureVerseRange({ 1, 2, 3, 5 }) == "1-3, 5" && pf::ScriptureVerseRange({ 7 }) == "7" && pf::ScriptureVerseRange({ 5, 1, 2 }) == "1-2, 5");
+    CHECK(pf::ScriptureReference("Genesis", 1, { 1, 2, 3 }) == "Genesis 1:1-3" && pf::ScriptureReference("Genesis", 1, {}) == "Genesis 1");
+    CHECK(pf::HasScriptureValues(tmpl) && !pf::HasScriptureValues({ text("just words", "text") }));
+
+    // ---- a preview: everything picked, on one slide ----
+    auto one = pf::BuildScriptureSlides(tmpl, src, {}, /*onlyFirst=*/true);
+    CHECK(one.size() == 1);
+    if (!one.empty()) {
+        const auto& b = one[0].blocks;
+        CHECK(b[0].text == "1 In the beginning God created the heaven and the earth. 2 And the earth was without form, and void. 3 And God said, Let there be light.");
+        CHECK(b[1].text == "Genesis 1:1-3" && b[2].text == "King James Version" && b[3].text == "Genesis 1:1-3");
+        CHECK(one[0].reference == "Genesis 1:1-3" && one[0].blocks.size() == tmpl.size());
+    }
+    CHECK(pf::BuildScriptureSlides(tmpl, {}, {}).empty());   // nothing picked
+
+    // ---- the options ----
+    pf::ScriptureSettings noNumbers; noNumbers.verseNumbers = false;
+    CHECK(pf::BuildScriptureSlides(tmpl, src, noNumbers, true)[0].blocks[0].text.rfind("In the beginning", 0) == 0);
+    pf::ScriptureSettings lines; lines.versesOnIndividualLines = true;
+    CHECK(pf::BuildScriptureSlides(tmpl, src, lines, true)[0].blocks[0].text.find("\n2 And") != std::string::npos);
+    pf::ScriptureSource single = src; single.verses = { src.verses[1] };
+    CHECK(pf::BuildScriptureSlides(tmpl, single, {}, true)[0].blocks[0].text == "And the earth was without form, and void.");   // the reference already says which verse
+    CHECK(pf::BuildScriptureSlides(tmpl, single, {}, true)[0].blocks[1].text == "Genesis 1:2");
+    // the same verse in a template that does not name the verse keeps its number
+    CHECK(pf::BuildScriptureSlides({ text("{scripture_text}") }, single, {}, true)[0].blocks[0].text == "2 And the earth was without form, and void.");
+    // the other Bibles of a parallel set are blank, {scripture_number} is only a style marker
+    CHECK(pf::BuildScriptureSlides({ text("{scripture2_text}|{scripture1_name}|{scripture_number}x") }, src, {}, true)[0].blocks[0].text == "|King James Version|x");
+
+    // ---- sharing verses out over slides ----
+    pf::ScriptureSource five = src;
+    five.verses.clear();
+    for (int i = 1; i <= 5; ++i) five.verses.push_back(verse(i, "Verse number " + std::to_string(i) + " text."));
+    pf::ScriptureSettings fixed; fixed.smartSplit = false; fixed.versesPerSlide = 2;
+    auto slides = pf::BuildScriptureSlides(tmpl, five, fixed);
+    CHECK(slides.size() == 3);
+    if (slides.size() == 3) {
+        CHECK(slides[0].reference == "Genesis 1:1-2" && slides[1].reference == "Genesis 1:3-4" && slides[2].reference == "Genesis 1:5");
+        CHECK(slides[0].blocks[3].text.empty() && slides[1].blocks[3].text.empty() && slides[2].blocks[3].text == "Genesis 1:1-5");   // {scripture_reference_last}: the last slide only
+        CHECK(slides[0].blocks[1].text == "Genesis 1:1-2" && slides[2].title == "Genesis 1:5");
+    }
+    five.verses.pop_back();   // four verses, three to a slide would be 2 slides: shared evenly, 2 + 2
+    fixed.versesPerSlide = 3;
+    auto even = pf::BuildScriptureSlides(tmpl, five, fixed);
+    CHECK(even.size() == 2 && even[0].reference == "Genesis 1:1-2" && even[1].reference == "Genesis 1:3-4");
+    // smart split: a small text box holds few verses, a big one all of them
+    std::vector<pf::ContentBlock> smallBox = { text("{scripture_text}", {}, 60) };
+    smallBox[0].width = 400; smallBox[0].height = 200;       // ~13 characters a line, 2 lines
+    CHECK(pf::BuildScriptureSlides(smallBox, five, {}).size() > 1);
+    CHECK(pf::BuildScriptureSlides(tmpl, five, {}).size() == 1);
+
+    // ---- long verses divided ----
+    pf::ScriptureSource longOne = src;
+    longOne.verses = { verse(1, "one two three four five six seven eight nine ten eleven twelve") };
+    pf::ScriptureSettings split; split.splitLongVerses = true; split.longVersesChars = 20; split.smartSplit = false; split.versesPerSlide = 1;
+    auto parts = pf::BuildScriptureSlides({ text("{scripture_text}") }, longOne, split);
+    CHECK(parts.size() >= 3);
+    if (!parts.empty()) CHECK(parts[0].blocks[0].text == "1 one two three four" && parts[1].blocks[0].text.rfind("five", 0) == 0);   // the number only on the first part
+    split.splitLongVersesSuffix = true;
+    auto lettered = pf::BuildScriptureSlides({ text("{scripture_text}") }, longOne, split);
+    CHECK(lettered.size() >= 3 && lettered[0].blocks[0].text.rfind("1a ", 0) == 0 && lettered[1].blocks[0].text.rfind("1b ", 0) == 0);
+    CHECK(lettered[0].reference == "Genesis 1:1" && lettered[1].reference == "Genesis 1:1");
+
+    // ---- an old-style template (no placeholders): its bound blocks get the verses ----
+    auto old = pf::BuildScriptureSlides({ text("Title", "text"), text("Ref", "ref"), text("Static") }, src, {}, true);
+    CHECK(old.size() == 1 && old[0].blocks[0].text.rfind("1 In the beginning", 0) == 0 && old[0].blocks[1].text == "Genesis 1:1-3" && old[0].blocks[2].text == "Static");
+}

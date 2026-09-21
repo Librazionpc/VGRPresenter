@@ -238,6 +238,9 @@ struct Presentation {
     std::vector<Category> categories;        // ordered; slides reference by id
     std::vector<SlideTemplate> templates;    // templates used by this show
     std::vector<Overlay> overlays;           // show-wide layers over slides
+    // About the show itself, as a JSON object string: a song's title / author / CCLI / copyright / key (what an import found),
+    // notes. Opaque to the engine core, kept in the file so it travels with the show.
+    std::string metaJson = "{}";
     PresentationState state = PresentationState::Created;
     std::chrono::system_clock::time_point createdAt;
     std::chrono::system_clock::time_point modifiedAt;

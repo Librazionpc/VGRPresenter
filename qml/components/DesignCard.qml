@@ -15,12 +15,16 @@ Item {
     // { id, name, color, category, isDefault, locked, blocks, ... } from DesignLibraryService.designs().
     property var design: ({})
     property date now: new Date()
+    // "overlay" makes the card draggable into a project (a template is not something a project holds); empty = not draggable.
+    property string dragKind: ""
 
     readonly property real previewHeight: Math.round((width - 12) * 9 / 16)
     readonly property bool hovered: hover.hovered
 
     // `anchor` is the category button, so the host can open its menu right there.
     signal editRequested()
+    signal activated()
+    signal opened()
     signal categoryRequested(Item anchor)
     signal renameRequested()
     signal duplicateRequested()
@@ -50,6 +54,16 @@ Item {
         id: hover
         anchors.fill: parent
         showCursor: false
+    }
+
+    // Above the hover area, below the card: the buttons on the preview keep their clicks, the rest of the preview is the handle.
+    DragSource {
+        anchors.fill: parent
+        enabled: root.dragKind !== ""
+        payload: ({ kind: root.dragKind, items: [{ ref: root.design.id, name: root.design.name }] })
+        label: root.design.name ?? ""
+        onActivated: root.activated()
+        onOpened: root.opened()
     }
 
     Rectangle {

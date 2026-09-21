@@ -43,15 +43,17 @@ Rectangle {
 
     color: "transparent"
 
-    // The far right of the bar, in the tabs' own row: same top and height, same red underline.
+    // The far right of the bar, in the tabs' own row (the FreeShow sample:
+    // the tab pack hugs the left, Search sits at the bar's right edge with
+    // the same red underline).
     TabSearchBox {
         visible: root.canSearch
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.topMargin: 8
         height: 31
-        // Whatever the tabs leave: up to 200 px, never less than 130.
-        width: Math.max(130, Math.min(200, root.width - tabsRow.childrenRect.width - 8 - 8))
+        // Whatever the tabs leave: up to 160 px, never less than 120.
+        width: Math.max(120, Math.min(160, root.width - tabsRow.childrenRect.width - 8 - 8))
         placeholder: qsTr("Search")
         focusedPlaceholder: qsTr("Search %1").arg(root.tabs[root.currentTab].label.toLowerCase())
         text: root.searches[root.currentPane] !== undefined ? root.searches[root.currentPane] : ""

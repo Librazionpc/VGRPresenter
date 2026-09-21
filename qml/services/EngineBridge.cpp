@@ -13,6 +13,7 @@
 #include <QDebug>
 #include <QDesktopServices>
 #include <QDir>
+#include <QFile>
 #include <QJSEngine>
 #include <QQmlEngine>
 #include <QPointer>
@@ -126,11 +127,25 @@ bool EngineBridge::boot()
     // never gets added: Initialize() only seeds defaults `if (sinks_.empty())`.
     // Once per process: a failed boot can be retried, and a second AddSink would
     // write every engine line to engine.log twice.
+    //
+    // The log lives next to the program (<app folder>/logs/engine.log) so it is easy to find and tail; when that folder can't be
+    // written (an install under Program Files), and in a sandboxed run, it falls back to the user's app-data folder.
     static bool fileSinkInstalled = false;
     if (!fileSinkInstalled) {
         fileSinkInstalled = true;
-        (void)bps::Logger::Instance().AddSink(
-            std::make_shared<bps::FileSink>((logDir + QStringLiteral("/engine.log")).toStdString()));
+        QString dir = logDir;
+        if (!QStandardPaths::isTestModeEnabled()) {
+            const QString beside = QCoreApplication::applicationDirPath() + QStringLiteral("/logs");
+            QDir().mkpath(beside);
+            QFile probe(beside + QStringLiteral("/.writable"));
+            if (probe.open(QIODevice::WriteOnly)) {
+                probe.close();
+                probe.remove();
+                dir = beside;
+            }
+        }
+        logPath_ = QDir::toNativeSeparators(QDir(dir).absoluteFilePath(QStringLiteral("engine.log")));
+        (void)bps::Logger::Instance().AddSink(std::make_shared<bps::FileSink>(logPath_.toStdString()));
     }
 
     bps::BootOptions options;
@@ -153,6 +168,11 @@ bool EngineBridge::boot()
         });
         return false;
     }
+
+    write(QStringLiteral("info"), QStringLiteral("App"),
+          QStringLiteral("---- %1 started (pid %2) - engine log: %3 - data: %4")
+              .arg(QCoreApplication::applicationName()).arg(QCoreApplication::applicationPid())
+              .arg(logPath_, QDir::toNativeSeparators(dataDir)));
 
     // Kernel is up — open the Engine → UI relay (engine log warnings/errors
     // + the curated engine-event set flow into the UI's EventBus and the
@@ -217,6 +237,21 @@ bool EngineBridge::boot()
 QString EngineBridge::bootError() const
 {
     return bootError_;
+}
+
+void EngineBridge::write(const QString &level, const QString &source, const QString &message)
+{
+    bps::LogLevel lv = bps::LogLevel::Info;
+    if (level == QLatin1String("trace"))        lv = bps::LogLevel::Trace;
+    else if (level == QLatin1String("debug"))   lv = bps::LogLevel::Debug;
+    else if (level == QLatin1String("warning")) lv = bps::LogLevel::Warning;
+    else if (level == QLatin1String("error"))   lv = bps::LogLevel::Error;
+    bps::Logger::Instance().Log(lv, "UI", source.toStdString(), message.toStdString());
+}
+
+void EngineBridge::log(const QString &level, const QString &source, const QString &message)
+{
+    write(level, source, message);
 }
 
 QStringList EngineBridge::bootLog() const
@@ -337,6 +372,10 @@ public:
         // the typed relay below, so re-reporting the log line produced a second, raw toast
         // ("Engine · Core  [Warning][Performance] ...") for every event.
         if (record.category == "Notify")
+            return;
+        // Lines the UI itself wrote (EngineBridge::write) are for the log file: the UI already showed its own toast for them,
+        // so relaying them back would show every one twice.
+        if (record.module == "UI")
             return;
         QString level;
         switch (record.level) {

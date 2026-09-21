@@ -2672,12 +2672,30 @@ Rectangle {
         }
     }
 
+    // The seconds a slide stays up before the show moves on by itself.
+    NameDialog {
+        id: slideTimerDialog
+        parent: Window.window ? Window.window.contentItem : null
+        z: 30000
+        property string slideId: ""
+        title: qsTr("Next timer, in seconds")
+        placeholder: qsTr("0 = wait for the operator")
+        confirmLabel: qsTr("Set")
+        allowEmpty: true
+        onAccepted: (text) => {
+            const seconds = Math.max(0, Math.min(3600, Number(text) || 0))
+            if (slideTimerDialog.slideId !== "")
+                ShowService.updateSlide(slideTimerDialog.slideId, { nextTimer: seconds })
+        }
+    }
+
     DropdownPanel {
         id: slideContextMenu
         visible: false
         model: [
             { label: "Edit" },
             { label: "Duplicate" },
+            { label: "Next timer…" },
             { divider: true },
             { label: "Delete", danger: true }
         ]
@@ -2686,6 +2704,15 @@ Rectangle {
             case "Edit":
                 slideModel.selectSlide(root.contextMenuSlideIndex)
                 break
+            case "Next timer…": {
+                // How long this slide stays up before the show moves on by itself (0 = it waits).
+                const eid = slideModel.engineIdAt(root.contextMenuSlideIndex)
+                if (eid !== "") {
+                    slideTimerDialog.slideId = eid
+                    slideTimerDialog.open(String(Math.round(ShowService.slideOf(eid).nextTimer ?? 0)))
+                }
+                break
+            }
             case "Duplicate":
                 // The ENGINE duplicates the slide (fresh id, its items copied); the list
                 // and the copy's canvas are rebuilt from what it made.

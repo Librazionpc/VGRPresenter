@@ -75,6 +75,9 @@ public:
     // Puts the engine's recommended profile in force.
     Q_INVOKABLE void applyRecommendedProfile();
 
+    // The scripture options (the Scripture tab's settings) in the form the engine's slide builder takes them.
+    bps::presentation::ScriptureSettings scriptureSettings() const;
+
     // Whether a file is there (the last show may have been moved or deleted since the app was closed).
     Q_INVOKABLE bool fileExists(const QString &path) const;
 

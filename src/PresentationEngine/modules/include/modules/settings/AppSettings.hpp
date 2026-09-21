@@ -11,6 +11,7 @@
 
 #include "core/common/Common.hpp"
 #include "core/config/Json.hpp"
+#include "modules/presentation/ScriptureSlides.hpp"
 
 #include <functional>
 #include <map>
@@ -88,6 +89,9 @@ public:
 
     static ResourceCaps CapsFor(std::string_view profile);
     static ProfileAllocation AllocationFor(std::string_view profile);
+
+    // The scripture options (Scripture tab > options) as the slide builder takes them.
+    presentation::ScriptureSettings Scripture() const;
 
     const std::string& StorageFile() const noexcept { return storageFile_; }
 

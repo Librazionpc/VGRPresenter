@@ -93,6 +93,14 @@ public:
     // human-readable reason in bootError() on failure.
     bool boot();
     Q_INVOKABLE bool isBooted() const { return booted(); }
+
+    // The engine log file (<app folder>/logs/engine.log, or the user's app-data folder when the app folder is read-only).
+    // Empty until boot().
+    Q_INVOKABLE QString logPath() const { return logPath_; }
+    // One line in the engine log, stamped with who wrote it: level is "trace"|"debug"|"info"|"warning"|"error", source is the
+    // subsystem ("Projects", "Import", "Show"...). QML calls this for what the user did; the C++ services use the static form.
+    Q_INVOKABLE void log(const QString &level, const QString &source, const QString &message);
+    static void write(const QString &level, const QString &source, const QString &message);
     Q_INVOKABLE QString bootError() const;
     Q_INVOKABLE QStringList bootLog() const;
     Q_INVOKABLE QString health() const;
@@ -170,6 +178,7 @@ private:
 
     QString bootError_;
     QString bootSummary_;
+    QString logPath_;
 
     // ---- Engine → UI relay (see startRelay in EngineBridge.cpp) ----------
     // The kernel drives everything; the UI only relays. Attaches a Logger

@@ -972,6 +972,155 @@ void TestShowEditor() {
     CHECK(again2.ok() && again2.value() != cPastor.value());
 }
 
+static std::string FindText(const p::Presentation& show, const std::string& id) {
+    for (const p::Slide& s : show.slides) if (s.id == id) return s.text;
+    return "<missing>";
+}
+
+// The slide menu (FreeShow's): what disable, change group, format, find and replace, cut in half, merge, transition and outputs do.
+void TestSlideMenu() {
+    using E = p::ShowEditor;
+    p::Presentation show;
+    show.id = "m";
+    show.name = "Menu";
+    auto make = [&](const std::string& text) {
+        p::Slide s;
+        s.text = text;
+        p::ContentBlock b;
+        b.kind = "text";
+        b.text = text;
+        s.blocks.push_back(b);
+        auto id = E::AddSlide(show, std::move(s));
+        CHECK(id.ok());
+        return id.ok() ? id.value() : std::string();
+    };
+    const std::string a = make("amazing grace how sweet the sound.\n  that saved   a wretch like me!  ");
+    const std::string b = make("i once was lost\nbut now am found");
+    const std::string c = make("was blind\nbut now i see");
+    const std::string d = make("line one\nline two\nline three");
+
+    // ---- disable ----
+    CHECK(E::SetSlidesHidden(show, { a, b }, true).ok());
+    CHECK(show.slides[0].hidden && show.slides[1].hidden && !show.slides[2].hidden);
+    CHECK(E::SetSlidesHidden(show, { a }, false).ok() && !show.slides[0].hidden);
+    CHECK(!E::SetSlidesHidden(show, {}, true).ok());                       // nothing chosen
+    CHECK(!E::SetSlidesHidden(show, { a, "nope" }, true).ok());            // an unknown slide: nothing changes
+    CHECK(show.slides[1].hidden);
+
+    // ---- change group ----
+    CHECK(E::SetSlidesGroup(show, { a }, "verse").ok());
+    CHECK(show.slides[0].tags.size() == 1 && show.slides[0].tags[0] == "verse" && show.slides[0].title == "Verse");
+    CHECK(E::SetSlidesGroup(show, { c }, "verse").ok());
+    CHECK(show.slides[0].title == "Verse" && show.slides[2].title == "Verse 2");   // the second of its group
+    CHECK(E::SetSlidesGroup(show, { b }, "pre_chorus").ok() && show.slides[1].title == "Pre-Chorus");
+    CHECK(!E::SetSlidesGroup(show, { a }, "refrain").ok());               // not one of the groups
+    CHECK(E::SetSlidesGroup(show, { b }, "").ok() && show.slides[1].tags.empty() && show.slides[1].title.empty());
+
+    // ---- format ----
+    CHECK(E::FormatSlidesText(show, { a }, E::TextFormat::Trim).ok());
+    CHECK(show.slides[0].text == "amazing grace how sweet the sound\nthat saved a wretch like me");   // spaces, . and !
+    CHECK(show.slides[0].blocks[0].text == show.slides[0].text);                                      // the text box too
+    CHECK(E::FormatSlidesText(show, { a }, E::TextFormat::Uppercase).ok());
+    CHECK(show.slides[0].text == "AMAZING GRACE HOW SWEET THE SOUND\nTHAT SAVED A WRETCH LIKE ME");
+    CHECK(E::FormatSlidesText(show, { a }, E::TextFormat::Lowercase).ok());
+    CHECK(show.slides[0].text == "amazing grace how sweet the sound\nthat saved a wretch like me");
+    CHECK(E::FormatSlidesText(show, { a }, E::TextFormat::Capitalize).ok());
+    CHECK(show.slides[0].text == "Amazing grace how sweet the sound\nThat saved a wretch like me");   // the first letter of each line
+    // accents and other alphabets
+    const std::string e = make("caf\xC3\xA9 \xCE\xB1\xCE\xB2\xCE\xB3 \xD0\xB4\xD0\xBE\xD0\xBC");   // café αβγ дом
+    CHECK(E::FormatSlidesText(show, { e }, E::TextFormat::Uppercase).ok());
+    CHECK(FindText(show, e) == "CAF\xC3\x89 \xCE\x91\xCE\x92\xCE\x93 \xD0\x94\xD0\x9E\xD0\x9C");
+    CHECK(E::RemoveSlide(show, e).ok());
+
+    // ---- find and replace ----
+    auto replaced = E::ReplaceInSlides(show, { a, c }, "GRACE", "mercy", false);
+    CHECK(replaced.ok() && replaced.value() == 1 && show.slides[0].text.find("mercy") != std::string::npos);
+    auto strict = E::ReplaceInSlides(show, { a }, "MERCY", "grace", true);
+    CHECK(strict.ok() && strict.value() == 0);                              // case matters when it is asked to
+    CHECK(!E::ReplaceInSlides(show, { a }, "", "x", true).ok());
+
+    // ---- cut in half ----
+    const size_t before = show.slides.size();
+    auto halves = E::SplitSlidesInHalf(show, { d });
+    CHECK(halves.ok() && halves.value().size() == 1 && show.slides.size() == before + 1);
+    CHECK(FindText(show, d) == "line one\nline two" && FindText(show, halves.value()[0]) == "line three");
+    CHECK(show.slides.back().id == halves.value()[0]);                      // right after the original
+    auto none = E::SplitSlidesInHalf(show, { halves.value()[0] });           // one line: nothing to cut
+    CHECK(none.ok() && none.value().empty());
+
+    // ---- merge ----
+    const size_t count = show.slides.size();
+    CHECK(!E::MergeSlides(show, { d }).ok());                               // needs two
+    CHECK(E::MergeSlides(show, { d, halves.value()[0] }).ok());
+    CHECK(show.slides.size() == count - 1 && FindText(show, d) == "line one\nline two\nline three");
+
+    // ---- transition ----
+    CHECK(E::SetSlidesTransition(show, { a, c }, p::TransitionKind::Zoom, 1200.0).ok());
+    CHECK(show.slides[0].transitionIn == p::TransitionKind::Zoom && show.slides[0].transitionMs == 1200.0);
+    CHECK(!E::SetSlidesTransition(show, { a }, p::TransitionKind::Fade, 20000.0).ok());
+    CHECK(show.slides[0].transitionMs == 1200.0);
+
+    // ---- specific outputs ----
+    CHECK(E::SetSlidesOutputs(show, { a }, { "output-2", "output-3" }).ok());
+    CHECK(show.slides[0].metaJson.find("output-2") != std::string::npos && show.slides[0].metaJson.find("output-3") != std::string::npos);
+    CHECK(E::SetSlidesOutputs(show, { a }, {}).ok() && show.slides[0].metaJson.find("outputs") == std::string::npos);   // none = all
+
+    // ---- and it all survives a save and a read ----
+    CHECK(E::SetSlidesHidden(show, { c }, true).ok());
+    CHECK(E::SetSlidesOutputs(show, { c }, { "output-2" }).ok());
+    p::PresentationSerializer serializer;
+    auto text = serializer.Serialize(show);
+    CHECK(text.ok());
+    if (text.ok()) {
+        auto back = serializer.Deserialize(text.value());
+        CHECK(back.ok());
+        if (back.ok()) {
+            const p::Slide* c2 = nullptr;
+            for (const p::Slide& s : back.value().slides) if (s.id == c) c2 = &s;
+            CHECK(c2 && c2->hidden && c2->transitionIn == p::TransitionKind::Zoom && c2->metaJson.find("output-2") != std::string::npos);
+        }
+    }
+}
+
+// The next timer: how long each slide stays up before the show moves on by itself.
+void TestNextTimer() {
+    using E = p::ShowEditor;
+    p::Presentation show;
+    show.id = "t";
+    show.name = "Timed";
+    for (int i = 0; i < 3; ++i) CHECK(E::AddSlide(show, p::Slide{}).ok());
+    show.slides[2].hidden = true;
+    const std::string first = show.slides[0].id;
+
+    CHECK(E::TotalNextTimer(show) == 0.0);
+    CHECK(E::SetNextTimer(show, 8.0).ok());                       // every slide that is showing
+    CHECK(show.slides[0].durationMs == 8000.0 && show.slides[1].durationMs == 8000.0);
+    CHECK(show.slides[2].durationMs == 0.0);                      // the hidden one is left alone
+    CHECK(E::TotalNextTimer(show) == 16.0);
+
+    CHECK(E::SetNextTimer(show, 30.0, { first }).ok());           // one slide
+    CHECK(show.slides[0].durationMs == 30000.0 && show.slides[1].durationMs == 8000.0);
+    CHECK(E::TotalNextTimer(show) == 38.0);
+
+    CHECK(!E::SetNextTimer(show, -1.0).ok());                     // refused, nothing changed
+    CHECK(!E::SetNextTimer(show, 3601.0).ok());
+    CHECK(!E::SetNextTimer(show, 5.0, { "no-such-slide" }).ok());
+    CHECK(E::TotalNextTimer(show) == 38.0);
+
+    CHECK(E::SetNextTimer(show, 0.0).ok());                       // 0 clears
+    CHECK(E::TotalNextTimer(show) == 0.0);
+
+    // it survives a save and a read
+    CHECK(E::SetNextTimer(show, 12.0).ok());
+    p::PresentationSerializer serializer;
+    auto text = serializer.Serialize(show);
+    CHECK(text.ok());
+    if (text.ok()) {
+        auto back = serializer.Deserialize(text.value());
+        CHECK(back.ok() && E::TotalNextTimer(back.value()) == 24.0);
+    }
+}
+
 void TestDocumentEdit() {
     p::PresentationDocument doc;
     CHECK(!doc.Edit([](p::Presentation&) { return bps::Ok(); }).ok());   // nothing open

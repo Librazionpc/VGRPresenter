@@ -332,6 +332,7 @@ Result<std::string> PresentationSerializer::Serialize(const Presentation& p) con
     root["categories"] = js::Value(std::move(categories));
     root["templates"] = js::Value(std::move(templates));
     root["overlays"] = js::Value(std::move(overlays));
+    root["meta"] = MetaToValue(p.metaJson);
     root["slides"] = js::Value(std::move(slides));
     return js::Value(std::move(root)).ToString();
 }
@@ -361,6 +362,7 @@ Result<Presentation> PresentationSerializer::Deserialize(std::string_view json) 
     p.defaultTransitionMs = GetNum(root, "defaultTransitionMs", 500.0);
     p.createdAt = FromMs(static_cast<int64_t>(GetNum(root, "createdAtMs", 0)));
     p.modifiedAt = FromMs(static_cast<int64_t>(GetNum(root, "modifiedAtMs", 0)));
+    p.metaJson = MetaFromValue(root, "meta");
 
     const js::Value* slides = root.Find("slides");
     if (slides && !slides->asArray())

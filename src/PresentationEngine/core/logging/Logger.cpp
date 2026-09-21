@@ -324,8 +324,17 @@ std::vector<LogRecord> Logger::Search(const LogQuery& query) const {
 }
 
 std::string Logger::Format(const LogRecord& rec) const {
-    std::string out = std::format("[{}][{}][Thread-{}]", ToString(rec.level),
-                                  rec.module, ThreadName(rec.threadId));
+    // Local wall-clock time first, so a tailed log reads as a timeline of what the app is doing.
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(rec.timestamp.time_since_epoch()).count() % 1000;
+    std::time_t tt = std::chrono::system_clock::to_time_t(rec.timestamp);
+    std::tm tmv{};
+#if defined(_WIN32)
+    localtime_s(&tmv, &tt);
+#else
+    localtime_r(&tt, &tmv);
+#endif
+    std::string out = std::format("{:02}:{:02}:{:02}.{:03} [{}][{}][Thread-{}]", tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
+                                  static_cast<int>(ms), ToString(rec.level), rec.module, ThreadName(rec.threadId));
     if (!rec.category.empty()) out += std::format("[{}]", rec.category);
     out += " ";
     out += rec.message;
@@ -373,6 +382,7 @@ void Logger::Pump() {
         writeTimeNs_.fetch_add(
             std::chrono::duration_cast<std::chrono::nanoseconds>(EngineClock::now() - writeBegin)
                 .count());
+        for (auto& sink : sinks) (void)sink->Flush();
         writes_.fetch_add(batch.size());
         idle_.store(true);
         cv_.notify_all();   // batch fully written; Flush() can return

@@ -27,6 +27,10 @@ Item {
     readonly property bool gridIcon: isVideo || isAudio
     readonly property real previewHeight: Math.round((width - 12) * 9 / 16)
 
+    // Click: the file on the centre page. Double-click: into the open project. Drag: into a project.
+    signal activated()
+    signal opened()
+
     // The size to ask the engine for (it rounds up to a cache size).
     readonly property int pictureSize: width > 300 ? 500 : 250
     // -1 = the still; 0..frameSteps-1 = the moving frame under the pointer.
@@ -45,6 +49,15 @@ Item {
     Connections {
         target: hover
         function onHoveredChanged() { if (!hover.hovered) root.frameStep = -1 }
+    }
+
+    // Underneath the card: the preview's scrub area above it takes no buttons, so a press falls through to here.
+    DragSource {
+        anchors.fill: parent
+        payload: ({ kind: "media", items: [{ ref: root.path, name: root.name }] })
+        label: root.name
+        onActivated: root.activated()
+        onOpened: root.opened()
     }
 
     Rectangle {
@@ -181,7 +194,7 @@ Item {
         }
     }
 
-    // Hover feedback only - a tile has no click action yet, so no pointing hand.
+    // Hover feedback only (the pointing hand comes from the DragSource underneath).
     PositionHoverArea {
         id: hover
         anchors.fill: parent

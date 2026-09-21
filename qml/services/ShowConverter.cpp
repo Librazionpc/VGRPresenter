@@ -107,6 +107,20 @@ QVariantList blocksToVariant(const std::vector<bp::ContentBlock> &blocks)
     return out;
 }
 
+QString transitionName(bp::TransitionKind kind)
+{
+    switch (kind) {
+    case bp::TransitionKind::Fade: return QStringLiteral("fade");
+    case bp::TransitionKind::Slide: return QStringLiteral("slide");
+    case bp::TransitionKind::Push: return QStringLiteral("push");
+    case bp::TransitionKind::Zoom: return QStringLiteral("zoom");
+    case bp::TransitionKind::Wipe: return QStringLiteral("wipe");
+    case bp::TransitionKind::Crossfade: return QStringLiteral("crossfade");
+    case bp::TransitionKind::Custom: return QStringLiteral("custom");
+    }
+    return QStringLiteral("fade");
+}
+
 QString scopeToString(bp::OverlayScope scope)
 {
     switch (scope) {
@@ -219,6 +233,9 @@ bp::Slide ShowConverter::slideFromVariant(const QVariantMap &s)
         { QStringLiteral("ref"), s.value(QStringLiteral("ref")) },
     });
     slide.blocks = blocksFromVariant(s.value(QStringLiteral("blocks")));
+    // Seconds the slide stays up before the show moves on by itself (0 = it waits for you).
+    if (s.contains(QStringLiteral("nextTimer")))
+        slide.durationMs = s.value(QStringLiteral("nextTimer")).toDouble() * 1000.0;
     return slide;
 }
 
@@ -237,6 +254,7 @@ bp::Presentation ShowConverter::fromVariant(const QVariantMap &show)
     bp::Presentation out;
     out.id = utf8(show.value(QStringLiteral("id")).toString());
     out.name = utf8(show.value(QStringLiteral("name")).toString());
+    out.metaJson = metaToJson(show.value(QStringLiteral("meta")));
 
     for (const QVariant &cv : show.value(QStringLiteral("categories")).toList())
         out.categories.push_back(categoryFromVariant(cv.toMap()));
@@ -296,6 +314,11 @@ QVariantMap ShowConverter::toVariant(const bp::Presentation &p)
             { QStringLiteral("background"), qstr(s.background) },
             { QStringLiteral("categoryId"), qstr(s.categoryId) },
             { QStringLiteral("blocks"), blocksToVariant(s.blocks) },
+            { QStringLiteral("nextTimer"), s.durationMs / 1000.0 },
+            { QStringLiteral("hidden"), s.hidden },                                   // disabled: skipped when played
+            { QStringLiteral("transitionKind"), transitionName(s.transitionIn) },
+            { QStringLiteral("transitionMs"), s.transitionMs },
+            { QStringLiteral("outputs"), meta.value(QStringLiteral("outputs")).toList() },   // the outputs it is for (empty = all)
         });
     }
     return {
@@ -304,6 +327,7 @@ QVariantMap ShowConverter::toVariant(const bp::Presentation &p)
         { QStringLiteral("categories"), categories },
         { QStringLiteral("templates"), templates },
         { QStringLiteral("overlays"), overlays },
+        { QStringLiteral("meta"), metaFromJson(p.metaJson) },
         { QStringLiteral("slides"), slides },
     };
 }

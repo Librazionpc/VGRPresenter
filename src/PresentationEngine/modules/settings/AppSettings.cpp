@@ -130,9 +130,27 @@ std::vector<SettingDef> BuildDefinitions() {
     d.push_back(IntRange("smart.cpuBudgetPct", "smart", "CPU budget", 60, 10, 100,
                          "The most of the CPU the engine may use (used in Manual mode)."));
 
+    // ---- Scripture (the tab's options, FreeShow's scripture settings) ----
+    d.push_back(Bool("scripture.verseNumbers", "scripture", "Verse numbers", true));
+    d.push_back(Bool("scripture.versesOnIndividualLines", "scripture", "Verses on individual lines", false));
+    d.push_back(Bool("scripture.splitLongVerses", "scripture", "Divide long verses", false));
+    d.push_back(Bool("scripture.splitLongVersesSuffix", "scripture", "Number the parts (1a, 1b)", false));
+    d.push_back(IntRange("scripture.longVersesChars", "scripture", "Size", 100, 3, 1000, "Characters a verse may have before it is divided"));
+    d.push_back(IntRange("scripture.longVersesTolerance", "scripture", "Tolerance", 0, 0, 100, "Percent past the size a cut may wait for a word end"));
+    d.push_back(Bool("scripture.smartSplit", "scripture", "Smart split", true, "As many verses to a slide as the template's text box holds"));
+    d.push_back(IntRange("scripture.versesPerSlide", "scripture", "Max verses", 3, 1, 100));
+    d.push_back(Text("scripture.template", "scripture", "Template"));
+
     // ---- What the app remembers between runs (not shown as settings) ----
+    d.push_back(Text("session.scriptureBible", "session", "Last Bible"));
+    d.push_back(Text("session.lastProject", "session", "Last project"));
     d.push_back(Text("session.lastShowPath", "session", "Last show"));
     d.push_back(Text("session.lastView", "session", "Last screen"));
+    // The slide grid on the Show screen's centre page (FreeShow's slidesOptions): slides across, and how they are laid out.
+    d.push_back(IntRange("session.slideColumns", "session", "Slides across", 4, 2, 10));
+    d.push_back(Choice("session.slideView", "session", "Slide view", "grid", {
+        C("grid", "Grid"), C("list", "List"), C("lyrics", "Lyrics"),
+    }));
     return d;
 }
 
@@ -316,6 +334,19 @@ size_t AppSettings::Subscribe(Listener listener) {
 void AppSettings::Unsubscribe(size_t id) {
     std::lock_guard<std::mutex> lock(mutex_);
     listeners_.erase(id);
+}
+
+presentation::ScriptureSettings AppSettings::Scripture() const {
+    presentation::ScriptureSettings s;
+    s.verseNumbers = GetBool("scripture.verseNumbers");
+    s.versesOnIndividualLines = GetBool("scripture.versesOnIndividualLines");
+    s.splitLongVerses = GetBool("scripture.splitLongVerses");
+    s.splitLongVersesSuffix = GetBool("scripture.splitLongVersesSuffix");
+    s.longVersesChars = static_cast<int>(GetInt("scripture.longVersesChars"));
+    s.longVersesTolerance = static_cast<int>(GetInt("scripture.longVersesTolerance"));
+    s.smartSplit = GetBool("scripture.smartSplit");
+    s.versesPerSlide = static_cast<int>(GetInt("scripture.versesPerSlide"));
+    return s;
 }
 
 ResourceCaps AppSettings::EffectiveCaps() const {

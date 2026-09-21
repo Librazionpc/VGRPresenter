@@ -34,6 +34,9 @@ Item {
     property string newEntryLabel: qsTr("New scripture")
     // The tab bar's search for this tab: only the books whose name contains it are listed.
     property string filter: ""
+    // The "+ New ..." pill was tapped (the host decides what creating means:
+    // Scripture opens a file dialog for a Bible, The Table imports a sermon).
+    signal newEntryActivated()
 
     // Compact metrics — sized for the 760×353 media_table dock the tabs
     // live in. Exposed as properties so a wider host (full-window pane)
@@ -97,6 +100,16 @@ Item {
         const g = groups[currentGroup]
         return (g && g.items[currentBook]) ? g.items[currentBook].chapters : []
     }
+
+    // Whole-library search. The search box feeds `filter`; when it is longer
+    // than a book-name fragment (two+ words) the verses column shows the
+    // matches as "Book C:V — paragraph" rows instead of the chapter list.
+    // The HOST supplies the hits (its engine's search); this only renders.
+    property var searchHits: []          // [{ reference, snippet }]
+    readonly property bool searching: {
+        const words = filter.trim().split(/\s+/).filter((w) => w.length > 0)
+        return words.length >= 2
+    }
     function updatePreview() {
         const chs = bookChapters()
         const ch = currentChapter < chs.length ? chs[currentChapter] : null
@@ -108,6 +121,29 @@ Item {
     }
     function selectBook(b) { currentBook = b; currentChapter = 0; updatePreview() }
     function selectChapter(c) { currentChapter = c; updatePreview() }
+
+    // The verses column's rows: search hits when searching, else the open
+    // chapter's paragraphs (a function — the QML compiler rejects a binding
+    // mixing a conditional with an object literal here).
+    function verseRows() {
+        if (root.searching) return root.searchHits
+        const chs = root.bookChapters()
+        return root.currentChapter < chs.length ? chs[currentChapter] : []
+    }
+
+    // Search-hit row tapped: jump to its book + chapter, pin the verse.
+    function goToHit(bookName, chapter, verse) {
+        for (let g = 0; g < groups.length; ++g) {
+            const bi = groups[g].items.findIndex((b) => b.name === bookName)
+            if (bi >= 0) {
+                currentGroup = g
+                selectBook(bi)
+                selectChapter(chapter - 1)
+                pinVerse(verse - 1)
+                return
+            }
+        }
+    }
     function pinVerse(v) {
         const cut = previewRef.lastIndexOf(":")
         if (cut > 0) previewRef = previewRef.slice(0, cut + 1) + (v + 1)
@@ -159,10 +195,12 @@ Item {
                 font.family: Theme.fontFamily; font.pixelSize: 11
             }
         }
-        // The "+ New ..." pill (reference's "+ New collection" box).
+        // The "+ New ..." pill (reference's "+ New collection" box): the HOST
+        // decides what creating means — this pane only signals.
         SidebarAddButton {
             x: 8; y: parent.height - 40; width: parent.width - 16
             text: root.newEntryLabel
+            onClicked: root.newEntryActivated()
         }
     }
 
@@ -235,13 +273,15 @@ Item {
                 id: versesColList
                 x: 0; y: 4; width: parent.width - 12
                 Repeater {
-                    model: {
-                        const chs = root.bookChapters()
-                        return root.currentChapter < chs.length ? chs[currentChapter] : []
-                    }
+                    model: root.verseRows()
                     delegate: Item {
+                        id: verseRow
                         required property var modelData
                         required property int index
+                        // Search rows carry { reference, snippet }; chapter rows are plain strings.
+                        readonly property bool isHit: root.searching
+                        readonly property string hitRef: isHit ? String(modelData.reference ?? "") : ""
+                        readonly property string hitSnippet: isHit ? String(modelData.snippet ?? "") : ""
                         width: versesColList.width
                         height: verseText.implicitHeight + 14
                         Rectangle {
@@ -252,16 +292,18 @@ Item {
                         }
                         Text {
                             x: 8; y: 8
-                            width: 22; horizontalAlignment: Text.AlignRight
-                            text: index + 1
+                            width: verseRow.isHit ? 76 : 22
+                            horizontalAlignment: Text.AlignRight
+                            text: verseRow.isHit ? verseRow.hitRef : (index + 1)
                             color: Theme.danger
+                            elide: Text.ElideRight
                             font.family: Theme.fontFamily; font.pixelSize: 12; font.bold: true
                         }
                         Text {
                             id: verseText
-                            x: 40; y: 8
-                            width: parent.width - root.previewW - 56
-                            text: modelData
+                            x: verseRow.isHit ? 92 : 40; y: 8
+                            width: parent.width - root.previewW - (verseRow.isHit ? 108 : 56)
+                            text: verseRow.isHit ? verseRow.hitSnippet : modelData
                             color: Theme.textPrimary
                             elide: Text.ElideRight
                             font.family: Theme.fontFamily; font.pixelSize: 12
@@ -271,7 +313,16 @@ Item {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: root.pinVerse(index)
+                            onClicked: {
+                                if (verseRow.isHit) {
+                                    // "1953 12:3" -> book "1953", chapter 12, verse 3
+                                    const parts = verseRow.hitRef.split(" ")
+                                    const refParts = (parts[1] ?? "").split(":")
+                                    root.goToHit(parts[0], parseInt(refParts[0]) || 1, parseInt(refParts[1]) || 1)
+                                } else {
+                                    root.pinVerse(index)
+                                }
+                            }
                         }
                     }
                 }

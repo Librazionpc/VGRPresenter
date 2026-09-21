@@ -439,6 +439,50 @@ Result<BibleVerse> BibleEngine::GetVerse(std::string_view bibleId, std::string_v
     return passage.value().front();
 }
 
+Result<TranslationMetadata> BibleEngine::Metadata(std::string_view bibleId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = bibles_.find(std::string(bibleId));
+    if (it == bibles_.end())
+        return Error::Make(Err::Bible_NotFound, "BibleEngine", "bible not found: " + std::string(bibleId));
+    return it->second.metadata;
+}
+
+Result<std::vector<BookOutline>> BibleEngine::Outline(std::string_view bibleId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = bibles_.find(std::string(bibleId));
+    if (it == bibles_.end())
+        return Error::Make(Err::Bible_NotFound, "BibleEngine", "bible not found: " + std::string(bibleId));
+    // The chapters are keyed "GEN.10" (sorted as text), so group them per book and order them as numbers.
+    std::map<std::string, std::vector<std::pair<int, int>>, std::less<>> perBook;
+    for (const auto& [key, chapter] : it->second.chapters)
+        perBook[chapter.bookId].emplace_back(chapter.number, static_cast<int>(chapter.verses.size()));
+    std::vector<BookOutline> out;
+    for (const BibleBook& book : it->second.books) {
+        auto found = perBook.find(book.id);
+        if (found == perBook.end() || found->second.empty()) continue;   // a book the Bible does not contain
+        std::sort(found->second.begin(), found->second.end());
+        BookOutline o;
+        o.book = book;
+        for (const auto& [number, verses] : found->second) {
+            o.chapters.push_back(number);
+            o.verseCounts.push_back(verses);
+        }
+        out.push_back(std::move(o));
+    }
+    return out;
+}
+
+Result<BibleChapter> BibleEngine::GetChapter(std::string_view bibleId, std::string_view bookId, int chapter) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = bibles_.find(std::string(bibleId));
+    if (it == bibles_.end())
+        return Error::Make(Err::Bible_NotFound, "BibleEngine", "bible not found: " + std::string(bibleId));
+    auto ch = it->second.chapters.find(std::format("{}.{}", bookId, chapter));
+    if (ch == it->second.chapters.end())
+        return Error::Make(Err::Bible_NotFound, "BibleEngine", std::format("chapter not found: {} {}", bookId, chapter));
+    return ch->second;
+}
+
 Result<size_t> BibleEngine::VerseCount(std::string_view bibleId) const {
     auto bible = GetBible(bibleId);
     if (!bible.ok()) return bible.error();

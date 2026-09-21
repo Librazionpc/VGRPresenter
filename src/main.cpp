@@ -15,6 +15,7 @@
 #include "services/EngineBridge.h"
 #include "services/SearchService.h"
 #include "services/MediaLibraryService.h"
+#include "services/LiveOutputService.h"
 #include "services/MediaThumbnailProvider.h"
 #include "services/EventBus.h"
 #ifdef VGR_ENABLE_SELFTEST
@@ -70,6 +71,9 @@ void ForwardToEventBus(QtMsgType type, const QMessageLogContext &context, const 
     // recognise them by the "<url>:<line>:" prefix they always start with.
     const bool isQml = (context.category && qstrncmp(context.category, "qml", 3) == 0)
         || msg.startsWith(QLatin1String("qrc:/")) || msg.startsWith(QLatin1String("file:///"));
+
+    // The same line goes to the engine log, so one file holds everything that went wrong (QML errors included).
+    EngineBridge::write(level, isQml ? QStringLiteral("QML") : QStringLiteral("Qt"), msg);
 
     forwarding = true;
     EventBus::instance().publish(isQml ? QStringLiteral("log.qml") : topic, QVariantMap{
@@ -137,6 +141,11 @@ int main(int argc, char *argv[])
 
     // Video preview frames for the Media tab (image://mediathumb/<path>).
     engine.addImageProvider(QStringLiteral("mediathumb"), new MediaThumbnailProvider);
+
+    // Live-output preview frames (image://livepreview?v=<frameRev>) — the
+    // QQuickImageProvider half of LiveOutputService, registered up-front so
+    // the QML Image resolves the URL before the singleton exists.
+    engine.addImageProvider(QStringLiteral("livepreview"), new LivePreviewProvider);
 
     engine.loadFromModule("VGRPresenterUI", "Main");
 
