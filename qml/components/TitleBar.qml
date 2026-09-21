@@ -84,12 +84,12 @@ Rectangle {
         border.color: searchInput.activeFocus ? Theme.accent : Theme.border
         Behavior on border.color { ColorAnimation { duration: 100 } }
 
-        Text {
+        IconGlyph {
             x: 12
             anchors.verticalCenter: parent.verticalCenter
-            text: "⌕"
+            name: "search"
             color: Theme.textMuted
-            font.pixelSize: Theme.textSm
+            width: 12; height: 12
         }
 
         TextInput {
@@ -210,7 +210,7 @@ Rectangle {
                         width: resultsFlick.width
                         height: 34
                         radius: Theme.radiusMd
-                        color: resultRow.selected ? "#266C5CE7"
+                        color: resultRow.selected ? Theme.accentSoft
                             : rowArea.containsMouse ? Theme.chip : "transparent"
 
                         Row {

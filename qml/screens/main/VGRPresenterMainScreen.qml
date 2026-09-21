@@ -2284,12 +2284,13 @@ Rectangle {
             // Divider between the monitor wall and the clock panel (the
             // original line_2 asset, repositioned to track the wall's
             // bottom edge instead of a fixed y).
-            Image {
+            Rectangle {
                 id: line_2
 
                 y: monitorWall.y + monitorWall.height + (monitorWall.pageCount > 1 ? 22 : 11)
-
-                source: Qt.resolvedUrl("assets/line_2.png")
+                width: parent.width
+                height: 1
+                color: "#232530"   // Theme.border
             }
 
             // Restored: the live clock panel my earlier static-tile cleanup

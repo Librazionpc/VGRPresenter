@@ -208,12 +208,12 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: 8
 
-                        Text {
+                        IconGlyph {
                             anchors.verticalCenter: parent.verticalCenter
-                            text: "⌕"
+                            name: "search"
                             color: "#5c6475"
-                            font.pixelSize: 12
-                        }
+                            width: 12; height: 12
+                            }
 
                         TextInput {
                             anchors.verticalCenter: parent.verticalCenter

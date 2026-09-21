@@ -45,6 +45,8 @@ struct RuntimeSnapshot {
     double gpuPct = 0.0;
     double frameTimeMs = 0.0;
     double temperatureC = -1.0;
+    unsigned gpuCapPct = 100;    // the share of the GPU the user allows (Settings > Smart Config)
+    unsigned cpuCapPct = 100;    // ...and of the CPU
     unsigned workerThreads = 0;
     size_t activeFeatures = 0;
     size_t suspendedFeatures = 0;
@@ -97,6 +99,12 @@ public:
     ConfigLayer GetConfigLayer() const;
     Result<void> SetPreference(Preference p);
     Preference GetPreference() const;
+    // The share of the machine the user lets the engine use (Settings > Smart Config's resource budgets), 10..100 each.
+    // The CPU cap bounds the recommended worker count, the GPU cap scales the texture budget; everything that asks the
+    // runtime (GetRecommendedThreadCount / GetTextureBudget) sees the capped answer. 100 = no cap (the default).
+    Result<void> SetResourceCaps(unsigned gpuPct, unsigned cpuPct);
+    unsigned GpuCapPct() const { return gpuCapPct_.load(); }
+    unsigned CpuCapPct() const { return cpuCapPct_.load(); }
 
     // --- Features ---
     Result<void> RegisterFeature(const FeatureDef& def);
@@ -173,6 +181,8 @@ private:
     std::atomic<bool> initialized_{false};
     std::atomic<bool> running_{false};
     std::atomic<QualityLevel> activeQuality_{QualityLevel::Balanced};
+    std::atomic<unsigned> gpuCapPct_{100};
+    std::atomic<unsigned> cpuCapPct_{100};
     std::atomic<PressureLevel> activePressure_{PressureLevel::None};
     // Previous PAL jiffies (CPU% computed as a delta across heartbeats).
     std::atomic<uint64_t> prevCpuTotal_{0};

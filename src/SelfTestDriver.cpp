@@ -81,6 +81,11 @@ void SelfTestDriver::click(double x, double y)
 #endif
 }
 
+QObject *SelfTestDriver::findItem(const QString &objectName)
+{
+    return m_window ? lookup(m_window, objectName) : nullptr;
+}
+
 bool SelfTestDriver::grab(const QString &itemName, const QString &pngPath)
 {
     if (!m_window)

@@ -9,21 +9,40 @@ import "../../components"
 // selector (Strict / Smart / Manual), a Hardware detected card whose rows
 // show a green check + a value, and Resource budgets meters.
 //
-// Same structure as GeneralScreen: an Item root (scrollbar stays fixed at
-// the edge while content scrolls), Flickable + Column inside, shared
+// Same structure as GeneralScreen: an Item root (scrollbar stays fixed
+// at the edge while content scrolls), Flickable + Column inside, shared
 // AppScrollBar, Theme tokens throughout. Content is short enough that it
 // doesn't scroll at the dialog's default size, but the Flickable stays so
 // it degrades gracefully at small window sizes.
+//
+// It is the ENGINE's page: the hardware rows, their wording and the recommended profile come from the engine's own detection
+// (SettingsService.hardwareRows, from bps::settings::BuildHardwareReport), the three modes and their descriptions are the engine's
+// list, and the numbers are the engine's defaults - each resource profile has its own GPU / CPU share (80% / 60% for Performance),
+// which the engine applies to its adaptive runtime (the CPU share bounds the worker threads, the GPU share the texture budget).
+// In Manual mode the two budgets are yours to set; in Smart and Strict they follow the profile.
 Item {
     id: root
 
-    // "strict" | "smart" | "manual"
-    property string configMode: "smart"
-    readonly property var modes: [
-        { key: "strict", label: qsTr("Strict"), sub: qsTr("Only initialize what you enable") },
-        { key: "smart", label: qsTr("Smart"), sub: qsTr("Auto-tune for this hardware") },
-        { key: "manual", label: qsTr("Manual"), sub: qsTr("You configure every option") }
-    ]
+    readonly property var values: SettingsService.values
+    readonly property var modeChoices: SettingsService.definitions["smart.mode"].choices
+    readonly property bool manual: root.values["smart.mode"] === "manual"
+
+    function profileLabel(value) {
+        const choices = SettingsService.definitions["resources.profile"].choices
+        for (let i = 0; i < choices.length; ++i)
+            if (choices[i].value === value)
+                return choices[i].label
+        return ""
+    }
+    function modeText(key) {
+        for (let i = 0; i < root.modeChoices.length; ++i)
+            if (root.modeChoices[i].value === key)
+                return root.modeChoices[i].description
+        return ""
+    }
+
+    // Look at the machine again whenever this page is shown (a device may have been plugged in).
+    Component.onCompleted: SettingsService.refreshHardware()
 
     Flickable {
         id: flick
@@ -89,16 +108,16 @@ Item {
                         spacing: 16
 
                         Repeater {
-                            model: root.modes
+                            model: root.modeChoices
                             delegate: Rectangle {
                                 id: modeCell
                                 required property var modelData
-                                readonly property bool active: root.configMode === modeCell.modelData.key
+                                readonly property bool active: root.values["smart.mode"] === modeCell.modelData.value
 
                                 width: (parent.width - 32) / 3
                                 height: 62
                                 radius: Theme.radiusMd
-                                color: modeCell.active ? "#266C5CE7" : (modeArea.containsMouse ? Theme.chip : Theme.inset)
+                                color: modeCell.active ? Theme.accentSoft : (modeArea.containsMouse ? Theme.chip : Theme.inset)
                                 border.width: 1
                                 border.color: modeCell.active ? Theme.accent : Theme.border
                                 Behavior on color { ColorAnimation { duration: 100 } }
@@ -117,7 +136,7 @@ Item {
                                     }
                                     Text {
                                         width: modeCell.width - 28
-                                        text: modeCell.modelData.sub
+                                        text: modeCell.modelData.description
                                         color: Theme.textMuted
                                         font.family: Theme.fontFamily
                                         font.pixelSize: Theme.textXs
@@ -130,7 +149,7 @@ Item {
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.configMode = modeCell.modelData.key
+                                    onClicked: SettingsService.setValue("smart.mode", modeCell.modelData.value)
                                 }
                             }
                         }
@@ -164,15 +183,11 @@ Item {
                     }
 
                     Repeater {
-                        model: [
-                            { label: qsTr("GPU"), value: qsTr("NVIDIA RTX 4060 · 8 GB") },
-                            { label: qsTr("Encoder"), value: qsTr("NVENC available") },
-                            { label: qsTr("Audio devices"), value: qsTr("4 outputs, 2 inputs") },
-                            { label: qsTr("Displays"), value: qsTr("3 connected") }
-                        ]
+                        model: SettingsService.hardwareRows
                         delegate: Column {
                             id: hwRow
                             required property var modelData
+                            required property int index
                             width: hwCol.width
 
                             Item {
@@ -194,8 +209,8 @@ Item {
 
                                     Text {
                                         anchors.verticalCenter: parent.verticalCenter
-                                        text: "✓"
-                                        color: Theme.success
+                                        text: hwRow.modelData.ok ? "✓" : "!"
+                                        color: hwRow.modelData.ok ? Theme.success : Theme.warning
                                         font.pixelSize: 11
                                         font.weight: Font.Bold
                                     }
@@ -208,8 +223,73 @@ Item {
                                     }
                                 }
                             }
-                            Rectangle { width: hwRow.width; height: 1; color: Theme.border; visible: hwRow.index < 3 }
+                            Rectangle { width: hwRow.width; height: 1; color: Theme.border; visible: hwRow.index < SettingsService.hardwareRows.length - 1 }
                         }
+                    }
+                }
+            }
+
+            // ---- Recommended profile card: the engine's pick for this machine, one click to put it in force ----
+            Rectangle {
+                width: parent.width
+                height: 74
+                radius: Theme.radiusLg
+                color: Theme.card
+                border.color: Theme.border
+                border.width: 1
+                visible: SettingsService.recommendedProfile !== ""
+
+                readonly property bool inForce: root.values["resources.profile"] === SettingsService.recommendedProfile
+
+                Column {
+                    x: 20
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - 180
+                    spacing: 4
+
+                    Text {
+                        text: qsTr("Recommended profile: %1").arg(root.profileLabel(SettingsService.recommendedProfile))
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 14
+                        font.weight: Font.DemiBold
+                    }
+                    Text {
+                        width: parent.width
+                        text: SettingsService.hardwareDetail
+                        color: Theme.textSecondary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.textSm
+                        wrapMode: Text.Wrap
+                    }
+                }
+
+                Rectangle {
+                    anchors.right: parent.right
+                    anchors.rightMargin: 20
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 116
+                    height: 34
+                    radius: Theme.radiusMd
+                    opacity: parent.inForce ? 0.5 : 1
+                    color: applyArea.containsMouse && !parent.inForce ? Theme.accentLight : Theme.accent
+                    Behavior on color { ColorAnimation { duration: 100 } }
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: parent.parent.inForce ? qsTr("In use") : qsTr("Apply")
+                        color: "#ffffff"
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.textSm
+                        font.weight: Font.Medium
+                    }
+                    MouseArea {
+                        id: applyArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        enabled: !parent.parent.inForce
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: SettingsService.applyRecommendedProfile()
                     }
                 }
             }
@@ -239,8 +319,49 @@ Item {
                         bottomPadding: 4
                     }
 
-                    LabeledMeter { label: qsTr("GPU"); pct: 80; width: parent.width }
-                    LabeledMeter { label: qsTr("CPU"); pct: 60; width: parent.width }
+                    Text {
+                        width: parent.width
+                        text: root.manual ? qsTr("Manual mode: drag to set how much of the machine the engine may use.")
+                                          : qsTr("Set by the %1 profile. Switch to Manual to choose your own.").arg(root.profileLabel(root.values["resources.profile"]))
+                        color: Theme.textMuted
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.textXs
+                        wrapMode: Text.Wrap
+                    }
+
+                    // One budget: a meter of what the engine uses (the profile's number), or - in Manual - a slider that sets it.
+                    component BudgetRow: Item {
+                        id: budget
+                        property string label: ""
+                        property string settingKey: ""       // the engine's setting behind it in Manual mode
+                        property int shown: 0                // the number in force (percent)
+                        property real draft: budget.shown
+                        property bool dragging: false
+                        width: parent.width
+                        height: 34
+
+                        Binding { target: budget; property: "draft"; value: budget.shown; when: !budget.dragging }
+
+                        LabeledMeter { visible: !root.manual; anchors.fill: parent; label: budget.label; pct: budget.shown }
+                        LabeledSlider {
+                            visible: root.manual
+                            anchors.fill: parent
+                            label: budget.label
+                            suffix: "%"
+                            minValue: 10
+                            maxValue: 100
+                            value: budget.draft
+                            onDragStarted: budget.dragging = true
+                            onMoved: (v) => budget.draft = Math.round(v)
+                            onDragFinished: {
+                                budget.dragging = false
+                                SettingsService.setValue(budget.settingKey, Math.round(budget.draft))
+                            }
+                        }
+                    }
+
+                    BudgetRow { label: qsTr("GPU"); settingKey: "smart.gpuBudgetPct"; shown: SettingsService.caps.gpu }
+                    BudgetRow { label: qsTr("CPU"); settingKey: "smart.cpuBudgetPct"; shown: SettingsService.caps.cpu }
                 }
             }
         }

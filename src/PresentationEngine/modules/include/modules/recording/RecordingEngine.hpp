@@ -118,6 +118,10 @@ public:
 
     // --- Health (docs/specs/28 §Health) ---
     Result<EncoderHealth> GetRecordingHealth(std::string_view recordingId) const;
+    // Highest reported encoder load across the sessions that still occupy an
+    // encoder (Preparing/Recording/Paused/Finalizing/Recovering); 0 when none.
+    // The one number the Telemetry module's encoding meter needs.
+    int MaxActiveEncoderLoad() const;
     Result<void> UpdateEncoderLoad(std::string_view recordingId, int loadPct);
     Result<void> UpdateDroppedFrames(std::string_view recordingId, size_t count);
 

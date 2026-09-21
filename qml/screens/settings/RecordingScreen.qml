@@ -147,7 +147,7 @@ Item {
                                 width: platLabel.width + 26
                                 height: 30
                                 radius: Theme.radiusMd
-                                color: platChip.active ? "#266C5CE7" : (platArea.containsMouse ? Theme.chip : Theme.inset)
+                                color: platChip.active ? Theme.accentSoft : (platArea.containsMouse ? Theme.chip : Theme.inset)
                                 border.width: 1
                                 border.color: platChip.active ? Theme.accent : Theme.border
                                 Behavior on color { ColorAnimation { duration: 100 } }
@@ -301,7 +301,7 @@ Item {
                                             width: contLabel.width + 22
                                             height: 28
                                             radius: Theme.radiusMd
-                                            color: contChip.active ? "#266C5CE7" : Theme.inset
+                                            color: contChip.active ? Theme.accentSoft : Theme.inset
                                             border.width: 1
                                             border.color: contChip.active ? Theme.accent : Theme.border
 
@@ -344,7 +344,7 @@ Item {
                                             width: encLabel.width + 22
                                             height: 28
                                             radius: Theme.radiusMd
-                                            color: encChip.active ? "#266C5CE7" : Theme.inset
+                                            color: encChip.active ? Theme.accentSoft : Theme.inset
                                             border.width: 1
                                             border.color: encChip.active ? Theme.accent : Theme.border
 

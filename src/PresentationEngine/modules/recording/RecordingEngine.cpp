@@ -1014,6 +1014,20 @@ Result<void> RecordingEngine::ScheduleStop(std::string_view recordingId, int64_t
     return Ok();
 }
 
+int RecordingEngine::MaxActiveEncoderLoad() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    int max = 0;
+    for (const auto& [id, s] : sessions_) {
+        const bool occupies = s.state == RecordingState::Preparing ||
+                              s.state == RecordingState::Recording ||
+                              s.state == RecordingState::Paused ||
+                              s.state == RecordingState::Finalizing ||
+                              s.state == RecordingState::Recovering;
+        if (occupies) max = std::max(max, s.encoderLoad);
+    }
+    return max;
+}
+
 Result<EncoderHealth> RecordingEngine::GetRecordingHealth(std::string_view recordingId) const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = sessions_.find(recordingId);

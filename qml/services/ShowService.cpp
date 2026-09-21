@@ -187,7 +187,7 @@ bool ShowService::saveShowFile(const QVariantMap &show, const QString &path)
     return true;
 }
 
-bool ShowService::saveCurrentShow(const QString &path)
+bool ShowService::saveCurrentShow(const QString &path, bool quiet)
 {
     auto doc = showDocument();
     if (!doc || !doc->HasDocument()) {
@@ -200,13 +200,22 @@ bool ShowService::saveCurrentShow(const QString &path)
         reportError(QStringLiteral("Couldn't save the show"), message(saved.error()));
         return false;
     }
-    EventBus::instance().notify(QStringLiteral("Saved to %1").arg(QString::fromStdString(doc->Path())),
-                                QStringLiteral("success"), QStringLiteral("Show saved"),
-                                QStringLiteral("show.saved"));
+    if (!quiet)
+        EventBus::instance().notify(QStringLiteral("Saved to %1").arg(QString::fromStdString(doc->Path())),
+                                    QStringLiteral("success"), QStringLiteral("Show saved"),
+                                    QStringLiteral("show.saved"));
     const QString saved_ = QDir::fromNativeSeparators(QString::fromStdString(doc->Path()));
     if (library_ && saved_.startsWith(QDir::fromNativeSeparators(libraryPath_), Qt::CaseInsensitive))
         refreshLibrary();
     return true;
+}
+
+bool ShowService::saveShowCopy(const QString &path)
+{
+    auto doc = showDocument();
+    if (!doc || !doc->HasDocument() || path.isEmpty())
+        return false;
+    return doc->SaveCopy(vgrPath(path)).ok();
 }
 
 void ShowService::ensureShow(const QString &name)

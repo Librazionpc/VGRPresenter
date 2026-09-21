@@ -45,6 +45,9 @@ public:
     Q_INVOKABLE QPointF itemCenter(const QString &objectName);
     Q_INVOKABLE void clickItem(const QString &objectName);
     Q_INVOKABLE bool grab(const QString &itemName, const QString &pngPath);
+    // Resolve an item by objectName (no action) — for scenarios that poke
+    // properties the invokables don't cover (e.g. a Flickable's contentY).
+    Q_INVOKABLE QObject *findItem(const QString &objectName);
     Q_INVOKABLE void quit();
 
 private:

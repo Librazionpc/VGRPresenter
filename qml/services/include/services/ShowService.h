@@ -72,7 +72,11 @@ public:
     // Saves the engine's own copy of the show (what the edit calls below maintain).
     // "" = the file it was opened from / last saved to. Prefer this to saveShowFile
     // once the show is edited through the engine — it cannot drop engine-side data.
-    Q_INVOKABLE bool saveCurrentShow(const QString &path = QString());
+    // `quiet` skips the "Show saved" toast (autosave: a failure is still reported).
+    Q_INVOKABLE bool saveCurrentShow(const QString &path = QString(), bool quiet = false);
+    // Writes the show as it is now to `path` WITHOUT making that its file (backups and the crash-recovery copy): the show's
+    // own path and unsaved state are left alone, and nothing is announced.
+    Q_INVOKABLE bool saveShowCopy(const QString &path);
     // Makes sure a working show exists (creating an empty one named `name`).
     Q_INVOKABLE void ensureShow(const QString &name);
     // Native file pickers (engine platform layer). "" when the user cancels.

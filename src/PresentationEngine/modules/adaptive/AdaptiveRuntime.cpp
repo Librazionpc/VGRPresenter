@@ -277,9 +277,18 @@ std::vector<Capability> AdaptiveRuntime::Capabilities() const { return caps_.Sup
 // ---------------------------------------------------------------------------
 
 unsigned AdaptiveRuntime::GetRecommendedThreadCount() const {
-    return optimizer_.GetRecommendedThreadCount();
+    // The user's CPU cap: that share of the cores, never fewer than one worker.
+    const unsigned wanted = optimizer_.GetRecommendedThreadCount();
+    const unsigned cap = cpuCapPct_.load();
+    if (cap >= 100) return wanted;
+    const unsigned cores = std::max(1u, hwSnapshot_.coreCount);
+    return std::max(1u, std::min(wanted, (cores * cap + 99) / 100));
 }
-uint64_t AdaptiveRuntime::GetTextureBudget() const { return optimizer_.GetTextureBudget(); }
+uint64_t AdaptiveRuntime::GetTextureBudget() const {
+    const uint64_t wanted = optimizer_.GetTextureBudget();
+    const unsigned cap = gpuCapPct_.load();
+    return cap >= 100 ? wanted : wanted / 100 * cap;
+}
 uint64_t AdaptiveRuntime::GetCacheBytes() const { return optimizer_.GetCacheBytes(); }
 uint64_t AdaptiveRuntime::GetRenderCacheBytes() const { return optimizer_.GetRenderCacheBytes(); }
 size_t AdaptiveRuntime::GetBatchSize() const { return optimizer_.GetBatchSize(); }
@@ -323,6 +332,14 @@ Result<void> AdaptiveRuntime::SetPreference(Preference p) {
 }
 
 Preference AdaptiveRuntime::GetPreference() const { return modes_.GetPreference(); }
+
+Result<void> AdaptiveRuntime::SetResourceCaps(unsigned gpuPct, unsigned cpuPct) {
+    if (gpuPct < 10 || gpuPct > 100 || cpuPct < 10 || cpuPct > 100)
+        return Error::Make(Err::InvalidArgument, "AdaptiveRuntime", "a resource cap is between 10% and 100%");
+    if (gpuCapPct_.exchange(gpuPct) == gpuPct && cpuCapPct_.exchange(cpuPct) == cpuPct) return Ok();
+    cpuCapPct_.store(cpuPct);
+    return ApplyOptimization("resource-caps");
+}
 
 // ---------------------------------------------------------------------------
 // Features
@@ -617,6 +634,8 @@ RuntimeSnapshot AdaptiveRuntime::Snapshot() const {
     s.gpuPct = prof.gpuPct;
     s.frameTimeMs = prof.frameTimeMs;
     s.temperatureC = prof.cpuTemperatureC;
+    s.gpuCapPct = gpuCapPct_.load();
+    s.cpuCapPct = cpuCapPct_.load();
     s.workerThreads = ThreadPool::Instance().WorkerCount();
     s.activeFeatures = features_.Count();
     for (const auto& f : features_.All())

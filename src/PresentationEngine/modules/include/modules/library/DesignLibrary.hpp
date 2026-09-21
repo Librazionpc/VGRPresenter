@@ -80,6 +80,9 @@ struct DesignLibraryConfig {
     std::string idPrefix = "d";                  // design ids are "<prefix>-<n>"
     std::vector<DesignCategory> defaultCategories;
     std::vector<Design> defaultDesigns;
+    // Block kinds a design of this library may hold IN ADDITION to the ones every slide has (text, shape, clock ...). The Edit
+    // screen offers exactly these in its Add menu, so what a library allows is decided here, not by the UI.
+    std::vector<std::string> extraBlockKinds;
     // What a brand-new design holds (empty = a blank canvas).
     std::function<std::vector<presentation::ContentBlock>()> starterBlocks;
 };

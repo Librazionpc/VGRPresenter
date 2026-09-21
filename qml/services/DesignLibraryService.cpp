@@ -74,6 +74,15 @@ DesignLibraryService &DesignLibraryService::templates() { return TemplateLibrary
 
 QString DesignLibraryService::noun() const { return noun_; }
 
+QStringList DesignLibraryService::extraBlockKinds() const
+{
+    QStringList out;
+    if (library_)
+        for (const std::string &kind : library_->Config().extraBlockKinds)
+            out.append(qstr(kind));
+    return out;
+}
+
 QVariantList DesignLibraryService::categories() const
 {
     QVariantList out;

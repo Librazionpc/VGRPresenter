@@ -18,7 +18,13 @@ import VGRPresenterUI
 Item {
     id: root
 
-    property alias text: displayText.text
+    // The TYPED text - what is edited and what the model keeps. What is SHOWN is this with the list style applied (below).
+    property string text: ""
+    // The engine's list style for the text ("" / "none" = a plain paragraph, "disc", "decimal" ... = every line is a list
+    // item). It only changes what is displayed; the typed text is never touched.
+    property string listStyle: ""
+    // The text as displayed (list markers included) - for a consumer that has to measure what is on screen.
+    readonly property alias shownText: displayText.text
     property alias color: displayText.color
     property alias font: displayText.font
     property alias horizontalAlignment: displayText.horizontalAlignment
@@ -108,6 +114,7 @@ Item {
         anchors.fill: parent
         verticalAlignment: Text.AlignVCenter
         visible: !root.editing
+        text: TextFormatService.applyList(root.text, root.listStyle)
     }
 
     // TextEdit, not TextInput — TextInput is inherently single-line (it has
@@ -120,7 +127,7 @@ Item {
         anchors.fill: parent
         verticalAlignment: Text.AlignVCenter
         visible: root.editing
-        text: displayText.text
+        text: root.text
         color: displayText.color
         font: displayText.font
         horizontalAlignment: displayText.horizontalAlignment
@@ -178,7 +185,7 @@ Item {
         }
         onVisibleChanged: {
             if (visible) {
-                preEditText = displayText.text
+                preEditText = root.text
                 forceActiveFocus()
                 selectAll()
             }

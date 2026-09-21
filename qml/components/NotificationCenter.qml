@@ -52,6 +52,10 @@ Item {
         function onEventPosted(topic, payload) {
             if (!payload || !payload.message)
                 return
+            // Settings > General > Notifications (and Lock In Mode): switched off, only errors still interrupt.
+            const settings = SettingsService.values
+            if ((settings["notifications.show"] === false || settings["appearance.lockInMode"] === true) && payload.level !== "error")
+                return
             root.push(payload.level, payload.title, payload.message, topic)
         }
     }

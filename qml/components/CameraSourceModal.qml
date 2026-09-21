@@ -145,12 +145,12 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: 8
 
-                    Text {
+                    IconGlyph {
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "⌕"
+                        name: "search"
                         color: "#5c6475"
-                        font.pixelSize: 12
-                    }
+                        width: 12; height: 12
+                        }
 
                     TextInput {
                         anchors.verticalCenter: parent.verticalCenter
@@ -223,12 +223,13 @@ Item {
                         // ground truth's rendered camera-lens artwork — a
                         // real live-preview visual is future work (same
                         // status as the canvas's own camera placeholder).
-                        Text {
+                        IconGlyph {
                             anchors.centerIn: parent
                             anchors.verticalCenterOffset: -14
-                            text: "◎"
+                            name: "camera"
+                            fit: true
                             color: sourceCard.isOffline ? "#3a4155" : "#4a6b58"
-                            font.pixelSize: 32
+                            width: 34; height: 34
                         }
 
                         Column {

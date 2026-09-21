@@ -98,6 +98,8 @@ EnvironmentInfo WindowsEnvironment::Current() const {
         HKEY_LOCAL_MACHINE,
         "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\0000",
         "DriverDesc");
+    // DXGI names the adapter the machine actually renders with (the registry's first entry can be an integrated one).
+    if (const auto& gpu = win::PrimaryGpu(); !gpu.name.empty()) info.gpuName = gpu.name;
 
     MEMORYSTATUSEX ms{};
     ms.dwLength = sizeof(ms);

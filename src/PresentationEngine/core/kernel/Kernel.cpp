@@ -24,6 +24,7 @@
 #include "modules/automation/FlowEngine.hpp"
 #include "modules/production/ProductionEngine.hpp"
 #include "modules/recording/RecordingEngine.hpp"
+#include "modules/settings/Telemetry.hpp"
 #include "modules/broadcast/BroadcastEngine.hpp"
 #include "modules/bible/BibleEngine.hpp"
 #include "modules/content/ContentManager.hpp"
@@ -368,6 +369,18 @@ Result<void> Kernel::Boot(const BootOptions& options) {
         }
     }
 
+    // ---- 16b. Telemetry (live utilization feed for the Settings meters) ----
+    // Subscribes to the render frame events; boots before the RenderEngine (17)
+    // so the very first frame is counted. Stops with the engine (it holds only
+    // event subscriptions — nothing to stop out of order).
+    {
+        auto& tel = settings::Telemetry::Instance();
+        if (auto r = tel.Initialize(); !r.ok())
+            logger.Warning("Telemetry init: " + r.error().message, "Kernel");
+        else
+            (void)services.Register<settings::Telemetry>(&tel);
+    }
+
     // ---- 17. RenderEngine (Phase 6, docs/specs/17) ----
     // The generic rendering engine: scenes → layers → objects → pixels.
     // Backend-independent (IGraphicsBackend) and frontend-agnostic; renders
@@ -696,6 +709,9 @@ Result<void> Kernel::ShutdownSystems() {
     (void)presentation::PresentationEngine::Instance().Shutdown();
     (void)display::DisplayEngine::Instance().Shutdown();
     (void)rendering::RenderEngine::Instance().Shutdown();
+    // Telemetry (16b) unsubscribes after the RenderEngine (17) stopped — no
+    // more frames can arrive mid-unsubscribe.
+    (void)settings::Telemetry::Instance().Shutdown();
     (void)adaptive::AdaptiveRuntime::Instance().Shutdown();
     (void)project::DataManager::Instance().Shutdown();
     (void)notification::NotificationService::Instance().Shutdown();

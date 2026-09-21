@@ -102,7 +102,8 @@ Snapshot WindowsPlatform::Sample() {
         CloseHandle(snap);
     }
 
-    // gpuVram: not available without DXGI, a documented follow-up (PAL.md §11).
+    // The main graphics adapter's own video memory, from DXGI (asked once; see WindowsGpu.cpp).
+    s.gpuVramTotalBytes = win::PrimaryGpu().vramBytes;
     return s;
 }
 

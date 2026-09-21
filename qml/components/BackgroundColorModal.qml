@@ -10,14 +10,12 @@ import QtQuick
 // in anywhere a color needs picking, not just the Edit screen's Background
 // row.
 //
-// There is deliberately no Opacity slider: opacity was removed from the app
-// (it either did nothing or just faded things confusingly), and a fill's
-// "less visible" state is expressed by picking a dimmer color instead. What the
-// palette DOES offer for overlays and lower thirds is Transparent (nothing is
-// drawn - the checkerboard shows it, and it renders out transparent) and a few
-// TINTS: black / white at 25%, 50% and 75% (#AARRGGBB), also typeable in the
-// custom field. If a slider ever comes back it belongs on the consumer's style
-// object, not in this picker's payload.
+// OPACITY: an Opacity slider (0-100%, default 100). The first version of it only faded the preview - the
+// value was handed to consumers that ignored it, so it was removed. It is back and it WORKS: the alpha is
+// written INTO the applied colour (#AARRGGBB), so consumers need no change and nothing else is carried in the
+// payload. It applies to solid colours and to both stops of a gradient; Transparent stays transparent.
+// Besides that the palette offers Transparent (nothing is drawn - the checkerboard shows it, and it renders out
+// transparent) and six TINTS: black / white at 25%, 50% and 75% (#AARRGGBB), also typeable in the custom field.
 //
 // The whole picker state is a single `selection` value —
 //   { kind: "color", color } | { kind: "gradient", from, to, name, subtitle }
@@ -32,6 +30,10 @@ Item {
     id: root
 
     property bool open: false
+
+    // 0-100. Written into the applied colour's alpha (see withOpacity); reset to fully opaque whenever the picker opens.
+    property real opacityPct: 100
+    onOpenChanged: if (open) root.opacityPct = 100
 
     // Header text — rename when reusing the picker for something other than
     // the slide background (e.g. an item's border color).
@@ -174,8 +176,22 @@ Item {
         return -1
     }
 
-    // Fires when "Apply" is clicked, carrying the current selection. The
-    // consumer decides what to do with it.
+    // `color` (a colour string or value) with its alpha scaled by the Opacity slider, as "#AARRGGBB" / "#RRGGBB".
+    function fadedColor(color) {
+        const c = Qt.color(color)
+        return Qt.rgba(c.r, c.g, c.b, c.a * root.opacityPct / 100).toString()
+    }
+    // A selection with the Opacity slider applied. Transparent stays transparent; at 100% nothing changes.
+    function withOpacity(sel) {
+        if (root.opacityPct >= 100)
+            return sel
+        if (sel.kind === "color")
+            return sel.color === root.transparentValue ? sel : Object.assign({}, sel, { color: root.fadedColor(sel.color) })
+        return Object.assign({}, sel, { from: root.fadedColor(sel.from), to: root.fadedColor(sel.to) })
+    }
+
+    // Fires when "Apply" is clicked, carrying the current selection (with the Opacity slider baked into its colour).
+    // The consumer decides what to do with it.
     signal applied(var selection)
     signal cancelled()
 
@@ -345,13 +361,14 @@ Item {
                             radius: 8
                             border.color: "#6c5ce7"
                             border.width: 1.5
-                            color: root.selection.kind === "color" ? root.selection.color : "transparent"
+                            color: root.selection.kind === "color" && root.selection.color !== root.transparentValue
+                                   ? root.fadedColor(root.selection.color) : "transparent"
                             gradient: root.selection.kind === "gradient" ? gradPreview : null
 
                             Gradient {
                                 id: gradPreview
-                                GradientStop { position: 0; color: root.selection.kind === "gradient" ? root.selection.from : root.selection.color }
-                                GradientStop { position: 1; color: root.selection.kind === "gradient" ? root.selection.to : root.selection.color }
+                                GradientStop { position: 0; color: root.fadedColor(root.selection.kind === "gradient" ? root.selection.from : root.selection.color) }
+                                GradientStop { position: 1; color: root.fadedColor(root.selection.kind === "gradient" ? root.selection.to : root.selection.color) }
                             }
                         }
                     }
@@ -466,6 +483,18 @@ Item {
                         }
                     }
                 }
+            }
+
+            // OPACITY - the alpha of whatever is picked (colour or gradient); 100% = as chosen.
+            LabeledSlider {
+                objectName: "selfTestPaletteOpacity"
+                width: parent.width
+                label: qsTr("Opacity")
+                minValue: 0
+                maxValue: 100
+                suffix: "%"
+                value: root.opacityPct
+                onMoved: (v) => root.opacityPct = v
             }
 
             // GRADIENTS
@@ -722,7 +751,7 @@ Item {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.applied(root.selection)
+                        onClicked: root.applied(root.withOpacity(root.selection))
                     }
                 }
             }

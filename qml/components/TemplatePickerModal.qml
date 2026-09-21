@@ -296,7 +296,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             spacing: 8
 
-                            Text { anchors.verticalCenter: parent.verticalCenter; text: "⌕"; color: "#5c6475"; font.pixelSize: 12 }
+                            IconGlyph { anchors.verticalCenter: parent.verticalCenter; name: "search"; color: "#5c6475"; width: 12; height: 12 }
 
                             TextInput {
                                 anchors.verticalCenter: parent.verticalCenter

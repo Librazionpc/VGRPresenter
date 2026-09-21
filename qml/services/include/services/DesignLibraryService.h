@@ -47,6 +47,9 @@ class DesignLibraryService : public QObject
     Q_PROPERTY(QStringList categoryIcons READ categoryIcons CONSTANT)
     // "overlay" or "template" - what this instance manages (used in messages and titles).
     Q_PROPERTY(QString noun READ noun CONSTANT)
+    // Block kinds this library's designs may hold beyond the ones every slide has ("vignette", "corners" for overlays):
+    // declared by the ENGINE, so the Edit screen's Add menu follows the library and not a name check in QML.
+    Q_PROPERTY(QStringList extraBlockKinds READ extraBlockKinds CONSTANT)
 
 public:
     static DesignLibraryService &overlays();
@@ -55,6 +58,7 @@ public:
     ~DesignLibraryService() override;
 
     QString noun() const;
+    QStringList extraBlockKinds() const;
 
     QVariantList categories() const;
     int totalCount() const;

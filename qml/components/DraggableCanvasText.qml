@@ -20,6 +20,10 @@ Item {
     // a slider move shows up here with no mirroring layer. Null means "no
     // styling": defaults below apply (no padding, no border).
     property CanvasItemStyle style: null
+    // True when the content draws its OWN body from that style - a circle, a line or a glyph shape, a vignette, screen corners.
+    // The plain box fill and border below are then not drawn: they are a rectangle, and a rectangle behind a circle is
+    // exactly what makes a circle read as a box.
+    property bool drawsOwnBody: false
 
     // Drives the hover-wash Rectangle below. Set externally from whichever
     // content MouseArea is actually present (EditableCanvasLabel.hovered,
@@ -59,6 +63,7 @@ Item {
     // contentHolder so the fill sits behind the actual text/content. No
     // visible: check needed — "transparent" already renders as nothing.
     Rectangle {
+        visible: !root.drawsOwnBody
         anchors.fill: parent
         radius: root.styleCornerRadius
         color: root.styleBackgroundColor
@@ -76,7 +81,7 @@ Item {
     // rounded corners render as a smooth curve, not a faceted polygon.
     Shape {
         anchors.fill: parent
-        visible: root.styleBorderEnabled && root.styleBorderWidth > 0
+        visible: !root.drawsOwnBody && root.styleBorderEnabled && root.styleBorderWidth > 0
         antialiasing: true
         ShapePath {
             strokeColor: root.styleBorderColor

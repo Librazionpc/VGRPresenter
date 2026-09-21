@@ -356,6 +356,8 @@ DesignLibraryConfig OverlayLibraryConfig() {
     c.defaultCategories = { DesignCategory{ "visuals", "Visuals", "star", true } };
     c.defaultDesigns = ShippedOverlays();
     c.starterBlocks = OverlayStarter;
+    // The two whole-screen treatments only overlays have (see DesignCatalogs.hpp).
+    c.extraBlockKinds = { "vignette", "corners" };
     return c;
 }
 

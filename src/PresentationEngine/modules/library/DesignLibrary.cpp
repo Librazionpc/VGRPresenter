@@ -1,6 +1,7 @@
 #include "modules/library/DesignLibrary.hpp"
 
 #include "core/config/Json.hpp"
+#include "modules/presentation/BlockValidator.hpp"
 #include "modules/presentation/PresentationSerializer.hpp"
 #include "modules/presentation/ShowEditor.hpp"
 #include "platform/PlatformAccessor.hpp"
@@ -574,6 +575,10 @@ Result<size_t> DesignLibrary::RestoreDefaults() {
 
 Result<void> DesignLibrary::SetContent(std::string_view id, std::string background,
                                        std::vector<pres::ContentBlock> blocks) {
+    // What the canvas sends is checked by the engine's own block rules before anything is changed.
+    if (auto ok = pres::CheckBlocks(blocks); !ok.ok()) return ok;
+    if (!background.empty() && !pres::IsColorText(background))
+        return Error::Make(Err::InvalidArgument, kModule, std::format("'{}' is not a colour (background)", background));
     return Edit(id, [&](Design& d) {
         d.background = background.empty() ? std::string("transparent") : std::move(background);
         d.blocks = std::move(blocks);
@@ -581,6 +586,7 @@ Result<void> DesignLibrary::SetContent(std::string_view id, std::string backgrou
 }
 
 Result<std::string> DesignLibrary::AddBlock(std::string_view id, pres::ContentBlock block, std::string_view above) {
+    if (auto ok = pres::CheckBlock(block, /*requireId=*/false); !ok.ok()) return ok.error();
     std::string claimed;
     auto done = Edit(id, [&](Design& d) -> Result<void> {
         auto added = WithBlocks(d, [&](pres::Presentation& scratch) -> Result<std::string> {

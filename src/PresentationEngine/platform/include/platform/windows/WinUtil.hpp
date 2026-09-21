@@ -74,5 +74,14 @@ inline std::string LastErrorString(DWORD code) {
     return out;
 }
 
+// The machine's main graphics adapter, from DXGI (the adapter with the most dedicated video memory that is not the
+// software renderer). name is empty and vramBytes 0 when DXGI is unavailable or there is no hardware adapter.
+// Asked once and remembered - the adapters do not change while the app runs.
+struct GpuInfo {
+    std::string name;
+    unsigned long long vramBytes = 0;
+};
+const GpuInfo& PrimaryGpu();
+
 } // namespace bps::platform::win
 #endif // _WIN32

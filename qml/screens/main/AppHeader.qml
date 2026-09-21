@@ -148,7 +148,6 @@ Rectangle {
     HeaderStatus {
         id: status
         // The window buttons live in WindowControls now (real ones), not in this cluster.
-        showWindowControls: false
         anchors.right: windowButtons.left
         anchors.rightMargin: 8
         y: 9

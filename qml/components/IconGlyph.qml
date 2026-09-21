@@ -31,6 +31,9 @@ Item {
             case "folder": return folderC
             case "plus": return plusC
             case "chevronRight": return chevronRightC
+            case "chevronDown": return chevronDownC
+            case "chevronUp": return chevronUpC
+            case "check": return checkC
             case "settings": return settingsC
             case "presentation": return presentationC
             case "penTool": return penToolC
@@ -100,6 +103,32 @@ Item {
             capStyle: ShapePath.RoundCap
             joinStyle: ShapePath.RoundJoin
             PathSvg { id: svgElement }
+        }
+    }
+
+    // Vector replacements for the text characters that were standing in for icons: they need a font that has them, and drew
+    // as different sizes and weights in different places. These are one stroke each, in the icon's colour.
+    Component {
+        id: chevronDownC
+        StrokeIcon {
+            width: 8; height: 4.5
+            svgPath: "M 0 0 L 4 4.5 L 8 0"
+        }
+    }
+
+    Component {
+        id: chevronUpC
+        StrokeIcon {
+            width: 8; height: 4.5
+            svgPath: "M 0 4.5 L 4 0 L 8 4.5"
+        }
+    }
+
+    Component {
+        id: checkC
+        StrokeIcon {
+            width: 9; height: 6.5
+            svgPath: "M 0 3.5 L 3 6.5 L 9 0"
         }
     }
 

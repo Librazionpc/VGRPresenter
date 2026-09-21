@@ -103,12 +103,12 @@ Column {
             }
         }
 
-        Text {
+        IconGlyph {
             x: parent.width - 28
             anchors.verticalCenter: parent.verticalCenter
-            text: root.expanded ? "⌃" : "⌄"
+            name: root.expanded ? "chevronUp" : "chevronDown"
             color: "#6b7280"
-            font.pixelSize: 12
+            width: 12; height: 12
         }
 
         MouseArea {

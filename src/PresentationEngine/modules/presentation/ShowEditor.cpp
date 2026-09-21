@@ -1,5 +1,6 @@
 #include "modules/presentation/ShowEditor.hpp"
 
+#include "modules/presentation/BlockValidator.hpp"
 #include "modules/presentation/PresentationTemplates.hpp"
 
 #include <algorithm>
@@ -43,6 +44,14 @@ Result<std::string> ClaimId(const std::vector<T>& items, std::string requested,
                                    [&](const T& t) { return t.id == requested; });
     if (taken) return Invalid(std::format("a {} with id '{}' already exists", what, requested));
     return requested;
+}
+
+// A list of blocks entering the engine (a slide's, a template's, an overlay's): blocks that have no id yet are given one - the
+// engine issues ids - and then the whole list must pass BlockValidator, or nothing is changed.
+Result<void> AcceptBlocks(std::vector<ContentBlock>& blocks) {
+    for (ContentBlock& b : blocks)
+        if (b.id.empty()) b.id = NextId(blocks, "item");
+    return CheckBlocks(blocks);
 }
 
 template <typename T>
@@ -130,6 +139,7 @@ Result<void> ShowEditor::SetSlideCategory(Presentation& show, std::string_view s
 
 Result<std::string> ShowEditor::AddTemplate(Presentation& show, SlideTemplate tmpl) {
     if (tmpl.name.empty()) return Invalid("a template needs a name");
+    if (auto ok = AcceptBlocks(tmpl.blocks); !ok.ok()) return ok.error();
     auto id = ClaimId(show.templates, tmpl.id, "template", "template");
     if (!id.ok()) return id.error();
     tmpl.id = id.value();
@@ -141,6 +151,7 @@ Result<void> ShowEditor::UpdateTemplate(Presentation& show, std::string_view id,
     auto it = FindById(show.templates, id);
     if (it == show.templates.end()) return Missing("template", id);
     if (tmpl.name.empty()) return Invalid("a template needs a name");
+    if (auto ok = AcceptBlocks(tmpl.blocks); !ok.ok()) return ok;
     tmpl.id = it->id;   // the id is the template's identity — never changed by an update
     *it = std::move(tmpl);
     return Ok();
@@ -189,6 +200,7 @@ Result<void> CheckOverlayTarget(const Presentation& show, const Overlay& o) {
 
 Result<std::string> ShowEditor::AddOverlay(Presentation& show, Overlay overlay) {
     if (auto t = CheckOverlayTarget(show, overlay); !t.ok()) return t.error();
+    if (auto ok = AcceptBlocks(overlay.blocks); !ok.ok()) return ok.error();
     auto id = ClaimId(show.overlays, overlay.id, "overlay", "overlay");
     if (!id.ok()) return id.error();
     overlay.id = id.value();
@@ -200,6 +212,7 @@ Result<void> ShowEditor::UpdateOverlay(Presentation& show, std::string_view id, 
     auto it = FindById(show.overlays, id);
     if (it == show.overlays.end()) return Missing("overlay", id);
     if (auto t = CheckOverlayTarget(show, overlay); !t.ok()) return t;
+    if (auto ok = AcceptBlocks(overlay.blocks); !ok.ok()) return ok;
     overlay.id = it->id;
     *it = std::move(overlay);
     return Ok();
@@ -226,6 +239,7 @@ Result<void> ShowEditor::SetOverlayEnabled(Presentation& show, std::string_view 
 Result<std::string> ShowEditor::AddSlide(Presentation& show, Slide slide, std::optional<size_t> index) {
     if (!slide.categoryId.empty() && !SlideResolver::FindCategory(show, slide.categoryId))
         return Invalid(std::format("category '{}' does not exist", slide.categoryId));
+    if (auto ok = AcceptBlocks(slide.blocks); !ok.ok()) return ok.error();
     auto id = ClaimId(show.slides, slide.id, "slide", "slide");
     if (!id.ok()) return id.error();
     slide.id = id.value();
@@ -239,6 +253,7 @@ Result<void> ShowEditor::UpdateSlide(Presentation& show, std::string_view id, Sl
     if (it == show.slides.end()) return Missing("slide", id);
     if (!slide.categoryId.empty() && !SlideResolver::FindCategory(show, slide.categoryId))
         return Invalid(std::format("category '{}' does not exist", slide.categoryId));
+    if (auto ok = AcceptBlocks(slide.blocks); !ok.ok()) return ok;
     slide.id = it->id;
     *it = std::move(slide);
     return Ok();
@@ -290,6 +305,8 @@ Result<std::string> ShowEditor::AddBlock(Presentation& show, std::string_view sl
     auto slide = SlideOrError(show, slideId);
     if (!slide.ok()) return slide.error();
     Slide& s = *slide.value();
+    if (auto ok = CheckBlock(block, /*requireId=*/false); !ok.ok()) return ok.error();
+    if (s.blocks.size() >= kMaxBlocksPerList) return Invalid(std::format("a slide holds at most {} blocks", kMaxBlocksPerList));
     auto id = ClaimId(s.blocks, block.id, "item", "block");
     if (!id.ok()) return id.error();
     block.id = id.value();
@@ -304,6 +321,7 @@ Result<void> ShowEditor::UpdateBlock(Presentation& show, std::string_view slideI
     if (!slide.ok()) return slide.error();
     auto it = FindById(slide.value()->blocks, blockId);
     if (it == slide.value()->blocks.end()) return Missing("block", blockId);
+    if (auto ok = CheckBlock(block, /*requireId=*/false); !ok.ok()) return ok;
     block.id = it->id;
     *it = std::move(block);
     return Ok();

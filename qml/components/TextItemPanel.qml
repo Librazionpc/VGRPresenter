@@ -66,6 +66,8 @@ Column {
     readonly property string autoSize: root.meta.autoSize ?? "none"
     // How the text is SHOWN whatever was typed: "none" | "upper" | "lower" | "capitalize". The typed text itself is never changed.
     readonly property string textCase: root.meta.textCase ?? "none"
+    // The list style (an ENGINE list style key, see TextFormatService.listStyles): every line of the text becomes a list item.
+    readonly property string listStyle: root.meta.list ?? "none"
     readonly property real fontSize: root.meta.fontSize ?? 16
     readonly property real lineHeight: root.meta.lineHeight ?? 1.2
     readonly property real letterSpacing: root.meta.letterSpacing ?? 0
@@ -135,7 +137,7 @@ Column {
     Text {
         id: fitMeasure
         visible: false
-        text: root.target ? root.target.text : ""
+        text: root.target ? TextFormatService.applyList(root.target.text, root.listStyle) : ""
         font.family: root.fontFamily
         font.pixelSize: Math.max(1, root.fontSize)
         font.weight: root.bold ? Font.Bold
@@ -301,11 +303,11 @@ Column {
                 font.family: "Inter"
                 font.pixelSize: 12
             }
-            Text {
+            IconGlyph {
                 anchors.verticalCenter: parent.verticalCenter
-                text: "▾"
+                name: "chevronDown"
                 color: "#6b7280"
-                font.pixelSize: 10
+                width: 10; height: 10
             }
         }
 
@@ -419,6 +421,60 @@ Column {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: root.setMetaDiscrete("textCase", caseBtn.modelData.key)
+                    }
+                }
+            }
+        }
+    }
+
+    // List - like FreeShow's list option: every line becomes an item, marked with a bullet, a dash, numbers, letters ...
+    // The typed text is never changed (the marker is added when it is shown), and the styles come from the engine.
+    Column {
+        width: parent.width
+        spacing: 8
+
+        Text {
+            text: qsTr("LIST")
+            color: "#5c6475"
+            font.family: "Inter"
+            font.pixelSize: 9
+            font.weight: Font.Bold
+        }
+
+        Flow {
+            width: parent.width
+            spacing: 8
+
+            Repeater {
+                model: TextFormatService.listStyles()
+                delegate: Rectangle {
+                    id: listBtn
+                    required property var modelData
+                    readonly property bool active: root.listStyle === listBtn.modelData.key
+
+                    width: listBtn.modelData.key === "none" ? 64 : 48
+                    height: 32
+                    radius: 8
+                    color: listBtn.active ? "#6c5ce7" : (listArea.containsMouse ? "#20222c" : "#1a1c26")
+                    border.color: listBtn.active ? "#6c5ce7" : "#2a2f3a"
+                    border.width: 1
+                    Behavior on color { ColorAnimation { duration: 100 } }
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: listBtn.modelData.key === "none" ? qsTr("None") : listBtn.modelData.sample
+                        color: listBtn.active ? "#ffffff" : "#c8cdd9"
+                        font.family: "Inter"
+                        font.pixelSize: 12
+                        font.weight: listBtn.active ? Font.DemiBold : Font.Medium
+                    }
+
+                    MouseArea {
+                        id: listArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.setMetaDiscrete("list", listBtn.modelData.key)
                     }
                 }
             }

@@ -1,18 +1,19 @@
 import QtQuick
+import VGRPresenterUI
 
 // One row in the Edit screen's slide list. Pulled out of EditScreen.qml's
 // Repeater so the CRUD-row presentation (selection, hover, delete) is a
 // self-contained, reusable unit instead of an inline anonymous delegate —
 // it only knows about its own props/signals, not the model.
 //
-// The thumbnail is a LIVE mini-canvas: `previewItems` are the slide's item
-// objects straight from SlideCanvasStore (the same objects the canvas
-// edits), each drawn at its real x/y/width/height — scaled to fit — with
-// its own fill, border and radius, so moving/resizing/restyling on the
-// canvas re-renders the row the moment it happens. No hardcoded previews,
-// no JS shadow of the model. The model's own title/line1/line2/ref roles
-// turned out to be dead data (only a removed preview indirection ever read
-// them), so this component never took them.
+// The thumbnail is a LIVE render of the slide, in the same 16:9 proportions as the stage (like FreeShow's slide
+// thumbnails): `previewItems` are the slide's item objects straight from SlideCanvasStore - the very objects the canvas
+// edits - handed to the SAME DesignPreview the overlay/template cards use, which draws every kind the way the canvas does
+// (text with its weight / case / list / alignment / fitting, shapes with their fill and border, clocks and timers ticking,
+// camera / media tiles, the slide's background or the transparency checkerboard). Because the objects are live, moving,
+// typing or restyling on the canvas re-renders the row the moment it happens; there is no second, simplified drawing of
+// the slide to keep in step with the real one. The model's own title/line1/line2/ref roles turned out to be dead data,
+// so this component never took them.
 //
 // Literal colors, not Theme.* — same AOT-compiler limitation as
 // AppMenuBar.qml at this nesting depth.
@@ -30,25 +31,12 @@ Rectangle {
     // The slide's CanvasItem objects — bound live, see the header note. May
     // be empty (a brand-new slide).
     property var previewItems: []
+    // The slide's background colour (SlideCanvasStore.backgroundOf) - transparent shows the checkerboard, as on the canvas.
+    property var previewBackground: "transparent"
 
-    // The canvas's design size — items' x/y/width/height live in this space;
-    // the mini-canvas scales them to fit the thumbnail. The consumer binds
-    // these to the actual canvas item so the mapping can never drift.
-    property real canvasWidth: 754
-    property real canvasHeight: 428
-
-    // { kind, icon, label } entries — the SAME array EditScreen.qml's "+"
-    // Add Content menu and canvas placeholder use (passed straight through,
-    // not duplicated), so a non-text item's thumbnail shows its icon
-    // instead of rendering as an unlabeled blank tile.
-    property var contentTypes: []
-    function typeInfoFor(kind) {
-        for (let i = 0; i < root.contentTypes.length; ++i) {
-            if (root.contentTypes[i].kind === kind)
-                return root.contentTypes[i]
-        }
-        return { icon: "?", label: kind }
-    }
+    // Only a slide with a clock or a timer needs a ticking `now`; the rest never wake a timer.
+    readonly property bool hasLiveContent: (root.previewItems || []).some((it) => it.kind === "clock" || it.kind === "timer")
+    LiveClock { id: ticker; running: root.hasLiveContent }
 
     signal selected()
     signal duplicateRequested()
@@ -65,7 +53,8 @@ Rectangle {
     // (and the button fade out) the instant the cursor reached it.
     readonly property bool hovered: hoverArea.containsMouse || deleteArea.containsMouse
 
-    height: 124
+    // The thumbnail keeps the stage's proportions (754 x 428), so the row is as tall as the picture needs.
+    height: canvasThumb.height + 8
     width: 256
     border.color: root.active ? "#6c5ce7" : "#232530"
     border.width: root.active ? 1.2 : 1
@@ -84,134 +73,38 @@ Rectangle {
         id: canvasThumb
         x: 16
         y: 4
-        height: 108
         width: 224
+        height: Math.round((width - 2) * 428 / 754) + 2
         border.color: "#262a38"
         border.width: 1
         color: "#0d0f16"
-        radius: 8
-        clip: true
+        radius: 4
 
-        // Scale every item's real geometry into the thumbnail: fit the whole
-        // canvas inside, centered. All bindings read the LIVE item objects,
-        // so moving/resizing/restyling on the canvas updates this row in
-        // real time — same binding chain the text preview used, one visual
-        // level closer to the actual slide.
-        readonly property real fit: Math.min((width - 8) / root.canvasWidth,
-                                             (height - 8) / root.canvasHeight)
-        readonly property real offX: (width - root.canvasWidth * fit) / 2
-        readonly property real offY: (height - root.canvasHeight * fit) / 2
-
-        Repeater {
-            model: root.previewItems || []
-            delegate: Rectangle {
-                id: miniItem
-                required property var modelData
-                readonly property var st: modelData.style
-                // text always shows its (possibly empty) text; camera/media
-                // show the source/file name picked in their "+" menu popup
-                // once one's actually been set — same live value the canvas
-                // itself shows, not just a kind icon.
-                readonly property bool showValueText: miniItem.modelData.kind === "text"
-                    || (["camera", "media"].includes(miniItem.modelData.kind) && miniItem.modelData.text.length > 0)
-                readonly property bool showLiveValue: ["clock", "timer"].includes(miniItem.modelData.kind)
-                readonly property bool showIcon: !miniItem.showValueText && !miniItem.showLiveValue
-                    && miniItem.modelData.kind !== "shape"
-
-                x: canvasThumb.offX + modelData.x * canvasThumb.fit
-                y: canvasThumb.offY + modelData.y * canvasThumb.fit
-                width: Math.max(2, modelData.width * canvasThumb.fit)
-                height: Math.max(2, modelData.height * canvasThumb.fit)
-                radius: st ? Math.min(st.cornerRadius * canvasThumb.fit, width / 2) : 0
-                // A transparent fill renders as a neutral tile so the item's
-                // footprint stays legible in the thumbnail; a picked color
-                // (or an enabled border) shows as-is.
-                // Alpha test, not !== "transparent" — a QML color holding
-                // "transparent" reads back as #00000000, so the string
-                // comparison never matched (see EditScreen.qml's
-                // shapeContent.hasFill for the full note).
-                color: st && st.backgroundColor.a > 0
-                       ? st.backgroundColor : "#1e2130"
-                border.width: st && st.borderEnabled ? Math.max(1, st.borderWidth * canvasThumb.fit) : 1
-                border.color: st && st.borderEnabled ? st.borderColor : "#343a4e"
-
-                Text {
-                    visible: miniItem.showValueText
-                    anchors.fill: parent
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                    font.family: "Inter"
-                    // Same size ratio as the canvas label (16px at full
-                    // scale), floored so it never vanishes entirely.
-                    font.pixelSize: Math.max(3, 16 * canvasThumb.fit)
-                    color: "#f2f4fa"
-                    elide: Text.ElideRight
-                    text: miniItem.modelData.text
-                }
-
-                // Live-ticking value for clock/timer kinds — same
-                // LiveClock.qml shared component and math the canvas visual
-                // itself uses (see EditScreen.qml's clockContent/
-                // timerContent), so the thumbnail shows an actually-live
-                // clock/countdown instead of a frozen or generic icon.
-                LiveClock {
-                    id: miniTicker
-                    running: miniItem.showLiveValue
-                }
-
-                Text {
-                    visible: miniItem.modelData.kind === "clock"
-                    anchors.fill: parent
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                    font.family: "Inter"
-                    font.pixelSize: Math.max(3, 11 * canvasThumb.fit)
-                    color: "#9b8ff5"
-                    elide: Text.ElideRight
-                    text: miniTicker.formatClock(miniTicker.now,
-                        miniItem.modelData.meta.format !== "24",
-                        miniItem.modelData.meta.showSeconds !== false)
-                }
-
-                Text {
-                    visible: miniItem.modelData.kind === "timer"
-                    anchors.fill: parent
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                    font.family: "Inter"
-                    font.pixelSize: Math.max(3, 11 * canvasThumb.fit)
-                    color: "#9b8ff5"
-                    elide: Text.ElideRight
-                    text: miniTicker.formatDuration(miniTicker.timerSeconds(miniTicker.now,
-                        miniItem.modelData.meta.mode ?? "countdown",
-                        miniItem.modelData.meta.durationSeconds ?? 300,
-                        miniItem.modelData.meta.startedAt ?? Date.now()))
-                }
-
-                // Every remaining kind with no live value of its own
-                // (audio, or camera/media before a source is picked) — its
-                // icon glyph, same as the canvas's own generic placeholder,
-                // so it still reads as identifiable content instead of a
-                // blank tile. "shape" is excluded: its own style-driven
-                // fill/border above (the same one the canvas itself uses)
-                // already reads as real content without an icon on top.
-                Text {
-                    visible: miniItem.showIcon
-                    anchors.centerIn: parent
-                    color: "#9b8ff5"
-                    font.pixelSize: Math.max(6, Math.min(miniItem.width, miniItem.height) * 0.4)
-                    text: root.typeInfoFor(miniItem.modelData.kind).icon
-                }
-            }
+        DesignPreview {
+            x: 1
+            y: 1
+            width: canvasThumb.width - 2
+            blocks: root.previewItems || []
+            background: root.previewBackground
+            now: ticker.now
+            checkerSize: 32
         }
 
-        Text {
+        // A slide with nothing on it yet (over the background, so it reads on a colour or the checkerboard alike).
+        Rectangle {
             visible: (root.previewItems || []).length === 0
             anchors.centerIn: parent
-            color: "#4a4f60"
-            font.family: "Inter"
-            font.pixelSize: 9
-            text: qsTr("Empty slide")
+            width: emptyLabel.width + 14; height: emptyLabel.height + 6
+            radius: 3
+            color: "#cc0d0f16"
+            Text {
+                id: emptyLabel
+                anchors.centerIn: parent
+                color: "#8a91a3"
+                font.family: "Inter"
+                font.pixelSize: 9
+                text: qsTr("Empty slide")
+            }
         }
     }
 

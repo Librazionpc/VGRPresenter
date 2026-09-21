@@ -43,6 +43,9 @@ public:
     // Writes `path` (also becomes the document's path). Empty path = the path it
     // was opened from / last saved to.
     Result<void> Save(const std::string& path) override;
+    // Writes the show as it is NOW to `path` without making it the document's file: the path, the dirty flag and the
+    // model stay as they were (backups and crash-recovery copies are written this way).
+    Result<void> SaveCopy(const std::string& path);
     Result<void> Close() override;
     bool IsDirty() const override;
 
@@ -69,6 +72,8 @@ public:
     bool HasDocument() const;
 
 private:
+    Result<void> WriteFile(Presentation& snapshot, const std::string& target);
+
     mutable std::mutex mutex_;
     Presentation model_;
     std::string path_;

@@ -1,5 +1,7 @@
 #include "modules/rendering/RenderOutputs.hpp"
 
+#include "core/services/ServiceManager.hpp"
+#include "modules/settings/Telemetry.hpp"
 #include "platform/IPlatform.hpp"
 #include "platform/PlatformAccessor.hpp"
 
@@ -7,6 +9,8 @@
 #include <format>
 
 namespace bps::rendering {
+
+namespace settings = bps::settings;
 
 namespace {
 
@@ -126,6 +130,12 @@ void OutputManager::Distribute(const Frame& frame) {
             if (o->Enabled()) enabled.push_back(o);
     }
     for (const auto& o : enabled) (void)o->Present(frame);
+
+    // Feed the Telemetry module's output meter: how many enabled outputs just
+    // received a frame. Best-effort include (never fails; a no-op before the
+    // module initializes).
+    if (auto* t = bps::ServiceManager::Instance().Get<settings::Telemetry>(); t != nullptr)
+        t->OnOutputPresented(static_cast<int>(enabled.size()));
 }
 
 void OutputManager::Clear() {

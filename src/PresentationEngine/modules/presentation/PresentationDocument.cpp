@@ -57,22 +57,8 @@ Result<void> PresentationDocument::Open(const std::string& path) {
     return Ok();
 }
 
-Result<void> PresentationDocument::Save(const std::string& requestedPath) {
-    Presentation snapshot;
-    std::string target;
-    uint64_t savedRevision = 0;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!open_)
-            return Error::Make(Err::InvalidState, kModule, "no document is open");
-        target = requestedPath.empty() ? path_ : requestedPath;
-        snapshot = model_;
-        savedRevision = revision_;
-    }
-    if (target.empty())
-        return Error::Make(Err::InvalidArgument, kModule,
-                           "this show has never been saved — a file path is required");
-
+// Serializes `snapshot` and writes it to `target` (verified and crash-safe, see VgrFile). Touches no state of the document.
+Result<void> PresentationDocument::WriteFile(Presentation& snapshot, const std::string& target) {
     snapshot.path = target;
     snapshot.modifiedAt = std::chrono::system_clock::now();
     if (snapshot.createdAt.time_since_epoch().count() == 0) snapshot.createdAt = snapshot.modifiedAt;
@@ -107,7 +93,27 @@ Result<void> PresentationDocument::Save(const std::string& requestedPath) {
 
     // Verified, crash-safe write (see VgrFile): one complete file on disk at every
     // instant, the previous one restored if the swap fails.
-    if (auto w = vgr::VgrFile::Write(target, doc); !w.ok()) return w.error();
+    if (auto w = vgr::VgrFile::Write(target, doc); !w.ok()) return w;
+    return Ok();
+}
+
+Result<void> PresentationDocument::Save(const std::string& requestedPath) {
+    Presentation snapshot;
+    std::string target;
+    uint64_t savedRevision = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!open_)
+            return Error::Make(Err::InvalidState, kModule, "no document is open");
+        target = requestedPath.empty() ? path_ : requestedPath;
+        snapshot = model_;
+        savedRevision = revision_;
+    }
+    if (target.empty())
+        return Error::Make(Err::InvalidArgument, kModule,
+                           "this show has never been saved — a file path is required");
+
+    if (auto w = WriteFile(snapshot, target); !w.ok()) return w;
 
     std::lock_guard<std::mutex> lock(mutex_);
     path_ = target;
@@ -119,6 +125,17 @@ Result<void> PresentationDocument::Save(const std::string& requestedPath) {
         dirty_ = false;
     }
     return Ok();
+}
+
+Result<void> PresentationDocument::SaveCopy(const std::string& path) {
+    Presentation snapshot;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!open_) return Error::Make(Err::InvalidState, kModule, "no document is open");
+        snapshot = model_;
+    }
+    if (path.empty()) return Error::Make(Err::InvalidArgument, kModule, "a file path is required");
+    return WriteFile(snapshot, path);
 }
 
 Result<void> PresentationDocument::Close() {

@@ -5,8 +5,11 @@ QtObject {
     id: theme
 
     // ---- Brand ----
-    readonly property color accent: "#6C5CE7"
-    readonly property color accentLight: "#9b8ff5"
+    // The accent is the user's choice (Settings > General > Accent color): the ENGINE keeps it and SettingsService hands the colours over,
+    // so every Theme.accent / accentLight / accentSoft in the interface follows the choice. (Purple until the engine is up.)
+    readonly property color accent: SettingsService.accent
+    readonly property color accentLight: SettingsService.accentLight
+    readonly property color accentSoft: Qt.alpha(SettingsService.accent, 0.15)   // the tint behind a selected chip or row
 
     // ---- Semantic ----
     readonly property color danger: "#ff4d3d"

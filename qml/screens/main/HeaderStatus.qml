@@ -20,12 +20,9 @@ import VGRPresenterUI
 Item {
     id: root
 
-    // The fake window buttons this cluster used to draw are gone from the header (real ones
-    // live in WindowControls); kept switchable so the original 164px layout can be reused.
-    property bool showWindowControls: true
-
+    // (The window buttons live in WindowControls; this cluster is only the status light.)
     height: 32
-    width: showWindowControls ? 164 : 104
+    width: 104
 
     // Kernel truth, mirrored from the relay. "Running" = the kernel booted
     // and is serving; anything else shows a matching degraded/idle color.
@@ -102,31 +99,4 @@ Item {
         }
     }
 
-    // Original export geometry: fixed 60x12 container with icons at x 0/20/40
-    // (a Row with spacing drifts if the PNG sizes change).
-    Rectangle {
-        x: 104
-        y: 1
-        visible: root.showWindowControls
-
-        height: 12
-        width: 60
-
-        color: "transparent"
-
-        Image {
-            id: close
-            source: Qt.resolvedUrl("assets/close.png")
-        }
-        Image {
-            id: minimize
-            x: 20
-            source: Qt.resolvedUrl("assets/minimize.png")
-        }
-        Image {
-            id: maximize
-            x: 40
-            source: Qt.resolvedUrl("assets/maximize.png")
-        }
-    }
 }

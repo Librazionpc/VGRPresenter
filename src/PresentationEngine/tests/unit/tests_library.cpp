@@ -2,7 +2,13 @@
 //   ./bps_unit_tests library
 #include "TestHarness.hpp"
 
+#include <cmath>
+#include <limits>
+
 #include "modules/library/DesignCatalogs.hpp"
+#include "modules/presentation/BlockValidator.hpp"
+#include "modules/presentation/ShowEditor.hpp"
+#include "modules/presentation/TextFormat.hpp"
 
 namespace {
 
@@ -21,8 +27,9 @@ std::vector<std::string> Ids(const std::vector<pres::ContentBlock>& blocks) {
     return out;
 }
 
-pres::ContentBlock TextBlock(std::string text, double x = 10, double y = 20) {
+pres::ContentBlock TextBlock(std::string text, double x = 10, double y = 20, std::string id = {}) {
     pres::ContentBlock b;
+    b.id = std::move(id);   // empty for a block being ADDED (the engine issues its id); a canvas being SET carries ids
     b.kind = "text";
     b.text = std::move(text);
     b.x = x; b.y = y; b.width = 300; b.height = 90;
@@ -78,6 +85,8 @@ void TestOverlayLibrary() {
         // Transparent is really transparent (the recording frame is an outline, with no stand-in fill), and the clocks carry their colour.
         CHECK(library->Get("recording").value().blocks[0].style.backgroundColor == "transparent" && library->Get("recording").value().blocks[0].style.borderEnabled);
         CHECK(library->Get("clock").value().blocks[0].metaJson.find("\"color\":\"#ffffff\"") != std::string::npos);
+        // The library itself says which extra block kinds its designs may hold (the Edit screen's Add menu follows it).
+        CHECK(library->Config().extraBlockKinds == (std::vector<std::string>{ "vignette", "corners" }));
         // Loading does not write a file by itself.
         CHECK(!fs.Exists(file));
     }
@@ -157,7 +166,7 @@ void TestOverlayLibrary() {
     CHECK(library->SetContentType(thirdId, "song").ok() && library->Get(thirdId).value().contentType == "song");
 
     // ---- content: the canvas the Edit screen edits ----
-    CHECK(library->SetContent(thirdId, "#ff101010", { TextBlock("Hello \"quoted\"\nline") }).ok());
+    CHECK(library->SetContent(thirdId, "#ff101010", { TextBlock("Hello \"quoted\"\nline", 10, 20, "c1") }).ok());
     {
         const auto d = library->Get(thirdId).value();
         CHECK(d.background == "#ff101010" && d.blocks.size() == 1 && d.blocks[0].text == "Hello \"quoted\"\nline");
@@ -297,6 +306,7 @@ void TestTemplateLibrary() {
         CHECK(counts.all == shippedCount && counts.unlabeled == 0 && counts.byCategory.size() == 3);
     }
     CHECK(library->RestoreDefaults().value() == 0);
+    CHECK(library->Config().extraBlockKinds.empty());   // templates add no block kinds of their own
     // Every shipped template shows the slide's own content: at least one block is bound, to a field a slide has,
     // and it says which kind of show category it fits.
     for (const auto& t : config.defaultDesigns) {
@@ -338,7 +348,7 @@ void TestTemplateLibrary() {
     // A library template is a slide template a show can embed, `bind` and all.
     auto notes = library->Create("Sermon notes", songs.value().id);
     CHECK(notes.ok() && library->SetContentType(notes.value().id, "notes").ok());
-    CHECK(library->SetContent(notes.value().id, "#ff000000", { TextBlock("Body") }).ok());
+    CHECK(library->SetContent(notes.value().id, "#ff000000", { TextBlock("Body", 10, 20, "c1") }).ok());
     {
         const auto t = library->AsTemplate(notes.value().id);
         CHECK(t.ok() && t.value().id == notes.value().id && t.value().name == "Sermon notes" && t.value().contentType == "notes"
@@ -361,5 +371,151 @@ void TestTemplateLibrary() {
     }
 
     CHECK(lib::OverlayLibraryConfig().noun == "overlay" && lib::TemplateLibraryConfig().noun == "template");
+    (void)fs.RemoveAll(root);
+}
+
+// Text lists: the engine turns typed lines into list items (the Text tab's "List" option).
+void TestTextListFormat() {
+    namespace pf = bps::presentation;
+
+    // The styles: "none" first, keys unique, every real style has a sample marker.
+    const auto& styles = pf::ListStyles();
+    CHECK(!styles.empty() && styles[0].key == "none" && styles[0].sample.empty());
+    for (size_t i = 0; i < styles.size(); ++i) {
+        for (size_t j = i + 1; j < styles.size(); ++j) CHECK(styles[i].key != styles[j].key);
+        if (i > 0) CHECK(!styles[i].sample.empty() && !styles[i].label.empty());
+    }
+    auto sampleOf = [&](const char* key) {
+        for (const auto& s : styles) if (s.key == key) return s.sample;
+        return std::string("?");
+    };
+    CHECK(sampleOf("decimal") == "1." && sampleOf("disc") == "•" && sampleOf("dash") == "–" && sampleOf("lower-alpha") == "a."
+          && sampleOf("upper-roman") == "I." && sampleOf("decimal-leading-zero") == "01.");
+
+    // Every non-blank line becomes an item; blank lines are left alone and do not count.
+    CHECK(pf::ApplyList("one\ntwo\nthree", "decimal") == "1. one\n2. two\n3. three");
+    CHECK(pf::ApplyList("one\n\ntwo", "decimal") == "1. one\n\n2. two");
+    CHECK(pf::ApplyList("  \none", "disc") == "  \n• one");
+    CHECK(pf::ApplyList("a\nb", "dash") == "– a\n– b");
+    CHECK(pf::ApplyList("only", "square") == "▪ only");
+    CHECK(pf::ApplyList("", "decimal").empty());
+    CHECK(pf::ApplyList("a\n", "decimal") == "1. a\n");   // a trailing newline stays
+
+    // No list: the text is returned as it is.
+    CHECK(pf::ApplyList("a\nb", "") == "a\nb" && pf::ApplyList("a\nb", "none") == "a\nb" && pf::ApplyList("a\nb", "nonsense") == "a\nb");
+
+    // Markers: letters run on past z, roman numerals, leading zero, greek, and a number past what a style can spell falls back to digits.
+    CHECK(pf::ListMarker("lower-alpha", 1) == "a." && pf::ListMarker("lower-alpha", 26) == "z." && pf::ListMarker("lower-alpha", 27) == "aa."
+          && pf::ListMarker("upper-alpha", 28) == "AB.");
+    CHECK(pf::ListMarker("lower-roman", 4) == "iv." && pf::ListMarker("lower-roman", 9) == "ix." && pf::ListMarker("upper-roman", 14) == "XIV."
+          && pf::ListMarker("lower-roman", 1994) == "mcmxciv." && pf::ListMarker("lower-roman", 4000) == "4000.");
+    CHECK(pf::ListMarker("decimal-leading-zero", 7) == "07." && pf::ListMarker("decimal-leading-zero", 12) == "12.");
+    CHECK(pf::ListMarker("lower-greek", 1) == "α." && pf::ListMarker("lower-greek", 24) == "ω." && pf::ListMarker("lower-greek", 25) == "25.");
+    CHECK(pf::ListMarker("none", 1).empty() && pf::ListMarker("", 3).empty() && pf::ListMarker("bogus", 3).empty());
+    // Twelve lines number up to 12.
+    std::string twelve;
+    for (int i = 0; i < 12; ++i) twelve += (i ? "\nx" : "x");
+    CHECK(pf::ApplyList(twelve, "decimal").find("\n12. x") != std::string::npos);
+}
+
+// The engine's rules for content blocks: what BlockValidator accepts, and that every way blocks enter the engine uses it.
+void TestBlockValidator() {
+    namespace pf = bps::presentation;
+    namespace lib = bps::library;
+    auto good = [](std::string id = "item-1") {
+        pf::ContentBlock b;
+        b.id = std::move(id);
+        b.kind = "text";
+        b.text = "hi";
+        b.x = 10; b.y = 20; b.width = 100; b.height = 40;
+        b.style.backgroundColor = "#80000000";
+        b.style.borderColor = "white";
+        b.metaJson = R"({"fontSize":20})";
+        b.bind = "line1";
+        return b;
+    };
+    auto rejects = [&](auto change, const char* why) {
+        pf::ContentBlock b = good();
+        change(b);
+        const auto r = pf::CheckBlock(b, /*requireId=*/true);
+        CHECK(!r.ok() && r.error().code == bps::Err::InvalidArgument);
+        if (!r.ok()) CHECK(r.error().message.find(why) != std::string::npos);
+    };
+
+    // A sound block passes, with or without an id (an added block has none yet).
+    CHECK(pf::CheckBlock(good(), true).ok() && pf::ValidateBlock(good(), true).empty());
+    { auto b = good(""); CHECK(pf::CheckBlock(b, false).ok() && !pf::CheckBlock(b, true).ok()); }
+    // The colours the UI produces, all accepted.
+    for (const char* c : { "transparent", "#fff", "#8fff", "#ff0b57a2", "#0b57a2", "red", "dodgerblue" }) CHECK(pf::IsColorText(c));
+    for (const char* c : { "", "#", "#12", "#12345", "#gggggg", "rgb(1,2,3)", "12", "#ff0b57a2ff" }) CHECK(!pf::IsColorText(c));
+
+    // Every rule, one at a time.
+    rejects([](auto& b) { b.kind = ""; }, "kind");
+    rejects([](auto& b) { b.kind = "bad kind!"; }, "kind");
+    rejects([](auto& b) { b.id = std::string(81, 'x'); }, "id");
+    rejects([](auto& b) { b.x = std::nan(""); }, "x and y");
+    rejects([](auto& b) { b.y = 1e9; }, "x and y");
+    rejects([](auto& b) { b.width = -1; }, "width");
+    rejects([](auto& b) { b.height = std::numeric_limits<double>::infinity(); }, "width and height");
+    rejects([](auto& b) { b.text = std::string(200001, 'a'); }, "text");
+    rejects([](auto& b) { b.style.padding = -3; }, "padding");
+    rejects([](auto& b) { b.style.cornerRadius = std::nan(""); }, "corner radius");
+    rejects([](auto& b) { b.style.backgroundColor = "not a colour"; }, "background");
+    rejects([](auto& b) { b.style.borderColor = "#zzz"; }, "border");
+    rejects([](auto& b) { b.style.borderStyle = "wavy"; }, "border style");
+    rejects([](auto& b) { b.metaJson = "{ nope"; }, "JSON object");
+    rejects([](auto& b) { b.metaJson = "[1,2]"; }, "JSON object");
+    rejects([](auto& b) { b.bind = "has space"; }, "field name");
+    // Several problems: the first is named and the rest counted.
+    { auto b = good(); b.kind = ""; b.width = -1;
+      const auto r = pf::CheckBlock(b, true);
+      CHECK(!r.ok() && r.error().message.find("block 'item-1'") != std::string::npos && r.error().message.find("and 1 more") != std::string::npos); }
+
+    // A list: unique ids, at most kMaxBlocksPerList.
+    CHECK(pf::CheckBlocks({ good("a"), good("b") }).ok() && pf::CheckBlocks({}).ok());
+    { const auto r = pf::CheckBlocks({ good("a"), good("a") });
+      CHECK(!r.ok() && r.error().message.find("same id") != std::string::npos); }
+    { std::vector<pf::ContentBlock> many;
+      for (size_t i = 0; i <= pf::kMaxBlocksPerList; ++i) many.push_back(good("b" + std::to_string(i)));
+      CHECK(!pf::CheckBlocks(many).ok()); many.pop_back(); CHECK(pf::CheckBlocks(many).ok()); }
+
+    // ---- a design library refuses bad content and keeps what it had ----
+    auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    const std::string root = "/tmp/bps_block_validation";
+    (void)fs.RemoveAll(root);
+    auto library = lib::MakeOverlayLibrary(root + "/overlays.json");
+    CHECK(library->Load().ok());
+    auto made = library->Create("Probe");
+    CHECK(made.ok());
+    const std::string id = made.value().id;
+    CHECK(library->SetContent(id, "#ff101010", { good("a"), good("b") }).ok());
+    const auto before = library->Get(id).value();
+    CHECK(!library->SetContent(id, "", { good("a"), good("a") }).ok());                                   // duplicate ids
+    { auto nan = good("c"); nan.width = std::nan(""); CHECK(!library->SetContent(id, "", { nan }).ok()); }   // not a number
+    CHECK(!library->SetContent(id, "no such colour!", { good("a") }).ok());                              // bad background
+    CHECK(!library->SetContent(id, "", { good("") }).ok());                                              // a settled canvas has ids
+    { const auto after = library->Get(id).value(); CHECK(after.blocks.size() == 2 && after.background == before.background && after.blocks[0].id == "a"); }
+    { auto bad = good(""); bad.style.backgroundColor = "??"; CHECK(!library->AddBlock(id, bad).ok()); }
+    CHECK(library->Get(id).value().blocks.size() == 2);
+    { auto fresh = good(""); const auto added = library->AddBlock(id, fresh); CHECK(added.ok() && library->Get(id).value().blocks.size() == 3); }
+
+    // ---- ShowEditor: every way a block or a list of blocks enters a show is checked ----
+    pf::Presentation show;
+    pf::Slide slide;
+    slide.title = "s";
+    auto slideId = pf::ShowEditor::AddSlide(show, slide);
+    CHECK(slideId.ok());
+    CHECK(pf::ShowEditor::AddBlock(show, slideId.value(), good("")).ok());
+    { auto bad = good(""); bad.width = -5; CHECK(!pf::ShowEditor::AddBlock(show, slideId.value(), bad).ok()); }
+    CHECK(show.slides[0].blocks.size() == 1);
+    { pf::Slide replaced; replaced.blocks = { good("x"), good("x") };
+      CHECK(!pf::ShowEditor::UpdateSlide(show, slideId.value(), replaced).ok()); CHECK(show.slides[0].blocks.size() == 1); }
+    { pf::Slide replaced; replaced.blocks = { good("x"), good("") };                                       // a block with no id is given one
+      CHECK(pf::ShowEditor::UpdateSlide(show, slideId.value(), replaced).ok());
+      CHECK(show.slides[0].blocks.size() == 2 && !show.slides[0].blocks[1].id.empty() && show.slides[0].blocks[1].id != "x"); }
+    { pf::SlideTemplate tmpl; tmpl.name = "t"; auto bad = good("a"); bad.kind = ""; tmpl.blocks = { bad };
+      CHECK(!pf::ShowEditor::AddTemplate(show, tmpl).ok()); tmpl.blocks = { good("a") }; CHECK(pf::ShowEditor::AddTemplate(show, tmpl).ok()); }
+    { pf::Overlay overlay; overlay.name = "o"; auto bad = good("a"); bad.x = std::nan(""); overlay.blocks = { bad };
+      CHECK(!pf::ShowEditor::AddOverlay(show, overlay).ok()); overlay.blocks = { good("a") }; CHECK(pf::ShowEditor::AddOverlay(show, overlay).ok()); }
     (void)fs.RemoveAll(root);
 }

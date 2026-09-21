@@ -809,13 +809,20 @@ Rectangle {
         { kind: "timer",  icon: "timer",   label: "Timer" },
         { kind: "clock",  icon: "clock",   label: "Clock" }
     ]
-    // What the Add menu offers. An OVERLAY also gets the two whole-screen treatments only overlays use.
-    readonly property var contentTypes: root.designMode && showSession.designKind === "overlay"
-        ? root.baseContentTypes.concat([
-            { kind: "vignette", icon: "layers",         label: "Vignette" },
-            { kind: "corners",  icon: "layoutTemplate", label: "Corners" }
-        ])
-        : root.baseContentTypes
+    // How the extra block kinds a library declares are shown in the Add menu (which kinds exist is the ENGINE's call -
+    // DesignLibraryConfig::extraBlockKinds, via the service; this is only their icon and label).
+    readonly property var extraKindLook: ({
+        vignette: { icon: "layers",         label: "Vignette" },
+        corners:  { icon: "layoutTemplate", label: "Corners" }
+    })
+    // What the Add menu offers: the usual kinds, plus whatever the open design's library allows on top of them.
+    readonly property var contentTypes: {
+        const service = root.designMode ? showSession.designService : null
+        if (!service)
+            return root.baseContentTypes
+        const extra = service.extraBlockKinds.map((k) => Object.assign({ kind: k, icon: "shape", label: k }, root.extraKindLook[k] ?? {}))
+        return root.baseContentTypes.concat(extra)
+    }
 
     // ---- Middle toolbar ----
     Rectangle {
@@ -1204,6 +1211,10 @@ Rectangle {
                 width: modelData.width
                 height: modelData.height
                 style: modelData.style
+                // A circle / line / glyph shape, a vignette and screen corners draw their own body (see below); the box behind
+                // every other kind is the item's fill and border.
+                drawsOwnBody: modelData.kind === "vignette" || modelData.kind === "corners"
+                    || (modelData.kind === "shape" && ["circle", "line", "triangle", "arrow", "star", "hexagon"].includes(modelData.meta.shapeType ?? "rectangle"))
                 selected: root.isCanvasObjectSelected(modelData.key)
                 // Sourced from whichever content MouseArea is actually
                 // present for this kind — not a second MouseArea of this
@@ -1253,7 +1264,7 @@ Rectangle {
                         id: shrinkMeasure
                         visible: false
                         width: itemTextLabel.width
-                        text: itemTextLabel.text
+                        text: itemTextLabel.shownText          // what is on screen, list markers included
                         font.family: itemTextLabel.tmeta.fontFamily ?? "Inter"
                         font.pixelSize: itemTextLabel.tmeta.fontSize ?? 16
                         font.weight: itemTextLabel.tmeta.bold ? Font.Bold
@@ -1337,6 +1348,8 @@ Rectangle {
                             : Text.AlignHCenter
                     }
                     text: canvasItemObject.modelData.text
+                    // The list style (Text tab): every line a list item, marked by the ENGINE's formatting - display only.
+                    listStyle: itemTextLabel.tmeta.list ?? ""
                     // (The box is the master in every auto-size mode — see
                     // autoSizeMode above — so nothing here resizes modelData
                     // geometry from content size anymore; the box-resizing
@@ -1424,7 +1437,7 @@ Rectangle {
                             PathRectangle { width: camContent.width; height: camContent.height; radius: 8 }
                         }
                     }
-                    Image { x: 8; y: 8; source: Qt.resolvedUrl("assets/cam_dot.png") }
+                    Rectangle { x: 8; y: 8; width: 6; height: 6; radius: 3; color: "#ff4d3d" }   // the LIVE dot
                     Text {
                         x: 18; y: 7
                         color: "#e2e8f0"
@@ -1435,7 +1448,7 @@ Rectangle {
                     }
                     Rectangle { x: 10; y: 24; height: 34; width: 36; color: "#14503a"; radius: 4 }
                     Rectangle { x: 30; y: 24; height: 34; width: 24; color: "#0f3a2c"; radius: 4 }
-                    Image { x: 96; y: 10; source: Qt.resolvedUrl("assets/cam_lens.png") }
+                    Rectangle { x: 96; y: 10; width: 8; height: 8; radius: 4; color: "#0b1f17"; border.width: 1; border.color: "#1d5c46" }   // the lens
                     Text {
                         x: 10; y: 68
                         color: "#eef0f6"
@@ -2025,17 +2038,15 @@ Rectangle {
         enabled: root.hasActiveSlide
         opacity: root.hasActiveSlide ? 1 : 0.35
 
-        Text {
+        // A "+" rotated 45 degrees reads as an "X": the open state is the same glyph turned, not a different character.
+        IconGlyph {
             anchors.centerIn: parent
+            name: "plus"
             color: "#ffffff"
-            font.family: "Inter"
-            font.pixelSize: 22
-            // A "+" rotated 45° reads as an "X" — the ground truth exports
-            // this literally as a pre-rotated glyph for the open state
-            // rather than swapping characters.
+            strokeWidth: 1.2
+            scale: 2.2
             rotation: root.addMenuOpen ? 45 : 0
             Behavior on rotation { NumberAnimation { duration: 120 } }
-            text: "＋"
         }
 
         MouseArea {
@@ -2274,14 +2285,10 @@ Rectangle {
                 delegate: SlideListItem {
                     // Live thumbnail: the slide's items straight from the
                     // per-slide store — the same objects the canvas edits,
-                    // so a row re-renders the moment its content does.
+                    // so a row re-renders the moment its content does —
+                    // over the slide's own background.
                     previewItems: slideStore.items(slideId)
-                    contentTypes: root.contentTypes
-                    // The design space the items' coordinates live in — the
-                    // canvas's actual on-screen size, so the mini-canvas
-                    // scale can never drift from what you see while editing.
-                    canvasWidth: mCanvas.width
-                    canvasHeight: mCanvas.height
+                    previewBackground: slideStore.backgroundOf(slideId)
                     onSelected: slideModel.selectSlide(index)
                     onDuplicateRequested: showSession.duplicateSlide(index)
                     onDeleteRequested: showSession.removeSlide(index)

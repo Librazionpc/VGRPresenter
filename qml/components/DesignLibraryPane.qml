@@ -101,6 +101,7 @@ Item {
     property string menuCurrent: ""
     function openCategoryMenu(design, anchorItem) {
         const p = anchorItem.mapToItem(root, 0, anchorItem.height + 4)
+        cardMenu.visible = false
         menuDesign = design.id
         menuCurrent = design.category
         categoryMenu.x = Math.max(4, Math.min(root.width - categoryMenu.width - 4, p.x + anchorItem.width - categoryMenu.width))
@@ -238,6 +239,8 @@ Item {
                 onCategoryRequested: (anchorItem) => root.openCategoryMenu(modelData, anchorItem)
                 onRenameRequested: root.askName("rename", qsTr("Rename %1").arg(root.noun), modelData.name, modelData.id)
                 onDuplicateRequested: service.duplicateDesign(modelData.id)
+                onRenameCommitted: (name) => service.renameDesign(modelData.id, name)
+                onContextMenuRequested: (source, mx, my) => root.openCardMenu(modelData, source, mx, my)
                 onDeleteRequested: {
                     root.deleteTarget = modelData.id
                     root.deleteName = modelData.name
@@ -368,6 +371,71 @@ Item {
                         service.setDesignCategory(designId, modelData.id)
                     }
                 }
+            }
+        }
+    }
+
+    // ---- Right-click menu on a card: every action of the hover buttons ----------------------------------
+    // Edit / Rename / Duplicate, then "Move to ..." for each category (a tick marks where it is now), then Delete. Built when it
+    // opens, so it always lists the current categories.
+    property var cardMenuDesign: null
+    property var cardMenuActions: ({})     // menu label -> "edit" | "rename" | "duplicate" | "delete" | "file:<category id>"
+    function openCardMenu(design, source, mx, my) {
+        root.menuDesign = ""                 // the "file in" popup, if it is open, gives way
+        const items = []
+        const actions = {}
+        const add = (label, action, extra) => {
+            items.push(Object.assign({ label: label }, extra || {}))
+            actions[label] = action
+        }
+        add(qsTr("Edit"), "edit")
+        add(qsTr("Rename"), "rename")
+        add(qsTr("Duplicate"), "duplicate")
+        items.push({ divider: true })
+        add(qsTr("Move to Unlabeled"), "file:", design.category === "" ? { trailing: "\u2713" } : {})
+        const cats = service.categories
+        for (let i = 0; i < cats.length; ++i)
+            add(qsTr("Move to %1").arg(cats[i].name), "file:" + cats[i].id, design.category === cats[i].id ? { trailing: "\u2713" } : {})
+        items.push({ divider: true })
+        add(qsTr("Delete"), "delete", { danger: true })
+        root.cardMenuDesign = design
+        root.cardMenuActions = actions
+        cardMenu.model = items
+        cardMenu.openAt(source, mx, my, root)
+        // The panel's height is only known once its rows have laid out; placing it again then keeps a tall menu inside the window.
+        Qt.callLater(function () { if (cardMenu.visible) cardMenu.openAt(source, mx, my, root) })
+    }
+
+    // Any click or scroll outside the menu closes it. The menu floats at WINDOW level (DropdownPanel lifts itself there), so its
+    // catcher has to cover the whole window too - a pane-sized one left the menu hanging over other screens.
+    MenuCatcher { menu: cardMenu }
+    // ...and it goes when this tab does.
+    onVisibleChanged: if (!visible) cardMenu.visible = false
+    DropdownPanel {
+        id: cardMenu
+        objectName: "selfTestDesignCardMenu"
+        visible: false
+        z: 25
+        maxHeight: 320
+        onItemActivated: (label) => {
+            cardMenu.visible = false           // first: the change below rebuilds the grid this menu was opened from
+            const action = root.cardMenuActions[label]
+            const design = root.cardMenuDesign
+            if (!action || !design)
+                return
+            if (action === "edit") {
+                root.designOpenRequested(design.id)
+            } else if (action === "rename") {
+                root.askName("rename", qsTr("Rename %1").arg(root.noun), design.name, design.id)
+            } else if (action === "duplicate") {
+                service.duplicateDesign(design.id)
+            } else if (action === "delete") {
+                root.deleteTarget = design.id
+                root.deleteName = design.name
+                root.deletingCategory = false
+                confirm.open()
+            } else if (action.indexOf("file:") === 0) {
+                service.setDesignCategory(design.id, action.substring(5))
             }
         }
     }

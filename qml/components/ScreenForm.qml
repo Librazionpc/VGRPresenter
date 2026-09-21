@@ -201,14 +201,14 @@ Item {
                         font.pixelSize: Theme.textSm
                     }
 
-                    Text {
+                    IconGlyph {
                         anchors.right: parent.right
                         anchors.rightMargin: 12
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "⌄"
+                        name: "chevronDown"
                         color: Theme.textMuted
-                        font.pixelSize: Theme.textMd
-                    }
+                        width: 12; height: 12
+                        }
 
                     MouseArea {
                         anchors.fill: parent
@@ -247,14 +247,14 @@ Item {
                         font.pixelSize: Theme.textSm
                     }
 
-                    Text {
+                    IconGlyph {
                         anchors.right: parent.right
                         anchors.rightMargin: 12
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "⌄"
+                        name: "chevronDown"
                         color: Theme.textMuted
-                        font.pixelSize: Theme.textMd
-                    }
+                        width: 12; height: 12
+                        }
 
                     MouseArea {
                         anchors.fill: parent

@@ -92,6 +92,14 @@ ApplicationWindow {
         onDesignClosed: window.currentView = "show"
     }
 
+    // What the Settings > General switches do to the running app: start-up (minimized, last show), autosave, backups,
+    // crash recovery, close-to-tray. The engine keeps the settings; this carries them out.
+    AppBehaviors {
+        id: behaviors
+        window: window
+        editScreen: editScreen
+    }
+
     // A design is only edited while the Edit screen is showing: leaving it (the Show tab) closes it, and the show that was
     // open comes back on the canvas.
     onCurrentViewChanged: {
@@ -236,8 +244,16 @@ ApplicationWindow {
     // Closing the window with unsaved changes asks first (once confirmed, it closes).
     property bool closeConfirmed: false
     onClosing: (close) => {
-        if (window.closeConfirmed || !ShowService.hasShow || !ShowService.showDirty)
+        // Close to tray (Settings > General > Preferences): the window hides and the app keeps running; the tray icon quits it.
+        if (!window.closeConfirmed && behaviors.hidesToTray()) {
+            close.accepted = false
+            window.hide()
             return
+        }
+        if (window.closeConfirmed || !ShowService.hasShow || !ShowService.showDirty) {
+            behaviors.cleanExit()
+            return
+        }
         close.accepted = false
         unsavedDialog.ask(function () {
             window.closeConfirmed = true
@@ -346,7 +362,36 @@ ApplicationWindow {
         id: selfTestStage18
         interval: 500
         onTriggered: {
+            // Grab alone this tick: grabToImage is async, so scrolling in the
+            // same onTriggered lands the scroll inside the capture.
             SelfTest.grab("selfTestSettingsShell", "shot_settings_general.png")
+            selfTestStage18b.restart()
+        }
+    }
+    Timer {
+        id: selfTestStage18b
+        interval: 400
+        onTriggered: {
+            // Scroll General to its bottom (the Libraries section) and grab it:
+            const fl = SelfTest.findItem("selfTestGeneralFlick")
+            if (fl) fl.contentY = Math.max(0, fl.contentHeight - fl.height)
+            SelfTest.grab("selfTestSettingsShell", "shot_settings_general_bottom.png")
+            // Behavioral probe: click the templates row's Restore button (row
+            // center + half row width minus the button's ~62px inset). With
+            // nothing deleted the expected toast is "All the default templates
+            // are already here." — a toast at all proves the row's wiring.
+            const c = SelfTest.itemCenter("selfTestRestoreTemplates")
+            console.log("[SELFTEST] restore row center:", c)
+            if (c.x || c.y)
+                SelfTest.click(c.x + 433, c.y)
+            selfTestStage18c.restart()
+        }
+    }
+    Timer {
+        id: selfTestStage18c
+        interval: 500
+        onTriggered: {
+            SelfTest.grab("", "shot_restore_toast.png")
             // Quit on a LATER tick: grabToImage saves asynchronously, and
             // quitting this frame killed the last save (missing soon shot).
             selfTestStage19.restart()
@@ -409,7 +454,9 @@ ApplicationWindow {
 
     Component {
         id: generalScreenComponent
-        GeneralScreen {}
+        GeneralScreen {
+            onSectionRequested: (key) => window.settingsSection = key
+        }
     }
 
     Component {

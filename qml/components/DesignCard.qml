@@ -4,10 +4,11 @@ import VGRPresenterUI
 // One DESIGN - an overlay or a template - in a library grid: a 16:9 preview of its blocks
 // (DesignPreview, drawn from what the ENGINE keeps) over a dark stage, and its name under it.
 // Pointing at the card shows small actions on the preview - open it in the Edit screen, file it
-// in a category, rename, duplicate, delete - each reported as a signal; the card changes nothing itself.
+// in a category, rename, duplicate, delete - and a RIGHT-CLICK on the card offers the same actions as a menu
+// (contextMenuRequested; the host builds and shows the menu). Each is reported as a signal; the card changes
+// nothing itself.
 //
-// An overlay that came with the app carries a small "Default" chip and one that stays on screen when
-// the slide changes a padlock. A template's card is identical without the padlock.
+// A design that stays on screen when the slide changes (locked) carries a small padlock.
 Item {
     id: root
 
@@ -24,6 +25,25 @@ Item {
     signal renameRequested()
     signal duplicateRequested()
     signal deleteRequested()
+    // Right-click: `source` is this card and (mx, my) the point in its coordinates - the host opens its menu there.
+    signal contextMenuRequested(Item source, real mx, real my)
+    // The name was edited in place (double-click it): the new, non-empty, changed name.
+    signal renameCommitted(string name)
+
+    function beginRename() {
+        nameEdit.text = root.design.name !== undefined ? root.design.name : ""
+        nameEdit.visible = true
+        nameEdit.forceActiveFocus()
+        nameEdit.selectAll()
+    }
+    function finishRename(commit) {
+        if (!nameEdit.visible)
+            return
+        const text = nameEdit.text.trim()
+        nameEdit.visible = false            // (losing focus calls this again; the guard above ends that)
+        if (commit && text !== "" && text !== root.design.name)
+            root.renameCommitted(text)
+    }
 
     // Underneath everything, so the actions on the preview (which sit above it) get their clicks.
     PositionHoverArea {
@@ -132,25 +152,14 @@ Item {
                 }
             }
 
-            // chips: what ships, and what stays on screen
+            // what stays on screen when the slide changes
             Row {
-                visible: root.design.isDefault === true || root.design.locked === true
+                visible: root.design.locked === true
                 anchors.left: parent.left
                 anchors.top: parent.top
                 anchors.margins: 6
                 spacing: 4
 
-                Rectangle {
-                    visible: root.design.isDefault === true
-                    width: chipRow.implicitWidth + 12; height: 18; radius: 9
-                    color: "#20222e"
-                    Row {
-                        id: chipRow
-                        anchors.centerIn: parent
-                        spacing: 4
-                        Text { text: qsTr("Default"); color: "#8f96a8"; font.family: Theme.fontFamily; font.pixelSize: 10 }
-                    }
-                }
                 Rectangle {
                     visible: root.design.locked === true
                     width: 18; height: 18; radius: 9
@@ -160,7 +169,7 @@ Item {
             }
         }
 
-        // ---- name ----
+        // ---- name (double-click to rename) ----
         Item {
             width: parent.width
             height: 30
@@ -171,11 +180,55 @@ Item {
                 anchors.leftMargin: 8
                 anchors.verticalCenter: parent.verticalCenter
                 width: parent.width - 16
+                visible: !nameEdit.visible
                 text: root.design.name !== undefined ? root.design.name : ""
                 color: Theme.textPrimary
                 font.family: Theme.fontFamily; font.pixelSize: 12
                 elide: Text.ElideRight
             }
+
+            Rectangle {
+                visible: nameEdit.visible
+                anchors.fill: parent
+                anchors.margins: 3
+                radius: 4
+                color: "#0f1015"
+                border.width: 1
+                border.color: "#6c5ce7"
+            }
+            TextInput {
+                id: nameEdit
+                objectName: "selfTestDesignNameEdit"
+                visible: false
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.leftMargin: 8
+                anchors.rightMargin: 8
+                anchors.verticalCenter: parent.verticalCenter
+                color: Theme.textPrimary
+                font.family: Theme.fontFamily; font.pixelSize: 12
+                selectByMouse: true
+                clip: true
+                onAccepted: root.finishRename(true)
+                Keys.onEscapePressed: root.finishRename(false)
+                onActiveFocusChanged: if (!activeFocus) root.finishRename(true)
+            }
+
+            MouseArea {
+                objectName: "selfTestDesignName"
+                anchors.fill: parent
+                enabled: !nameEdit.visible
+                acceptedButtons: Qt.LeftButton
+                onDoubleClicked: root.beginRename()
+            }
         }
+    }
+
+    // Right-click: the same actions as the hover buttons, for people who reach for the context menu. Accepts only the
+    // right button, so a left click still reaches the card and the action buttons underneath.
+    MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.RightButton
+        onClicked: (mouse) => root.contextMenuRequested(root, mouse.x, mouse.y)
     }
 }
