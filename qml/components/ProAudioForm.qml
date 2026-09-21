@@ -59,11 +59,17 @@ Column {
         qsTr("Always passing signal"),
         qsTr("Enabled automatically when signal is detected"),
         qsTr("Enabled until signal ends")
-    ][root.mode]
+    ][root.mode] || ""   // out-of-range mode reads blank, not "undefined"
 
     // Channel enable-state — an exceptions array over a default-on base,
     // copy-on-written so re-assignment re-fires the row bindings.
     property var channelOn: []
+    // A shrinking channel count (a different device picked) must not leave
+    // stale exceptions behind for channels that no longer exist.
+    onChannelsChanged: {
+        if (root.channelOn.length > root.channels)
+            root.channelOn = root.channelOn.slice(0, root.channels)
+    }
     function channelEnabled(i) { return root.channelOn[i] !== false }
     function setChannelEnabled(i, on) {
         if (root.channelEnabled(i) === on) return
@@ -476,6 +482,17 @@ Column {
                 // Per-channel phase offset — rows never pulse in unison.
                 readonly property real phase: chRow.index * 0.37
 
+                // Meter wobble phase — ONE timer per channel row shared by all 24
+                // dots (was a Timer per dot: 24 x channels of them).
+                property real cycle: 0
+                readonly property bool signalOn: chRow.chOn && root.meterLevel > 0 && !root.muted
+                Timer {
+                    interval: 140
+                    running: chRow.signalOn
+                    repeat: true
+                    onTriggered: chRow.cycle = (chRow.cycle + 0.11) % 2
+                }
+
                 // Checkbox — the reference's plain square check.
                 Rectangle {
                     id: box
@@ -527,6 +544,8 @@ Column {
                     anchors.rightMargin: 16
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: 2
+                    clip: true
+                    visible: width > 24   // a squeezed dialog drops the strip instead of overflowing it
 
                     readonly property int segs: 24
                     // Segments widen to share the strip, so the meter fills
@@ -543,15 +562,13 @@ Column {
                             // threshold this dot represents.
                             readonly property real pos: dot.index / (meterRow.segs - 1)
                             width: meterRow.segW; height: 12; radius: 2
-                            property real cycle: 0
-                            readonly property bool signalOn: chRow.chOn && root.meterLevel > 0 && !root.muted
                             // A dot is LIT when the level has reached it —
                             // with a small wobble on the boundary so the
                             // leading edge dances like a real VU needle.
-                            readonly property real env: !dot.signalOn ? 0
+                            readonly property real env: !chRow.signalOn ? 0
                                 : Math.max(0, Math.min(1,
                                     root.meterLevel - dot.pos
-                                    + Math.sin(dot.cycle + dot.index * 0.8) * 0.06))
+                                    + Math.sin(chRow.cycle + dot.index * 0.8) * 0.06))
                             readonly property bool lit: dot.env > 0.02
                             // The green→yellow→red ramp is ALWAYS visible
                             // (dimmed) — the meter reads as a scale even at
@@ -562,13 +579,6 @@ Column {
                                  : "#ff4d3d"
                             opacity: dot.lit ? 1 : 0.22
                             Behavior on opacity { NumberAnimation { duration: 90 } }
-
-                            Timer {
-                                interval: 140
-                                running: dot.signalOn
-                                repeat: true
-                                onTriggered: dot.cycle = (dot.cycle + 0.11) % 2
-                            }
                         }
                     }
                 }

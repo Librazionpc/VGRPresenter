@@ -22,10 +22,8 @@ Result<void> UndoRedoManager::ExecuteCommand(std::shared_ptr<ICommand> cmd) {
     cmd->Execute();
     Entry e;
     e.label = cmd->Label();
-    std::string label = e.label;   // copy before the move (use-after-move guard)
     e.commands.push_back(std::move(cmd));
     PushUndo(std::move(e));
-    (void)EventBus::Instance().Publish(events::UndoPerformed{label, Depth()});
     return Ok();
 }
 
@@ -55,7 +53,6 @@ Result<void> UndoRedoManager::EndGroup() {
     // Execute the whole group now that it is complete.
     for (auto& c : group.commands) c->Execute();
     PushUndo(std::move(group));
-    (void)EventBus::Instance().Publish(events::UndoPerformed{group.label, Depth()});
     return Ok();
 }
 
@@ -92,8 +89,15 @@ Result<void> UndoRedoManager::Undo() {
     }
     // Undo in reverse order (groups undo their last command first).
     for (auto it = e.commands.rbegin(); it != e.commands.rend(); ++it) (*it)->Undo();
-    std::lock_guard<std::mutex> lock(mutex_);
-    redo_.push_back(std::move(e));
+    std::string label = e.label;   // copy before the move into redo_
+    size_t depth = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        redo_.push_back(std::move(e));
+        depth = undo_.size();
+    }
+    // Published AFTER the locks are released (subscribers may call back in).
+    (void)EventBus::Instance().Publish(events::UndoPerformed{std::move(label), depth});
     return Ok();
 }
 
@@ -107,8 +111,14 @@ Result<void> UndoRedoManager::Redo() {
         redo_.pop_back();
     }
     for (auto& c : e.commands) c->Redo();
-    std::lock_guard<std::mutex> lock(mutex_);
-    undo_.push_back(std::move(e));
+    std::string label = e.label;   // copy before the move into undo_
+    size_t depth = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        undo_.push_back(std::move(e));
+        depth = undo_.size();
+    }
+    (void)EventBus::Instance().Publish(events::RedoPerformed{std::move(label), depth});
     return Ok();
 }
 

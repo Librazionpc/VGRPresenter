@@ -67,7 +67,12 @@ Result<void> ContentManager::Initialize() {
     subscriptions_.push_back(bus.Subscribe<events::ConfigHotReload>(
         [this](const events::ConfigHotReload&) { (void)Reload(); }));
     subscriptions_.push_back(bus.Subscribe<events::ResourcePressureHigh>(
-        [this](const events::ResourcePressureHigh&) { OnPressureHigh(); }));
+        [this](const events::ResourcePressureHigh& e) {
+            // Cache shrinking answers MEMORY pressure only (a busy CPU is not a reason to
+            // throw away thumbnails).
+            if (e.resource == "memory")
+                OnPressureHigh();
+        }));
 
     initialized_.store(true);
     logger.Info(std::format("ContentManager ready: {} importers, {} exporters, {} assets",

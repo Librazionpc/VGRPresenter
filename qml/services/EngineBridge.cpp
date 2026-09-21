@@ -11,12 +11,14 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDebug>
+#include <QDesktopServices>
 #include <QDir>
 #include <QJSEngine>
 #include <QQmlEngine>
 #include <QPointer>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QUrl>
 #include <QVariantMap>
 
 #include <atomic>
@@ -34,25 +36,36 @@ public:
     {
     }
 
-    void Execute() override
-    {
-        if (do_.isCallable())
-            do_.call();
-    }
-
-    void Undo() override
-    {
-        if (undo_.isCallable())
-            undo_.call();
-    }
+    void Execute() override { run(do_, "redo"); }
+    void Undo() override { run(undo_, "undo"); }
 
     std::string Label() const override { return label_.toStdString(); }
 
 private:
+    // A throwing closure must not vanish: the engine moves the entry between
+    // its stacks regardless, so a silent failure desyncs stack and canvas.
+    // qWarning also surfaces as a toast via the app's message handler.
+    void run(QJSValue &fn, const char *what)
+    {
+        if (!fn.isCallable())
+            return;
+        const QJSValue result = fn.call();
+        if (result.isError())
+            qWarning("Undo command '%s' (%s) failed: %s:%d: %s", qUtf8Printable(label_), what,
+                     qUtf8Printable(result.property(QStringLiteral("fileName")).toString()),
+                     result.property(QStringLiteral("lineNumber")).toInt(),
+                     qUtf8Printable(result.toString()));
+    }
+
     QString label_;
     QJSValue do_;
     QJSValue undo_;
 };
+
+// Every entry holds TWO whole-canvas snapshots inside QJSValue closures, so the
+// engine's default depth (1000) is far too generous — the old UI-side history
+// this replaced capped at 50.
+constexpr size_t kMaxUndoDepth = 100;
 
 bps::project::UndoRedoManager &Manager()
 {
@@ -111,14 +124,22 @@ bool EngineBridge::boot()
     // working directory — fine for our own build-dir test runs, fragile for
     // a real double-clicked/shortcut launch where the CWD is unpredictable)
     // never gets added: Initialize() only seeds defaults `if (sinks_.empty())`.
-    (void)bps::Logger::Instance().AddSink(
-        std::make_shared<bps::FileSink>((logDir + QStringLiteral("/engine.log")).toStdString()));
+    // Once per process: a failed boot can be retried, and a second AddSink would
+    // write every engine line to engine.log twice.
+    static bool fileSinkInstalled = false;
+    if (!fileSinkInstalled) {
+        fileSinkInstalled = true;
+        (void)bps::Logger::Instance().AddSink(
+            std::make_shared<bps::FileSink>((logDir + QStringLiteral("/engine.log")).toStdString()));
+    }
 
     bps::BootOptions options;
     options.dataDir = dataDir.toStdString();
     options.logLevel = bps::LogLevel::Info;
     // pluginDirs left empty, ipcPort left 0 (its BootOptions default) —
     // no plugin loading, no network listener opened.
+
+    Manager().SetLimit(kMaxUndoDepth);
 
     auto result = bps::Kernel::Instance().Boot(options);
     emit bootedChanged();
@@ -181,8 +202,8 @@ bool EngineBridge::boot()
         }
         bootSummary_ = QStringLiteral("Engine booted (%1 systems) · %2 audio device(s): %3 · %4 display(s): %5")
             .arg(bps::Kernel::Instance().BootLog().size())
-            .arg(audioDevices_.size()).arg(audioNames.join(QStringLiteral(", ")).toHtmlEscaped())
-            .arg(screenDevices_.size()).arg(screenNames.join(QStringLiteral(", ")).toHtmlEscaped());
+            .arg(audioDevices_.size()).arg(audioNames.join(QStringLiteral(", ")))
+            .arg(screenDevices_.size()).arg(screenNames.join(QStringLiteral(", ")));
     }
     EventBus::instance().publish(QStringLiteral("engine.boot"), QVariantMap{
         {QStringLiteral("level"), QStringLiteral("success")},
@@ -219,6 +240,10 @@ void EngineBridge::shutdown()
     // EventBus subscriptions run on engine threads and must not fire into the
     // UI while (or after) Kernel::Shutdown() is dismantling those systems.
     stopRelay();
+    // The undo stack holds QJSValue closures inside the engine's static
+    // UndoRedoManager, which outlives the QML engine — drop them now (aboutToQuit,
+    // JS engine still alive) rather than at static destruction.
+    Manager().Clear();
     (void)bps::Kernel::Instance().Shutdown();
     emit bootedChanged();
 }
@@ -293,14 +318,25 @@ namespace {
 class EngineLogSink final : public bps::ISink
 {
 public:
-    explicit EngineLogSink(EngineBridge *bridge) : bridge_(bridge) {}
+    explicit EngineLogSink(EngineBridge *bridge) : bridge_(bridge)
+    {
+        // The Logger honors per-sink minimums (default Trace) — without this every
+        // Info line the engine writes would reach Write() and become a toast.
+        SetMinLevel(bps::LogLevel::Warning);
+    }
 
     const char *Name() const noexcept override { return "UiRelay"; }
 
     void Write(std::string_view formatted, const bps::LogRecord &record) override
     {
         Q_UNUSED(formatted)
-        if (!bridge_)
+        if (!bridge_ || record.level < bps::LogLevel::Warning)
+            return;
+        // The Notification Service echoes every notification it raises to the log (category
+        // "Notify"). Each of those already reaches the UI as a properly worded toast through
+        // the typed relay below, so re-reporting the log line produced a second, raw toast
+        // ("Engine · Core  [Warning][Performance] ...") for every event.
+        if (record.category == "Notify")
             return;
         QString level;
         switch (record.level) {
@@ -338,6 +374,7 @@ QString qstr(const std::string &s) { return QString::fromStdString(s); }
 // roster then).
 void EngineBridge::enumerateDevices()
 {
+    lastEnumerationMs_ = QDateTime::currentMSecsSinceEpoch();
     audioDevices_.clear();
     screenDevices_.clear();
     videoDevices_.clear();
@@ -403,9 +440,28 @@ void EngineBridge::enumerateDevices()
         ndiSources_.clear();
         ndiAvailable_ = false;
         ndiStatus_.clear();
+        ndiVersion_.clear();
+        ndiState_ = QStringLiteral("unknown");
         if (booted()) {
             auto &broadcast = bps::broadcast::BroadcastEngine::Instance();
-            ndiAvailable_ = broadcast.NdiAvailable();
+            using NdiState = bps::broadcast::BroadcastEngine::NdiRuntimeStatus::State;
+            const auto ndi = broadcast.NdiStatus();
+            ndiAvailable_ = ndi.state == NdiState::Ready;
+            switch (ndi.state) {
+            case NdiState::Ready:
+                ndiState_ = QStringLiteral("ready");
+                ndiVersion_ = qstr(ndi.version);
+                break;
+            case NdiState::NotInstalled:
+                // The actionable case: the UI offers the download page.
+                ndiState_ = QStringLiteral("notInstalled");
+                ndiStatus_ = QStringLiteral("The NDI runtime isn't installed on this computer.");
+                break;
+            case NdiState::Error:
+                ndiState_ = QStringLiteral("error");
+                ndiStatus_ = qstr(ndi.detail);
+                break;
+            }
             if (ndiAvailable_) {
                 auto sources = broadcast.DiscoverNdiSources();
                 if (sources.ok()) {
@@ -422,21 +478,58 @@ void EngineBridge::enumerateDevices()
                     // usually empty (the SDK browses in the background) —
                     // one deferred re-query lets the cache warm up without
                     // blocking this one.
-                    if (ndiSources_.isEmpty())
+                    // Once per refreshDevices()/boot — the re-query itself must not
+                    // re-arm, or an empty network loops forever (and re-runs the
+                    // camera enumeration each pass).
+                    if (ndiSources_.isEmpty() && !ndiRetried_) {
+                        ndiRetried_ = true;
                         QTimer::singleShot(1200, this, [this]() { if (booted()) enumerateDevices(); });
+                    }
                 } else {
                     ndiAvailable_ = false;
                     ndiStatus_ = QString::fromStdString(sources.error().message);
                 }
-            } else {
-                ndiStatus_ = QStringLiteral("NDI SDK not available on this machine");
             }
         }
     }
     emit devicesChanged();
 }
 
-void EngineBridge::refreshDevices() { enumerateDevices(); }
+// Where the vendor's runtime is downloaded (NDI Tools includes it). Kept here,
+// not in QML, so there is exactly one place to update if the vendor moves it.
+QString EngineBridge::ndiDownloadUrl() const
+{
+    return QStringLiteral("https://ndi.video/tools/");
+}
+
+void EngineBridge::openNdiDownloadPage()
+{
+    QDesktopServices::openUrl(QUrl(ndiDownloadUrl()));
+}
+
+// "I installed it — check again": bypasses refreshDevices()'s throttle so the
+// UI reacts immediately instead of making the user wait out the window.
+void EngineBridge::recheckNdi()
+{
+    lastEnumerationMs_ = 0;
+    ndiRetried_ = false;
+    enumerateDevices();
+}
+
+void EngineBridge::refreshDevices()
+{
+    // UI code calls this whenever a device-picking dialog opens. Enumeration is
+    // synchronous on the GUI thread and Media Foundation briefly activates each
+    // camera (can stall, can flash capture LEDs), so back-to-back requests
+    // reuse the last result. Hot-plug relay handlers call enumerateDevices()
+    // directly and are not throttled.
+    constexpr qint64 kMinRefreshGapMs = 10000;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (lastEnumerationMs_ > 0 && now - lastEnumerationMs_ < kMinRefreshGapMs)
+        return;
+    ndiRetried_ = false;
+    enumerateDevices();
+}
 
 void EngineBridge::startRelay()
 {
@@ -497,8 +590,59 @@ void EngineBridge::startRelay()
         }));
     relaySubs_.push_back(bus.Subscribe<bps::events::ResourcePressureHigh>(
         [relay](const bps::events::ResourcePressureHigh &e) {
-            relay("engine.resource.pressure_high", QStringLiteral("warning"),
-                  QStringLiteral("Resource pressure"), QStringLiteral("%1 running high").arg(qstr(e.resource)));
+            // One toast per SUSTAINED episode (the engine's PressureLatch raises this only
+            // after the load held for a while and rate-limits repeats), worded for the
+            // resource that is actually under pressure.
+            const QString res = qstr(e.resource);
+            const QString level = QString::fromLatin1(bps::ToString(e.level));
+            QString title = QStringLiteral("High %1 usage").arg(res);
+            QString text = QStringLiteral("%1 load is %2.").arg(res, level.toLower());
+            if (e.resource == "memory") {
+                title = QStringLiteral("Low memory");
+                text = QStringLiteral("Memory use is %1 â close other apps if playback stutters.").arg(level.toLower());
+            } else if (e.resource == "cpu") {
+                title = QStringLiteral("High CPU usage");
+                text = QStringLiteral("The CPU has stayed at %1 load for a while â heavy work in other apps may slow the presentation.").arg(level.toLower());
+            } else if (e.resource == "disk") {
+                title = QStringLiteral("Low disk space");
+                text = QStringLiteral("Disk usage is %1.").arg(level.toLower());
+            }
+            relay("engine.resource.pressure_high", QStringLiteral("warning"), title, text);
+        }));
+
+    // ---- Content / project notices (formerly reached the UI only as formatted engine
+    // log lines â "Engine Â· Core [Warning]..." â via the Notification Service's console
+    // channel; the log sink now skips those, so each event gets ONE properly worded toast).
+    relaySubs_.push_back(bus.Subscribe<bps::events::ContentAssetImported>(
+        [relay](const bps::events::ContentAssetImported &e) {
+            relay("content.asset_imported", QStringLiteral("success"), QStringLiteral("Import finished"),
+                  QStringLiteral("%1 (%2 asset%3)").arg(qstr(e.name)).arg(e.assetsCreated)
+                      .arg(e.assetsCreated == 1 ? QString() : QStringLiteral("s")));
+        }));
+    relaySubs_.push_back(bus.Subscribe<bps::events::ContentAssetDeleted>(
+        [relay](const bps::events::ContentAssetDeleted &) {
+            relay("content.asset_deleted", QStringLiteral("info"), QStringLiteral("Asset deleted"),
+                  QStringLiteral("The asset was removed from the library."));
+        }));
+    relaySubs_.push_back(bus.Subscribe<bps::events::ContentValidationFailed>(
+        [relay](const bps::events::ContentValidationFailed &e) {
+            relay("content.validation_failed", QStringLiteral("warning"), QStringLiteral("Validation failed"),
+                  qstr(e.reason));
+        }));
+    relaySubs_.push_back(bus.Subscribe<bps::events::ProjectCreated>(
+        [relay](const bps::events::ProjectCreated &e) {
+            relay("project.created", QStringLiteral("success"), QStringLiteral("Project created"), qstr(e.name));
+        }));
+    relaySubs_.push_back(bus.Subscribe<bps::events::PackageExported>(
+        [relay](const bps::events::PackageExported &e) {
+            relay("project.package_exported", QStringLiteral("success"), QStringLiteral("Package exported"),
+                  QStringLiteral("%1 (%2 asset%3)").arg(qstr(e.path)).arg(e.assetCount)
+                      .arg(e.assetCount == 1 ? QString() : QStringLiteral("s")));
+        }));
+    relaySubs_.push_back(bus.Subscribe<bps::events::BackupCompleted>(
+        [relay](const bps::events::BackupCompleted &e) {
+            relay("project.backup_completed", QStringLiteral("success"), QStringLiteral("Backup completed"),
+                  qstr(e.destination));
         }));
 
     // ---- Platform hot plug -------------------------------------------------
@@ -641,6 +785,31 @@ void EngineBridge::startRelay()
                     {QStringLiteral("title"), QStringLiteral("Redo")},
                     {QStringLiteral("command"), name},
                     {QStringLiteral("depth"), qulonglong(depth)},
+                });
+            }, Qt::QueuedConnection);
+        }));
+
+    // ---- Production graph changes made outside the UI's own models ----------
+    // Silent telemetry (no "message": never a toast). BusListModel listens for
+    // these on engineEvent and re-syncs its cached rows from the graph.
+    relaySubs_.push_back(bus.Subscribe<bps::events::ProductionRestored>(
+        [self](const bps::events::ProductionRestored &e) {
+            QMetaObject::invokeMethod(self, [self, name = qstr(e.name)]() {
+                self->ingestEngineEvent(QStringLiteral("production.restored"), QVariantMap{
+                    {QStringLiteral("level"), QStringLiteral("info")},
+                    {QStringLiteral("title"), QStringLiteral("Production")},
+                    {QStringLiteral("name"), name},
+                });
+            }, Qt::QueuedConnection);
+        }));
+    relaySubs_.push_back(bus.Subscribe<bps::events::BusChanged>(
+        [self](const bps::events::BusChanged &e) {
+            QMetaObject::invokeMethod(self, [self, busId = qstr(e.busId), change = qstr(e.change)]() {
+                self->ingestEngineEvent(QStringLiteral("production.bus_changed"), QVariantMap{
+                    {QStringLiteral("level"), QStringLiteral("info")},
+                    {QStringLiteral("title"), QStringLiteral("Production")},
+                    {QStringLiteral("busId"), busId},
+                    {QStringLiteral("change"), change},
                 });
             }, Qt::QueuedConnection);
         }));

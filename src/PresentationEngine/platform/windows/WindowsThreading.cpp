@@ -18,8 +18,8 @@ Result<void> WindowsThreading::SetCurrentThreadName(std::string_view name) {
     // SetThreadDescription is Win10 1607+; resolve dynamically so the binary
     // still loads on older systems (naming is then a no-op there).
     using SetThreadDescriptionFn = HRESULT(WINAPI*)(HANDLE, PCWSTR);
-    static auto fn = reinterpret_cast<SetThreadDescriptionFn>(
-        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"));
+    static auto fn = win::ProcAddress<SetThreadDescriptionFn>(
+        GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription");
     if (!fn) return Ok();   // older Windows: naming unavailable, not an error
     std::wstring wide = win::Wide(name);
     HRESULT hr = fn(GetCurrentThread(), wide.c_str());
@@ -30,8 +30,8 @@ Result<void> WindowsThreading::SetCurrentThreadName(std::string_view name) {
 
 std::string WindowsThreading::CurrentThreadName() const {
     using GetThreadDescriptionFn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
-    static auto fn = reinterpret_cast<GetThreadDescriptionFn>(
-        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription"));
+    static auto fn = win::ProcAddress<GetThreadDescriptionFn>(
+        GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription");
     if (!fn) return {};
     PWSTR desc = nullptr;
     if (FAILED(fn(GetCurrentThread(), &desc)) || !desc) return {};

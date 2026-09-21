@@ -113,8 +113,18 @@ private:
                      qreal level, bool muted);
     void pullRow(int row);
     void rebuildFromGraph();
+    void pruneOrphanSourceNodes();
 
 public:
+    // Re-read every row's routes from the graph. Routes are cached as roster
+    // ROWS, so a roster removal (which shifts rows) must call this or every
+    // bus keeps pointing at the old row numbers.
+    void refreshRoutes();
+    // Full re-sync from the graph (rows added/removed behind this model's
+    // back — engine facade, restore). Also fired by production.restored /
+    // production.bus_changed engine events.
+    Q_INVOKABLE void refresh();
+
     // Edge cleanup invoked by the roster models when a source row is
     // REMOVED: cuts every graph edge from that source's stable node(s)
     // (asrc:<id> / vsrc:<id>) and refreshes the affected rows. No-ops when

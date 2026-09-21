@@ -138,6 +138,11 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/presentation/PresentationCompiler.cpp
     ${BPS_ROOT}/modules/presentation/SceneBuilder.cpp
     ${BPS_ROOT}/modules/presentation/PresentationRuntime.cpp
+    ${BPS_ROOT}/modules/presentation/PresentationSerializer.cpp
+    ${BPS_ROOT}/modules/presentation/PresentationDocument.cpp
+    ${BPS_ROOT}/modules/presentation/PresentationTemplates.cpp
+    ${BPS_ROOT}/modules/presentation/ShowLibrary.cpp
+    ${BPS_ROOT}/modules/presentation/ShowEditor.cpp
     ${BPS_ROOT}/modules/presentation/PresentationSession.cpp
     ${BPS_ROOT}/modules/presentation/PresentationEngine.cpp
     # Search & Indexing Engine (Phase 9, docs/specs/20)
@@ -147,6 +152,7 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/media/MediaEngine.cpp
     # Native .vgr format (docs/specs/22)
     ${BPS_ROOT}/modules/vgr/VgrFormat.cpp
+    ${BPS_ROOT}/modules/vgr/VgrFile.cpp
     # Scene Composition Engine (Phase 11, docs/specs/23)
     ${BPS_ROOT}/modules/scene/SceneCompositionEngine.cpp
     # Shared XML utility (Bible + Song providers)
@@ -348,28 +354,37 @@ file(GLOB_RECURSE APP_ASSET_FILES
     RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
     CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/qml/*.png")
 
+# UI self-test driver (env-gated at runtime by VGR_SELFTEST=1, and inert without it).
+# A diagnostic aid, not product code — configure with -DVGR_ENABLE_SELFTEST=OFF for
+# a release build to leave it out of the binary entirely.
+option(VGR_ENABLE_SELFTEST "Compile the VGR_SELFTEST UI self-test driver" ON)
+
 qt_add_executable(appVGRPresenterUI
     src/main.cpp
-    src/SelfTestDriver.h
-    src/SelfTestDriver.cpp
     qml/services/include/services/EventBus.h
     qml/services/EventBus.cpp
     qml/services/include/services/CrashHandler.h
     qml/services/CrashHandler.cpp
     qml/services/include/services/EngineBridge.h
     qml/services/EngineBridge.cpp
-    src/SlideListModel.h
-    src/SlideListModel.cpp
-    src/OutputListModel.h
-    src/OutputListModel.cpp
-    src/StyleListModel.h
-    src/StyleListModel.cpp
-    src/AudioInputListModel.h
-    src/AudioInputListModel.cpp
-    src/VideoSourceListModel.h
-    src/VideoSourceListModel.cpp
-    src/BusListModel.h
-    src/BusListModel.cpp
+    qml/services/include/services/ShowConverter.h
+    qml/services/ShowConverter.cpp
+    qml/services/include/services/ShowService.h
+    qml/services/ShowService.cpp
+    qml/services/include/services/SearchService.h
+    qml/services/SearchService.cpp
+    qml/models/include/models/SlideListModel.h
+    qml/models/SlideListModel.cpp
+    qml/models/include/models/OutputListModel.h
+    qml/models/OutputListModel.cpp
+    qml/models/include/models/StyleListModel.h
+    qml/models/StyleListModel.cpp
+    qml/models/include/models/AudioInputListModel.h
+    qml/models/AudioInputListModel.cpp
+    qml/models/include/models/VideoSourceListModel.h
+    qml/models/VideoSourceListModel.cpp
+    qml/models/include/models/BusListModel.h
+    qml/models/BusListModel.cpp
 )
 
 # Theme.qml has `pragma Singleton`, but qt_add_qml_module doesn't infer that
@@ -402,11 +417,23 @@ target_link_libraries(appVGRPresenterUI
 
 # The generated qmltyperegistrations.cpp does `#if __has_include(<SlideListModel.h>)`
 # — a BARE filename check, so every QML_ELEMENT header's own directory has to
-# be a search root directly, not just an ancestor of it. src/ covers the
-# List models; qml/services/include/services covers EngineBridge/EventBus
+# be a search root directly, not just an ancestor of it. qml/models/include/
+# models covers the List models; qml/services/include/services covers EngineBridge/EventBus
 # (whose headers live in services/include/services/*.h, one level deeper
 # than services/include itself — that outer path is kept too so
 # `#include "services/EngineBridge.h"` from main.cpp/EngineBridge.cpp still
 # resolves). Without either, the include is skipped and the generated
 # registration code fails with "EventBus was not declared in this scope".
-target_include_directories(appVGRPresenterUI PRIVATE src qml/services/include qml/services/include/services)
+if(VGR_ENABLE_SELFTEST)
+    target_sources(appVGRPresenterUI PRIVATE src/SelfTestDriver.h src/SelfTestDriver.cpp)
+    target_compile_definitions(appVGRPresenterUI PRIVATE VGR_ENABLE_SELFTEST)
+endif()
+
+# Development builds find the KJV that ships in the source tree (SearchService).
+target_compile_definitions(appVGRPresenterUI PRIVATE
+    VGR_DEV_DATA_DIR="${CMAKE_SOURCE_DIR}/src/VGR_XML_JSON")
+
+target_include_directories(appVGRPresenterUI PRIVATE
+    src
+    qml/services/include qml/services/include/services
+    qml/models/include qml/models/include/models)

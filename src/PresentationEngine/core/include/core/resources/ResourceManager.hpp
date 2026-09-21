@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/common/Common.hpp"
+#include "core/resources/PressureLatch.hpp"
 #include "interfaces/IService.hpp"
 #include "platform/IPlatform.hpp"
 #include "core/task_scheduler/TaskScheduler.hpp"
@@ -114,6 +115,15 @@ private:
     EngineTime lastNetSample_{};                            // guarded by mutex_
     PressureLevel lastMemPressure_{PressureLevel::None};    // guarded by mutex_
     PressureLevel lastCpuPressure_{PressureLevel::None};    // guarded by mutex_
+    // Alert state (see PressureLatch): an alert needs SUSTAINED pressure, clears with
+    // hysteresis, and is rate-limited â a CPU spike or a load hovering at the threshold
+    // is not an emergency and must not toast (or evict caches) on every sample.
+    // CPU is spiky, so it must hold 90%+ for 8 s and re-alerts at most once a minute;
+    // memory moves slowly, so a short 3 s hold and a 30 s cooldown are enough.
+    PressureLatch cpuLatch_{PressureLatch::Config{PressureLevel::High, PressureLevel::Medium,
+                                                  std::chrono::seconds(8), std::chrono::seconds(60)}};  // guarded by mutex_
+    PressureLatch memLatch_{PressureLatch::Config{PressureLevel::High, PressureLevel::Medium,
+                                                  std::chrono::seconds(3), std::chrono::seconds(30)}};  // guarded by mutex_
     std::deque<AutoDecision> decisions_;                    // guarded by mutex_
     static constexpr size_t kMaxDecisions = 64;
     TaskId heartbeatTask_ = 0;

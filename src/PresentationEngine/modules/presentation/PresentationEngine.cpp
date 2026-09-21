@@ -3,6 +3,7 @@
 #include "core/logging/Logger.hpp"
 #include "modules/presentation/PresentationCompiler.hpp"
 #include "modules/presentation/SceneBuilder.hpp"
+#include "modules/project/DocumentManager.hpp"
 #include "modules/rendering/RenderEngine.hpp"
 
 #include <chrono>
@@ -31,7 +32,15 @@ Result<void> PresentationEngine::Initialize() {
     (void)session_.Initialize();
     WireDependencies();
     WireEvents();
+    // Document type "presentation": DocumentManager -> handler -> .vgr file.
+    document_ = std::make_shared<PresentationDocument>();
+    (void)project::DocumentManager::Instance().RegisterHandler(document_);
     return Ok();
+}
+
+std::shared_ptr<PresentationDocument> PresentationEngine::Document() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return document_;
 }
 
 Result<void> PresentationEngine::Start() {
@@ -48,10 +57,12 @@ Result<void> PresentationEngine::Shutdown() {
     if (!initialized_.load()) return Ok();
     (void)runtime_.Close();
     UnwireEvents();
+    (void)project::DocumentManager::Instance().UnregisterHandler(PresentationDocument::kType);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         registry_.clear();
         activeId_.clear();
+        document_.reset();
         initialized_.store(false);
     }
     (void)session_.Shutdown();

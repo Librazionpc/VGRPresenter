@@ -6,7 +6,11 @@
 #include "platform/IProcess.hpp"
 
 #ifdef _WIN32
-#include <windows.h>
+// WinUtil.hpp pulls in <winsock2.h> BEFORE <windows.h> (and sets
+// WIN32_LEAN_AND_MEAN). Including <windows.h> here first made every later
+// <winsock2.h> in the same translation unit warn "include winsock2.h before
+// windows.h".
+#include "platform/windows/WinUtil.hpp"
 #endif
 
 #include <mutex>

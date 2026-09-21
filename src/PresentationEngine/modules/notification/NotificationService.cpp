@@ -366,7 +366,7 @@ void NotificationService::WireEvents() {
         }));
     subscriptions_.push_back(bus.Subscribe<events::ResourcePressureHigh>(
         [this](const events::ResourcePressureHigh& e) {
-            (void)Publish(factory_.LowMemory(e.resource, ToString(e.level)));
+            (void)Publish(factory_.ResourcePressure(e.resource, ToString(e.level)));
         }));
     subscriptions_.push_back(bus.Subscribe<events::KernelPanic>(
         [this](const events::KernelPanic& e) {

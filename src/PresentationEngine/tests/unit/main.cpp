@@ -33,6 +33,7 @@ struct Suite {
 
 static const Suite kSuites[] = {
     {"core", "result", TestResult},
+    {"core", "pressure-latch", TestPressureLatch},
     {"core", "version", TestVersion},
     {"core", "json", TestJson},
     {"core", "logger", TestLogger},
@@ -119,6 +120,14 @@ static const Suite kSuites[] = {
     {"presentation", "present", TestPresentationNavigator},
     {"presentation", "present", TestPresentationTimeline},
     {"presentation", "present", TestPresentationEngine},
+    {"presentation", "present", TestPresentationSerializer},
+    {"presentation", "present", TestPresentationDocument},
+    {"presentation", "present", TestShowStructure},
+    {"presentation", "present", TestTemplateFile},
+    {"presentation", "present", TestShowLibrary},
+    {"presentation", "present", TestShowEditor},
+    {"presentation", "present", TestDocumentEdit},
+    {"presentation", "present", TestShowLibraryCrud},
     {"search", "search", TestSearchIndexing},
     {"search", "search", TestSearchRanking},
     {"media", "media", TestMediaEngine},
@@ -139,6 +148,7 @@ static const Suite kSuites[] = {
     {"broadcast", "broadcast", TestBroadcastEngine},
     {"broadcast", "broadcast", TestBroadcastSenders},
     {"broadcast", "broadcast", TestBroadcastFeatures},
+    {"broadcast", "broadcast-ndi", TestBroadcastNdiRuntime},
     {"core", "kernel", TestKernel},
 };
 static bool Matches(const char* phase, const char* name,

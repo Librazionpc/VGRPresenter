@@ -170,5 +170,5 @@ private:
     static inline AudioInputListModel *s_instance = nullptr;
 
     QList<AudioInputItem> m_inputs;
-    int m_nextId = 1;   // stable-id counter ("a<n>" — unique per row, ever)
+    int m_nextId = 1;   // stable-id counter ("a<n>"): unique for the whole session; restarts each launch (rosters aren't persisted)
 };

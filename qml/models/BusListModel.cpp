@@ -1,6 +1,7 @@
 #include "BusListModel.h"
 
 #include "AudioInputListModel.h"
+#include "services/EngineBridge.h"
 #include "VideoSourceListModel.h"
 
 #include <QDebug>
@@ -120,13 +121,48 @@ void logIfFailed(const char *op, const auto &r)
         qWarning() << "BusListModel:" << op << "failed:" << r.error().message.c_str();
 }
 
+// One atomic edit window around a multi-step graph mutation. Every graph
+// mutator serializes the WHOLE graph and flushes the database synchronously
+// (QueuePersist) — on the GUI thread, once per call — so a bus creation
+// (6 mutators) or a video re-route (N+1) would otherwise flush that many
+// times back to back. Inside an edit window the graph saves once, at commit.
+// A no-op when a window is already open (nesting), so helpers compose.
+class GraphEdit
+{
+public:
+    GraphEdit() : owns_(graph().BeginEdit().ok()) {}
+    ~GraphEdit()
+    {
+        if (owns_)
+            logIfFailed("CommitEdit", graph().CommitEdit());
+    }
+    GraphEdit(const GraphEdit &) = delete;
+    GraphEdit &operator=(const GraphEdit &) = delete;
+
+private:
+    bool owns_;
+};
+
 } // namespace
 
 BusListModel::BusListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
     s_instance = this;
+    pruneOrphanSourceNodes();
     rebuildFromGraph();
+
+    // Engine-side changes made without this model (production.restored, or a
+    // bus edited through the engine facade / a future IPC client) re-sync the
+    // rows. The model is otherwise a cached view refreshed only after its own
+    // mutations. Queued: the relay already marshals to the GUI thread, this
+    // just keeps a reset from happening inside a delegate's own event.
+    connect(&EngineBridge::instance(), &EngineBridge::engineEvent, this,
+            [this](const QString &topic, const QVariantMap &) {
+                if (topic == QLatin1String("production.restored")
+                    || topic == QLatin1String("production.bus_changed"))
+                    refresh();
+            }, Qt::QueuedConnection);
 }
 
 BusListModel::~BusListModel()
@@ -177,11 +213,15 @@ void BusListModel::cutAudioSourceEdges(const QString &stableId)
     if (!graph().HasNode(node))
         return;   // never routed — nothing to cut
 
+    GraphEdit edit;
     QList<int> touched;
     for (int row = 0; row < m_buses.size(); ++row) {
         if (graph().Disconnect(node, m_buses.at(row).engineId.toStdString()).ok())
             touched.append(row);
     }
+    // The row is gone for good — its source node goes with it (else every
+    // removed source leaves an orphan node in the persisted graph).
+    logIfFailed("RemoveNode(asrc)", graph().RemoveNode(node));
     for (const int row : std::as_const(touched)) {
         pullRow(row);
         const QModelIndex changed = index(row);
@@ -197,11 +237,13 @@ void BusListModel::cutVideoSourceEdges(const QString &stableId)
     if (!graph().HasNode(node))
         return;   // never routed — nothing to cut
 
+    GraphEdit edit;
     QList<int> touched;
     for (int row = 0; row < m_buses.size(); ++row) {
         if (graph().Disconnect(node, m_buses.at(row).engineIdVideo.toStdString()).ok())
             touched.append(row);
     }
+    logIfFailed("RemoveNode(vsrc)", graph().RemoveNode(node));
     for (const int row : std::as_const(touched)) {
         pullRow(row);
         const QModelIndex changed = index(row);
@@ -241,14 +283,23 @@ void BusListModel::rebuildFromGraph()
     for (int n : seen) {
         const std::string a = "bus:" + std::to_string(n) + "#a";
         const std::string v = "bus:" + std::to_string(n) + "#v";
-        if (!graph().HasNode(a) || !graph().HasNode(v))
-            continue;   // half-bus from an interrupted remove — skip
+        // Count EVERY number seen, half-buses included: the next AddBus must
+        // never reuse an id that still names a stray plane node.
+        m_nextBus = std::max(m_nextBus, n + 1);
+        if (!graph().HasNode(a) || !graph().HasNode(v)) {
+            // Half-bus from an interrupted remove — not a row; clean the
+            // stray plane up so it can't collide or linger in the document.
+            GraphEdit edit;
+            for (const std::string &stray : {a, v})
+                if (graph().HasNode(stray))
+                    logIfFailed("RemoveNode(stray)", graph().RemoveNode(stray));
+            continue;
+        }
 
         BusItem item;
         item.id = n;   // stable identity = the engine node number
         item.engineId = QString::fromStdString(a);
         item.engineIdVideo = QString::fromStdString(v);
-        m_nextBus = std::max(m_nextBus, n + 1);
 
         // The UI's routing-policy type lives engine-side as node meta
         // (survives restarts with the rest of the graph).
@@ -264,6 +315,50 @@ void BusListModel::rebuildFromGraph()
         pullRow(row);
 }
 
+// Roster rows are not persisted (they restart empty each launch, with fresh
+// stable ids a1/v1...), but the graph is — so any "asrc:"/"vsrc:" node found at
+// startup is a leftover from a PREVIOUS session. Left alone, a new source
+// "a1" would inherit last session's routes for the old "a1" (its first toggle
+// would DISconnect) and the orphans would pile up forever. Drop them all.
+// (When rosters are persisted with their ids, this must go — then only nodes
+// whose id is absent from the restored roster are orphans.)
+void BusListModel::pruneOrphanSourceNodes()
+{
+    std::vector<std::string> stale;
+    for (const auto &id : graph().NodeIds()) {
+        const std::string s = id;
+        if (s.starts_with(kAudioSourcePrefix) || s.starts_with(kVideoSourcePrefix))
+            stale.push_back(s);
+    }
+    if (stale.empty())
+        return;
+    GraphEdit edit;
+    for (const std::string &id : stale)
+        logIfFailed("RemoveNode(orphan source)", graph().RemoveNode(id));
+}
+
+// Re-reads every row's routes (and level/mute/name) from the graph. Routes
+// are cached as roster ROWS, so ANY roster row shift (a removal) leaves every
+// bus's cached lists stale — the roster models call this after a removal.
+void BusListModel::refreshRoutes()
+{
+    if (m_buses.isEmpty())
+        return;
+    for (int row = 0; row < m_buses.size(); ++row)
+        pullRow(row);
+    emit dataChanged(index(0), index(int(m_buses.size()) - 1),
+                     { RoutedAudioInputsRole, RoutedVideoSourcesRole });
+}
+
+// Full re-sync from the graph — rows added/removed/renamed behind our back.
+void BusListModel::refresh()
+{
+    beginResetModel();
+    m_buses.clear();
+    rebuildFromGraph();
+    endResetModel();
+}
+
 int BusListModel::createBusRow(const QString &name, const QString &type,
                                qreal level, bool muted)
 {
@@ -272,6 +367,8 @@ int BusListModel::createBusRow(const QString &name, const QString &type,
     item.type = type;
     item.level = level;
     item.muted = muted;
+
+    GraphEdit edit;   // 6 graph mutators, one save
 
     const int busNo = m_nextBus++;
     const std::string base = "bus:" + std::to_string(busNo);
@@ -377,8 +474,16 @@ void BusListModel::removeBus(int index)
 
     // Engine first: node removal takes its edges with it; the view row goes
     // only when the graph no longer holds the bus.
-    logIfFailed("RemoveNode(audio)", graph().RemoveNode(item.engineId.toStdString()));
-    logIfFailed("RemoveNode(video)", graph().RemoveNode(item.engineIdVideo.toStdString()));
+    {
+        GraphEdit edit;
+        logIfFailed("RemoveNode(audio)", graph().RemoveNode(item.engineId.toStdString()));
+        logIfFailed("RemoveNode(video)", graph().RemoveNode(item.engineIdVideo.toStdString()));
+    }
+    if (graph().HasNode(item.engineId.toStdString())
+        || graph().HasNode(item.engineIdVideo.toStdString())) {
+        qWarning() << "BusListModel: removeBus kept the row — the graph still holds it";
+        return;
+    }
 
     beginRemoveRows(QModelIndex(), index, index);
     m_buses.removeAt(index);
@@ -407,6 +512,7 @@ void BusListModel::renameBus(int index, const QString &name)
         return;
 
     // Rename flows through the graph (one truth for every view of the node).
+    GraphEdit edit;
     logIfFailed("RenameNode(audio)", graph().RenameNode(m_buses[index].engineId.toStdString(),
                                                         trimmed.toStdString()));
     logIfFailed("RenameNode(video)", graph().RenameNode(m_buses[index].engineIdVideo.toStdString(),
@@ -423,6 +529,7 @@ void BusListModel::setType(int index, const QString &type)
     if (m_buses[index].type == type)
         return;
 
+    GraphEdit edit;
     m_buses[index].type = type;
     // Persist the policy engine-side (meta), then drop routes the narrowed
     // type no longer accepts: a route to a roster the bus no longer accepts
@@ -464,6 +571,7 @@ void BusListModel::setLevel(int index, qreal level)
     if (qFuzzyCompare(m_buses[index].level, clamped))
         return;
 
+    GraphEdit edit;
     // Write gainDb on BOTH plane nodes, preserving each node's mute/solo.
     for (const QString &id : { m_buses[index].engineId, m_buses[index].engineIdVideo }) {
         bps::production::VolumeControl v{};
@@ -485,6 +593,7 @@ void BusListModel::setMuted(int index, bool muted)
     if (m_buses[index].muted == muted)
         return;
 
+    GraphEdit edit;
     for (const QString &id : { m_buses[index].engineId, m_buses[index].engineIdVideo }) {
         bps::production::VolumeControl v{};
         if (auto r = graph().Volume(id.toStdString()); r.ok())
@@ -510,6 +619,7 @@ void BusListModel::toggleAudioRoute(int busIndex, int inputIndex)
     BusItem &item = m_buses[busIndex];
     const std::string src = srcQ.toStdString();
     const std::string plane = item.engineId.toStdString();
+    GraphEdit edit;   // (AddSource + Connect), one save
 
     if (feedsFrom(plane, src)) {
         logIfFailed("Disconnect(audio)", graph().Disconnect(src, plane));
@@ -544,6 +654,7 @@ void BusListModel::toggleVideoRoute(int busIndex, int sourceIndex)
     if (srcQ.isEmpty())
         return;
     const std::string src = srcQ.toStdString();
+    GraphEdit edit;   // N disconnects + one connect, one save
 
     QSet<int> touchedRows;
     bool wasOnThisBus = false;

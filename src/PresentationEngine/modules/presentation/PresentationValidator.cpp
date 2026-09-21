@@ -1,5 +1,7 @@
 #include "modules/presentation/PresentationValidator.hpp"
 
+#include "modules/presentation/PresentationTemplates.hpp"
+
 #include <algorithm>
 #include <set>
 
@@ -46,6 +48,15 @@ std::vector<ValidationIssue> PresentationValidator::Validate(
             issues.push_back(
                 ValidationIssue{slide.id, "slide has no title and no content", 0});
     }
+
+    // Show structure: a dangling category/template/overlay reference means part of
+    // the show would silently render unstyled or not at all — warn, never crash.
+    std::set<std::string> categoryIds;
+    for (const auto& c : presentation.categories)
+        if (!categoryIds.insert(c.id).second)
+            issues.push_back(ValidationIssue{{}, "duplicate category id '" + c.id + "'", 1});
+    for (const auto& message : SlideResolver::DanglingReferences(presentation))
+        issues.push_back(ValidationIssue{{}, message, 0});
     return issues;
 }
 

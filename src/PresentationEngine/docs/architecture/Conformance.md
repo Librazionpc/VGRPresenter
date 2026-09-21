@@ -14,7 +14,7 @@
 > + the full Phase 2 PAL (18 subsystem interfaces with Linux **and Windows**
 > backends, headers under `platform/include/`) + the PAL `ISocket` IPC transport
 > + remote log streaming + the Remote App + three feature modules are implemented;
-> **3450 unit checks passing**, AddressSanitizer-clean. The Phase 12 Bible Engine
+> **3964 unit checks (2026-09-21 run; 1 timing-sensitive filesystem-stress check can exceed its 5 s budget on a loaded Windows machine)**, AddressSanitizer-clean. The Phase 12 Bible Engine
 > (docs/specs/24, DoD §27: 19/19), the Phase 13 Song & Lyrics Engine
 > (docs/specs/25, DoD §28: 21/21) and the Phase 17 Broadcast Engine (NDI/SDI,
 > docs/specs/29, DoD §32: 16/16) are implemented and audited below. The 26-point

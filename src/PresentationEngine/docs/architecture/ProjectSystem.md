@@ -56,6 +56,21 @@ Project metadata is also indexed in the DatabaseManager `projects` collection.
 events (`project.document_*`). Handlers implement `IDocumentHandler`; adding a
 document type = register a handler, no engine change.
 
+### Show library
+
+`ShowLibrary` (modules/presentation) is a folder of `.vgr` shows: library categories are
+sub-folders, shows are files. It lists/searches shows from their headers, creates and
+renames categories, and does show CRUD in the engine: `RenameShow` (stored name + file
+name), `DuplicateShow` (fresh identity), `DeleteShow` (recoverable — moved to
+`<root>/.deleted/`), `MoveShow`. Unreadable files are reported via `Problems()`, never
+silently dropped.
+
+### Registered document types
+
+| Type | Handler | File |
+|---|---|---|
+| `presentation` | `PresentationDocument` (modules/presentation), registered by `PresentationEngine::Initialize` | `.vgr` (`Show`) |
+
 ## Undo/Redo
 
 Every editing operation is an `ICommand { Name(), Execute(), Undo() }`.

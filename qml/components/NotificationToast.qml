@@ -63,6 +63,7 @@ Rectangle {
 
             Text {
                 text: root.title
+                textFormat: Text.PlainText
                 visible: root.title.length > 0
                 color: Theme.textPrimary
                 font.family: Theme.fontFamily
@@ -89,6 +90,7 @@ Rectangle {
 
         Text {
             text: root.message
+            textFormat: Text.PlainText   // engine/device text must never render as HTML
             color: Theme.textSecondary
             font.family: Theme.fontFamily
             font.pixelSize: Theme.textSm

@@ -12,10 +12,13 @@ Item {
     id: root
 
     // name / version / tag are read-only facts; `enabled` is the setting.
+    // An entry with `engine: "ndi"` is backed by the REAL engine runtime: its
+    // version and status come from EngineBridge (not from this list), and it
+    // can't read "Active" while the NDI runtime isn't actually usable.
     property var plugins: [
         { name: qsTr("Song Provider"), version: "v1.2", tag: qsTr("chords + transpose"), enabled: true },
         { name: qsTr("Bible Provider"), version: "v1.0", tag: qsTr("KJV + BBE"), enabled: true },
-        { name: qsTr("NDI Broadcast"), version: "v1.1", tag: qsTr("network output"), enabled: true },
+        { name: qsTr("NDI Broadcast"), version: "", tag: qsTr("network output"), enabled: true, engine: "ndi" },
         { name: qsTr("MIDI Control"), version: "v0.9", tag: qsTr("hardware triggers"), enabled: false },
         { name: qsTr("Flow Automation"), version: "v1.0", tag: qsTr("service flows"), enabled: true }
     ]
@@ -88,6 +91,16 @@ Item {
                             required property int index
                             width: pluginsCol.width
 
+                            // Engine-backed rows show the runtime's real state; the
+                            // toggle is only the user's wish, never proof it works.
+                            readonly property bool isNdi: modelData.engine === "ndi"
+                            readonly property string ndiState: EngineBridge.ndiState
+                            readonly property bool runtimeOk: !isNdi || ndiState === "ready"
+                            readonly property bool live: modelData.enabled && runtimeOk
+                            readonly property string subtitle: isNdi
+                                ? (EngineBridge.ndiVersion !== "" ? EngineBridge.ndiVersion : qsTr("runtime not detected")) + " · " + modelData.tag
+                                : modelData.version + " · " + modelData.tag
+
                             Item {
                                 width: pluginRow.width
                                 height: 46
@@ -103,7 +116,7 @@ Item {
                                         font.pixelSize: Theme.textSm
                                     }
                                     Text {
-                                        text: pluginRow.modelData.version + " · " + pluginRow.modelData.tag
+                                        text: pluginRow.subtitle
                                         color: Theme.textMuted
                                         font.family: Theme.fontFamily
                                         font.pixelSize: Theme.textXs
@@ -117,13 +130,14 @@ Item {
                                     width: pillLabel.width + 20
                                     height: 20
                                     radius: 10
-                                    color: pluginRow.modelData.enabled ? "#264ade80" : "#26f5c26b"
+                                    color: pluginRow.live ? "#264ade80" : "#26f5c26b"
 
                                     Text {
                                         id: pillLabel
                                         anchors.centerIn: parent
-                                        text: pluginRow.modelData.enabled ? qsTr("Active") : qsTr("Installed")
-                                        color: pluginRow.modelData.enabled ? Theme.success : Theme.warning
+                                        text: !pluginRow.runtimeOk ? (pluginRow.ndiState === "notInstalled" ? qsTr("Runtime missing") : qsTr("Error"))
+                                              : pluginRow.live ? qsTr("Active") : qsTr("Installed")
+                                        color: pluginRow.live ? Theme.success : Theme.warning
                                         font.family: Theme.fontFamily
                                         font.pixelSize: 10
                                         font.weight: Font.Medium
@@ -141,6 +155,15 @@ Item {
                                     }
                                 }
                             }
+                            // The way out when a runtime is missing/broken: reason,
+                            // a link to the download page, and a re-check.
+                            NdiRuntimeNotice {
+                                id: ndiNotice
+                                width: pluginRow.width
+                                active: pluginRow.isNdi
+                            }
+                            Item { width: 1; height: ndiNotice.visible ? 10 : 0 }
+
                             Rectangle { width: pluginRow.width; height: 1; color: Theme.border; visible: pluginRow.index < root.plugins.length - 1 }
                         }
                     }

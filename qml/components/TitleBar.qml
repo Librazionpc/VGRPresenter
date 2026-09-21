@@ -3,8 +3,8 @@ import VGRPresenterUI
 
 // The Settings dialog's title bar: logo, search box, close button.
 //
-// The search is a command palette: typing filters `searchIndex` (the
-// app-wide list of settings entries, supplied by ModalShell) and opens a
+// The search is a command palette: typing asks the backend (SearchService.
+// searchSettings) for the matching settings entries and opens a
 // suggestions dropdown under the box — each row shows the entry's label
 // plus a tag chip naming the section it lives in, exactly like the
 // reference. Rows are keyboard-navigable (↑↓ move, Enter opens, Escape
@@ -20,10 +20,6 @@ Rectangle {
 
     property string searchPlaceholder: "Search settings"
     property alias searchText: searchInput.text
-    // The searchable index: [{ label, section, key }] — label is what's
-    // matched and shown, section is the tag chip's text, key is the
-    // NavRail section key emitted on selection.
-    property var searchIndex: []
 
     signal sectionRequested(string key)
     signal closeRequested()
@@ -46,13 +42,8 @@ Rectangle {
             root.closeSearch()
             return
         }
-        const out = []
-        for (let i = 0; i < root.searchIndex.length; ++i) {
-            const e = root.searchIndex[i]
-            if (String(e.label).toLowerCase().indexOf(q) >= 0
-                    || String(e.section).toLowerCase().indexOf(q) >= 0)
-                out.push(e)
-        }
+        // Each result: { title, section, key, ... } - the backend owns the list.
+        const out = SearchService.searchSettings(q, 50)
         root.results = out
         root.selectedIndex = 0
         root.searchOpen = out.length > 0
@@ -237,7 +228,7 @@ Rectangle {
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 170
-                                text: resultRow.modelData.label
+                                text: resultRow.modelData.title
                                 color: resultRow.selected ? "#ffffff" : Theme.textPrimary
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.textSm

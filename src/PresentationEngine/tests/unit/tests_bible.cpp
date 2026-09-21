@@ -89,6 +89,22 @@ void TestBibleProviders() {
     auto id3 = eng.Import(js, "json", bb::ImportOptions{std::string(), std::string(), false, false});
     CHECK(id3.ok() && id3.value() == "JSNB");
 
+    // JSON as many Bible dumps write it: numeric canonical "book" (43 = John), "module"
+    // / "shortname" / "lang_short" instead of id / abbreviation / language.
+    const char* numJs =
+        "{\"metadata\":{\"name\":\"Numbered\",\"shortname\":\"NUMB\",\"module\":\"numb\",\"lang_short\":\"en\"},"
+        "\"verses\":[{\"book_name\":\"John\",\"book\":43,\"chapter\":3,\"verse\":16,"
+        "\"text\":\"For God so loved the world.\"},"
+        "{\"book_name\":\"Genesis\",\"book\":1,\"chapter\":1,\"verse\":1,\"text\":\"In the beginning.\"}]}";
+    auto idNum = eng.Import(numJs, "json", bb::ImportOptions{std::string(), std::string(), false, false});
+    CHECK(idNum.ok() && idNum.value() == "numb");
+    auto numBible = eng.GetBible("numb");
+    CHECK(numBible.ok() && numBible.value().metadata.abbreviation == "NUMB"
+          && numBible.value().metadata.language == "en");
+    auto numVerse = eng.GetVerse("numb", "JHN", 3, 16);
+    CHECK(numVerse.ok() && numVerse.value().text == "For God so loved the world.");
+    CHECK(eng.GetVerse("numb", "GEN", 1, 1).ok());
+
     // USFM.
     const char* usfm =
         "\\id JHN\n\\h John\n\\c 3\n"

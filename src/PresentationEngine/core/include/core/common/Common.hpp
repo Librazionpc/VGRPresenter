@@ -344,6 +344,9 @@ inline constexpr ErrorCode Broadcast_ReceiveFailed          = 2909;
 inline constexpr ErrorCode Broadcast_InvalidFrame           = 2910;
 inline constexpr ErrorCode Broadcast_NoSdiDevices           = 2911;
 inline constexpr ErrorCode Broadcast_SourceNotFound         = 2912;
+// The vendor runtime (NDI/DeckLink) is simply not on this machine — distinct from
+// SdkLoadFailed (present but unusable) so the UI can point at the download page.
+inline constexpr ErrorCode Broadcast_SdkNotInstalled         = 2913;
 }
 
 struct Error {

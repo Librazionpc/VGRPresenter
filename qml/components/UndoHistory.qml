@@ -3,7 +3,7 @@ import VGRPresenterUI
 
 // Generic undo/redo history — the reusable surface adapter over the real
 // engine's undo stack (bps::project::UndoRedoManager, via the EngineBridge
-// service; see src/EngineBridge.h). Any surface in the app (EditScreen's
+// service; see qml/services/EngineBridge.h). Any surface in the app (EditScreen's
 // canvas, a future slide-roster history, a properties dialog...)
 // instantiates one UndoHistory and teaches it two things:
 //
@@ -62,6 +62,11 @@ QtObject {
     property var apply: null
     property var afterRestore: null
 
+    // Fired whenever the surface's state settled into a new value: an edit was
+    // committed to the stack, or an undo/redo restored one. Lets an owner keep
+    // something in step with the surface (EditScreen syncs the slide to the engine).
+    signal committed()
+
     readonly property bool canUndo: EngineBridge.canUndo
     readonly property bool canRedo: EngineBridge.canRedo
 
@@ -69,6 +74,13 @@ QtObject {
     // null when no edit is in progress.
     property var _pendingBefore: null
     property string _pendingLabel: ""
+
+    // Bumped by abandonPending()/clear(). commit() defers its capture-and-push
+    // with Qt.callLater; if the history is abandoned/cleared/undone in the
+    // meantime (an undo keystroke, a slide switch, New show) that queued
+    // closure must NOT run — it would capture the post-change state as its
+    // "after" and push a command whose "before" belongs to a different state.
+    property int _epoch: 0
 
     property Timer _settleTimer: Timer {
         interval: 600
@@ -117,7 +129,11 @@ QtObject {
         // fix shape used there — safe even when commit() is already being
         // called from inside push()'s OWN Qt.callLater (a harmless extra
         // tick, not a second command).
+        const epoch = history._epoch
         Qt.callLater(function () {
+            // Abandoned/cleared while queued (see _epoch) — drop it.
+            if (epoch !== history._epoch || !history.capture)
+                return
             const after = history.capture()
             EngineBridge.pushCommand(label,
                 function () { history.apply(after) },
@@ -131,10 +147,12 @@ QtObject {
             // coupling to EngineBridge or any one screen's UndoHistory
             // instance directly.
             EventBus.publish("undo.pushed", { label: label })
+            history.committed()
         })
     }
 
     function abandonPending() {
+        history._epoch++
         // Discards an open push(label, false) bracket — the pending "before"
         // snapshot describes an edit that never became a command, so it must
         // NOT commit afterwards. The critical caller is undo()/redo() below:
@@ -162,6 +180,7 @@ QtObject {
             label: EngineBridge.redoLabel(),
             canUndo: EngineBridge.canUndo, canRedo: EngineBridge.canRedo
         })
+        history.committed()
     }
 
     function redo() {
@@ -175,6 +194,7 @@ QtObject {
             label: EngineBridge.undoLabel(),
             canUndo: EngineBridge.canUndo, canRedo: EngineBridge.canRedo
         })
+        history.committed()
     }
 
     // Drops the WHOLE app-wide history (see the shared-stack note above) —

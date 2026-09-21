@@ -1,5 +1,8 @@
 #include "SlideListModel.h"
 
+#include <QHash>
+#include <QSet>
+
 SlideListModel::SlideListModel(QObject *parent)
     : QAbstractListModel(parent)
     , m_nextId(0)
@@ -33,6 +36,8 @@ QVariant SlideListModel::data(const QModelIndex &index, int role) const
     case Line2Role: return item.line2;
     case RefRole: return item.ref;
     case IdRole: return item.id;
+    case EngineIdRole: return item.engineId;
+    case CategoryIdRole: return item.categoryId;
     default: return {};
     }
 }
@@ -49,6 +54,8 @@ QHash<int, QByteArray> SlideListModel::roleNames() const
         { Line2Role, "line2" },
         { RefRole, "ref" },
         { IdRole, "slideId" },
+        { EngineIdRole, "engineId" },
+        { CategoryIdRole, "categoryId" },
     };
 }
 
@@ -107,6 +114,22 @@ void SlideListModel::removeSlide(int index)
     } else if (removedWasActive) {
         emit activeSlideChanged();
     }
+}
+
+void SlideListModel::clear()
+{
+    if (m_slides.isEmpty())
+        return;
+
+    const bool hadActive = activeIndex() >= 0;
+    beginRemoveRows(QModelIndex(), 0, m_slides.size() - 1);
+    m_slides.clear();
+    endRemoveRows();
+
+    // No slides → no active slide; the canvas must follow (EditScreen's
+    // hasActiveSlide greys the editor out, exactly like a fresh launch).
+    if (hadActive)
+        emit activeSlideChanged();
 }
 
 void SlideListModel::selectSlide(int index)
@@ -213,8 +236,106 @@ int SlideListModel::activeSlideId() const
     return item ? item->id : -1;
 }
 
+QString SlideListModel::engineIdAt(int index) const
+{
+    if (index < 0 || index >= m_slides.size())
+        return {};
+    return m_slides.at(index).engineId;
+}
+
+int SlideListModel::indexOfEngineId(const QString &engineId) const
+{
+    if (engineId.isEmpty())
+        return -1;
+    for (int i = 0; i < m_slides.size(); ++i)
+        if (m_slides.at(i).engineId == engineId)
+            return i;
+    return -1;
+}
+
+QVariantMap SlideListModel::slideFieldsAt(int index) const
+{
+    if (index < 0 || index >= m_slides.size())
+        return {};
+    const SlideItem &s = m_slides.at(index);
+    return {
+        { QStringLiteral("title"), s.title },
+        { QStringLiteral("tag"), s.tag },
+        { QStringLiteral("tagColor"), s.tagColor },
+        { QStringLiteral("line1"), s.line1 },
+        { QStringLiteral("line2"), s.line2 },
+        { QStringLiteral("ref"), s.ref },
+    };
+}
+
+QVariantMap SlideListModel::syncFromEngine(const QVariantList &slides)
+{
+    QHash<QString, SlideItem> existing;
+    QString activeEngineId;
+    for (const SlideItem &s : std::as_const(m_slides)) {
+        if (!s.engineId.isEmpty())
+            existing.insert(s.engineId, s);
+        if (s.active)
+            activeEngineId = s.engineId;
+    }
+
+    QList<SlideItem> next;
+    QVariantList added;
+    QSet<QString> kept;
+    int position = 0;
+    for (const QVariant &sv : slides) {
+        const QVariantMap s = sv.toMap();
+        const QString eid = s.value(QStringLiteral("id")).toString();
+        SlideItem item;
+        const bool isNew = !existing.contains(eid);
+        if (isNew) {
+            item.id = nextId();
+        } else {
+            item = existing.value(eid);   // keeps the UI id and the active flag
+        }
+        item.engineId = eid;
+        item.num = ++position;
+        item.title = s.value(QStringLiteral("title")).toString();
+        item.tag = s.value(QStringLiteral("tag")).toString();
+        item.tagColor = s.value(QStringLiteral("tagColor")).toString();
+        item.line1 = s.value(QStringLiteral("line1")).toString();
+        item.line2 = s.value(QStringLiteral("line2")).toString();
+        item.ref = s.value(QStringLiteral("ref")).toString();
+        item.categoryId = s.value(QStringLiteral("categoryId")).toString();
+        if (isNew) {
+            item.active = false;
+            added.append(QVariantMap{ { QStringLiteral("slideId"), item.id },
+                                      { QStringLiteral("engineId"), eid } });
+        }
+        kept.insert(eid);
+        next.append(item);
+    }
+
+    QVariantList removed;
+    for (const SlideItem &s : std::as_const(m_slides))
+        if (s.engineId.isEmpty() || !kept.contains(s.engineId))
+            removed.append(s.id);
+
+    beginResetModel();
+    m_slides = next;
+    endResetModel();
+
+    const bool activeRemoved = !activeEngineId.isEmpty() && !kept.contains(activeEngineId);
+    // The active slide vanished: whatever binds to the active* properties (the canvas,
+    // the empty-state) must hear about it before the caller selects a replacement.
+    if (activeRemoved)
+        emit activeSlideChanged();
+
+    return {
+        { QStringLiteral("added"), added },
+        { QStringLiteral("removed"), removed },
+        { QStringLiteral("activeRemoved"), activeRemoved },
+    };
+}
+
 int SlideListModel::slideIdAt(int index) const
 {
+
     if (index < 0 || index >= m_slides.size())
         return -1;
     return m_slides.at(index).id;

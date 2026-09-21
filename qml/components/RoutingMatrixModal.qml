@@ -109,8 +109,32 @@ ModalCard {
         // ---- The matrix ---------------------------------------------
         // Column labels (buses) over a cell grid; row labels (channels)
         // at the left. Auto lights every cell and ignores clicks.
-        Column {
+        // Horizontal scroll: 46 px gutter + 44 px per bus outgrows the card at ~9
+        // buses, and the bus list is unbounded.
+        Flickable {
+            id: matrixFlick
             width: parent.width
+            height: matrixCol.height
+            contentWidth: matrixCol.width
+            contentHeight: matrixCol.height
+            clip: true
+            flickableDirection: Flickable.HorizontalFlick
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentWidth > width
+
+            // Vertical wheel scrolls sideways while the matrix overflows.
+            WheelHandler {
+                enabled: matrixFlick.contentWidth > matrixFlick.width
+                onWheel: (event) => {
+                    matrixFlick.contentX = Math.max(0, Math.min(
+                        matrixFlick.contentWidth - matrixFlick.width,
+                        matrixFlick.contentX - event.angleDelta.y))
+                }
+            }
+
+        Column {
+            id: matrixCol
+            width: implicitWidth
             spacing: 6
 
             Row {
@@ -125,6 +149,7 @@ ModalCard {
                         model: root.busList.length
 
                         delegate: Item {
+                            id: colHead
                             required property int index
                             width: 40
                             height: 24
@@ -132,7 +157,9 @@ ModalCard {
                             Text {
                                 anchors.centerIn: parent
                                 width: parent.width
-                                text: root.busList[parent.index].name
+                                // The bus list can shrink while the modal is open —
+                                // the Repeater may still hand us an index past its end.
+                                text: (root.busList[colHead.index] || {}).name || ""
                                 color: Theme.textSecondary
                                 font.family: Theme.fontFamily
                                 font.pixelSize: 10
@@ -190,7 +217,7 @@ ModalCard {
 
                                     MouseArea {
                                         anchors.fill: parent
-                                        anchors.margins: -3
+                                        anchors.margins: -2   // half the 4 px gap — adjacent hit areas touch, never overlap
                                         cursorShape: root.autoRoute ? Qt.ArrowCursor : Qt.PointingHandCursor
                                         enabled: !root.autoRoute
                                         onClicked: root.toggle(chRow.index, cell.busIndex)
@@ -201,6 +228,7 @@ ModalCard {
                     }
                 }
             }
+        }
         }
 
         Text {

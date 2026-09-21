@@ -52,6 +52,29 @@ NotificationSeed NotificationFactory::LowMemory(std::string_view resource,
     return s;
 }
 
+NotificationSeed NotificationFactory::ResourcePressure(std::string_view resource,
+                                                       std::string_view level) const {
+    if (resource == "memory")
+        return LowMemory(resource, level);
+    NotificationSeed s;
+    s.sourceModule = "ResourceManager";
+    s.sourceEvent = "resource.pressure_high";
+    s.severity = Severity::Warning;
+    s.category = Category::kPerformance;
+    if (resource == "cpu") {
+        s.title = "High CPU usage";
+        s.message = std::string("The CPU has stayed at ") + std::string(level) +
+                    " load for a while. Heavy work (video, builds, other apps) may be slowing the presentation.";
+    } else if (resource == "disk") {
+        s.title = "Low disk space";
+        s.message = std::string("Disk usage: ") + std::string(level);
+    } else {
+        s.title = "High " + std::string(resource) + " usage";
+        s.message = std::string(resource) + " load: " + std::string(level);
+    }
+    return s;
+}
+
 NotificationSeed NotificationFactory::EngineCrash(std::string_view message) const {
     NotificationSeed s;
     s.sourceModule = "Kernel";

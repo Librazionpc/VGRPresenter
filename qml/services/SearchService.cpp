@@ -1,0 +1,462 @@
+#include "services/SearchService.h"
+
+#include "services/EngineBridge.h"
+#include "services/EventBus.h"
+#include "services/ShowService.h"
+
+#include "modules/bible/BibleEngine.hpp"
+#include "modules/songs/SongEngine.hpp"
+
+#include <QDebug>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QJSEngine>
+#include <QQmlEngine>
+#include <QSet>
+#include <QStandardPaths>
+#include <QThread>
+
+#include <algorithm>
+#include <functional>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace bb = bps::bible;
+namespace sg = bps::song;
+
+namespace {
+
+using Scored = std::pair<int, QVariantMap>;   // lower score = better match
+
+QVariantMap makeResult(const QString &kind, const QString &title, const QString &subtitle,
+                       const QString &id, const QString &path = QString(),
+                       const QString &text = QString(), const QString &key = QString())
+{
+    return {
+        { QStringLiteral("kind"), kind },
+        { QStringLiteral("title"), title },
+        { QStringLiteral("subtitle"), subtitle },
+        { QStringLiteral("text"), text },
+        { QStringLiteral("id"), id },
+        { QStringLiteral("path"), path },
+        { QStringLiteral("key"), key },
+    };
+}
+
+// Names that start with the query beat names that merely contain it; a match
+// on any of `fields` counts, the best one wins. -1 = no match.
+int matchScore(const QString &needle, std::initializer_list<QString> fields)
+{
+    int best = -1;
+    for (const QString &f : fields) {
+        if (f.isEmpty()) continue;
+        const int at = f.indexOf(needle, 0, Qt::CaseInsensitive);
+        if (at < 0) continue;
+        const int score = at == 0 ? 0 : (f.at(at - 1).isSpace() ? 1 : 2);
+        if (best < 0 || score < best) best = score;
+    }
+    return best;
+}
+
+// Appends the best `limit` of `found` (stable, so ties keep their source order).
+void take(QVariantList &out, std::vector<Scored> &found, int limit)
+{
+    std::stable_sort(found.begin(), found.end(),
+                     [](const Scored &a, const Scored &b) { return a.first < b.first; });
+    for (int i = 0; i < int(found.size()) && i < limit; ++i)
+        out.append(found[size_t(i)].second);
+}
+
+QString qstr(const std::string &s) { return QString::fromStdString(s); }
+
+// Every searchable entry of the Settings popup: what it is called, the section it is
+// filed under, and the popup's navigation key for that section. The popup's own search
+// box and the app-wide search both read this one list (through SearchService).
+struct SettingEntry { const char *label; const char *section; const char *key; };
+constexpr SettingEntry kSettings[] = {
+    { "General", "Settings", "general" },
+    { "Smart Config", "Settings", "smart" },
+    { "Outputs", "Settings", "outputs" },
+    { "Styles", "Settings", "styles" },
+    { "Audio & Video", "Settings", "av" },
+    { "Recording", "Settings", "recording" },
+    { "Plugins", "Settings", "plugins" },
+    { "Resource profile", "General", "general" },
+    { "Appearance", "General", "general" },
+    { "Accent color", "General", "general" },
+    { "Lock In Mode", "General", "general" },
+    { "Autosave", "General", "general" },
+    { "Backups & recovery", "General", "general" },
+    { "Crash recovery", "General", "general" },
+    { "Notifications & logs", "General", "general" },
+    { "Configuration mode", "Smart Config", "smart" },
+    { "Hardware detected", "Smart Config", "smart" },
+    { "Resource budgets", "Smart Config", "smart" },
+    { "Stream platform", "Recording", "recording" },
+    { "Stream key", "Recording", "recording" },
+    { "Video bitrate", "Recording", "recording" },
+    { "Encoder", "Recording", "recording" },
+    { "Screens to record", "Recording", "recording" },
+    { "Recording & Streaming", "Recording", "recording" },
+    { "Installed plugins", "Plugins", "plugins" },
+    { "Browse plugin store", "Plugins", "plugins" },
+};
+
+// The Settings entries that match `text` (name first, then section), best first.
+QVariantList settingsMatches(const QString &text, int limit)
+{
+    std::vector<Scored> found;
+    for (const SettingEntry &e : kSettings) {
+        const QString label = QString::fromUtf8(e.label);
+        const QString section = QString::fromUtf8(e.section);
+        int score = matchScore(text, { label });
+        if (score < 0) {
+            score = matchScore(text, { section });
+            if (score < 0) continue;
+            score += 3;   // an entry that only matches through its section comes after real name matches
+        }
+        QVariantMap r = makeResult(QStringLiteral("setting"), label,
+                                   QObject::tr("Settings · %1").arg(section), QString(), QString(),
+                                   QString(), QString::fromUtf8(e.key));
+        r.insert(QStringLiteral("section"), section);
+        found.emplace_back(score, r);
+    }
+    QVariantList out;
+    take(out, found, limit);
+    return out;
+}
+
+QString slideNumberLabel(int index) { return QStringLiteral("Slide %1").arg(index + 1); }
+
+// Verse text as the Bible files carry it has typesetting marks: the paragraph sign, the
+// red-letter quote marks, and [brackets] around the translators' added words. None of
+// that belongs in a search row or on a slide.
+QString cleanVerse(QString s)
+{
+    s.remove(QChar(0x00B6)).remove(QChar(0x2039)).remove(QChar(0x203A)).remove(QLatin1Char('[')).remove(QLatin1Char(']'));
+    return s.simplified();
+}
+
+// The Bible's own name for a book ("Psalms"), falling back to a capitalised id/alias.
+QString bookNameFor(const bb::BibleEngine &bible, const std::string &bibleId, const std::string &bookId,
+                    const std::string &fallback)
+{
+    auto book = bible.GetBook(bibleId, bookId);
+    if (book.ok() && !book.value().name.empty())
+        return qstr(book.value().name);
+    QString name = qstr(fallback.empty() ? bookId : fallback);
+    if (!name.isEmpty()) name[0] = name[0].toUpper();
+    return name;
+}
+
+// "John 3:16" / "Psalms 23" / "Genesis 1:1-3" from a resolved reference.
+QString referenceLabel(const bb::PassageRef &ref, const QString &book)
+{
+    if (ref.IsWholeChapter())
+        return QStringLiteral("%1 %2").arg(book).arg(ref.chapter);
+    QString label = QStringLiteral("%1 %2:%3").arg(book).arg(ref.chapter).arg(ref.verseStart);
+    if (ref.verseEnd > ref.verseStart)
+        label += QStringLiteral("-%1").arg(ref.verseEnd);
+    return label;
+}
+
+QString bibleLabel(const std::string &bibleId) { return qstr(bibleId).toUpper(); }
+
+// Reads one Bible file into the engine. Format comes from the file extension.
+bool importOne(const QString &path, QString *why)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        if (why) *why = QStringLiteral("cannot open %1").arg(path);
+        return false;
+    }
+    const QByteArray data = file.readAll();
+    QString ext = QFileInfo(path).suffix().toLower();
+    if (ext == QLatin1String("sfm")) ext = QStringLiteral("usfm");
+    auto r = bb::BibleEngine::Instance().Import(std::string_view(data.constData(), size_t(data.size())),
+                                                ext.toStdString(), {});
+    if (!r.ok()) {
+        if (why) *why = qstr(r.error().message);
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+SearchService::SearchService(QObject *parent)
+    : QObject(parent)
+{
+}
+
+SearchService::~SearchService() = default;
+
+SearchService &SearchService::instance()
+{
+    static SearchService s;
+    return s;
+}
+
+SearchService *SearchService::create(QQmlEngine *engine, QJSEngine *jsEngine)
+{
+    Q_UNUSED(engine)
+    Q_UNUSED(jsEngine)
+    QJSEngine::setObjectOwnership(&instance(), QJSEngine::CppOwnership);
+    return &instance();
+}
+
+QStringList SearchService::bibles() const
+{
+    QStringList out;
+    if (!EngineBridge::instance().booted())
+        return out;
+    for (const std::string &id : bb::BibleEngine::Instance().BibleIds())
+        out << qstr(id);
+    return out;
+}
+
+QVariantList SearchService::searchSettings(const QString &text, int limit) const
+{
+    const QString q = text.trimmed();
+    return q.isEmpty() ? QVariantList{} : settingsMatches(q, limit);
+}
+
+// ===========================================================================
+// Search
+// ===========================================================================
+
+QVariantList SearchService::search(const QString &rawText, int perKind) const
+{
+    QVariantList out;
+    const QString text = rawText.trimmed();
+    if (text.isEmpty() || !EngineBridge::instance().booted())
+        return out;
+    const int limit = qMax(1, perKind);
+
+    // ---- A typed Bible reference goes first ("john 3:16", "ps 23") ------------
+    const std::vector<std::string> bibleIds = bb::BibleEngine::Instance().BibleIds();
+    bool referenceFound = false;
+    if (!bibleIds.empty()) {
+        auto &bible = bb::BibleEngine::Instance();
+        auto ref = bible.ResolveReference(text.toStdString(), bibleIds.front());
+        if (ref.ok() && ref.value().Valid() && !ref.value().IsWholeBook()) {
+            auto verses = bible.GetPassage(bibleIds.front(), ref.value());
+            if (verses.ok() && !verses.value().empty()) {
+                QStringList lines;
+                const auto &vs = verses.value();
+                const bool many = vs.size() > 1;
+                for (size_t i = 0; i < vs.size() && i < 3; ++i)
+                    lines << (many ? QStringLiteral("%1 ").arg(vs[i].verse) : QString()) + cleanVerse(qstr(vs[i].text));
+                QString body = lines.join(QLatin1Char(' '));
+                if (vs.size() > 3) body += QStringLiteral(" …");
+                // What a slide gets: the passage itself (capped, so a whole chapter can't flood one slide).
+                QStringList all;
+                for (size_t i = 0; i < vs.size() && i < 8; ++i)
+                    all << (many ? QStringLiteral("%1 ").arg(vs[i].verse) : QString()) + cleanVerse(qstr(vs[i].text));
+                const QString bookName = bookNameFor(bible, bibleIds.front(), ref.value().bookId, ref.value().bookName);
+                QVariantMap r = makeResult(QStringLiteral("bible"), referenceLabel(ref.value(), bookName),
+                                           bibleLabel(bibleIds.front()),
+                                           qstr(ref.value().ToString()), QString(), body);
+                r.insert(QStringLiteral("bibleId"), qstr(bibleIds.front()));
+                r.insert(QStringLiteral("fullText"), all.join(QLatin1Char(' ')));
+                out.append(r);
+                referenceFound = true;
+            }
+        }
+    }
+
+    // ---- Shows in the library ---------------------------------------------------
+    {
+        std::vector<Scored> found;
+        for (const QVariant &v : ShowService::instance().searchLibrary(text)) {
+            const QVariantMap s = v.toMap();
+            const QString category = s.value(QStringLiteral("category")).toString();
+            const int slides = s.value(QStringLiteral("slideCount")).toInt();
+            found.emplace_back(matchScore(text, { s.value(QStringLiteral("name")).toString(), category }),
+                               makeResult(QStringLiteral("show"), s.value(QStringLiteral("name")).toString(),
+                                          (category.isEmpty() ? QString() : category + QStringLiteral(" · "))
+                                              + QObject::tr("%n slide(s)", "", slides),
+                                          s.value(QStringLiteral("id")).toString(),
+                                          s.value(QStringLiteral("path")).toString()));
+        }
+        // matchScore is -1 when only the engine's fuzzier matching hit: keep those, last.
+        for (auto &f : found) if (f.first < 0) f.first = 3;
+        take(out, found, limit);
+    }
+
+    // ---- The working show: slides, templates, overlays, categories ------------------
+    ShowService &shows = ShowService::instance();
+    if (shows.hasShow()) {
+        const QVariantMap show = shows.currentShow();
+
+        std::vector<Scored> slides;
+        const QVariantList slideList = show.value(QStringLiteral("slides")).toList();
+        for (int i = 0; i < slideList.size(); ++i) {
+            const QVariantMap s = slideList[i].toMap();
+            const QString title = s.value(QStringLiteral("title")).toString();
+            const QString line1 = s.value(QStringLiteral("line1")).toString();
+            const QString line2 = s.value(QStringLiteral("line2")).toString();
+            const QString ref = s.value(QStringLiteral("ref")).toString();
+            const int score = matchScore(text, { title, line1, line2, ref });
+            if (score < 0) continue;
+            slides.emplace_back(score,
+                makeResult(QStringLiteral("slide"), title.isEmpty() ? slideNumberLabel(i) : title,
+                           (!line1.isEmpty() ? line1 : (!ref.isEmpty() ? ref : slideNumberLabel(i)))
+                               + QStringLiteral(" · ") + show.value(QStringLiteral("name")).toString(),
+                           s.value(QStringLiteral("id")).toString()));
+        }
+        take(out, slides, limit);
+
+        auto named = [&](const QString &listKey, const QString &kind,
+                         const std::function<QString(const QVariantMap &)> &subtitle) {
+            std::vector<Scored> found;
+            for (const QVariant &v : show.value(listKey).toList()) {
+                const QVariantMap m = v.toMap();
+                const QString name = m.value(QStringLiteral("name")).toString();
+                const int score = matchScore(text, { name });
+                if (score < 0) continue;
+                found.emplace_back(score, makeResult(kind, name, subtitle(m),
+                                                     m.value(QStringLiteral("id")).toString()));
+            }
+            take(out, found, limit);
+        };
+        named(QStringLiteral("templates"), QStringLiteral("template"), [](const QVariantMap &m) {
+            const QString type = m.value(QStringLiteral("contentType")).toString();
+            return type.isEmpty() ? QObject::tr("Template") : QObject::tr("Template · %1").arg(type);
+        });
+        named(QStringLiteral("overlays"), QStringLiteral("overlay"), [](const QVariantMap &m) {
+            return QObject::tr("Overlay · %1%2").arg(m.value(QStringLiteral("scope")).toString(),
+                m.value(QStringLiteral("enabled")).toBool() ? QString() : QObject::tr(" · off"));
+        });
+        named(QStringLiteral("categories"), QStringLiteral("category"), [](const QVariantMap &m) {
+            const QString type = m.value(QStringLiteral("contentType")).toString();
+            return type.isEmpty() ? QObject::tr("Category") : QObject::tr("Category · %1").arg(type);
+        });
+    }
+
+    // ---- Settings -------------------------------------------------------------------
+    out += settingsMatches(text, limit);
+
+    // ---- Songs (engine) -------------------------------------------------------------
+    if (text.size() >= 2) {
+        auto songs = sg::SongEngine::Instance().Search(text.toStdString());
+        if (songs.ok()) {
+            int n = 0;
+            for (const sg::Song &s : songs.value()) {
+                if (n++ >= limit) break;
+                QStringList authors;
+                for (const std::string &a : s.metadata.authors) authors << qstr(a);
+                out.append(makeResult(QStringLiteral("song"), qstr(s.metadata.title),
+                                      authors.isEmpty() ? QObject::tr("Song") : authors.join(QStringLiteral(", ")),
+                                      qstr(s.id)));
+            }
+        }
+    }
+
+    // ---- Bible text (engine, every installed Bible) ---------------------------------
+    if (!bibleIds.empty() && !referenceFound && text.size() >= 3) {
+        auto &bible = bb::BibleEngine::Instance();
+        auto hits = bible.Search(text.toStdString());
+        if (hits.ok()) {
+            int n = 0;
+            for (const bb::BibleSearchHit &h : hits.value()) {
+                if (n++ >= qMax(limit, 6)) break;
+                const QString name = bookNameFor(bible, h.bibleId, h.bookId, std::string());
+                QString body = cleanVerse(qstr(h.snippet));
+                if (body.isEmpty()) {
+                    auto verse = bible.GetVerse(h.bibleId, h.bookId, h.chapter, h.verse);
+                    if (verse.ok()) body = cleanVerse(qstr(verse.value().text));
+                }
+                QVariantMap r = makeResult(QStringLiteral("bible"),
+                                           QStringLiteral("%1 %2:%3").arg(name).arg(h.chapter).arg(h.verse),
+                                           bibleLabel(h.bibleId), qstr(h.reference), body);
+                r.insert(QStringLiteral("bibleId"), qstr(h.bibleId));
+                out.append(r);
+            }
+        }
+    }
+
+    return out;
+}
+
+// ===========================================================================
+// Bible files
+// ===========================================================================
+
+QStringList SearchService::candidateBibleFiles()
+{
+    QStringList files;
+    const QString env = qEnvironmentVariable("VGR_BIBLE_FILE");
+    if (!env.isEmpty() && QFileInfo::exists(env))
+        files << env;
+
+    const QDir userDir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
+                       + QStringLiteral("/VGR Presenter/Bibles"));
+    QSet<QString> bases;
+    for (const QFileInfo &fi : userDir.entryInfoList(
+             { "*.json", "*.xml", "*.osis", "*.usfm", "*.sfm", "*.txt" }, QDir::Files, QDir::Name)) {
+        files << fi.absoluteFilePath();
+        bases << fi.completeBaseName().toLower();
+    }
+
+#ifdef VGR_DEV_DATA_DIR
+    // Development builds: the KJV that ships in the source tree, unless the user
+    // already has one of their own.
+    const QString dev = QStringLiteral(VGR_DEV_DATA_DIR "/kjv.json");
+    if (QFileInfo::exists(dev) && !bases.contains(QStringLiteral("kjv")))
+        files << dev;
+#endif
+    return files;
+}
+
+void SearchService::loadBibles()
+{
+    if (loadStarted_ || !EngineBridge::instance().booted())
+        return;
+    loadStarted_ = true;
+    const QStringList files = candidateBibleFiles();
+    if (files.isEmpty())
+        return;
+
+    loading_ = true;
+    emit bibleChanged();
+
+    QThread *thread = QThread::create([files] {
+        for (const QString &path : files) {
+            QString why;
+            if (!importOne(path, &why))
+                qWarning().noquote() << "Bible import skipped:" << path << "-" << why;
+        }
+    });
+    loader_ = thread;
+    connect(thread, &QThread::finished, this, [this] {
+        loading_ = false;
+        emit bibleChanged();
+    });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
+}
+
+bool SearchService::importBibleFile(const QString &path)
+{
+    if (!EngineBridge::instance().booted())
+        return false;
+    QString why;
+    if (!importOne(path, &why)) {
+        EventBus::instance().notify(why, QStringLiteral("error"), QObject::tr("Couldn't install the Bible"),
+                                    QStringLiteral("bible.import"));
+        return false;
+    }
+    emit bibleChanged();
+    EventBus::instance().notify(QFileInfo(path).fileName(), QStringLiteral("success"),
+                                QObject::tr("Bible installed"), QStringLiteral("bible.import"));
+    return true;
+}
+
+void SearchService::shutdown()
+{
+    if (loader_)
+        loader_->wait(20000);
+}

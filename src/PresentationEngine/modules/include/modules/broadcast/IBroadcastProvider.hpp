@@ -29,6 +29,9 @@ public:
     // Probing never throws and never aborts: it resolves the runtime SDK and
     // reports availability. Returns Unsupported when the SDK/hardware is absent.
     virtual Result<ProviderState> Probe() = 0;
+    // Vendor runtime version string once Probe() succeeded ("" when unknown /
+    // not applicable) — surfaced in Settings · Plugins.
+    virtual std::string RuntimeVersion() const { return {}; }
 
     // --- NDI-style discovery / send / receive (all providers) ---
     virtual std::vector<NdiSourceInfo> DiscoverSources() { return {}; }

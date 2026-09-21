@@ -123,27 +123,42 @@ void ResourceManager::Sample() {
                             : PressureLevel::None;
     PressureLevel cpu = LevelFor(t.cpuUsagePct / 100.0);
 
-    if (mem >= PressureLevel::High && lastMemPressure_ < PressureLevel::High) {
-        decisions_.push_back(AutoDecision{EngineClock::now(), "throttle-background",
-                                          "memory pressure " + std::string(ToString(mem))});
-        auto sticky = std::make_shared<events::ResourcePressureHigh>("memory", mem);
-        EventBus::Instance().SetSticky(events::ResourcePressureHigh::kTopic, sticky);
-        (void)EventBus::Instance().Publish(*sticky);
-        (void)EventBus::Instance().Publish(
-            events::ResourcePressureChanged{"memory", lastMemPressure_, mem});
-    } else if (mem < PressureLevel::High && lastMemPressure_ >= PressureLevel::High) {
-        (void)EventBus::Instance().Publish(
-            events::ResourcePressureChanged{"memory", lastMemPressure_, mem});
+    const EngineTime now = EngineClock::now();
+
+    // Memory: alert once per sustained episode (see PressureLatch).
+    switch (memLatch_.Update(mem, now)) {
+        case PressureLatch::Transition::Raised: {
+            decisions_.push_back(AutoDecision{now, "throttle-background",
+                                              "memory pressure " + std::string(ToString(mem))});
+            auto sticky = std::make_shared<events::ResourcePressureHigh>("memory", mem);
+            EventBus::Instance().SetSticky(events::ResourcePressureHigh::kTopic, sticky);
+            (void)EventBus::Instance().Publish(*sticky);
+            (void)EventBus::Instance().Publish(
+                events::ResourcePressureChanged{"memory", lastMemPressure_, mem});
+            break;
+        }
+        case PressureLatch::Transition::Cleared:
+            (void)EventBus::Instance().Publish(
+                events::ResourcePressureChanged{"memory", lastMemPressure_, mem});
+            break;
+        case PressureLatch::Transition::None:
+            break;
     }
-    if (cpu >= PressureLevel::High && lastCpuPressure_ < PressureLevel::High) {
-        decisions_.push_back(AutoDecision{EngineClock::now(), "reduce-polling",
-                                          "cpu pressure " + std::string(ToString(cpu))});
-        (void)EventBus::Instance().Publish(events::ResourcePressureHigh{"cpu", cpu});
-        (void)EventBus::Instance().Publish(
-            events::ResourcePressureChanged{"cpu", lastCpuPressure_, cpu});
-    } else if (cpu < PressureLevel::High && lastCpuPressure_ >= PressureLevel::High) {
-        (void)EventBus::Instance().Publish(
-            events::ResourcePressureChanged{"cpu", lastCpuPressure_, cpu});
+    // CPU: same, with a longer hold â a CPU spike is normal, sustained saturation is not.
+    switch (cpuLatch_.Update(cpu, now)) {
+        case PressureLatch::Transition::Raised:
+            decisions_.push_back(AutoDecision{now, "reduce-polling",
+                                              "cpu pressure " + std::string(ToString(cpu))});
+            (void)EventBus::Instance().Publish(events::ResourcePressureHigh{"cpu", cpu});
+            (void)EventBus::Instance().Publish(
+                events::ResourcePressureChanged{"cpu", lastCpuPressure_, cpu});
+            break;
+        case PressureLatch::Transition::Cleared:
+            (void)EventBus::Instance().Publish(
+                events::ResourcePressureChanged{"cpu", lastCpuPressure_, cpu});
+            break;
+        case PressureLatch::Transition::None:
+            break;
     }
     lastMemPressure_ = mem;
     lastCpuPressure_ = cpu;

@@ -210,6 +210,7 @@ Result<void> BroadcastEngine::Reset() {
     senders_.clear();
     receivers_.clear();
     sdiCaptures_.clear();
+    preferredProvider_.clear();
     framesSent_.store(0);
     framesReceived_.store(0);
     sourcesDiscovered_.store(0);
@@ -308,12 +309,17 @@ Result<BroadcastSenderId> BroadcastEngine::CreateNdiSender(std::string_view name
         return Error::Make(Err::InvalidArgument, kModule, "sender name required");
     // Prefer a real NDI provider when it is actually usable (SDK present);
     // otherwise fall back to the always-available software loopback.
-    auto p = Find("ndi");
-    if (p) {
-        auto probe = p->Probe();
-        if (!probe.ok() || probe.value() != ProviderState::Available) p = nullptr;
+    std::shared_ptr<IBroadcastProvider> p;
+    if (!preferredProvider_.empty()) {
+        p = Find(preferredProvider_);
+    } else {
+        p = Find("ndi");
+        if (p) {
+            auto probe = p->Probe();
+            if (!probe.ok() || probe.value() != ProviderState::Available) p = nullptr;
+        }
+        if (!p) p = Find("software");
     }
-    if (!p) p = Find("software");
     if (!p)
         return Error::Make(Err::Broadcast_ProviderNotFound, kModule,
                            "no sender-capable provider registered");
@@ -381,12 +387,17 @@ std::vector<std::string> BroadcastEngine::SenderIds() const {
 
 Result<BroadcastReceiverId> BroadcastEngine::CreateNdiReceiver(std::string_view sourceName) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto p = Find("ndi");
-    if (p) {
-        auto probe = p->Probe();
-        if (!probe.ok() || probe.value() != ProviderState::Available) p = nullptr;
+    std::shared_ptr<IBroadcastProvider> p;
+    if (!preferredProvider_.empty()) {
+        p = Find(preferredProvider_);
+    } else {
+        p = Find("ndi");
+        if (p) {
+            auto probe = p->Probe();
+            if (!probe.ok() || probe.value() != ProviderState::Available) p = nullptr;
+        }
+        if (!p) p = Find("software");
     }
-    if (!p) p = Find("software");
     if (!p)
         return Error::Make(Err::Broadcast_ProviderNotFound, kModule,
                            "no receiver-capable provider registered");
@@ -501,6 +512,32 @@ bool BroadcastEngine::NdiAvailable() const {
     if (!p) return false;
     auto r = p->Probe();
     return r.ok() && r.value() == ProviderState::Available;
+}
+
+BroadcastEngine::NdiRuntimeStatus BroadcastEngine::NdiStatus() const {
+    NdiRuntimeStatus st;
+    auto p = Find("ndi");
+    if (!p) {
+        st.state = NdiRuntimeStatus::State::Error;
+        st.detail = "NDI provider is not registered";
+        return st;
+    }
+    auto r = p->Probe();
+    if (r.ok() && r.value() == ProviderState::Available) {
+        st.state = NdiRuntimeStatus::State::Ready;
+        st.version = p->RuntimeVersion();
+        return st;
+    }
+    st.detail = r.ok() ? "NDI runtime is unavailable" : r.error().message;
+    st.state = (!r.ok() && r.error().code == Err::Broadcast_SdkNotInstalled)
+                   ? NdiRuntimeStatus::State::NotInstalled
+                   : NdiRuntimeStatus::State::Error;
+    return st;
+}
+
+void BroadcastEngine::PreferProvider(std::string_view name) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    preferredProvider_ = std::string(name);
 }
 
 bool BroadcastEngine::SdiAvailable() const {

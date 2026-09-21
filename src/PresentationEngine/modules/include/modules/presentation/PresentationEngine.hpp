@@ -11,6 +11,7 @@
 #include "core/events/Events.hpp"
 #include "interfaces/IService.hpp"
 #include "modules/presentation/PresentationCues.hpp"
+#include "modules/presentation/PresentationDocument.hpp"
 #include "modules/presentation/PresentationRuntime.hpp"
 #include "modules/presentation/PresentationSession.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
@@ -102,6 +103,13 @@ public:
 private:
     PresentationEngine() = default;
 
+public:
+    // The working show and its .vgr open/save (docs/specs/22). Null before
+    // Initialize() / after Shutdown().
+    std::shared_ptr<PresentationDocument> Document() const;
+
+private:
+
     // Dependency wiring (set at Initialize): the RenderEngine and the builders.
     void WireDependencies();
 
@@ -113,6 +121,9 @@ private:
     PresentationValidator validator_;
     std::shared_ptr<PresentationCompiler> compiler_;
     std::shared_ptr<SceneBuilder> builder_;
+    // The "presentation" document handler (open/save the working show as .vgr),
+    // registered with the DocumentManager while the engine is initialized.
+    std::shared_ptr<PresentationDocument> document_;
     std::vector<Subscription> subscriptions_;
     std::atomic<bool> initialized_{false};
     std::atomic<bool> running_{false};

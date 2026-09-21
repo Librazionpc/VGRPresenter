@@ -248,7 +248,9 @@ Item {
     // why the list is empty (SDK absent vs still browsing).
     readonly property var ndiOptions: {
         if (!EngineBridge.ndiAvailable)
-            return [{ label: qsTr("NDI not enabled yet — check plugin"),
+            return [{ label: EngineBridge.ndiState === "notInstalled"
+                             ? qsTr("NDI runtime not installed — see the notice above")
+                             : qsTr("NDI unavailable — see the notice above"),
                       disabled: true }]
         if (EngineBridge.ndiSources.length === 0)
             return [{ label: qsTr("No NDI sources found on the network"),
@@ -452,36 +454,16 @@ Item {
     }
 
     // ---- Row removal (right-click menu + Edit dialogs' Delete) ----
-    // Removal must FIX ROUTING before it removes: buses store routes by row
-    // index, so deleting row i without compacting would silently rewire
-    // every route pointing at rows after i. Rewriting the route lists via
-    // toggles (remove the dead index, shift the rest down) keeps the stored
-    // indices in step with the model. Both the context menu's Delete and
+    // Routes key on each row's STABLE id inside the engine graph, and the
+    // roster models cut the removed row's edges themselves and re-derive the
+    // buses' cached row numbers afterwards (BusListModel::refreshRoutes) — so
+    // removal is just removal. (The old index-compaction toggling here fought
+    // that and rewired the wrong sources.) Both the context menu's Delete and
     // the Edit dialogs' Delete buttons go through these.
     function removeAudioFixingRoutes(index) {
-        for (let b = 0; b < BusListModel.rowCount(); ++b) {
-            const before = BusListModel.getBus(b).routedAudioInputs
-            const desired = before.filter((i) => i !== index).map((i) => i > index ? i - 1 : i)
-            for (const i of before)
-                if (desired.indexOf(i) < 0)
-                    BusListModel.toggleAudioRoute(b, i)
-            for (const i of desired)
-                if (before.indexOf(i) < 0)
-                    BusListModel.toggleAudioRoute(b, i)
-        }
         AudioInputListModel.removeInput(index)
     }
     function removeVideoFixingRoutes(index) {
-        for (let b = 0; b < BusListModel.rowCount(); ++b) {
-            const before = BusListModel.getBus(b).routedVideoSources
-            const desired = before.filter((i) => i !== index).map((i) => i > index ? i - 1 : i)
-            for (const i of before)
-                if (desired.indexOf(i) < 0)
-                    BusListModel.toggleVideoRoute(b, i)
-            for (const i of desired)
-                if (before.indexOf(i) < 0)
-                    BusListModel.toggleVideoRoute(b, i)
-        }
         VideoSourceListModel.removeSource(index)
     }
 
@@ -1662,6 +1644,11 @@ Item {
                 // a shared 76px label rail, then Mode, a section divider,
                 // Delay, Volume, Channels (checkbox rows + pill meters +
                 // green gain knobs).
+                NdiRuntimeNotice {
+                    width: parent.width
+                    active: root.editAudioKind === "ndi"
+                }
+
                 ProAudioForm {
                     width: parent.width
                     nameText: root.editAudioName
@@ -1824,6 +1811,11 @@ Item {
             suffix: "%"
             value: root.editVideoLevel
             onMoved: (v) => root.editVideoLevel = v
+        }
+
+        NdiRuntimeNotice {
+            width: parent.width
+            active: root.editVideoKind === "ndi"
         }
 
         // Source — REAL hardware selects, kind-driven (camera = the
@@ -2105,6 +2097,11 @@ Item {
 
                 // Pro-audio form — the reference layout (Name / Source on
                 // the shared label rail, Mode, Delay, Volume, Channels).
+                NdiRuntimeNotice {
+                    width: parent.width
+                    active: root.addSourceKind === "ndi"
+                }
+
                 ProAudioForm {
                     width: parent.width
                     nameText: root.addSourceName
@@ -2180,6 +2177,11 @@ Item {
                         }
                     }
                 }
+            }
+
+            NdiRuntimeNotice {
+                width: parent.width
+                active: root.addSourceKind === "ndi"
             }
 
             // Source — REAL hardware for the camera kind (the engine's Media

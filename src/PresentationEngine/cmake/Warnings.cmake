@@ -2,9 +2,11 @@
 function(bps_enable_warnings target)
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "15")
-      # GCC 15 regression: -Wmaybe-uninitialized fires on libstdc++ std::variant
-      # internal union storage (_Variant_storage::_M_u) in optimized builds even
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "13")
+      # GCC 13+ false positive (first hit on 13.1 through core/config/Json.hpp
+      # ParseLiteral and every bps::json::Value temp; still present in 15):
+      # -Wmaybe-uninitialized fires on libstdc++ std::variant internal union
+      # storage (_Variant_storage::_M_u) in optimized builds even
       # though every use site is fully initialized — verified by ASan + UBSan
       # both running clean on the full test suite (2719 checks).
       target_compile_options(${target} PRIVATE -Wno-maybe-uninitialized)

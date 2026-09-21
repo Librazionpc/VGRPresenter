@@ -2,6 +2,8 @@
 
 #include <QAbstractListModel>
 #include <QList>
+#include <QVariantList>
+#include <QVariantMap>
 #include <qqml.h>
 
 struct SlideItem
@@ -18,6 +20,12 @@ struct SlideItem
     QString line1;
     QString line2;
     QString ref;
+    // The ENGINE's identity for this slide ("slide-3"). The int `id` above is a
+    // UI-session handle; the engine (ShowService/ShowEditor) owns the slide and this
+    // is the id every engine call uses. Empty only for a row the engine has not
+    // been told about yet.
+    QString engineId;
+    QString categoryId;   // the engine's category assignment (kept so it survives syncs)
 };
 
 // Mock CRUD backend for the Edit screen's slide list. Seeded with the same
@@ -57,6 +65,8 @@ public:
         // Stable identity — delegates key per-slide state (EditScreen's
         // canvas archive) on this, never on `num`, which renumbers.
         IdRole,
+        EngineIdRole,
+        CategoryIdRole,
     };
     Q_ENUM(Role)
 
@@ -71,10 +81,30 @@ public:
     // the caller can clone per-slide state onto the copy.
     Q_INVOKABLE int duplicateSlide(int index);
     Q_INVOKABLE void removeSlide(int index);
+    // Drops EVERY slide ("New show"): roster empty, activeSlideId 0, one
+    // activeSlideChanged emitted if anything was active. Canvas archives
+    // are the caller's to clear (SlideCanvasStore::clear).
+    Q_INVOKABLE void clear();
     Q_INVOKABLE void selectSlide(int index);
     // Stable id of the slide at `index`, or -1 when out of range. Lets QML
     // map a model row to archive keys without a JS-side shadow of the model.
     Q_INVOKABLE int slideIdAt(int index) const;
+
+    // ---- Engine projection ---------------------------------------------------
+    // The engine owns the show; this model is its projection for the slide list.
+    // The engine's id for the slide at `index` ("" out of range).
+    Q_INVOKABLE QString engineIdAt(int index) const;
+    Q_INVOKABLE int indexOfEngineId(const QString &engineId) const;   // -1 if absent
+    // Roster fields the UI edits ({ title, tag, tagColor, line1, line2, ref }) —
+    // what a flush sends to the engine.
+    Q_INVOKABLE QVariantMap slideFieldsAt(int index) const;
+    // Makes the rows match the engine's slides (`slides` = ShowService.currentShow.slides,
+    // in order). Rows the engine still has keep their UI id and active flag; new ones
+    // get a fresh UI id; gone ones are dropped. Returns
+    //   { added: [ { slideId, engineId } ], removed: [ slideId ], activeRemoved: bool }
+    // so the caller can build/drop the per-slide canvas archives. Does NOT emit
+    // activeSlideChanged (the caller selects a slide once its archive exists).
+    Q_INVOKABLE QVariantMap syncFromEngine(const QVariantList &slides);
 
     // Inline-editing the canvas text objects (DraggableCanvasText +
     // EditableCanvasLabel in EditScreen.qml) writes back through these

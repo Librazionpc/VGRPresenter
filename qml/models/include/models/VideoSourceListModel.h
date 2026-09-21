@@ -107,5 +107,5 @@ private:
     static inline VideoSourceListModel *s_instance = nullptr;
 
     QList<VideoSourceItem> m_sources;
-    int m_nextId = 1;   // stable-id counter ("v<n>" — unique per row, ever)
+    int m_nextId = 1;   // stable-id counter ("v<n>"): unique for the whole session; restarts each launch (rosters aren't persisted)
 };

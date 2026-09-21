@@ -73,6 +73,20 @@ public:
     // --- Introspection ---
     BroadcastStats Stats() const;
     bool NdiAvailable() const;
+    // Why NDI is or isn't usable — what the UI shows and acts on. NotInstalled
+    // is the actionable case (link the user to the runtime download); Error is
+    // "installed but unusable" (detail says why).
+    struct NdiRuntimeStatus {
+        enum class State { Ready, NotInstalled, Error };
+        State state = State::NotInstalled;
+        std::string detail;    // human-readable reason (empty when Ready)
+        std::string version;   // vendor runtime version (Ready only)
+    };
+    NdiRuntimeStatus NdiStatus() const;
+    // Pins sender/receiver creation to one provider ("software" makes tests
+    // deterministic on machines that have the real NDI runtime; "" = automatic:
+    // real NDI when usable, software loopback otherwise).
+    void PreferProvider(std::string_view name);
     bool SdiAvailable() const;
 
     // --- Events ---
@@ -92,6 +106,7 @@ private:
     void RecordError(std::string_view provider, std::string_view message);
 
     std::map<std::string, std::shared_ptr<IBroadcastProvider>, std::less<>> providers_;
+    std::string preferredProvider_;   // "" = automatic (see PreferProvider)
     std::map<BroadcastSenderId, std::string, std::less<>> senders_;    // id -> provider
     std::map<BroadcastReceiverId, std::string, std::less<>> receivers_; // id -> provider
     std::map<std::string, std::string, std::less<>> sdiCaptures_;      // id -> provider

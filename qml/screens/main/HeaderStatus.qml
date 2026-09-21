@@ -20,8 +20,12 @@ import VGRPresenterUI
 Item {
     id: root
 
+    // The fake window buttons this cluster used to draw are gone from the header (real ones
+    // live in WindowControls); kept switchable so the original 164px layout can be reused.
+    property bool showWindowControls: true
+
     height: 32
-    width: 164
+    width: showWindowControls ? 164 : 104
 
     // Kernel truth, mirrored from the relay. "Running" = the kernel booted
     // and is serving; anything else shows a matching degraded/idle color.
@@ -103,6 +107,7 @@ Item {
     Rectangle {
         x: 104
         y: 1
+        visible: root.showWindowControls
 
         height: 12
         width: 60

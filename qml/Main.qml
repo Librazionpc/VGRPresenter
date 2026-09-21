@@ -13,10 +13,18 @@ ApplicationWindow {
     minimumWidth: 1024
     minimumHeight: 640
     visible: true
-    title: "VGRPresenter"
+    flags: Qt.Window | Qt.FramelessWindowHint
+    // The open show's name, with a dot while it has unsaved changes.
+    title: (ShowService.hasShow ? ShowService.showName + (ShowService.showDirty ? " •" : "") + " — " : "") + "VGRPresenter"
     color: Theme.windowBg
 
     property string settingsSection: "general"
+    // The header is now two rows — the title bar (logo, menu, window buttons), a
+    // separator line, then the Show / Edit / Stage tabs. The screens were designed
+    // around a 48 px header, so they are pushed down by however much taller it is
+    // (their own top 48 px sits underneath the header, hidden).
+    readonly property int headerHeight: appHeader.height
+    readonly property int headerExtra: window.headerHeight - 48
     // "show" | "edit" | "stage" — Stage has no screen yet, so its tab click
     // is accepted but doesn't switch the view.
     property string currentView: "show"
@@ -42,30 +50,41 @@ ApplicationWindow {
         const boot = EngineBridge.bootSummary()
         if (boot !== "")
             EventBus.notify(boot, "success", qsTr("Engine"), "engine.boot")
+
+        // Search: the Bible files are read into the engine (background thread) so verses
+        // can be found.
+        SearchService.loadBibles()
     }
 
     // Screens first (opaque, fill the window), then the shared header strip
     // and the menu layer on top — AppMenuBar must sit above AppHeader because
-    // its logo/menu labels are drawn inside the same 48px strip.
+    // its logo/menu labels are drawn inside the title row of the same header.
     VGRPresenterMainScreen {
+        id: showScreen
         anchors.fill: parent
+        anchors.topMargin: window.headerExtra
         visible: window.currentView === "show"
+        onNewShowRequested: {
+            editScreen.newShow()
+            window.currentView = "edit"
+        }
+        // Row click in the shows library: open that .vgr (unsaved-changes
+        // guarded) and go to the Edit screen.
+        onOpenShowRequested: (path) => {
+            editScreen.openShowPath(path)
+            window.currentView = "edit"
+        }
+        // The Projects panel's search box / "Quick search" button: the same app-wide search.
+        onSearchRequested: quickSearch.openSearch()
     }
 
     EditScreen {
         id: editScreen
         anchors.fill: parent
+        anchors.topMargin: window.headerExtra
         visible: window.currentView === "edit"
     }
 
-    // UI self-test: resolve an edit-screen + menu chip into window coords
-    // (C++ findChild can't reach Repeater delegates; see EditScreen note).
-    function selfTestCenter(name) {
-        if (name === "selfTestAddContent")
-            return SelfTest.itemCenter(name)
-        const p = editScreen.selfTestItemCenter(name)
-        return p || SelfTest.itemCenter(name)   // fall back to C++ path
-    }
     // Opens the Settings dialog — the one entry point both the header's
     // gear button and the menu bar's Settings/Preferences items funnel
     // into, so a future keyboard shortcut (Ctrl+,) only ever calls this.
@@ -76,6 +95,7 @@ ApplicationWindow {
     }
 
     AppHeader {
+        id: appHeader
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
@@ -84,11 +104,130 @@ ApplicationWindow {
             if (tab === "show" || tab === "edit") window.currentView = tab
         }
         onSettingsClicked: window.openSettings("general")
+        onSearchClicked: quickSearch.openSearch()
+    }
+
+    // Quick search over the show library — header button, Ctrl+K, and the menu item.
+    QuickSearchDialog {
+        id: quickSearch
+        onResultChosen: (result) => window.openSearchResult(result)
+    }
+
+    // What picking a search result does. The dialog only finds things (SearchService, backed
+    // by the engine); this is the one place that knows how to go to them.
+    function openSearchResult(r) {
+        switch (r.kind) {
+        case "show":
+            editScreen.openShowPath(r.path)
+            window.currentView = "edit"
+            break
+        case "slide":
+            window.currentView = "edit"
+            editScreen.session.refresh(r.id)
+            break
+        case "setting":
+            window.openSettings(r.key)
+            break
+        case "bible": {
+            // A verse becomes a slide in the working show.
+            ShowService.ensureShow(qsTr("Untitled show"))
+            const ref = r.title + (r.subtitle !== "" ? " (" + r.subtitle + ")" : "")
+            const body = r.fullText !== undefined && r.fullText !== "" ? r.fullText : r.text
+            const id = ShowService.addSlide({
+                title: r.title,
+                ref: ref,
+                line1: body,
+                blocks: [
+                    { kind: "text", text: body, x: 24, y: 24, width: 420, height: 110 },
+                    { kind: "text", text: ref, x: 24, y: 144, width: 420, height: 30 }
+                ]
+            })
+            if (id !== "") {
+                window.currentView = "edit"
+                editScreen.session.refresh(id)
+                EventBus.notify(qsTr("Added %1 to the show.").arg(r.title), "success", qsTr("Bible"), "search.bible.added")
+            }
+            break
+        }
+        default:
+            // Templates, overlays, categories and songs are found (the engine has them) but
+            // nothing in the UI shows them yet — say so instead of doing nothing.
+            EventBus.notify(qsTr("“%1” — %2. There is no screen for this yet.").arg(r.title).arg(r.subtitle),
+                            "info", qsTr("Search"), "search.nodest")
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+K"
+        onActivated: quickSearch.openSearch()
     }
 
     AppMenuBar {
         anchors.fill: parent
         onSettingsRequested: (section) => window.openSettings(section)
+        // "New show" from either menu = the same deck reset as the Show
+        // screen's buttons.
+        onNewShowRequested: {
+            editScreen.newShow()
+            window.currentView = "edit"
+        }
+        // Show files: the engine reads/writes the .vgr (see ShowSession.qml).
+        onOpenShowRequested: {
+            window.currentView = "edit"
+            editScreen.openShow()
+        }
+        onQuickSearchRequested: quickSearch.openSearch()
+        onSaveShowRequested: editScreen.saveShow()
+        onSaveShowAsRequested: editScreen.saveShowAs()
+    }
+
+    // Ctrl+N / O / S / Shift+S — the same actions as the File menu.
+    Shortcut {
+        sequence: "Ctrl+N"
+        onActivated: {
+            editScreen.newShow()
+            window.currentView = "edit"
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+O"
+        onActivated: {
+            window.currentView = "edit"
+            editScreen.openShow()
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+S"
+        onActivated: editScreen.saveShow()
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+S"
+        onActivated: editScreen.saveShowAs()
+    }
+
+    // "Save changes?" over any screen; the show session asks through it.
+    UnsavedChangesDialog {
+        id: unsavedDialog
+        saveAction: function () { return editScreen.saveShow() }
+        // The show session asks through this dialog (a function-valued property
+        // cannot be bound with Binding, so it is handed over once).
+        Component.onCompleted: editScreen.session.askUnsaved = unsavedDialog.ask
+    }
+
+    // Closing the window with unsaved changes asks first (once confirmed, it closes).
+    property bool closeConfirmed: false
+    onClosing: (close) => {
+        if (window.closeConfirmed || !ShowService.hasShow || !ShowService.showDirty)
+            return
+        close.accepted = false
+        unsavedDialog.ask(function () {
+            window.closeConfirmed = true
+            window.close()
+        })
+    }
+
+    // Resize borders for the frameless window (the OS handles the resize itself).
+    WindowResizeHandles {
+        anchors.fill: parent
     }
 
     // Topmost cursor layer — renders the AppCursor override stack's shape
@@ -101,182 +240,89 @@ ApplicationWindow {
 
     // ---- UI self-test scenario (TEMPORARY diagnostic, env-gated) ----------
     // Drives the real UI with real OS cursor moves through SelfTestDriver
-    // (main.cpp only wires it when VGR_SELFTEST=1) to reproduce the two
-    // rendering-layer bug reports end to end and grab PNGs for offline
-    // pixel sampling:
-    //   1. "shape canvas items paint nothing"  -> canvas grab with a shape
-    //      rectangle on it (VGR_SELFTEST_SHOT_CANVAS)
-    //   2. "chip row highlight flickers"       -> a scripted hover sweep
-    //      ACROSS the chip row: multiple passes, then a grab mid-sweep and
-    //      two grabs of the SAME chip 400ms apart while stationary, to
-    //      compare pixel-identicalness (VGR_SELFTEST_SHOT_CHIPS)
-    // Coordinates are the app's fixed 1440x900 layout positions read from
-    // the QML (Add slide chip, + content chip, menu chips, modal buttons).
+    // (main.cpp only wires it when VGR_SELFTEST=1) and grabs PNGs for
+    // offline pixel sampling. Covers the Show screen's live surfaces:
+    // the New show CTA's hover reaction and the library dock tabs (Shows
+    // table, Media rosters, Scripture/The Table engine-waiting panes,
+    // coming-soon). The old Edit-screen probes (shape-canvas painting,
+    // chip-row flicker) were removed once those bugs were fixed and
+    // verified — the harness stays lean.
     Timer {
-        id: selfTestStage
+        id: selfTestStage1
         running: typeof SelfTest !== "undefined"
         interval: 1200
         onTriggered: {
-            console.log("[SELFTEST] stage 1: edit view")
-            window.currentView = "edit"
-            selfTestStage2.restart()
+            console.log("[SELFTEST] stage 1: show view, park cursor on New show CTA")
+            window.currentView = "show"
+            const cta = SelfTest.itemCenter("selfTestNewShowBtn")
+            if (cta) SelfTest.move(cta.x, cta.y)
+            // Seed one REAL show through the engine's own save path so the
+            // library feed (categories sidebar, shows table, Media playlists)
+            // proves itself non-empty — never mocks, always the engine.
+            if (!ShowService.hasShow)
+                ShowService.newShowDocument("Probe Sunday Service")
+            ShowService.saveShowFile(ShowService.currentShow, ShowService.libraryPath + "/Probe Sunday Service.vgr")
+            selfTestStage1b.restart()
         }
     }
     Timer {
-        id: selfTestStage2
-        interval: 500
-        onTriggered: {
-            console.log("[SELFTEST] stage 2: add slide")
-            // Empty-state veil Column centerIn mCanvas (286,308,754,428);
-            // chip is the Column's last child -> center ~(663, 564).
-            SelfTest.click(663, 564)
-            selfTestStage2b.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage2b
-        interval: 500
-        onTriggered: {
-            // Verification grab: the veil must be GONE in this shot.
-            SelfTest.grab("", "shot_stage2.png")
-            selfTestStage3.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage3
-        interval: 500
-        onTriggered: {
-            console.log("[SELFTEST] stage 3: open + menu")
-            // Self-locating: the chip's center by objectName.
-            SelfTest.clickItem("selfTestAddContent")
-            selfTestStage4.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage4
-        interval: 500
-        onTriggered: {
-            console.log("[SELFTEST] stage 4: pick Shape (self-locating)")
-            // Chip positions shift whenever the contentTypes roster changes
-            // (NDI was added) — resolve the live center from QML (see
-            // selfTestCenter), then click it.
-            const c = window.selfTestCenter("selfTestChip4")
-            if (c)
-                SelfTest.click(c.x, c.y)
-            else
-                console.log("[SELFTEST] chip1 not resolvable — menu closed?")
-            selfTestStage5.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage5
-        interval: 600
-        onTriggered: {
-            console.log("[SELFTEST] stage 5: Add Shape (self-locating)")
-            // Footer button position depends on modal metrics that have
-            // changed more than once — click by objectName. "rectangle"
-            // is the picker's DEFAULT selection, so no grid click needed.
-            SelfTest.clickItem("selfTestAddShape")
-            selfTestStage6.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage6
-        interval: 700
-        onTriggered: {
-            console.log("[SELFTEST] stage 6: move shape onto canvas + grab")
-            // The new 220x44 shape item lands at (40,40) on the canvas.
-            // Also grab the whole window for full context.
-            SelfTest.grab("", "shot_window.png")
-            SelfTest.grab("selfTestCanvas", "shot_canvas.png")
-            selfTestStage7.restart()
-        }
-    }
-    // Chip-row flicker probe. The Add Shape click closed the + menu, so
-    // first RE-OPEN it, then park the cursor exactly on one chip (Camera,
-    // center 430,860) and grab the menu region twice 400ms apart while
-    // stationary — a real flicker shows as a pixel difference between the
-    // two grabs.
-    Timer {
-        id: selfTestStage7
+        id: selfTestStage1b
         interval: 400
         onTriggered: {
-            console.log("[SELFTEST] stage 7: reopen + menu for chip probe")
-            SelfTest.clickItem("selfTestAddContent")
-            // NEXT tick resolves + sweeps: the click above has not been
-            // processed yet (same-frame itemCenter returned null while the
-            // menu was still closed — the async click lesson from stage 4).
-            selfTestStage7r.restart()
+            // Cursor parked on the CTA — the full-window grab shows the
+            // hovered (lightened) pill.
+            SelfTest.grab("", "shot_cta_hover.png")
+            SelfTest.grab("selfTestShowsTable", "shot_tab_shows.png")
+            SelfTest.clickItem("selfTestTab_media")
+            selfTestStage13.restart()
         }
     }
     Timer {
-        id: selfTestStage7r
+        id: selfTestStage13
         interval: 500
         onTriggered: {
-            const target = window.selfTestCenter("selfTestChip4")
-            const from = SelfTest.itemCenter("selfTestAddContent")
-            if (!target) {
-                console.log("[SELFTEST] stage 7: chip4 unresolvable — aborting probe")
-                SelfTest.quit()
-                return
-            }
-            // Stepped sweep like a real hand — now SLOW: 60 small moves at
-            // 80ms (~5s total), reproducing the user's slow-hover flicker
-            // report (the earlier 12-step/40ms sweep never reproduced it).
-            // A mid-sweep window grab catches the menu WITH the truth
-            // readout (ptr=… zone=… under the menu) mid-motion.
-            selfTestStage7b.path = []
-            for (let i = 1; i <= 60; ++i)
-                selfTestStage7b.path.push(
-                            [from.x + (target.x - from.x) * i / 60,
-                             from.y + (target.y - from.y) * i / 60])
-            selfTestStage7b.step = 0
-            selfTestStage7b.restart()
+            SelfTest.grab("selfTestMediaPane", "shot_tab_media.png")
+            SelfTest.clickItem("selfTestTab_scripture")
+            selfTestStage14.restart()
         }
     }
     Timer {
-        id: selfTestStage7b
-        interval: 80
-        repeat: true
-        property int step: 0
-        property var path: []
+        id: selfTestStage14
+        interval: 500
         onTriggered: {
-            if (step < path.length) {
-                const p = path[step++]
-                SelfTest.move(p[0], p[1])
-                // Mid-sweep truth capture: the menu + readout while moving.
-                if (step === 30)
-                    SelfTest.grab("", "shot_midsweep.png")
-            } else {
-                repeat = false
-                selfTestStage8.restart()
-            }
+            SelfTest.grab("selfTestScripturePane", "shot_tab_scripture.png")
+            SelfTest.clickItem("selfTestTab_table")
+            selfTestStage15.restart()
         }
     }
     Timer {
-        id: selfTestStage8
-        interval: 600
+        id: selfTestStage15
+        interval: 500
         onTriggered: {
-            SelfTest.grab("selfTestChips", "shot_chips_a.png")
-            selfTestStage9.restart()
+            SelfTest.grab("selfTestTablePane", "shot_tab_table.png")
+            SelfTest.clickItem("selfTestTab_overlays")
+            selfTestStage16.restart()
         }
     }
     Timer {
-        id: selfTestStage9
-        interval: 400
+        id: selfTestStage16
+        interval: 500
         onTriggered: {
-            SelfTest.grab("selfTestChips", "shot_chips_b.png")
-            selfTestStage10.restart()
+            SelfTest.grab("selfTestSoonPane", "shot_tab_soon.png")
+            // Quit on a LATER tick: grabToImage saves asynchronously, and
+            // quitting this frame killed the last save (missing soon shot).
+            selfTestStage17.restart()
         }
     }
     Timer {
-        id: selfTestStage10
+        id: selfTestStage17
         interval: 400
         onTriggered: {
             console.log("[SELFTEST] done")
             SelfTest.quit()
         }
     }
+
 
     // ---- Settings overlay ----
     // Shared ModalScrim: click-dismisses, and consumes wheel events so a
@@ -289,12 +335,14 @@ ApplicationWindow {
         onDismissed: settingsScrim.visible = false
 
         ModalShell {
+            id: settingsShell
             anchors.centerIn: parent
             currentKey: window.settingsSection
             onSectionSelected: (key) => window.settingsSection = key
             onCloseRequested: settingsScrim.visible = false
-            onCancelRequested: settingsScrim.visible = false
-            onSaveRequested: settingsScrim.visible = false
+            // No Cancel / Save Changes footer: the settings sections apply as you go, and
+            // the popup closes with the X (or by clicking outside it).
+            showFooter: false
 
             Loader {
                     anchors.fill: parent
@@ -367,6 +415,9 @@ ApplicationWindow {
         anchors.top: parent.top
         anchors.right: parent.right
         anchors.margins: Theme.space5
+        // Below the header strip, so a toast never covers the window buttons in the
+        // title bar (the header is window.headerHeight tall).
+        anchors.topMargin: window.headerHeight + 8
         z: 10000
     }
 }

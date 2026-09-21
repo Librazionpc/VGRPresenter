@@ -54,9 +54,11 @@ AudioInputListModel::AudioInputListModel(QObject *parent)
     // on the board is one the user added. (The old seed rows were mock data;
     // with the engine PAL now enumerating real hardware they were removed.)
     //
-    // Row ORDER is a stored contract: BusListModel routes reference rows by
-    // index, so removing a row shifts them (no remap exists yet — routes can
-    // go stale after a removal; a known limitation, see KNOWN_ISSUES.md).
+    // Routes key on each row's STABLE id (asrc:<id> graph nodes), never its row.
+    // BusListModel does CACHE routes as roster rows for QML, so a removal
+    // (which shifts rows) ends with BusListModel::refreshRoutes() — see
+    // removeInput. Ids restart at a1 every launch: BusListModel prunes the
+    // previous session's asrc:/vsrc: nodes at startup so they can't be inherited.
 }
 
 AudioInputListModel::~AudioInputListModel()
@@ -159,15 +161,20 @@ void AudioInputListModel::removeInput(int index)
         return;
 
     // Cut this source's routing edges BEFORE the row disappears: routes key
-    // on the row's stable id, so nothing shifts or goes stale — other rows'
-    // routes are untouched by construction.
+    // on the row's stable id, so no OTHER row's route is touched.
     const QString id = m_inputs.at(index).id;
-    if (BusListModel *buses = BusListModel::Instance())
+    BusListModel *buses = BusListModel::Instance();
+    if (buses)
         buses->cutAudioSourceEdges(id);
 
     beginRemoveRows(QModelIndex(), index, index);
     m_inputs.removeAt(index);
     endRemoveRows();
+
+    // Rows after `index` just shifted up; the buses cache routes as ROWS, so
+    // re-derive them (the graph edges themselves are untouched).
+    if (buses)
+        buses->refreshRoutes();
 }
 
 int AudioInputListModel::duplicateInput(int index)
@@ -183,6 +190,9 @@ int AudioInputListModel::duplicateInput(int index)
     // Mute is a state, not a property of the source — a copy starts live
     // (same rule as OutputListModel's duplicates).
     copy.muted = false;
+    // Per-channel bus routing is NOT copied either — the copy's graph routes start
+    // empty, so a copied matrix would claim routes the board doesn't have.
+    copy.channelRoutes.clear();
     m_inputs.append(copy);
     endInsertRows();
     return row;

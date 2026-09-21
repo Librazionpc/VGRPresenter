@@ -1,17 +1,23 @@
 #include <QGuiApplication>
 #include <QQuickWindow>
+#include <QDateTime>
 #include <QDebug>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQmlError>
+#include <QStandardPaths>
 #include <QStringList>
 
 #include <cstdio>
+#include <mutex>
 
 #include "services/CrashHandler.h"
 #include "services/EngineBridge.h"
+#include "services/SearchService.h"
 #include "services/EventBus.h"
+#ifdef VGR_ENABLE_SELFTEST
 #include "SelfTestDriver.h"
+#endif
 
 namespace {
 
@@ -23,7 +29,6 @@ namespace {
 // binding re-evaluation would otherwise spam the UI.
 void ForwardToEventBus(QtMsgType type, const QMessageLogContext &context, const QString &msg)
 {
-    Q_UNUSED(context)
     std::fprintf(stderr, "%s\n", qUtf8Printable(msg));
     std::fflush(stderr);
 
@@ -36,17 +41,53 @@ void ForwardToEventBus(QtMsgType type, const QMessageLogContext &context, const 
     default:
         return;
     }
-    EventBus::instance().publish(topic, QVariantMap{
+    // A warning raised WHILE a warning is being forwarded (a toast delegate
+    // whose own binding errors, say) would otherwise feed itself forever.
+    static thread_local bool forwarding = false;
+    if (forwarding)
+        return;
+
+    // The same binding error can fire on every re-evaluation — show it once,
+    // and again only after a quiet spell. (stderr above always prints.)
+    // (Leaked on purpose and mutex-guarded: engine threads can log too, and this
+    // handler may run after static destructors.)
+    struct Dedupe { std::mutex m; QString lastMsg; qint64 lastAt = 0; };
+    static Dedupe *dedupe = new Dedupe;
+    {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        std::lock_guard<std::mutex> lock(dedupe->m);
+        if (msg == dedupe->lastMsg && now - dedupe->lastAt < 3000)
+            return;
+        dedupe->lastMsg = msg;
+        dedupe->lastAt = now;
+    }
+
+    // QML engine diagnostics arrive here — this is the ONE path for them (the
+    // engine's warnings() signal used to be forwarded too, doubling every QML
+    // error). Binding/TypeErrors reported by the engine itself carry no "qml" category —
+    // recognise them by the "<url>:<line>:" prefix they always start with.
+    const bool isQml = (context.category && qstrncmp(context.category, "qml", 3) == 0)
+        || msg.startsWith(QLatin1String("qrc:/")) || msg.startsWith(QLatin1String("file:///"));
+
+    forwarding = true;
+    EventBus::instance().publish(isQml ? QStringLiteral("log.qml") : topic, QVariantMap{
         {QStringLiteral("level"), level},
-        {QStringLiteral("title"), QStringLiteral("Application")},
+        {QStringLiteral("title"), isQml ? QStringLiteral("QML") : QStringLiteral("Application")},
         {QStringLiteral("message"), msg},
     });
+    forwarding = false;
 }
 
 } // namespace
 
 int main(int argc, char *argv[])
 {
+    // VGR_SANDBOX=1 points every QStandardPaths location (engine data, logs, crash
+    // records) at Qt's throwaway test area, so a diagnostic/CI run can never touch —
+    // or fight over the database of — a real installation running at the same time.
+    if (qEnvironmentVariableIsSet("VGR_SANDBOX"))
+        QStandardPaths::setTestModeEnabled(true);
+
     qInstallMessageHandler(ForwardToEventBus);
 
     QGuiApplication app(argc, argv);
@@ -64,6 +105,9 @@ int main(int argc, char *argv[])
     // startup — the UI still works against its existing mock data either way.
     (void)EngineBridge::instance().boot();
     QObject::connect(&app, &QGuiApplication::aboutToQuit, [] {
+        // A Bible import may still be running on its own thread; let it finish before
+        // the engine's systems are torn down under it.
+        SearchService::instance().shutdown();
         EngineBridge::instance().shutdown();
     });
 
@@ -74,18 +118,9 @@ int main(int argc, char *argv[])
             qWarning() << "Failed to create the QML application window.";
             QCoreApplication::exit(-1);
         }, Qt::QueuedConnection);
-    QObject::connect(
-        &engine, &QQmlApplicationEngine::warnings,
-        &app, [](const QList<QQmlError> &warnings) {
-            QStringList lines;
-            for (const QQmlError &e : warnings)
-                lines << e.toString();
-            EventBus::instance().publish(QStringLiteral("log.qml"), QVariantMap{
-                {QStringLiteral("level"), QStringLiteral("warning")},
-                {QStringLiteral("title"), QStringLiteral("QML")},
-                {QStringLiteral("message"), lines.join(QStringLiteral("\n"))},
-            });
-        });
+    // (No QQmlApplicationEngine::warnings hookup: the engine already routes every
+    // QML error through the message handler above, so hooking the signal too
+    // raised each error twice.)
 
     // Crash notification, UI side: if the previous run went down in flames,
     // its CrashHandler could only leave a log file (firing toasts from inside
@@ -105,11 +140,13 @@ int main(int argc, char *argv[])
     // any named item to a PNG for offline pixel sampling — pixel truth for
     // rendering-layer bug reports that property traces can never see.
     // Inert (not even instantiated) without the env var.
+#ifdef VGR_ENABLE_SELFTEST
     SelfTestDriver selfTestDriver;
     if (qEnvironmentVariableIsSet("VGR_SELFTEST") && !engine.rootObjects().isEmpty()) {
         selfTestDriver.setWindow(qobject_cast<QQuickWindow *>(engine.rootObjects().first()));
         engine.rootContext()->setContextProperty(QStringLiteral("SelfTest"), &selfTestDriver);
     }
+#endif
 
     // A safety net for exceptions that escape the event loop (e.g. from a
     // future engine-bridge call) — logs and exits cleanly instead of letting

@@ -99,6 +99,27 @@ void TestProjectUndoRedo() {
     CHECK(ur.Redo().ok());
     CHECK(value == 9);
 
+    // Events: UndoPerformed/RedoPerformed fire from Undo()/Redo() (not on push),
+    // carry the command label, and a group keeps its own label.
+    ur.Clear();
+    std::vector<std::string> undone, redone;
+    auto subU = EventBus::Instance().Subscribe<events::UndoPerformed>(
+        [&](const events::UndoPerformed& e) { undone.push_back(e.commandName); });
+    auto subR = EventBus::Instance().Subscribe<events::RedoPerformed>(
+        [&](const events::RedoPerformed& e) { redone.push_back(e.commandName); });
+    CHECK(ur.ExecuteCommand(inc).ok());
+    CHECK(undone.empty());               // pushing is not an undo
+    CHECK(ur.BeginGroup("grouped").ok());
+    CHECK(ur.ExecuteCommand(a).ok());
+    CHECK(ur.EndGroup().ok());
+    CHECK(undone.empty());
+    CHECK(ur.Undo().ok());
+    CHECK(undone.size() == 1 && undone[0] == "grouped");
+    CHECK(ur.Redo().ok());
+    CHECK(redone.size() == 1 && redone[0] == "grouped");
+    (void)EventBus::Instance().Unsubscribe(subU);
+    (void)EventBus::Instance().Unsubscribe(subR);
+
     // Undo-empty failure path.
     ur.Clear();
     CHECK(!ur.Undo().ok());

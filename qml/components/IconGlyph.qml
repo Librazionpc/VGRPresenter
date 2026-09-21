@@ -9,6 +9,9 @@ Item {
     id: root
     property string name: "search"
     property color color: Theme.textSecondary
+    // Line width of the stroked (StrokeIcon) glyphs — lower it when the glyph is
+    // enlarged with `scale` so the line keeps its weight.
+    property real strokeWidth: 1.5
     implicitWidth: 14
     implicitHeight: 14
 
@@ -56,7 +59,7 @@ Item {
         ShapePath {
             fillColor: "transparent"
             strokeColor: root.color
-            strokeWidth: 1.5
+            strokeWidth: root.strokeWidth
             capStyle: ShapePath.RoundCap
             joinStyle: ShapePath.RoundJoin
             PathSvg { id: svgElement }

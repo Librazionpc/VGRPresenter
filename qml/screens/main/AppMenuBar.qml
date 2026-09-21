@@ -33,11 +33,29 @@ Item {
     signal settingsRequested(string section)
 
     // Menu actions are presentation-only for now (the underlying commands
-    // don't exist yet) — except Settings/Preferences, which are live.
+    // don't exist yet) — except Settings/Preferences, which are live, and
+    // "New show" (both menus list it), which funnels into the same deck
+    // reset as the Show screen's New show buttons.
+    signal newShowRequested()
+    // Show file actions — the engine reads/writes the .vgr (see ShowSession.qml).
+    signal openShowRequested()
+    signal saveShowRequested()
+    signal saveShowAsRequested()
+    signal quickSearchRequested()
     function activateItem(menuName, label) {
         closeMenu()
         if (label === "Settings" || label === "Preferences…")
             root.settingsRequested("general")
+        else if (label === "New show")
+            root.newShowRequested()
+        else if (label === "Open project…")
+            root.openShowRequested()
+        else if (label === "Save")
+            root.saveShowRequested()
+        else if (label === "Save As…")
+            root.saveShowAsRequested()
+        else if (label === "Quick search…")
+            root.quickSearchRequested()
     }
 
     readonly property var logoMenuItems: [
@@ -211,7 +229,10 @@ Item {
         id: header_left
 
         x: 16
-        y: 12.50
+        // Top-anchored, not vertically centered: the logo + File/Edit/View/
+        // Help row belongs at the window's top edge (standard menu-bar
+        // position — user call), not floating mid-strip beside the tabs.
+        y: 4
 
         height: 23
         width: 271

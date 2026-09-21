@@ -25,6 +25,10 @@ public:
 
     // --- Resource / system ---
     NotificationSeed LowMemory(std::string_view resource, std::string_view level) const;
+    // Resource pressure worded for the resource that is actually under pressure
+    // ("memory" -> Low memory, "cpu" -> High CPU usage, ...) â LowMemory alone labels
+    // every resource as memory.
+    NotificationSeed ResourcePressure(std::string_view resource, std::string_view level) const;
     NotificationSeed EngineCrash(std::string_view message) const;
 
     // --- Platform / display ---

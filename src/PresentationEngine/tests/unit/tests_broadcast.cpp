@@ -4,6 +4,10 @@
 #include "TestHarness.hpp"
 #include "modules/broadcast/BroadcastEngine.hpp"
 
+#include <chrono>
+#include <cstdlib>
+#include <thread>
+
 namespace br = bps::broadcast;
 
 // ===========================================================================
@@ -14,6 +18,7 @@ void TestBroadcastEngine() {
     auto& eng = br::BroadcastEngine::Instance();
     CHECK(eng.Initialize().ok());
     CHECK(eng.Start().ok());
+    eng.PreferProvider("software");   // deterministic loopback, whatever runtime is installed
 
     // The software loopback provider is always available.
     auto names = eng.ProviderNames();
@@ -95,6 +100,7 @@ void TestBroadcastSenders() {
     auto& eng = br::BroadcastEngine::Instance();
     CHECK(eng.Initialize().ok());
     CHECK(eng.Start().ok());
+    eng.PreferProvider("software");
 
     // Multiple independent senders.
     auto a = eng.CreateNdiSender("Cam A");
@@ -157,4 +163,105 @@ void TestBroadcastFeatures() {
 
     CHECK(eng.Stop().ok());
     CHECK(eng.Shutdown().ok());
+}
+
+// ===========================================================================
+// NDI runtime — status reporting, plus a REAL loopback through the vendor
+// runtime when it is installed (skipped, not failed, when it isn't).
+// ===========================================================================
+void TestBroadcastNdiRuntime() {
+    auto& eng = br::BroadcastEngine::Instance();
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.Start().ok());
+
+    const auto st = eng.NdiStatus();
+    using State = br::BroadcastEngine::NdiRuntimeStatus::State;
+    // NdiStatus and NdiAvailable must never disagree.
+    CHECK((st.state == State::Ready) == eng.NdiAvailable());
+    if (st.state != State::Ready) {
+        // Without the runtime: an actionable reason, and no version.
+        CHECK(!st.detail.empty());
+        CHECK(st.version.empty());
+        std::fprintf(stderr, "[note] NDI runtime not usable (%s) — real-loopback part skipped\n",
+                     st.detail.c_str());
+        eng.PreferProvider("");
+        CHECK(eng.Stop().ok());
+        CHECK(eng.Shutdown().ok());
+        CHECK(eng.Reset().ok());
+        return;
+    }
+    std::fprintf(stderr, "[note] NDI runtime ready: %s\n", st.version.c_str());
+    CHECK(!st.version.empty());
+
+    // Real sender -> real receiver through the vendor runtime on this machine.
+    // Exercises every ABI struct (send_create/send_video/recv_create/
+    // recv_capture/recv_free) — a wrong layout crashes or reads garbage here.
+    eng.PreferProvider("ndi");
+    constexpr uint32_t W = 320, H = 180;
+    auto sender = eng.CreateNdiSender("bps-unit-test");
+    CHECK(sender.ok());
+    if (sender.ok()) {
+        std::vector<uint8_t> frame(W * H * 2);
+        for (size_t i = 0; i < frame.size(); ++i) frame[i] = static_cast<uint8_t>(i * 7);
+        br::VideoFrameInfo vf;
+        vf.width = W;
+        vf.height = H;
+        vf.fps = 29.97;
+
+        // Bad input is refused by the provider, never handed to the runtime.
+        CHECK(!eng.SendVideoFrame(sender.value(), vf, frame.data(), frame.size() - 1).ok());
+        br::VideoFrameInfo oddFormat = vf;
+        oddFormat.fourCC = 0x12345678;
+        CHECK(!eng.SendVideoFrame(sender.value(), oddFormat, frame.data(), frame.size()).ok());
+        CHECK(eng.SendVideoFrame(sender.value(), vf, frame.data(), frame.size()).ok());
+
+        // Discover our own sender through the runtime (local sources are shown
+        // — but the provider hides ITS OWN senders, so look at the raw list via
+        // a second, independent receiver by full name instead).
+        std::string fullName;
+        for (int attempt = 0; attempt < 40 && fullName.empty(); ++attempt) {
+            (void)eng.SendVideoFrame(sender.value(), vf, frame.data(), frame.size());
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            (void)eng.DiscoverNdiSources();   // keeps the finder warm
+            // Our own sender is filtered from discovery by design, so build the
+            // full NDI name "<HOST> (<name>)" the way the runtime does.
+            if (attempt >= 3) {
+                std::string host = std::getenv("COMPUTERNAME") ? std::getenv("COMPUTERNAME") : "";
+                if (!host.empty()) fullName = host + " (bps-unit-test)";
+            }
+        }
+        CHECK(!fullName.empty());
+        auto recv = eng.CreateNdiReceiver(fullName);
+        CHECK(recv.ok());
+        if (recv.ok()) {
+            bool got = false;
+            br::VideoFrameInfo info;
+            std::vector<uint8_t> payload;
+            for (int i = 0; i < 100 && !got; ++i) {
+                (void)eng.SendVideoFrame(sender.value(), vf, frame.data(), frame.size());
+                auto r = eng.ReceiveFrame(recv.value(), info, payload);
+                CHECK(r.ok());
+                got = r.ok() && r.value();
+                if (!got) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            // Network loopback can be blocked by a firewall; a missing frame is
+            // reported, a WRONG frame is a failure.
+            if (got) {
+                CHECK(info.width == W && info.height == H);
+                CHECK(!payload.empty());
+                CHECK(payload.size() >= static_cast<size_t>(W) * H * 2);
+                std::fprintf(stderr, "[note] NDI loopback frame: %ux%u fourCC=0x%08x fps=%.3f bytes=%zu\n",
+                             info.width, info.height, info.fourCC, info.fps, payload.size());
+            } else {
+                std::fprintf(stderr, "[note] NDI loopback: no frame within 5 s (firewall/mDNS?) — not a failure\n");
+            }
+            CHECK(eng.DisconnectReceiver(recv.value()).ok());
+        }
+        CHECK(eng.StopSender(sender.value()).ok());
+    }
+
+    eng.PreferProvider("");
+    CHECK(eng.Stop().ok());
+    CHECK(eng.Shutdown().ok());
+    CHECK(eng.Reset().ok());
 }

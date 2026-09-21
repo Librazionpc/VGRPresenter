@@ -2,6 +2,7 @@
 
 #include <QJSEngine>
 #include <QQmlEngine>
+#include <QThread>
 
 EventBus::EventBus(QObject *parent)
     : QObject(parent)
@@ -26,6 +27,13 @@ EventBus *EventBus::create(QQmlEngine *engine, QJSEngine *jsEngine)
 
 void EventBus::publish(const QString &topic, const QVariantMap &payload)
 {
+    // Producers include engine threads and Qt's message handler (any thread).
+    // eventPosted feeds QML, so it must only ever fire on the GUI thread.
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, [this, topic, payload] { emit eventPosted(topic, payload); },
+                                  Qt::QueuedConnection);
+        return;
+    }
     emit eventPosted(topic, payload);
 }
 
@@ -44,6 +52,5 @@ void EventBus::notify(const QString &message, const QString &level,
         {QStringLiteral("message"), message},
         {QStringLiteral("origin"), QStringLiteral("ui")},
     };
-    const QString t = topic.isEmpty() ? QStringLiteral("ui.notification") : topic;
-    emit eventPosted(t, payload);
+    publish(topic.isEmpty() ? QStringLiteral("ui.notification") : topic, payload);
 }

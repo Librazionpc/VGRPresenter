@@ -1506,3 +1506,85 @@ void TestMedia() {
 // ===========================================================================
 // Phase 3 — Content & Asset Management System (docs/specs/13)
 // ===========================================================================
+
+// ===========================================================================
+// PressureLatch (docs/specs/10 §7): spikes are not pressure; alerts are sustained,
+// hysteretic and rate-limited.
+// ===========================================================================
+#include "core/resources/PressureLatch.hpp"
+
+void TestPressureLatch() {
+    using L = PressureLatch;
+    using T = PressureLatch::Transition;
+    using namespace std::chrono_literals;
+    const EngineTime t0 = EngineClock::now();
+    auto at = [&](std::chrono::milliseconds ms) { return t0 + ms; };
+
+    // A single spike (one High sample, then Low) never alerts.
+    {
+        L l(L::Config{PressureLevel::High, PressureLevel::Medium, 8000ms, 60000ms});
+        CHECK(l.Update(PressureLevel::High, at(0ms)) == T::None);
+        CHECK(l.Update(PressureLevel::Low, at(500ms)) == T::None);
+        CHECK(!l.Active());
+    }
+
+    // Held High for the full sustain window: raises exactly once, then stays quiet.
+    {
+        L l(L::Config{PressureLevel::High, PressureLevel::Medium, 8000ms, 60000ms});
+        CHECK(l.Update(PressureLevel::High, at(0ms)) == T::None);
+        CHECK(l.Update(PressureLevel::Critical, at(4000ms)) == T::None);   // Critical counts as High-or-worse
+        CHECK(l.Update(PressureLevel::High, at(7999ms)) == T::None);
+        CHECK(l.Update(PressureLevel::High, at(8000ms)) == T::Raised);
+        CHECK(l.Active());
+        CHECK(l.Update(PressureLevel::High, at(9000ms)) == T::None);       // no repeat while active
+        CHECK(l.Update(PressureLevel::Critical, at(20000ms)) == T::None);
+    }
+
+    // A dip below the raise level restarts the sustain clock (must be UNBROKEN).
+    {
+        L l(L::Config{PressureLevel::High, PressureLevel::Medium, 8000ms, 60000ms});
+        CHECK(l.Update(PressureLevel::High, at(0ms)) == T::None);
+        CHECK(l.Update(PressureLevel::Medium, at(6000ms)) == T::None);     // dip (still above clearBelow)
+        CHECK(l.Update(PressureLevel::High, at(7000ms)) == T::None);       // clock restarts here
+        CHECK(l.Update(PressureLevel::High, at(14999ms)) == T::None);
+        CHECK(l.Update(PressureLevel::High, at(15000ms)) == T::Raised);
+    }
+
+    // Hysteresis: hovering between clearBelow and raiseAt does NOT clear; only dropping
+    // below clearBelow does. Then the cooldown blocks an immediate re-alert.
+    {
+        L l(L::Config{PressureLevel::High, PressureLevel::Medium, 0ms, 60000ms});
+        CHECK(l.Update(PressureLevel::High, at(0ms)) == T::Raised);
+        CHECK(l.Update(PressureLevel::Medium, at(1000ms)) == T::None);     // 80-90%: stays raised
+        CHECK(l.Active());
+        CHECK(l.Update(PressureLevel::High, at(2000ms)) == T::None);       // and no re-raise
+        CHECK(l.Update(PressureLevel::Low, at(3000ms)) == T::Cleared);     // < 80%: clears
+        CHECK(!l.Active());
+        // Back to High 10 s later — inside the 60 s cooldown: no alert.
+        CHECK(l.Update(PressureLevel::High, at(13000ms)) == T::None);
+        CHECK(l.Update(PressureLevel::High, at(59000ms)) == T::None);
+        // Cooldown over and still High: alerts again.
+        CHECK(l.Update(PressureLevel::High, at(60000ms)) == T::Raised);
+    }
+
+    // Flapping right around the threshold (the screenshot case): High/Medium/High/...
+    // every half second for two minutes produces ONE alert, not one per crossing.
+    {
+        L l(L::Config{PressureLevel::High, PressureLevel::Medium, 0ms, 60000ms});
+        int raised = 0, cleared = 0;
+        for (int i = 0; i < 240; ++i) {
+            const auto level = (i % 2 == 0) ? PressureLevel::High : PressureLevel::Medium;
+            const auto tr = l.Update(level, at(std::chrono::milliseconds(i * 500)));
+            raised += tr == T::Raised;
+            cleared += tr == T::Cleared;
+        }
+        CHECK(raised == 1);
+        CHECK(cleared == 0);   // never dropped below Medium
+    }
+    // Memory-style config (short hold, short cooldown) alerts promptly.
+    {
+        L l(L::Config{PressureLevel::High, PressureLevel::Medium, 3000ms, 30000ms});
+        CHECK(l.Update(PressureLevel::High, at(0ms)) == T::None);
+        CHECK(l.Update(PressureLevel::High, at(3000ms)) == T::Raised);
+    }
+}

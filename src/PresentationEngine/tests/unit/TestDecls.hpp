@@ -1,6 +1,7 @@
 #pragma once
 // Generated declarations for every phase test suite.
 void TestResult();
+void TestPressureLatch();
 void TestVersion();
 void TestJson();
 void TestLogger();
@@ -83,6 +84,14 @@ void TestPresentationStateMachine();
 void TestPresentationNavigator();
 void TestPresentationTimeline();
 void TestPresentationEngine();
+void TestPresentationSerializer();
+void TestPresentationDocument();
+void TestShowStructure();
+void TestTemplateFile();
+void TestShowLibrary();
+void TestShowEditor();
+void TestDocumentEdit();
+void TestShowLibraryCrud();
 void TestSearchIndexing();
 void TestSearchRanking();
 void TestMediaEngine();
@@ -103,3 +112,4 @@ void TestRecordingEngine();
 void TestBroadcastEngine();
 void TestBroadcastSenders();
 void TestBroadcastFeatures();
+void TestBroadcastNdiRuntime();

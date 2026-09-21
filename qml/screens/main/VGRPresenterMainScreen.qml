@@ -13,20 +13,37 @@ Rectangle {
     clip: true
     color: "#0f1015"
 
+    // Emitted by BOTH "New show" buttons (the clock panel's primary CTA
+    // and the dock footer's red one) — Main.qml funnels it into
+    // EditScreen.newShow(), the single place the reset lives. The two
+    // buttons were dead Figma-export chrome: no MouseArea, no action —
+    // rendered clickable and weren't.
+    signal newShowRequested()
+    // A shows-table row was clicked — `path` is the .vgr to open (Main.qml
+    // routes it into the engine with the unsaved-changes guard).
+    signal openShowRequested(string path)
+    // The Projects panel's search box or the "Quick search" button was used — Main.qml
+    // opens the app-wide search (SearchService) for it.
+    signal searchRequested()
+
     Rectangle {
         id: workspace_body
 
         y: 48
 
-        height: 852
-        width: 1440
+        // Fills the window under the header (it was a fixed 1440 x 852 design). The side
+        // columns keep their widths; the middle column and the dock take the rest, and the top
+        // region (slate / monitors) is the same 54% of the height it was designed with.
+        height: parent.height - 48
+        width: parent.width
+        readonly property real topHeight: Math.max(460, Math.round(height * 0.54))
 
         color: "transparent"
 
         Rectangle {
             id: left_column
 
-            height: 852
+            height: parent.height
             width: 280
 
             border.color: "#232530"
@@ -36,7 +53,7 @@ Rectangle {
             Rectangle {
                 id: projects_section
 
-                height: 420
+                height: workspace_body.topHeight
                 width: 280
 
                 color: "transparent"
@@ -174,6 +191,12 @@ Rectangle {
                         verticalAlignment: Text.AlignTop
                         wrapMode: Text.Wrap
                     }
+                    // The box opens the app-wide search rather than being a field of its own.
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.IBeamCursor
+                        onClicked: vGRPresenter_Main_Screen.searchRequested()
+                    }
                 }
                 Rectangle {
                     id: projects_list
@@ -181,7 +204,7 @@ Rectangle {
                     x: 12
                     y: 82
 
-                    height: 326
+                    height: workspace_body.topHeight - 94
                     width: 256
 
                     clip: true
@@ -751,507 +774,22 @@ Rectangle {
                     }
                 }
             }
-            Image {
-                id: line
-
-                y: 419
-
-                source: Qt.resolvedUrl("assets/line.png")
-            }
-            Rectangle {
-                id: categories_section
-
-                y: 420
-
-                height: 432
-                width: 280
-
-                color: "transparent"
-
-                Text {
-                    id: categories
-
-                    x: 12
-                    y: 12
-
-                    height: 15
-                    width: 79
-
-                    color: "#8a94a6"
-                    font.capitalization: Font.AllUppercase
-                    font.family: "Inter"
-                    font.pixelSize: 12
-                    font.weight: Font.Bold
-                    horizontalAlignment: Text.AlignLeft
-                    text: qsTr("Categories")
-                    textFormat: Text.PlainText
-                    verticalAlignment: Text.AlignTop
-                }
-                Rectangle {
-                    id: categories_list
-
-                    x: 12
-                    y: 39
-
-                    height: 114
-                    width: 256
-
-                    color: "transparent"
-
-                    Rectangle {
-                        id: cat_0
-
-                        height: 27
-                        width: 256
-
-                        color: "#00000000"
-                        radius: 6
-
-                        Rectangle {
-                            id: cat_left
-
-                            x: 8
-                            y: 6
-
-                            height: 15
-                            width: 34
-
-                            color: "transparent"
-
-                            Rectangle {
-                                id: folder
-
-                                y: 1.50
-
-                                height: 12
-                                width: 12
-
-                                clip: true
-                                color: "transparent"
-
-                                Shape {
-                                    id: _vector_12
-
-                                    x: 1
-                                    y: 1.50
-
-                                    height: 8.50
-                                    width: 10
-
-                                    ShapePath {
-                                        id: _vector_12_ShapePath0
-
-                                        fillColor: "#00000000"
-                                        strokeColor: "#5c6475"
-                                        strokeWidth: 2
-
-                                        PathSvg {
-                                            id: _vector_12_ShapePath0_PathSvg0
-
-                                            path: "M 9.000720119476318 8.499600410461426 C 9.265957839884104 8.499600410461426 9.520331908527533 8.394248327357413 9.70788328766148 8.206720769808003 C 9.895434666795426 8.019193212258592 10.000800132751465 7.76485145259315 10.000800132751465 7.499647420995375 L 10.000800132751465 2.4998824736651253 C 10.000800132751465 2.2346784420673504 9.895434666795426 1.9803364439945363 9.70788328766148 1.7928088864451264 C 9.520331908527533 1.6052813288957164 9.265957839884104 1.499929484199076 9.000720119476318 1.4999294841990751 L 5.050404257789614 1.4999294841990751 C 4.88314763384626 1.5015690884029609 4.718150847492366 1.4612370481826689 4.570516048065656 1.382624951857371 C 4.422881248638946 1.3040128555320731 4.297323905889595 1.1896316818227821 4.205336379521941 1.0499505912578784 L 3.800304241195681 0.4499788929411967 C 3.7092421211747113 0.31172033445717184 3.5852740548150748 0.19823011889391834 3.439524701151231 0.11969253977249268 C 3.293775347487387 0.04115496065106704 3.1308046404061924 0.000027259436074827047 2.965237153523253 0 L 1.0000800132751464 0 C 0.7348422928673612 2.2203416648959308e-16 0.48046798578627514 0.1053518446966413 0.2929166066523294 0.2928794022460512 C 0.10536522751838362 0.4804069597954611 2.2206237144109995e-16 0.7347489578682751 0 0.99995298946605 L 0 7.499647420995375 C 2.2206237144109995e-16 7.76485145259315 0.10536522751838362 8.019193212258592 0.2929166066523294 8.206720769808003 C 0.48046798578627514 8.394248327357413 0.7348422928673612 8.499600410461426 1.0000800132751464 8.499600410461426 L 9.000720119476318 8.499600410461426 Z"
-                                        }
-                                    }
-                                }
-                            }
-                            Text {
-                                id: all
-
-                                x: 20
-
-                                height: 15
-                                width: 15
-
-                                color: "#8a94a6"
-                                font.family: "Inter"
-                                font.pixelSize: 12
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("All")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                            }
-                        }
-                        Text {
-                            id: element
-
-                            x: 223
-                            y: 7
-
-                            height: 13
-                            width: 26
-
-                            color: "#5c6475"
-                            font.family: "Inter"
-                            font.pixelSize: 11
-                            font.weight: Font.Normal
-                            horizontalAlignment: Text.AlignLeft
-                            text: qsTr("1227")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                        }
-                    }
-                    Rectangle {
-                        id: cat_1
-
-                        y: 29
-
-                        height: 27
-                        width: 256
-
-                        color: "#00000000"
-                        radius: 6
-
-                        Rectangle {
-                            id: cat_left_1
-
-                            x: 8
-                            y: 6
-
-                            height: 15
-                            width: 78
-
-                            color: "transparent"
-
-                            Rectangle {
-                                id: folder_1
-
-                                y: 1.50
-
-                                height: 12
-                                width: 12
-
-                                clip: true
-                                color: "transparent"
-
-                                Shape {
-                                    id: _vector_13
-
-                                    x: 1
-                                    y: 1.50
-
-                                    height: 8.50
-                                    width: 10
-
-                                    ShapePath {
-                                        id: _vector_13_ShapePath0
-
-                                        fillColor: "#00000000"
-                                        strokeColor: "#5c6475"
-                                        strokeWidth: 2
-
-                                        PathSvg {
-                                            id: _vector_13_ShapePath0_PathSvg0
-
-                                            path: "M 9.000720119476318 8.499600410461426 C 9.265957839884104 8.499600410461426 9.520331908527533 8.394248327357413 9.70788328766148 8.206720769808003 C 9.895434666795426 8.019193212258592 10.000800132751465 7.76485145259315 10.000800132751465 7.499647420995375 L 10.000800132751465 2.4998824736651253 C 10.000800132751465 2.2346784420673504 9.895434666795426 1.9803364439945363 9.70788328766148 1.7928088864451264 C 9.520331908527533 1.6052813288957164 9.265957839884104 1.499929484199076 9.000720119476318 1.4999294841990751 L 5.050404257789614 1.4999294841990751 C 4.88314763384626 1.5015690884029609 4.718150847492366 1.4612370481826689 4.570516048065656 1.382624951857371 C 4.422881248638946 1.3040128555320731 4.297323905889595 1.1896316818227821 4.205336379521941 1.0499505912578784 L 3.800304241195681 0.4499788929411967 C 3.7092421211747113 0.31172033445717184 3.5852740548150748 0.19823011889391834 3.439524701151231 0.11969253977249268 C 3.293775347487387 0.04115496065106704 3.1308046404061924 0.000027259436074827047 2.965237153523253 0 L 1.0000800132751464 0 C 0.7348422928673612 2.2203416648959308e-16 0.48046798578627514 0.1053518446966413 0.2929166066523294 0.2928794022460512 C 0.10536522751838362 0.4804069597954611 2.2206237144109995e-16 0.7347489578682751 0 0.99995298946605 L 0 7.499647420995375 C 2.2206237144109995e-16 7.76485145259315 0.10536522751838362 8.019193212258592 0.2929166066523294 8.206720769808003 C 0.48046798578627514 8.394248327357413 0.7348422928673612 8.499600410461426 1.0000800132751464 8.499600410461426 L 9.000720119476318 8.499600410461426 Z"
-                                        }
-                                    }
-                                }
-                            }
-                            Text {
-                                id: unlabeled
-
-                                x: 20
-
-                                height: 15
-                                width: 59
-
-                                color: "#8a94a6"
-                                font.family: "Inter"
-                                font.pixelSize: 12
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("Unlabeled")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                            }
-                        }
-                        Text {
-                            id: element_1
-
-                            x: 240
-                            y: 7
-
-                            height: 13
-                            width: 9
-
-                            color: "#5c6475"
-                            font.family: "Inter"
-                            font.pixelSize: 11
-                            font.weight: Font.Normal
-                            horizontalAlignment: Text.AlignLeft
-                            text: qsTr("3")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                        }
-                    }
-                    Rectangle {
-                        id: cat_2
-
-                        y: 58
-
-                        height: 27
-                        width: 256
-
-                        color: "#16171e"
-                        radius: 6
-
-                        Rectangle {
-                            id: cat_left_2
-
-                            x: 8
-                            y: 6
-
-                            height: 15
-                            width: 116
-
-                            color: "transparent"
-
-                            Rectangle {
-                                id: folder_2
-
-                                y: 1.50
-
-                                height: 12
-                                width: 12
-
-                                clip: true
-                                color: "transparent"
-
-                                Shape {
-                                    id: _vector_14
-
-                                    x: 1
-                                    y: 1.50
-
-                                    height: 8.50
-                                    width: 10
-
-                                    ShapePath {
-                                        id: _vector_14_ShapePath0
-
-                                        fillColor: "#00000000"
-                                        strokeColor: "#ff4d3d"
-                                        strokeWidth: 2
-
-                                        PathSvg {
-                                            id: _vector_14_ShapePath0_PathSvg0
-
-                                            path: "M 9.000720119476318 8.499600410461426 C 9.265957839884104 8.499600410461426 9.520331908527533 8.394248327357413 9.70788328766148 8.206720769808003 C 9.895434666795426 8.019193212258592 10.000800132751465 7.76485145259315 10.000800132751465 7.499647420995375 L 10.000800132751465 2.4998824736651253 C 10.000800132751465 2.2346784420673504 9.895434666795426 1.9803364439945363 9.70788328766148 1.7928088864451264 C 9.520331908527533 1.6052813288957164 9.265957839884104 1.499929484199076 9.000720119476318 1.4999294841990751 L 5.050404257789614 1.4999294841990751 C 4.88314763384626 1.5015690884029609 4.718150847492366 1.4612370481826689 4.570516048065656 1.382624951857371 C 4.422881248638946 1.3040128555320731 4.297323905889595 1.1896316818227821 4.205336379521941 1.0499505912578784 L 3.800304241195681 0.4499788929411967 C 3.7092421211747113 0.31172033445717184 3.5852740548150748 0.19823011889391834 3.439524701151231 0.11969253977249268 C 3.293775347487387 0.04115496065106704 3.1308046404061924 0.000027259436074827047 2.965237153523253 0 L 1.0000800132751464 0 C 0.7348422928673612 2.2203416648959308e-16 0.48046798578627514 0.1053518446966413 0.2929166066523294 0.2928794022460512 C 0.10536522751838362 0.4804069597954611 2.2206237144109995e-16 0.7347489578682751 0 0.99995298946605 L 0 7.499647420995375 C 2.2206237144109995e-16 7.76485145259315 0.10536522751838362 8.019193212258592 0.2929166066523294 8.206720769808003 C 0.48046798578627514 8.394248327357413 0.7348422928673612 8.499600410461426 1.0000800132751464 8.499600410461426 L 9.000720119476318 8.499600410461426 Z"
-                                        }
-                                    }
-                                }
-                            }
-                            Text {
-                                id: bible_References
-
-                                x: 20
-
-                                height: 15
-                                width: 97
-
-                                color: "#e2e8f0"
-                                font.family: "Inter"
-                                font.pixelSize: 12
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("Bible References")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                            }
-                        }
-                        Text {
-                            id: element_2
-
-                            x: 230
-                            y: 7
-
-                            height: 13
-                            width: 19
-
-                            color: "#5c6475"
-                            font.family: "Inter"
-                            font.pixelSize: 11
-                            font.weight: Font.Normal
-                            horizontalAlignment: Text.AlignLeft
-                            text: qsTr("110")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                        }
-                    }
-                    Rectangle {
-                        id: cat_3
-
-                        y: 87
-
-                        height: 27
-                        width: 256
-
-                        color: "#00000000"
-                        radius: 6
-
-                        Rectangle {
-                            id: cat_left_3
-
-                            x: 8
-                            y: 6
-
-                            height: 15
-                            width: 126
-
-                            color: "transparent"
-
-                            Rectangle {
-                                id: folder_3
-
-                                y: 1.50
-
-                                height: 12
-                                width: 12
-
-                                clip: true
-                                color: "transparent"
-
-                                Shape {
-                                    id: _vector_15
-
-                                    x: 1
-                                    y: 1.50
-
-                                    height: 8.50
-                                    width: 10
-
-                                    ShapePath {
-                                        id: _vector_15_ShapePath0
-
-                                        fillColor: "#00000000"
-                                        strokeColor: "#5c6475"
-                                        strokeWidth: 2
-
-                                        PathSvg {
-                                            id: _vector_15_ShapePath0_PathSvg0
-
-                                            path: "M 9.000720119476318 8.499600410461426 C 9.265957839884104 8.499600410461426 9.520331908527533 8.394248327357413 9.70788328766148 8.206720769808003 C 9.895434666795426 8.019193212258592 10.000800132751465 7.76485145259315 10.000800132751465 7.499647420995375 L 10.000800132751465 2.4998824736651253 C 10.000800132751465 2.2346784420673504 9.895434666795426 1.9803364439945363 9.70788328766148 1.7928088864451264 C 9.520331908527533 1.6052813288957164 9.265957839884104 1.499929484199076 9.000720119476318 1.4999294841990751 L 5.050404257789614 1.4999294841990751 C 4.88314763384626 1.5015690884029609 4.718150847492366 1.4612370481826689 4.570516048065656 1.382624951857371 C 4.422881248638946 1.3040128555320731 4.297323905889595 1.1896316818227821 4.205336379521941 1.0499505912578784 L 3.800304241195681 0.4499788929411967 C 3.7092421211747113 0.31172033445717184 3.5852740548150748 0.19823011889391834 3.439524701151231 0.11969253977249268 C 3.293775347487387 0.04115496065106704 3.1308046404061924 0.000027259436074827047 2.965237153523253 0 L 1.0000800132751464 0 C 0.7348422928673612 2.2203416648959308e-16 0.48046798578627514 0.1053518446966413 0.2929166066523294 0.2928794022460512 C 0.10536522751838362 0.4804069597954611 2.2206237144109995e-16 0.7347489578682751 0 0.99995298946605 L 0 7.499647420995375 C 2.2206237144109995e-16 7.76485145259315 0.10536522751838362 8.019193212258592 0.2929166066523294 8.206720769808003 C 0.48046798578627514 8.394248327357413 0.7348422928673612 8.499600410461426 1.0000800132751464 8.499600410461426 L 9.000720119476318 8.499600410461426 Z"
-                                        }
-                                    }
-                                }
-                            }
-                            Text {
-                                id: hymns_Scripture
-
-                                x: 20
-
-                                height: 15
-                                width: 107
-
-                                color: "#8a94a6"
-                                font.family: "Inter"
-                                font.pixelSize: 12
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("Hymns & Scripture")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                            }
-                        }
-                        Text {
-                            id: element_3
-
-                            x: 234
-                            y: 7
-
-                            height: 13
-                            width: 15
-
-                            color: "#5c6475"
-                            font.family: "Inter"
-                            font.pixelSize: 11
-                            font.weight: Font.Normal
-                            horizontalAlignment: Text.AlignLeft
-                            text: qsTr("85")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                        }
-                    }
-                }
-                Rectangle {
-                    id: category_actions
-
-                    x: 12
-                    y: 165
-
-                    height: 32
-                    width: 256
-
-                    color: "transparent"
-
-                    Text {
-                        id: manage_list
-
-                        y: 13.50
-
-                        height: 13
-                        width: 61
-
-                        color: "#5c6475"
-                        font.family: "Inter"
-                        font.pixelSize: 11
-                        font.weight: Font.Normal
-                        horizontalAlignment: Text.AlignLeft
-                        text: qsTr("Manage list")
-                        textFormat: Text.PlainText
-                        verticalAlignment: Text.AlignTop
-                    }
-                    Rectangle {
-                        id: add_cat_btn
-
-                        x: 232
-                        y: 8
-
-                        height: 24
-                        width: 24
-
-                        border.color: "#232530"
-                        border.width: 1
-                        color: "#16171e"
-                        radius: 12
-
-                        Text {
-                            id: element_4
-
-                            x: 7
-                            y: 3.50
-
-                            height: 17
-                            width: 11
-
-                            color: "#ff4d3d"
-                            font.family: "Inter"
-                            font.pixelSize: 14
-                            font.weight: Font.Normal
-                            horizontalAlignment: Text.AlignLeft
-                            text: qsTr("+")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                        }
-                    }
-                }
-            }
         }
         Rectangle {
             id: middle_column
 
             x: 280
 
-            height: 852
-            width: 760
+            height: parent.height
+            width: parent.width - 280 - 400
 
             color: "transparent"
 
             Rectangle {
                 id: presentation_slate
 
-                height: 460
-                width: 760
+                height: workspace_body.topHeight
+                width: parent.width
 
                 border.color: "#232530"
                 border.width: 1
@@ -1260,18 +798,19 @@ Rectangle {
                 Rectangle {
                     id: logo_group
 
+                    // (Content sits centred in the slate: the offsets keep it in the middle as the slate grows.)
                     x: 40
-                    y: 76
+                    y: 76 + (workspace_body.topHeight - 460) / 2
 
                     height: 80
-                    width: 680
+                    width: parent.width - 80
 
                     color: "transparent"
 
                     Text {
                         id: vGRPresenter_1
 
-                        x: 174.50
+                        x: (parent.width - width) / 2
 
                         height: 60
                         width: 333
@@ -1289,7 +828,7 @@ Rectangle {
                     Text {
                         id: v1_0_5_beta_2
 
-                        x: 299
+                        x: (parent.width - width) / 2
                         y: 64
 
                         height: 16
@@ -1308,8 +847,8 @@ Rectangle {
                 Rectangle {
                     id: scripture_quote_container
 
-                    x: 120
-                    y: 188
+                    x: (parent.width - width) / 2
+                    y: 188 + (workspace_body.topHeight - 460) / 2
 
                     height: 40
                     width: 520
@@ -1338,8 +877,8 @@ Rectangle {
                 Rectangle {
                     id: core_actions
 
-                    x: 260
-                    y: 260
+                    x: (parent.width - width) / 2
+                    y: 260 + (workspace_body.topHeight - 460) / 2
 
                     height: 124
                     width: 240
@@ -1352,10 +891,19 @@ Rectangle {
                         height: 36
                         width: 240
 
-                        border.color: "#232530"
+                        border.color: actionQuickSearchMouse.containsMouse ? "#3a3d4d" : "#232530"
                         border.width: 1
-                        color: "#16171e"
+                        color: actionQuickSearchMouse.pressed ? "#1e1f28"
+                             : (actionQuickSearchMouse.containsMouse ? "#1c1d26" : "#16171e")
                         radius: 8
+
+                        MouseArea {
+                            id: actionQuickSearchMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: vGRPresenter_Main_Screen.searchRequested()
+                        }
 
                         Rectangle {
                             id: search_2
@@ -1457,10 +1005,21 @@ Rectangle {
                         height: 36
                         width: 240
 
-                        border.color: "#232530"
+                        border.color: actionNewProjectMouse.containsMouse ? "#3a3d4d" : "#232530"
                         border.width: 1
-                        color: "#16171e"
+                        color: actionNewProjectMouse.pressed ? "#1e1f28"
+                             : (actionNewProjectMouse.containsMouse ? "#1c1d26" : "#16171e")
                         radius: 8
+
+                        MouseArea {
+                            id: actionNewProjectMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: EventBus.notify(
+                                qsTr("Project creation isn't wired yet."),
+                                "info", "New project", "ui.main.newProject")
+                        }
 
                         Rectangle {
                             id: plus
@@ -1562,10 +1121,19 @@ Rectangle {
                         height: 36
                         width: 240
 
-                        border.color: "#232530"
+                        border.color: actionNewShowMouse.containsMouse ? "#3a3d4d" : "#232530"
                         border.width: 1
-                        color: "#16171e"
+                        color: actionNewShowMouse.pressed ? "#1e1f28"
+                             : (actionNewShowMouse.containsMouse ? "#1c1d26" : "#16171e")
                         radius: 8
+
+                        MouseArea {
+                            id: actionNewShowMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: vGRPresenter_Main_Screen.newShowRequested()
+                        }
 
                         Rectangle {
                             id: presentation_1
@@ -1661,13 +1229,20 @@ Rectangle {
                     }
                 }
             }
+        }
             Rectangle {
                 id: media_resource_dock
 
-                y: 460
+                // Full-width bottom band (x=0 → window right edge) — the FreeShow
+                // samples: the library tabs + shows table start at the EXTREME
+                // LEFT and run the whole width, with the clock living inside
+                // the band at the right. Sits directly under the top region
+                // (slate / monitors), bottom edge at 852.
+                x: 0
+                y: workspace_body.topHeight
 
-                height: 392
-                width: 760
+                height: parent.height - workspace_body.topHeight
+                width: parent.width
 
                 color: "#12131a"
 
@@ -1675,509 +1250,558 @@ Rectangle {
                     id: dock_tab_bar
 
                     height: 39
-                    width: 760
+                    width: parent.width - 400
 
                     border.color: "#232530"
                     border.width: 1
                     color: "transparent"
 
-                    Rectangle {
-                        id: media_tab_Shows
-
-                        x: 16
-                        y: 8
-
-                        height: 31
-                        width: 85
-
-                        border.color: "#00000000"
-                        color: "#00000000"
-                        topLeftRadius: 6
-                        topRightRadius: 6
-
-                        Rectangle {
-                            id: presentation_2
-
-                            x: 14
-                            y: 9.50
-
-                            height: 12
-                            width: 12
-
-                            clip: true
-                            color: "transparent"
-
-                            Shape {
-                                id: _vector_22
-
-                                x: 1
-                                y: 1.50
-
-                                height: 9
-                                width: 10
-
-                                ShapePath {
-                                    id: _vector_22_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#5c6475"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_22_ShapePath0_PathSvg0
-
-                                        path: "M 0 0 L 10.000800132751465 0 M 9.50076012611389 0 L 9.50076012611389 5.5 C 9.50076012611389 5.765216499567032 9.395394660157852 6.019570216536522 9.207843281023905 6.207106590270996 C 9.020291901889959 6.39464296400547 8.76591783324653 6.5 8.500680112838744 6.5 L 1.5001200199127196 6.5 C 1.2348822995049344 6.5 0.9805079924238482 6.39464296400547 0.7929566132899025 6.207106590270996 C 0.6054052341559568 6.019570216536522 0.5000400066375734 5.765216499567032 0.5000400066375732 5.5 L 0.5000400066375732 0 M 2.500200033187866 9 L 5.000400066375732 6.5 L 7.500600099563598 9"
-                                    }
-                                }
-                            }
-                        }
-                        Text {
-                            id: shows
-
-                            x: 32
-                            y: 8
-
-                            height: 15
-                            width: 40
-
-                            color: "#8a94a6"
-                            font.family: "Inter"
-                            font.pixelSize: 12
-                            font.weight: Font.Medium
-                            horizontalAlignment: Text.AlignLeft
-                            text: qsTr("Shows")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                        }
-                    }
-                    Rectangle {
-                        id: media_tab_Audio
-
-                        x: 105
-                        y: 8
-
-                        height: 31
-                        width: 80
-
-                        border.color: "#00000000"
-                        color: "#00000000"
-                        topLeftRadius: 6
-                        topRightRadius: 6
-
-                        Rectangle {
-                            id: music
-
-                            x: 14
-                            y: 9.50
-
-                            height: 12
-                            width: 12
-
-                            clip: true
-                            color: "transparent"
-
-                            Shape {
-                                id: _vector_23
-
-                                x: 1.50
-                                y: 1.50
-
-                                height: 9
-                                width: 9
-
-                                ShapePath {
-                                    id: _vector_23_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#5c6475"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_23_ShapePath0_PathSvg0
-
-                                        path: "M 3 7.5 L 3 1 L 9 0 L 9 6.5 M 3 7.5 C 3 8.328427076339722 2.3284270763397217 9 1.5 9 C 0.6715728640556335 9 0 8.328427076339722 0 7.5 C 0 6.6715728640556335 0.6715728640556335 6 1.5 6 C 2.3284270763397217 6 3 6.6715728640556335 3 7.5 Z M 9 6.5 C 9 7.328427076339722 8.328427076339722 8 7.5 8 C 6.6715728640556335 8 6 7.328427076339722 6 6.5 C 6 5.6715728640556335 6.6715728640556335 5 7.5 5 C 8.328427076339722 5 9 5.6715728640556335 9 6.5 Z"
-                                    }
-                                }
-                            }
-                        }
-                        Text {
-                            id: audio
-
-                            x: 32
-                            y: 8
-
-                            height: 15
-                            width: 35
-
-                            color: "#8a94a6"
-                            font.family: "Inter"
-                            font.pixelSize: 12
-                            font.weight: Font.Medium
-                            horizontalAlignment: Text.AlignLeft
-                            text: qsTr("Audio")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                        }
-                    }
-                    Rectangle {
-                        id: media_tab_Overlays
-
-                        x: 189
-                        y: 8
-
-                        height: 31
-                        width: 97
-
-                        border.color: "#00000000"
-                        color: "#00000000"
-                        topLeftRadius: 6
-                        topRightRadius: 6
-
-                        Rectangle {
-                            id: layers
-
-                            x: 14
-                            y: 9.50
-
-                            height: 12
-                            width: 12
-
-                            clip: true
-                            color: "transparent"
-
-                            Shape {
-                                id: _vector_24
-
-                                x: 1
-                                y: 1
-
-                                height: 10
-                                width: 10.01
-
-                                ShapePath {
-                                    id: _vector_24_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#5c6475"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_24_ShapePath0_PathSvg0
-
-                                        path: "M 0.0000015314757755390289 5.000278976449238 C -0.00023512876514027623 5.095917759515399 0.026961329721227757 5.18961825530497 0.07836567302484124 5.270268748323481 C 0.12977001632845472 5.350919241341992 0.20322565130542775 5.415136167108725 0.29002179218127533 5.455304287007916 L 4.59032304632981 7.410413290501365 C 4.719932692581259 7.469102322109991 4.860573368090874 7.499460922236807 5.002851840615138 7.499460922236807 C 5.145130313139402 7.499460922236807 5.285770988649016 7.469102322109991 5.415380634900465 7.410413290501365 L 9.705681526079536 5.460304680431668 C 9.794191517372253 5.420521940963324 9.869213728001565 5.355845214214658 9.921598975406486 5.274160910360928 C 9.973984222811406 5.192476606507198 10.001468921167021 5.0973144040666485 10.000702262862545 5.000278976449238 M 0.0000015314757755390289 7.500418464673856 C -0.00023512876514027623 7.596057247740017 0.026961329721227757 7.689757743529589 0.07836567302484124 7.7704082365481 C 0.12977001632845472 7.851058729566611 0.20322565130542775 7.9152756553333425 0.29002179218127533 7.955443775232534 L 4.59032304632981 9.910552778725984 C 4.719932692581259 9.96924181033461 4.860573368090874 9.999600410461426 5.002851840615138 9.999600410461426 C 5.145130313139402 9.999600410461426 5.285770988649016 9.96924181033461 5.415380634900465 9.910552778725984 L 9.705681526079536 7.960444168656287 C 9.794191517372253 7.920661429187943 9.869213728001565 7.855984702439277 9.921598975406486 7.774300398585547 C 9.973984222811406 7.692616094731817 10.001468921167021 7.597453892291266 10.000702262862545 7.500418464673856 M 5.415605240931281 0.09018364043596945 C 5.285314832159944 0.030754669011861947 5.143780590645831 1.1102849698406108e-16 5.000576214332642 0 C 4.857371838019453 1.1102849698406108e-16 4.71583759650534 0.030754669011861947 4.585547187734003 0.09018364043596945 L 0.3002472380521089 2.0402923697216075 C 0.2115156733272523 2.0794165007246286 0.13607525467340595 2.1434974234558193 0.08311329194254313 2.2247308749741763 C 0.030151329211680324 2.3059643264925334 0.0019532617881602207 2.4008448738217876 0.0019532617881602207 2.497817876992162 C 0.0019532617881602207 2.5947908801625363 0.030151329211680324 2.6896716659236724 0.08311329194254313 2.7709051174420294 C 0.13607525467340595 2.8521385689603864 0.2115156733272523 2.9162192532596958 0.3002472380521089 2.955343384262717 L 4.590547652360626 4.910452149324285 C 4.720838061131963 4.969881120748393 4.862372302646076 5.00063662427184 5.005576678959265 5.0006366242718405 C 5.148781055272455 5.00063662427184 5.290315296786567 4.969881120748393 5.420605705557905 4.910452149324285 L 9.710906119866422 2.9603437776864694 C 9.799637684591278 2.9212196466834484 9.87507858011568 2.857138723952257 9.928040542846542 2.7759052724339 C 9.981002505577404 2.694671820915543 10.009200096130371 2.599791273586289 10.009200096130371 2.5028182704159145 C 10.009200096130371 2.40584526724554 9.981002505577404 2.310964481484404 9.928040542846542 2.229731029966047 C 9.87507858011568 2.14849757844769 9.799637684591278 2.084416894148381 9.710906119866422 2.04529276314536 L 5.415605240931281 0.09018364043596945 Z"
-                                    }
-                                }
-                            }
-                        }
-                        Text {
-                            id: overlays
-
-                            x: 32
-                            y: 8
-
-                            height: 15
-                            width: 52
-
-                            color: "#8a94a6"
-                            font.family: "Inter"
-                            font.pixelSize: 12
-                            font.weight: Font.Medium
-                            horizontalAlignment: Text.AlignLeft
-                            text: qsTr("Overlays")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                        }
-                    }
-                    Rectangle {
-                        id: media_tab_Templates
-
-                        x: 290
-                        y: 8
-
-                        height: 31
-                        width: 106
-
-                        border.color: "#00000000"
-                        color: "#00000000"
-                        topLeftRadius: 6
-                        topRightRadius: 6
-
-                        Rectangle {
-                            id: layout_template
-
-                            x: 14
-                            y: 9.50
-
-                            height: 12
-                            width: 12
-
-                            clip: true
-                            color: "transparent"
-
-                            Shape {
-                                id: _vector_25
-
-                                x: 1.50
-                                y: 1.50
-
-                                height: 9
-                                width: 9
-
-                                ShapePath {
-                                    id: _vector_25_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#5c6475"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_25_ShapePath0_PathSvg0
-
-                                        path: "M 0.5 0 L 8.5 0 C 8.776142120361328 0 9 0.22385761141777039 9 0.5 L 9 3 C 9 3.2761423587799072 8.776142120361328 3.5 8.5 3.5 L 0.5 3.5 C 0.22385761141777039 3.5 0 3.2761423587799072 0 3 L 0 0.5 C 0 0.22385761141777039 0.22385761141777039 0 0.5 0 Z M 0.5 5.5 L 4 5.5 C 4.276142597198486 5.5 4.5 5.72385761141777 4.5 6 L 4.5 8.5 C 4.5 8.776142358779907 4.276142597198486 9 4 9 L 0.5 9 C 0.22385761141777039 9 0 8.776142358779907 0 8.5 L 0 6 C 0 5.72385761141777 0.22385761141777039 5.5 0.5 5.5 Z M 7 5.5 L 8.5 5.5 C 8.776142358779907 5.5 9 5.72385761141777 9 6 L 9 8.5 C 9 8.776142358779907 8.776142358779907 9 8.5 9 L 7 9 C 6.72385761141777 9 6.5 8.776142358779907 6.5 8.5 L 6.5 6 C 6.5 5.72385761141777 6.72385761141777 5.5 7 5.5 Z"
-                                    }
-                                }
-                            }
-                        }
-                        Text {
-                            id: templates
-
-                            x: 32
-                            y: 8
-
-                            height: 15
-                            width: 61
-
-                            color: "#8a94a6"
-                            font.family: "Inter"
-                            font.pixelSize: 12
-                            font.weight: Font.Medium
-                            horizontalAlignment: Text.AlignLeft
-                            text: qsTr("Templates")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                        }
-                    }
-                    Image {
-                        id: media_tab_Scripture
-
-                        x: 400
-                        y: 8
-
-                        source: Qt.resolvedUrl("assets/media_tab_Scripture.png")
-
-                        Rectangle {
-                            id: book
-
-                            x: 14
-                            y: 9.50
-
-                            height: 12
-                            width: 12
-
-                            clip: true
-                            color: "transparent"
-
-                            Shape {
-                                id: _vector_26
-
-                                x: 2
-                                y: 1
-
-                                height: 10
-                                width: 8
-
-                                ShapePath {
-                                    id: _vector_26_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#ff4d3d"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_26_ShapePath0_PathSvg0
-
-                                        path: "M 0 8.750700116157532 L 0 1.250100016593933 C 4.4404479355989097e-16 0.9185528735353785 0.13168287360881692 0.600585053019023 0.3660799060149884 0.36614581792482565 C 0.6004769384211599 0.13170658283062833 0.9183875198123062 2.2206237144109995e-16 1.2498749792575836 0 L 7.499249875545502 0 C 7.631844862303547 2.2206237144109995e-16 7.759009477781546 0.05268261375919181 7.852768286274113 0.1464583033261647 C 7.94652709476668 0.24023399289313757 7.999199867248535 0.3674211464336806 7.999199867248535 0.5000400066375732 L 7.999199867248535 9.50076012611389 C 7.999199867248535 9.633378986317783 7.94652709476668 9.76056649751481 7.852768286274113 9.854342187081784 C 7.759009477781546 9.948117876648757 7.631844862303547 10.000800132751465 7.499249875545502 10.000800132751465 L 1.2498749792575836 10.000800132751465 C 0.9183875198123062 10.000800132751465 0.6004769384211599 9.869093549920835 0.3660799060149884 9.634654314826639 C 0.13168287360881692 9.400215079732442 4.4404479355989097e-16 9.082247259216086 0 8.750700116157532 Z M 0 8.750700116157532 C 4.4404479355989097e-16 8.419152973098978 0.13168287360881692 8.101185152582621 0.3660799060149884 7.866745917488424 C 0.6004769384211599 7.632306682394226 0.9183875198123062 7.5006000995635995 1.2498749792575836 7.500600099563598 L 7.999199867248535 7.500600099563598"
-                                    }
-                                }
-                            }
-                        }
-                        Text {
-                            id: bible_4
-
-                            x: 32
-                            y: 8
-
-                            height: 15
-                            width: 30
-
-                            color: "#e2e8f0"
-                            font.family: "Inter"
-                            font.pixelSize: 12
-                            font.weight: Font.DemiBold
-                            horizontalAlignment: Text.AlignLeft
-                            text: qsTr("Bible")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                        }
-                    }
-                    Rectangle {
-                        id: media_tab_Calendar
-
-                        x: 479
-                        y: 8
-
-                        height: 31
-                        width: 98
-
-                        border.color: "#00000000"
-                        color: "#00000000"
-                        topLeftRadius: 6
-                        topRightRadius: 6
-
-                        Rectangle {
-                            id: calendar
-
-                            x: 14
-                            y: 9.50
-
-                            height: 12
-                            width: 12
-
-                            clip: true
-                            color: "transparent"
-
-                            Shape {
-                                id: _vector_27
-
-                                x: 1.50
-                                y: 1
-
-                                height: 10
-                                width: 9
-
-                                ShapePath {
-                                    id: _vector_27_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#5c6475"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_27_ShapePath0_PathSvg0
-
-                                        path: "M 2.5 0 L 2.5 2.000160026550293 M 6.5 0 L 6.5 2.000160026550293 M 0 4.000320053100586 L 9 4.000320053100586 M 1 1.0000800132751464 L 8 1.0000800132751464 C 8.552285194396973 1.0000800132751464 9 1.4478310592719992 9 2.000160026550293 L 9 9.000720119476318 C 9 9.553049504020509 8.552285194396973 10.000800132751465 8 10.000800132751465 L 1 10.000800132751465 C 0.44771522283554077 10.000800132751465 0 9.553049504020509 0 9.000720119476318 L 0 2.000160026550293 C 0 1.4478310592719992 0.44771522283554077 1.0000800132751464 1 1.0000800132751464 Z"
-                                    }
-                                }
-                            }
-                        }
-                        Text {
-                            id: calendar_1
-
-                            x: 32
-                            y: 8
-
-                            height: 15
-                            width: 53
-
-                            color: "#8a94a6"
-                            font.family: "Inter"
-                            font.pixelSize: 12
-                            font.weight: Font.Medium
-                            horizontalAlignment: Text.AlignLeft
-                            text: qsTr("Calendar")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                        }
-                    }
-                    Rectangle {
-                        id: media_tab_Functions
-
-                        x: 581
-                        y: 8
-
-                        height: 31
-                        width: 103
-
-                        border.color: "#00000000"
-                        color: "#00000000"
-                        topLeftRadius: 6
-                        topRightRadius: 6
-
-                        Rectangle {
-                            id: settings
-
-                            x: 14
-                            y: 9.50
-
-                            height: 12
-                            width: 12
-
-                            clip: true
-                            color: "transparent"
-
-                            Shape {
-                                id: _vector_28
-
-                                x: 1.52
-                                y: 1.01
-
-                                height: 9.98
-                                width: 8.96
-
-                                ShapePath {
-                                    id: _vector_28_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#5c6475"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_28_ShapePath0_PathSvg0
-
-                                        path: "M 3.3136794567108154 1.0592867136001587 C 3.341228762641549 0.7694565653800964 3.475845903158188 0.5003089904785156 3.691230535507202 0.30442655086517334 C 3.9066151678562164 0.10854411125183105 4.187292814254761 -2.2204460492503096e-16 4.478429317474365 3.3476706134016988e-31 C 4.76956582069397 -2.2204460492503096e-16 5.050244182348251 0.10854411125183105 5.265628814697266 0.30442655086517334 C 5.48101344704628 0.5003089904785156 5.6156301107257605 0.7694565653800964 5.643179416656494 1.0592867136001587 C 5.659737911075354 1.2465139627456665 5.7211599573493 1.4269959926605225 5.822246551513672 1.5854564905166626 C 5.923333145678043 1.7439169883728027 6.061108812689781 1.875691182911396 6.223911285400391 1.9696251153945923 C 6.386713758111 2.0635590478777885 6.569751054048538 2.1168875070288777 6.7575297355651855 2.1250967979431152 C 6.945308417081833 2.1333060888573527 7.132300674915314 2.0961545184254646 7.302679538726807 2.016786575317383 C 7.567234843969345 1.8966757655143738 7.867016524076462 1.8792960420250893 8.14367961883545 1.9680296182632446 C 8.420342713594437 2.0567631945014 8.654093876481056 2.2452619075775146 8.7994384765625 2.4968390464782715 C 8.944783076643944 2.7484161853790283 8.99132301658392 3.0450726449489594 8.930000305175781 3.3290719985961914 C 8.868677593767643 3.6130713522434235 8.7038793861866 3.8640945106744766 8.467679977416992 4.0332865715026855 C 8.313869968056679 4.141210205852985 8.188315153121948 4.284590631723404 8.101635932922363 4.45129919052124 C 8.014956712722778 4.6180077493190765 7.969702243804932 4.803140565752983 7.969702243804932 4.991036891937256 C 7.969702243804932 5.178933218121529 8.014956712722778 5.364065557718277 8.101635932922363 5.530774116516113 C 8.188315153121948 5.69748267531395 8.313869968056679 5.840863101184368 8.467679977416992 5.948786735534668 C 8.7038793861866 6.117978796362877 8.868677593767643 6.36900195479393 8.930000305175781 6.653001308441162 C 8.99132301658392 6.937000662088394 8.944783076643944 7.233657598495483 8.7994384765625 7.48523473739624 C 8.654093876481056 7.736811876296997 8.420342713594437 7.925310231745243 8.14367961883545 8.014043807983398 C 7.867016524076462 8.102777384221554 7.567234843969345 8.08539754152298 7.302679538726807 7.965286731719971 C 7.132300674915314 7.885918788611889 6.945308417081833 7.848766741342843 6.7575297355651855 7.85697603225708 C 6.569751054048538 7.865185323171318 6.386713758111 7.918513424694538 6.223911285400391 8.012447357177734 C 6.061108812689781 8.10638128966093 5.923333145678043 8.238155484199524 5.822246551513672 8.396615982055664 C 5.7211599573493 8.555076479911804 5.659737911075354 8.735559463500977 5.643179416656494 8.922786712646484 C 5.6156301107257605 9.212616860866547 5.48101344704628 9.481764197349548 5.265628814697266 9.67764663696289 C 5.050244182348251 9.873529076576233 4.76956582069397 9.982072830200195 4.478429317474365 9.982072830200195 C 4.187292814254761 9.982072830200195 3.9066151678562164 9.873529076576233 3.691230535507202 9.67764663696289 C 3.475845903158188 9.481764197349548 3.341228762641549 9.212616860866547 3.3136794567108154 8.922786712646484 C 3.2971513122320175 8.73549273610115 3.2357283383607864 8.554940730333328 3.1346123218536377 8.39642333984375 C 3.033496305346489 8.237905949354172 2.895665928721428 8.106092482805252 2.7327959537506104 8.012147903442383 C 2.569925978779793 7.9182033240795135 2.386813923716545 7.864894911646843 2.1989691257476807 7.8567376136779785 C 2.0111243277788162 7.848580315709114 1.8240801990032196 7.8858146741986275 1.6536794900894165 7.965286731719971 C 1.389124184846878 8.08539754152298 1.0893427431583405 8.102777384221554 0.812679648399353 8.014043807983398 C 0.5360165536403656 7.925310231745243 0.30226586759090424 7.736811876296997 0.15692126750946045 7.48523473739624 C 0.011576667428016663 7.233657598495483 -0.03496314585208893 6.937000662088394 0.026359565556049347 6.653001308441162 C 0.08768227696418762 6.36900195479393 0.2524801194667816 6.117978796362877 0.48867952823638916 5.948786735534668 C 0.6424895375967026 5.840863101184368 0.7680445909500122 5.69748267531395 0.8547238111495972 5.530774116516113 C 0.9414030313491821 5.364065557718277 0.9866565465927128 5.178933218121529 0.9866565465927124 4.991036891937256 C 0.9866565465927128 4.803140565752983 0.9414030313491821 4.6180077493190765 0.8547238111495972 4.45129919052124 C 0.7680445909500122 4.284590631723404 0.6424895375967026 4.141210205852985 0.48867952823638916 4.0332865715026855 C 0.2528117001056671 3.8640093207359314 0.08830472454428673 3.613083988428116 0.027130253612995148 3.329277515411377 C -0.03404421731829643 3.045471042394638 0.012483805418014526 2.749056786298752 0.15767168998718262 2.497642993927002 C 0.3028595745563507 2.246229201555252 0.5363357961177826 2.0577754229307175 0.8127247095108032 1.9689069986343384 C 1.0891136229038239 1.8800385743379593 1.3886715173721313 1.8971039205789566 1.6531795263290405 2.016786575317383 C 1.8235583901405334 2.0961545184254646 2.010551244020462 2.1333060888573527 2.1983299255371094 2.1250967979431152 C 2.3861086070537567 2.1168875070288777 2.5691456645727158 2.0635590478777885 2.731948137283325 1.9696251153945923 C 2.8947506099939346 1.875691182911396 3.0325258001685143 1.7439169883728027 3.1336123943328857 1.5854564905166626 C 3.2346989884972572 1.4269959926605225 3.296121034771204 1.2465139627456665 3.3126795291900635 1.0592867136001587 M 5.97802734375 4.9912109375 C 5.97802734375 5.819638013839722 5.306454420089722 6.4912109375 4.47802734375 6.4912109375 C 3.6496002078056335 6.4912109375 2.97802734375 5.819638013839722 2.97802734375 4.9912109375 C 2.97802734375 4.1627838015556335 3.6496002078056335 3.4912109375 4.47802734375 3.4912109375 C 5.306454420089722 3.4912109375 5.97802734375 4.1627838015556335 5.97802734375 4.9912109375 Z"
-                                    }
-                                }
-                            }
-                        }
-                        Text {
-                            id: functions
-
-                            x: 32
-                            y: 8
-
-                            height: 15
-                            width: 58
-
-                            color: "#8a94a6"
-                            font.family: "Inter"
-                            font.pixelSize: 12
-                            font.weight: Font.Medium
-                            horizontalAlignment: Text.AlignLeft
-                            text: qsTr("Functions")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                        }
+                    // ---- Live tab bar ---- one shared component
+                    // (qml/components/LibraryTabBar.qml): all nine tabs —
+                    // including the new Media and THE TABLE (the sermon
+                    // app, riding the Scripture-architecture browser via
+                    // its JSON export) — share ONE delegate, so selected
+                    // underline, hover and metrics are identical by
+                    // construction.
+                    LibraryTabBar {
+                        id: media_tab_bar
+                        x: 0
+                        y: 0
+                        width: parent.width
+                        height: 39
                     }
                 }
                 Rectangle {
                     id: media_table
 
+                    objectName: "selfTestShowsTable"
+
                     y: 39
 
-                    height: 353
-                    width: 760
+                    // Tracks the dock's taller body so every pane (shows
+                    // table, browsers, media grid) fills to the bottom.
+                    height: parent.height - 39
+                    width: parent.width - 400
 
                     clip: true
                     color: "transparent"
 
+                    // ---- Per-tab panes ---- Shows keeps the original table
+                    // (gated below); Scripture and The Table share the
+                    // Scripture-architecture browser (LibraryBrowserPane).
+                    // BOTH PANES OWN NO DATA: the engine drives all library
+                    // content — the bridge pushes each library's document
+                    // into setLibrary() once wired; until then they show the
+                    // "Waiting for engine…" shell. Media binds the Settings
+                    // rosters (buses/video/audio) + playlists; everything
+                    // else gets the consistent coming-soon pane until its
+                    // content lands.
+                    LibraryBrowserPane {
+                        objectName: "selfTestScripturePane"
+                        visible: media_tab_bar.currentPane === "scripture"
+                        width: parent.width; height: parent.height
+                        sidebarLabel: qsTr("Bibles")
+                        newEntryLabel: qsTr("New scripture")
+                    }
+                    LibraryBrowserPane {
+                        objectName: "selfTestTablePane"
+                        visible: media_tab_bar.currentPane === "table"
+                        width: parent.width; height: parent.height
+                        sidebarLabel: qsTr("Collections")
+                        newEntryLabel: qsTr("New sermon")
+                    }
+                    MediaLibraryPane {
+                        id: mediaPane
+                        objectName: "selfTestMediaPane"
+                        visible: media_tab_bar.currentPane === "media"
+                        width: parent.width; height: parent.height
+                        // Playlists section mirrors the ENGINE's shows library
+                        // (the same feed the Shows table renders) — one source
+                        // of truth, no duplicated roster.
+                        playlists: {
+                            const shows = ShowService.libraryShows
+                            const out = []
+                            for (let i = 0; i < shows.length; ++i)
+                                out.push({ name: shows[i].name,
+                                           modified: Qt.formatDate(new Date(shows[i].modifiedMs), "dddd d, MMMM yyyy") })
+                            return out
+                        }
+                    }
+                    LibraryComingSoonPane {
+                        objectName: "selfTestSoonPane"
+                        visible: media_tab_bar.currentPane === "soon"
+                        width: parent.width; height: parent.height
+                        title: media_tab_bar.tabs[media_tab_bar.currentTab].label
+                        message: qsTr("This library is next on the roadmap.")
+                        newLabel: qsTr("New ") + media_tab_bar.tabs[media_tab_bar.currentTab].label
+                        onNewRequested: EventBus.notify(
+                            qsTr("%1 creation isn't wired yet — the pane shell is ready.")
+                                .arg(media_tab_bar.tabs[media_tab_bar.currentTab].label),
+                            "info", media_tab_bar.tabs[media_tab_bar.currentTab].label, "library.soon.new")
+                    }
+
+                    // ---- Categories sidebar (Shows tab) ---- the sample's
+                    // left rail: "All" row, Categories section, category
+                    // rows with counts, and the round + that creates new
+                    // ones. ENGINE-FED: the roster comes from
+                    // ShowService.libraryCategories (real sub-folders of the
+                    // show library — persisted across restarts); every CRUD
+                    // call goes straight to the engine, which validates and
+                    // republishes. Counts are the engine's shows-per-category.
+                    property int currentCategory: 0   // 0 = All, 1..n = category
+                    // The row being renamed inline (-1 = none). Opened from
+                    // the right-click context menu; Enter/focus-loss commits,
+                    // Escape cancels.
+                    property int renamingIndex: -1
+                    // Right-click context menu state — which row opened it
+                    // (-1 = closed). One shared menu instance lives at the
+                    // pane level (below), positioned over the clicked row.
+                    property int menuIndex: -1
+                    function openCatMenu(i, x, y) {
+                        menuIndex = i
+                        // Clamp inside the pane so the menu never pokes out.
+                        catContextMenu.x = Math.min(x, width - catContextMenu.width - 4)
+                        catContextMenu.y = Math.min(y, height - catContextMenu.height - 4)
+                    }
+                    function closeCatMenu() { menuIndex = -1 }
+
+                    // Engine is the source of truth — no UI-side roster.
+                    readonly property var showCategories: {
+                        const cats = ShowService.libraryCategories
+                        // Re-evaluate when the engine republishes the library.
+                        libRev
+                        const out = []
+                        for (let i = 0; i < cats.length; ++i) {
+                            const n = cats[i]
+                            out.push({ name: n, count: ShowService.libraryShowsIn(n).length })
+                        }
+                        return out
+                    }
+                    // Bumped after every engine CRUD call so the binding above
+                    // (an engine list the engine doesn't NOTIFY per-call beyond
+                    // its own libraryChanged) re-reads fresh counts.
+                    property int libRev: 0
+                    Connections {
+                        target: ShowService
+                        function onLibraryChanged() { media_table.libRev++ }
+                    }
+
+                    // ---- Category CRUD — straight through to the engine.
+                    // The engine validates (no duplicates, no junk names) and
+                    // republishes; failures toast from ShowService itself.
+                    function addCategory() {
+                        if (ShowService.createLibraryCategory(qsTr("New category"))) {
+                            currentCategory = showCategories.length
+                            renamingIndex = showCategories.length - 1
+                        }
+                    }
+                    function renameCategory(i, name) {
+                        const trimmed = name.trim()
+                        const list = showCategories
+                        if (trimmed === "" || i >= list.length || list[i].name === trimmed) {
+                            renamingIndex = -1                 // empty = cancel
+                            return
+                        }
+                        // Categories come back case-insensitively SORTED, so a
+                        // rename can reshuffle rows — remember whether this row
+                        // was selected and re-point the selection by name after
+                        // the engine republishes.
+                        const wasSelected = currentCategory === i + 1
+                        ShowService.renameLibraryCategory(list[i].name, trimmed)
+                        renamingIndex = -1
+                        if (wasSelected) {
+                            const idx = showCategories.findIndex(c => c.name === trimmed)
+                            if (idx >= 0)
+                                currentCategory = idx + 1
+                        }
+                    }
+                    function removeCategory(i) {
+                        const list = showCategories
+                        if (i < 0 || i >= list.length)
+                            return
+                        if (currentCategory === i + 1)
+                            currentCategory = 0            // deleted selection → All
+                        else if (currentCategory > i + 1)
+                            currentCategory--
+                        if (renamingIndex === i)
+                            renamingIndex = -1
+                        else if (renamingIndex > i)
+                            renamingIndex--
+                        ShowService.removeLibraryCategory(list[i].name)
+                    }
+
+                    Rectangle {
+                        id: categories_sidebar
+
+                        visible: media_tab_bar.currentPane === "shows"
+                        x: 0
+                        y: 0
+
+                        height: parent.height
+                        width: 320
+
+                        color: "#0f1015"
+
+                        Rectangle {
+                            anchors.right: parent.right
+                            width: 1
+                            height: parent.height
+                            color: "#232530"
+                        }
+
+                        Column {
+                            x: 8
+                            y: 8
+                            width: parent.width - 16
+                            spacing: 2
+
+                            // ---- All row (the library-wide filter) ------
+                            Rectangle {
+                                width: parent.width
+                                height: 40
+                                radius: 6
+                                // Tint is cursor-driven only — selection is
+                                // marked by the red edge + ring, never by a
+                                // persistent background (user call).
+                                color: allRowMouse.containsMouse ? "#16171e" : "transparent"
+                                Rectangle {
+                                    visible: media_table.currentCategory === 0
+                                    x: 0; y: 9; width: 3; height: 22
+                                    color: "#ff4d3d"; radius: 1.5
+                                }
+                                Rectangle {
+                                    x: 14
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: 14; height: 14; radius: 7
+                                    color: "transparent"
+                                    border.color: media_table.currentCategory === 0 ? "#ff4d3d" : "#5c6475"
+                                    border.width: 2
+                                }
+                                Text {
+                                    x: 44
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: qsTr("All")
+                                    color: media_table.currentCategory === 0 ? "#e2e8f0" : "#c7cdd8"
+                                    font.family: "Inter"; font.pixelSize: 14
+                                }
+                                Text {
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 12
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: ShowService.libraryShows.length
+                                    color: "#5c6475"
+                                    font.family: "Inter"; font.pixelSize: 12
+                                }
+                                MouseArea {
+                                    id: allRowMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: media_table.currentCategory = 0
+                                }
+                            }
+
+                            // ---- Categories section header + add ------
+                            Item {
+                                width: parent.width; height: 30
+                                Text {
+                                    x: 8; y: 9
+                                    text: qsTr("Categories")
+                                    color: "#8a94a6"
+                                    font.family: "Inter"; font.pixelSize: 12; font.weight: Font.DemiBold
+                                }
+                                // The + lives at the header's RIGHT (user call) —
+                                // hover/press states, honest toast while creation
+                                // is engine-owned.
+                                Rectangle {
+                                    id: addCatBtn
+
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 4
+                                    anchors.verticalCenter: parent.verticalCenter
+
+                                    width: 22
+                                    height: 22
+                                    radius: 11
+
+                                    color: addCatMouse.pressed ? "#5b4bd1"
+                                         : (addCatMouse.containsMouse ? "#8d7cf3" : "#6c5ce7")
+                                    Behavior on color { ColorAnimation { duration: 100 } }
+
+                                    MouseArea {
+                                        id: addCatMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: media_table.addCategory()
+                                    }
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "+"
+                                        color: "#ffffff"
+                                        font.family: "Inter"; font.pixelSize: 16; font.weight: Font.Medium
+                                    }
+                                }
+                            }
+
+                        }
+
+                        // ---- Scrollable category rows --------------------
+                        // When the roster outgrows the sidebar the rows
+                        // flick vertically; the shared AppScrollBar (same
+                        // visual language as every other list in the app)
+                        // sits at the rail's right edge below.
+                        Flickable {
+                            id: catScroll
+
+                            x: 8
+                            y: 82
+                            width: parent.width - 16
+                            height: parent.height - y - 8
+
+                            clip: true
+                            contentWidth: width
+                            contentHeight: catRows.height
+                            boundsBehavior: Flickable.StopAtBounds
+
+                            // Scroll-proof hover: containsMouse on the rows
+                            // goes stale when the list scrolls under a
+                            // stationary cursor (no mouse movement = no exit
+                            // event, so a tint can ride away with a row and
+                            // stick). The hovered row is computed from the
+                            // cursor position instead, so every scroll
+                            // re-evaluates it. Row pitch = 38 + 2 spacing.
+                            readonly property int hoveredRow: {
+                                if (!hoverTracker.containsMouse) return -1
+                                const y = hoverTracker.mouseY + contentY
+                                return Math.min(Math.max(Math.floor(y / 40), 0),
+                                                media_table.showCategories.length - 1)
+                            }
+                            // NoButton so clicks and flick drags pass
+                            // straight through to the rows/Flickable.
+                            MouseArea {
+                                id: hoverTracker
+                                anchors.fill: parent
+                                acceptedButtons: Qt.NoButton
+                                hoverEnabled: true
+                            }
+                            // Scrolling with the right-click menu open closes it.
+                            onMovementStarted: media_table.closeCatMenu()
+
+                            Column {
+                                id: catRows
+                                width: parent.width
+                                spacing: 2
+
+                                Repeater {
+                                    model: media_table.showCategories
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        required property int index
+                                        readonly property bool selected: media_table.currentCategory === index + 1
+
+                                        width: parent.width
+                                        height: 38
+                                        radius: 6
+                                        // Cursor-driven only — the selected
+                                        // row keeps its red edge + ring, never
+                                        // a persistent background (user call).
+                                        color: catScroll.hoveredRow === index ? "#16171e" : "transparent"
+
+                                        Rectangle {
+                                            visible: parent.selected
+                                            x: 0; y: 8; width: 3; height: 22
+                                            color: "#ff4d3d"; radius: 1.5
+                                        }
+                                        Rectangle {
+                                            x: 14
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            width: 14; height: 14; radius: 7
+                                            color: "transparent"
+                                            border.color: parent.selected ? "#ff4d3d" : "#5c6475"
+                                            border.width: 2
+                                        }
+                                        Text {
+                                            id: catNameText
+                                            x: 44
+                                            width: parent.width - 130
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            visible: media_table.renamingIndex !== index
+                                            text: modelData.name
+                                            color: selected ? "#e2e8f0" : "#c7cdd8"
+                                            elide: Text.ElideRight
+                                            font.family: "Inter"; font.pixelSize: 13
+                                        }
+                                        // Inline rename editor — opened from the
+                                        // right-click menu's Rename entry.
+                                        TextInput {
+                                            id: catNameEdit
+                                            x: 44
+                                            width: parent.width - 130
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            visible: media_table.renamingIndex === index
+                                            enabled: visible
+                                            text: visible ? modelData.name : ""
+                                            color: "#e2e8f0"
+                                            font.family: "Inter"; font.pixelSize: 13
+                                            clip: true
+                                            onAccepted: media_table.renameCategory(index, text)
+                                            onActiveFocusChanged: if (!activeFocus && visible)
+                                                media_table.renameCategory(index, text)
+                                            Keys.onEscapePressed: media_table.renamingIndex = -1
+                                        }
+                                        Text {
+                                            anchors.right: parent.right
+                                            anchors.rightMargin: 12
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            visible: media_table.renamingIndex !== index
+                                            text: modelData.count > 0 ? modelData.count : ""
+                                            color: "#5c6475"
+                                            font.family: "Inter"; font.pixelSize: 12
+                                        }
+                                        MouseArea {
+                                            id: catRowMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                            onClicked: (mouse) => {
+                                                if (mouse.button === Qt.RightButton) {
+                                                    // Context menu at the cursor —
+                                                    // Rename / Delete (user call).
+                                                    const p = catRowMouse.mapToItem(
+                                                        media_table, mouse.x, mouse.y)
+                                                    media_table.openCatMenu(index, p.x + 4, p.y - 4)
+                                            } else {
+                                                media_table.currentCategory = index + 1
+                                            }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Shared app scrollbar for the category list — a
+                        // sibling of the Flickable so it doesn't scroll with
+                        // the rows. Hides itself when the list doesn't
+                        // overflow (its own `visible` binding).
+                        AppScrollBar {
+                            flickable: catScroll
+
+                            x: parent.width - 8
+                            y: 82
+                            height: parent.height - y - 8
+                        }
+                    }
+
+                    // ---- Category context menu (right-click) ---- one
+                    // shared Rename/Delete menu for any row; a click anywhere
+                    // else closes it. Declared LAST in the pane so it paints
+                    // above the sidebar and table.
+                    Rectangle {
+                        id: catContextMenu
+
+                        visible: media_table.menuIndex !== -1
+                        x: 0; y: 0
+                        width: 148
+                        height: 76
+                        z: 60
+
+                        radius: 8
+                        color: "#1e1f28"
+                        border.color: "#3a3d4d"
+                        border.width: 1
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: (mouse) => {
+                                // Consume clicks on the menu itself so they
+                                // don't fall through to the catcher.
+                                mouse.accepted = true
+                            }
+                        }
+
+                        Column {
+                            anchors.fill: parent
+                            anchors.margins: 4
+
+                            Item {
+                                width: parent.width; height: 32
+                                Rectangle {
+                                    anchors.fill: parent
+                                    anchors.margins: 2
+                                    radius: 5
+                                    color: menuRenameMouse.containsMouse ? "#2c2f3c" : "transparent"
+                                }
+                                Text {
+                                    x: 12
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: qsTr("Rename")
+                                    color: "#e2e8f0"
+                                    font.family: "Inter"; font.pixelSize: 13
+                                }
+                                MouseArea {
+                                    id: menuRenameMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        media_table.renamingIndex = media_table.menuIndex
+                                        media_table.closeCatMenu()
+                                        catNameEdit.forceActiveFocus()
+                                        catNameEdit.selectAll()
+                                    }
+                                }
+                            }
+                            Item {
+                                width: parent.width; height: 32
+                                Rectangle {
+                                    anchors.fill: parent
+                                    anchors.margins: 2
+                                    radius: 5
+                                    color: menuDeleteMouse.containsMouse ? "#2c2f3c" : "transparent"
+                                }
+                                Text {
+                                    x: 12
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: qsTr("Delete")
+                                    color: "#ff6b61"
+                                    font.family: "Inter"; font.pixelSize: 13
+                                }
+                                MouseArea {
+                                    id: menuDeleteMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        media_table.removeCategory(media_table.menuIndex)
+                                        media_table.closeCatMenu()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Click-outside catcher while the menu is open.
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: media_table.menuIndex !== -1
+                        z: 50
+                        onClicked: media_table.closeCatMenu()
+                    }
+
+                    // The original shows table — visible only on the Shows
+                    // tab; the other tabs' panes replace it above. Shifted
+                    // right of the categories sidebar (320 + 12 margins).
                     Rectangle {
                         id: table_row_header
 
-                        x: 12
+                        visible: media_tab_bar.currentPane === "shows"
+                        x: 332
                         y: 12
 
                         height: 21
-                        width: 736
+                        width: parent.width - 344
 
                         color: "transparent"
 
@@ -2202,7 +1826,8 @@ Rectangle {
                         Text {
                             id: mODIFIED
 
-                            x: 528
+                            anchors.right: parent.right
+                            anchors.rightMargin: 16
                             y: 4
 
                             height: 13
@@ -2222,446 +1847,139 @@ Rectangle {
                     Rectangle {
                         id: table_body
 
-                        x: 12
+                        visible: media_tab_bar.currentPane === "shows"
+                        x: 332
                         y: 35
 
-                        height: 255
-                        width: 736
+                        // Grows with the pane; the footer (bound below)
+                        // stays pinned to the bottom.
+                        height: parent.height - 98
+                        width: parent.width - 344
 
                         clip: true
                         color: "transparent"
 
-                        Rectangle {
-                            id: row_0
+                        // ---- Shows rows — ENGINE-FED -------------------
+                        // One Repeater over ShowService.libraryShows (real
+                        // .vgr files, newest first); "All" lists every show,
+                        // a selected category filters to its sub-folder. Rows
+                        // are click-to-open: the path goes up through
+                        // openShowRequested → Main.qml → the engine, with the
+                        // unsaved-changes guard. Hover = cursor-driven lift;
+                        // the stale-containsMouse lesson applied from day one
+                        // via a pointer-position tracker like the sidebar's.
+                        readonly property var shownShows: {
+                            media_table.libRev   // re-read on engine republish
+                            const cat = media_table.currentCategory
+                            if (cat === 0)
+                                return ShowService.libraryShows
+                            const name = media_table.showCategories[cat - 1].name
+                            return ShowService.libraryShowsIn(name)
+                        }
+                        Repeater {
+                            model: table_body.shownShows
+                            delegate: Rectangle {
+                                required property var modelData
+                                required property int index
 
-                            height: 31
-                            width: 736
+                                y: index * 32
+                                height: 31
+                                width: parent.width - 24
 
-                            color: "#16171e"
-                            radius: 4
+                                radius: 4
+                                color: showRowsHover.hoveredIdx === index ? "#16171e" : "transparent"
 
-                            Text {
-                                id: mY_SINS_ARE_GONE
-
-                                x: 8
-                                y: 8
-
-                                height: 15
-                                width: 521
-
-                                color: "#e2e8f0"
-                                elide: Text.ElideRight
-                                font.family: "Inter"
-                                font.pixelSize: 12
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("108-MY SINS ARE GONE")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                            Text {
-                                id: wednesday_5_August_2026
-
-                                x: 528
-                                y: 9
-
-                                height: 13
-                                width: 201
-
-                                color: "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 11
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignRight
-                                text: qsTr("Wednesday 5, August, 2026")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
+                                Text {
+                                    x: 8
+                                    y: 8
+                                    height: 15
+                                    width: parent.width - 240
+                                    color: "#e2e8f0"
+                                    elide: Text.ElideRight
+                                    font.family: "Inter"; font.pixelSize: 12
+                                    text: modelData.name
+                                    textFormat: Text.PlainText
+                                    verticalAlignment: Text.AlignTop
+                                }
+                                Text {
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 16
+                                    y: 9
+                                    height: 13
+                                    width: 201
+                                    color: "#5c6475"
+                                    font.family: "Inter"; font.pixelSize: 11
+                                    horizontalAlignment: Text.AlignRight
+                                    text: {
+                                        const d = new Date(modelData.modifiedMs)
+                                        Qt.formatDate(d, "dddd d, MMMM yyyy")
+                                    }
+                                    textFormat: Text.PlainText
+                                    verticalAlignment: Text.AlignTop
+                                }
+                                MouseArea {
+                                    id: rowMouse
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: vGRPresenter_Main_Screen.openShowRequested(modelData.path)
+                                }
                             }
                         }
-                        Rectangle {
-                            id: row_1
-
-                            y: 32
-
-                            height: 31
-                            width: 736
-
-                            color: "#00000000"
-                            radius: 4
-
-                            Text {
-                                id: hE_TOUCHED_ME
-
-                                x: 8
-                                y: 8
-
-                                height: 15
-                                width: 521
-
-                                color: "#e2e8f0"
-                                elide: Text.ElideRight
-                                font.family: "Inter"
-                                font.pixelSize: 12
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("253-HE TOUCHED ME")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                            Text {
-                                id: wednesday_5_August_2027
-
-                                x: 528
-                                y: 9
-
-                                height: 13
-                                width: 201
-
-                                color: "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 11
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignRight
-                                text: qsTr("Wednesday 5, August, 2026")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
+                        // Cursor-position hover tracker for the rows (same
+                        // scroll-proof pattern as the category list).
+                        MouseArea {
+                            id: showRowsHover
+                            anchors.fill: parent
+                            acceptedButtons: Qt.NoButton
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            z: 1
+                            readonly property int hoveredIdx: {
+                                if (!containsMouse || table_body.shownShows.length === 0) return -1
+                                const i = Math.floor(mouseY / 32)
+                                return (i >= 0 && i < table_body.shownShows.length) ? i : -1
                             }
                         }
-                        Rectangle {
-                            id: row_2
 
-                            y: 64
-
-                            height: 31
-                            width: 736
-
-                            color: "#16171e"
-                            radius: 4
-
-                            Text {
-                                id: hE_ABIDES_2
-
-                                x: 8
-                                y: 8
-
-                                height: 15
-                                width: 521
-
-                                color: "#e2e8f0"
-                                elide: Text.ElideRight
-                                font.family: "Inter"
-                                font.pixelSize: 12
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("139-HE ABIDES 2")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                            Text {
-                                id: sunday_2_August_2020
-
-                                x: 528
-                                y: 9
-
-                                height: 13
-                                width: 201
-
-                                color: "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 11
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignRight
-                                text: qsTr("Sunday 2, August, 2020")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                        }
-                        Rectangle {
-                            id: row_3
-
-                            y: 96
-
-                            height: 31
-                            width: 736
-
-                            color: "#00000000"
-                            radius: 4
-
-                            Text {
-                                id: wE_VE_GET_THE_POWER
-
-                                x: 8
-                                y: 8
-
-                                height: 15
-                                width: 521
-
-                                color: "#e2e8f0"
-                                elide: Text.ElideRight
-                                font.family: "Inter"
-                                font.pixelSize: 12
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("429-WE'VE GET THE POWER")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                            Text {
-                                id: sunday_2_August_2021
-
-                                x: 528
-                                y: 9
-
-                                height: 13
-                                width: 201
-
-                                color: "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 11
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignRight
-                                text: qsTr("Sunday 2, August, 2020")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                        }
-                        Rectangle {
-                            id: row_4
-
-                            y: 128
-
-                            height: 31
-                            width: 736
-
-                            color: "#16171e"
-                            radius: 4
-
-                            Text {
-                                id: tHE_GREAT_EMANCIPATOR_2
-
-                                x: 8
-                                y: 8
-
-                                height: 15
-                                width: 521
-
-                                color: "#e2e8f0"
-                                elide: Text.ElideRight
-                                font.family: "Inter"
-                                font.pixelSize: 12
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("228-THE GREAT EMANCIPATOR 2")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                            Text {
-                                id: sunday_2_August_2022
-
-                                x: 528
-                                y: 9
-
-                                height: 13
-                                width: 201
-
-                                color: "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 11
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignRight
-                                text: qsTr("Sunday 2, August, 2020")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                        }
-                        Rectangle {
-                            id: row_5
-
-                            y: 160
-
-                            height: 31
-                            width: 736
-
-                            color: "#00000000"
-                            radius: 4
-
-                            Text {
-                                id: lIKE_JESUS_SET_ME_FREE_2
-
-                                x: 8
-                                y: 8
-
-                                height: 15
-                                width: 521
-
-                                color: "#e2e8f0"
-                                elide: Text.ElideRight
-                                font.family: "Inter"
-                                font.pixelSize: 12
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("LIKE JESUS SET ME FREE 2")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                            Text {
-                                id: sunday_2_August_2023
-
-                                x: 528
-                                y: 9
-
-                                height: 13
-                                width: 201
-
-                                color: "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 11
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignRight
-                                text: qsTr("Sunday 2, August, 2020")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                        }
-                        Rectangle {
-                            id: row_6
-
-                            y: 192
-
-                            height: 31
-                            width: 736
-
-                            color: "#16171e"
-                            radius: 4
-
-                            Text {
-                                id: fEELING_SO_MUCH_BETTER_3
-
-                                x: 8
-                                y: 8
-
-                                height: 15
-                                width: 521
-
-                                color: "#e2e8f0"
-                                elide: Text.ElideRight
-                                font.family: "Inter"
-                                font.pixelSize: 12
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("9 FEELING SO MUCH BETTER 3")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                            Text {
-                                id: sunday_2_August_2024
-
-                                x: 528
-                                y: 9
-
-                                height: 13
-                                width: 201
-
-                                color: "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 11
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignRight
-                                text: qsTr("Sunday 2, August, 2020")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                        }
-                        Rectangle {
-                            id: row_7
-
-                            y: 224
-
-                            height: 31
-                            width: 736
-
-                            color: "#00000000"
-                            radius: 4
-
-                            Text {
-                                id: i_HAVE_BEEN_DELIVERED
-
-                                x: 8
-                                y: 8
-
-                                height: 15
-                                width: 521
-
-                                color: "#e2e8f0"
-                                elide: Text.ElideRight
-                                font.family: "Inter"
-                                font.pixelSize: 12
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("439-I HAVE BEEN DELIVERED")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                            Text {
-                                id: sunday_2_August_2025
-
-                                x: 528
-                                y: 9
-
-                                height: 13
-                                width: 201
-
-                                color: "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 11
-                                font.weight: Font.Normal
-                                horizontalAlignment: Text.AlignRight
-                                text: qsTr("Sunday 2, August, 2020")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
-                                wrapMode: Text.Wrap
-                            }
-                        }
                     }
                     Rectangle {
                         id: dock_footer
 
-                        x: 12
-                        y: 292
+                        visible: media_tab_bar.currentPane === "shows"
+                        x: 332
+                        y: parent.height - 61
 
                         height: 31
-                        width: 736
+                        width: parent.width - 344
 
                         color: "transparent"
 
-                        Rectangle {
-                            id: new_show_dock_btn
+                    Rectangle {
+                        id: new_show_dock_btn
 
-                            x: 632
-                            y: 4
+                        anchors.right: parent.right
+                        anchors.rightMargin: 12
+                        y: 4
 
-                            height: 27
-                            width: 104
+                        height: 27
+                        width: 104
 
-                            border.color: "#ff4d3d"
-                            border.width: 1
-                            color: "#85261f"
-                            radius: 100
+                        border.color: "#ff4d3d"
+                        border.width: 1
+                        color: newShowDockMouse.pressed ? "#701f19"
+                             : (newShowDockMouse.containsMouse ? "#a03a30" : "#85261f")
+                        radius: 100
+                        Behavior on color { ColorAnimation { duration: 100 } }
+
+                        // The second dead "New show" chrome button, now
+                        // live with the same reset action.
+                        MouseArea {
+                            id: newShowDockMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: vGRPresenter_Main_Screen.newShowRequested()
+                        }
 
                             Text {
                                 id: new_show_1
@@ -2684,14 +2002,230 @@ Rectangle {
                         }
                     }
                 }
+                Rectangle {
+                    id: clock_panel
+
+                    // The band's right region: clock + New show CTA, full band height
+                    // (the FreeShow samples park the clock inside the library band
+                    // at the bottom-right).
+                    x: parent.width - 400
+                    y: 0
+
+                    height: parent.height
+
+                    width: 400
+
+                    color: "#0f1015"
+
+                    Rectangle {
+                        id: digital_clock_group
+
+                        // Dynamic centering — was fixed x/y in the old 439px
+                        // panel, which drifted off-balance as soon as the
+                        // panel's height became content-driven.
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.verticalCenterOffset: -48
+
+                        height: 88
+                        width: 352
+
+                        color: "transparent"
+
+                        Text {
+                            id: element_5
+
+                            x: 56.50
+
+                            height: 68
+                            width: 242
+
+                            color: "#ff523b"
+                            font.family: "Inter"
+                            font.letterSpacing: 1.12
+                            font.pixelSize: 56
+                            font.weight: Font.ExtraBold
+                            horizontalAlignment: Text.AlignHCenter
+                            text: showClockTicker.formatClock(showClockTicker.now, false, true)
+                            textFormat: Text.PlainText
+                            verticalAlignment: Text.AlignTop
+                        }
+                        Text {
+                            id: saturday_8_August_2026
+
+                            x: 97.50
+                            y: 72
+
+                            height: 16
+                            width: 158
+
+                            color: "#8a94a6"
+                            font.family: "Inter"
+                            font.pixelSize: 13
+                            font.weight: Font.DemiBold
+                            horizontalAlignment: Text.AlignHCenter
+                            text: Qt.formatDate(showClockTicker.now, "dddd d, MMMM yyyy")
+                            textFormat: Text.PlainText
+                            verticalAlignment: Text.AlignTop
+                        }
+                    }
+                    Rectangle {
+                        id: clock_actions
+
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.verticalCenterOffset: 55
+
+                        height: 61
+                        width: 352
+
+                        color: "transparent"
+
+                        Rectangle {
+                            id: new_show_btn
+
+                            objectName: "selfTestNewShowBtn"   // UI self-test hover target
+
+                            x: 86
+
+                            height: 36
+                            width: 180
+
+                            // Hover/press must READ as a reaction — the old
+                            // #7d6df0 tint was a ~7% lighten, imperceptible.
+                            color: newShowMouse.pressed ? "#5b4bd1"
+                                 : (newShowMouse.containsMouse ? "#8d7cf3" : "#6c5ce7")
+                            radius: 100
+                            Behavior on color { ColorAnimation { duration: 100 } }
+
+                            // LIVE: resets the deck to a fresh slide (see
+                            // newShowRequested at the top of this file).
+                            MouseArea {
+                                id: newShowMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: vGRPresenter_Main_Screen.newShowRequested()
+                            }
+
+                            Rectangle {
+                                id: plus_1
+
+                                x: 46
+                                y: 11
+
+                                height: 14
+                                width: 14
+
+                                clip: true
+                                color: "transparent"
+
+                                Shape {
+                                    id: _vector_37
+
+                                    x: 2.92
+                                    y: 2.92
+
+                                    height: 8.17
+                                    width: 8.17
+
+                                    ShapePath {
+                                        id: _vector_37_ShapePath0
+
+                                        fillColor: "#00000000"
+                                        strokeColor: "#ffffff"
+                                        strokeWidth: 2
+
+                                        PathSvg {
+                                            id: _vector_37_ShapePath0_PathSvg0
+
+                                            path: "M 0 4.083800315856934 L 8.167600631713867 4.083800315856934 M 4.083800315856934 0 L 4.083800315856934 8.167600631713867"
+                                        }
+                                    }
+                                }
+                            }
+                            Text {
+                                id: new_show_2
+
+                                x: 68
+                                y: 10
+
+                                height: 16
+                                width: 67
+
+                                color: "#ffffff"
+                                font.family: "Inter"
+                                font.pixelSize: 13
+                                font.weight: Font.Bold
+                                horizontalAlignment: Text.AlignLeft
+                                text: qsTr("New show")
+                                textFormat: Text.PlainText
+                                verticalAlignment: Text.AlignTop
+                            }
+                        }
+                        Text {
+                            id: autosaved_2_mins_ago
+
+                            x: 118.50
+                            y: 48
+
+                            height: 13
+                            width: 116
+
+                            color: "#5c6475"
+                            font.family: "Inter"
+                            font.pixelSize: 11
+                            font.weight: Font.Normal
+                            horizontalAlignment: Text.AlignHCenter
+                            textFormat: Text.PlainText
+                            verticalAlignment: Text.AlignTop
+                            // KERNEL-DRIVEN: real project.saved relay events with a
+                            // live "n ago" ticker, not the export's frozen string.
+                            property real lastSaveTs: 0
+                            function relabel() {
+                                if (lastSaveTs <= 0) {
+                                    text = qsTr("Not saved yet")
+                                    return
+                                }
+                                const mins = Math.max(0, Math.floor((Date.now() - lastSaveTs) / 60000))
+                                text = mins === 0 ? qsTr("Autosaved just now")
+                                     : qsTr("Autosaved %1 min%2 ago").arg(mins).arg(mins === 1 ? "" : "s")
+                            }
+                            Timer {
+                                interval: 30000
+                                running: parent.lastSaveTs > 0
+                                repeat: true
+                                triggeredOnStart: true
+                                onTriggered: parent.relabel()
+                            }
+                            Component.onCompleted: {
+                                const recent = EngineBridge.recentEngineEvents(200)
+                                for (let i = recent.length - 1; i >= 0; --i)
+                                    if (recent[i].topic === "project.saved") {
+                                        lastSaveTs = recent[i].ts
+                                        break
+                                    }
+                                relabel()
+                            }
+                        }
+                        Connections {
+                            target: EngineBridge
+                            function onEngineEvent(topic, payload) {
+                                if (topic === "project.saved" && payload) {
+                                    autosaved_2_mins_ago.lastSaveTs = Date.now()
+                                    autosaved_2_mins_ago.relabel()
+                                }
+                            }
+                        }
+                    }
+                }
             }
-        }
         Rectangle {
             id: right_column
 
-            x: 1040
+            x: parent.width - 400
 
-            height: 852
+            height: workspace_body.topHeight
             width: 400
 
             border.color: "#232530"
@@ -2708,62 +2242,15 @@ Rectangle {
             // hosts instantiate, so every surface shows the identical wall.
             // Main Output is protected upstream (OutputListModel::removeOutput
             // refuses it and its Delete affordance is hidden), so the wall
-            // always keeps a primary. y=51 sits below the 39px header (the
-            // header paints over the wall otherwise).
+            // always keeps a primary. Sits flush at the column's top — the
+            // old static "Congregation / Inner Thinks" header strip above it
+            // was removed (user call); the wall owns the whole column now.
             MonitorWall {
                 id: monitorWall
 
                 x: (parent.width - width) / 2
-                y: 51
+                y: 0
                 width: 376
-            }
-
-            Rectangle {
-                id: monitors_header
-
-                height: 39
-                width: 400
-
-                border.color: "#232530"
-                border.width: 1
-                color: "#16171e"
-
-                Text {
-                    id: congregation
-
-                    x: 12
-                    y: 12
-
-                    height: 15
-                    width: 82
-
-                    color: "#e2e8f0"
-                    font.family: "Inter"
-                    font.pixelSize: 12
-                    font.weight: Font.Bold
-                    horizontalAlignment: Text.AlignLeft
-                    text: qsTr("Congregation")
-                    textFormat: Text.PlainText
-                    verticalAlignment: Text.AlignTop
-                }
-                Text {
-                    id: inner_Thinks
-
-                    x: 105
-                    y: 12
-
-                    height: 15
-                    width: 71
-
-                    color: "#5c6475"
-                    font.family: "Inter"
-                    font.pixelSize: 12
-                    font.weight: Font.Normal
-                    horizontalAlignment: Text.AlignLeft
-                    text: qsTr("Inner Thinks")
-                    textFormat: Text.PlainText
-                    verticalAlignment: Text.AlignTop
-                }
             }
 
             // Divider between the monitor wall and the clock panel (the
@@ -2784,207 +2271,6 @@ Rectangle {
             // frozen "11:50:47" strings.
             LiveClock {
                 id: showClockTicker
-            }
-            Rectangle {
-                id: clock_panel
-
-                // Always the BOTTOM region: the top edge follows the wall
-                // (extra outputs push it down) and the panel stretches to
-                // the column's bottom edge — the time block never drifts
-                // up into a dead zone when the wall is short.
-                y: monitorWall.y + monitorWall.height + (monitorWall.pageCount > 1 ? 23 : 12)
-
-                height: parent.height - y
-
-                width: 400
-
-                color: "#0f1015"
-
-                Rectangle {
-                    id: digital_clock_group
-
-                    // Dynamic centering — was fixed x/y in the old 439px
-                    // panel, which drifted off-balance as soon as the
-                    // panel's height became content-driven.
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.verticalCenterOffset: -48
-
-                    height: 88
-                    width: 352
-
-                    color: "transparent"
-
-                    Text {
-                        id: element_5
-
-                        x: 56.50
-
-                        height: 68
-                        width: 242
-
-                        color: "#ff523b"
-                        font.family: "Inter"
-                        font.letterSpacing: 1.12
-                        font.pixelSize: 56
-                        font.weight: Font.ExtraBold
-                        horizontalAlignment: Text.AlignHCenter
-                        text: showClockTicker.formatClock(showClockTicker.now, false, true)
-                        textFormat: Text.PlainText
-                        verticalAlignment: Text.AlignTop
-                    }
-                    Text {
-                        id: saturday_8_August_2026
-
-                        x: 97.50
-                        y: 72
-
-                        height: 16
-                        width: 158
-
-                        color: "#8a94a6"
-                        font.family: "Inter"
-                        font.pixelSize: 13
-                        font.weight: Font.DemiBold
-                        horizontalAlignment: Text.AlignHCenter
-                        text: Qt.formatDate(showClockTicker.now, "dddd d, MMMM yyyy")
-                        textFormat: Text.PlainText
-                        verticalAlignment: Text.AlignTop
-                    }
-                }
-                Rectangle {
-                    id: clock_actions
-
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.verticalCenterOffset: 55
-
-                    height: 61
-                    width: 352
-
-                    color: "transparent"
-
-                    Rectangle {
-                        id: new_show_btn
-
-                        x: 86
-
-                        height: 36
-                        width: 180
-
-                        color: "#6c5ce7"
-                        radius: 100
-
-                        Rectangle {
-                            id: plus_1
-
-                            x: 46
-                            y: 11
-
-                            height: 14
-                            width: 14
-
-                            clip: true
-                            color: "transparent"
-
-                            Shape {
-                                id: _vector_37
-
-                                x: 2.92
-                                y: 2.92
-
-                                height: 8.17
-                                width: 8.17
-
-                                ShapePath {
-                                    id: _vector_37_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#ffffff"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_37_ShapePath0_PathSvg0
-
-                                        path: "M 0 4.083800315856934 L 8.167600631713867 4.083800315856934 M 4.083800315856934 0 L 4.083800315856934 8.167600631713867"
-                                    }
-                                }
-                            }
-                        }
-                        Text {
-                            id: new_show_2
-
-                            x: 68
-                            y: 10
-
-                            height: 16
-                            width: 67
-
-                            color: "#ffffff"
-                            font.family: "Inter"
-                            font.pixelSize: 13
-                            font.weight: Font.Bold
-                            horizontalAlignment: Text.AlignLeft
-                            text: qsTr("New show")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                        }
-                    }
-                    Text {
-                        id: autosaved_2_mins_ago
-
-                        x: 118.50
-                        y: 48
-
-                        height: 13
-                        width: 116
-
-                        color: "#5c6475"
-                        font.family: "Inter"
-                        font.pixelSize: 11
-                        font.weight: Font.Normal
-                        horizontalAlignment: Text.AlignHCenter
-                        textFormat: Text.PlainText
-                        verticalAlignment: Text.AlignTop
-                        // KERNEL-DRIVEN: real project.saved relay events with a
-                        // live "n ago" ticker, not the export's frozen string.
-                        property real lastSaveTs: 0
-                        function relabel() {
-                            if (lastSaveTs <= 0) {
-                                text = qsTr("Not saved yet")
-                                return
-                            }
-                            const mins = Math.max(0, Math.floor((Date.now() - lastSaveTs) / 60000))
-                            text = mins === 0 ? qsTr("Autosaved just now")
-                                 : qsTr("Autosaved %1 min%2 ago").arg(mins).arg(mins === 1 ? "" : "s")
-                        }
-                        Timer {
-                            interval: 30000
-                            running: parent.lastSaveTs > 0
-                            repeat: true
-                            triggeredOnStart: true
-                            onTriggered: parent.relabel()
-                        }
-                        Component.onCompleted: {
-                            const recent = EngineBridge.recentEngineEvents(200)
-                            for (let i = recent.length - 1; i >= 0; --i)
-                                if (recent[i].topic === "project.saved") {
-                                    lastSaveTs = recent[i].ts
-                                    break
-                                }
-                            relabel()
-                        }
-                    }
-                    Connections {
-                        target: EngineBridge
-                        function onEngineEvent(topic, payload) {
-                            if (topic === "project.saved" && payload) {
-                                autosaved_2_mins_ago.lastSaveTs = Date.now()
-                                autosaved_2_mins_ago.relabel()
-                            }
-                        }
-                    }
-                }
             }
         }
     }

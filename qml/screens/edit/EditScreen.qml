@@ -18,7 +18,7 @@ Rectangle {
     clip: true
     color: "#12131a"
 
-    // Mock CRUD backend (src/SlideListModel.{h,cpp}) — stands in for the
+    // Mock CRUD backend (qml/models/SlideListModel.cpp) — stands in for the
     // real show/slide data source. Seeded with the same ground-truth
     // content the static array used to hold, but "Add slide" and selecting
     // a row now mutate real model state instead of pointing at fixed data.
@@ -33,12 +33,44 @@ Rectangle {
         id: slideStore
     }
 
+    // The seam to the ENGINE, which owns the show (slides, items, duplicate/delete,
+    // ids, the .vgr file). Slide and item actions below ask it first; the list and
+    // canvas are its projection plus the live gesture state it is synced from. See
+    // ShowSession.qml.
+    ShowSession {
+        id: showSession
+        slideModel: slideModel
+        slideStore: slideStore
+        canvasHistory: canvasHistory
+    }
+    readonly property var session: showSession
+
+    // Every settled edit (and every undo/redo) is sent on to the engine.
+    Connections {
+        target: canvasHistory
+        function onCommitted() { showSession.scheduleFlush() }
+    }
+
     // Switching slides swaps the canvas: the store re-archives the outgoing
     // slide's working set and installs the incoming one. addSlide()
     // auto-selects, so a fresh slide lands here with an empty canvas too.
     Connections {
         target: slideModel
         function onActiveSlideChanged() {
+            // The undo stack's snapshots are of the ACTIVE slide's canvas only
+            // (no slide id), so replaying one after the slide changed would
+            // paint the old slide's items over the new one. Drop the history
+            // (and any open gesture/typing bracket) whenever the active slide
+            // changes — that also covers "New show", which clears the deck and
+            // adds a fresh slide. Session flags reset with it: the delegates
+            // die with the swap, and a destroyed TextEdit never reports
+            // editingChanged, which would leave them stale.
+            // The outgoing slide's on-screen state goes to the engine first (a no-op
+            // when it has not changed, and skipped while the UI is being rebuilt).
+            showSession.flushSlide(slideStore.activeSlideId)
+            canvasHistory.clear()
+            root.textUndoKey = ""
+            root.anyTextEditing = false
             slideStore.load(slideModel.activeSlideId)
         }
     }
@@ -63,29 +95,32 @@ Rectangle {
     // edit), while the slide list stays fully live (adding a slide is the
     // way out).
     readonly property bool hasActiveSlide: slideModel.activeSlideId > 0
+
+    // "New show": reset the deck to a fresh single slide. One call drops
+    // every canvas archive first, then every slide — order matters, since
+    // a removed ACTIVE slide fires onActiveSlideChanged and would load a
+    // stale archive for the next auto-selected slide if its canvas still
+    // existed. The final addSlide() gives the user the empty slide New
+    // Show means (matching the roster's empty-at-launch posture: never a
+    // hardcoded slide, never a bare roster).
+    function newShow() {
+        // The engine starts the new document; the UI resets to its single empty slide
+        // (asking first if the current show has unsaved changes).
+        showSession.newShow()
+    }
+    // Show file actions (menu bar): the engine reads/writes the .vgr; these keep the
+    // UI in step and prompt about unsaved changes.
+    function openShow() { showSession.openShow() }
+    // Opens a library path directly (shows-table row click, Main.qml routes it here).
+    function openShowPath(path) { showSession.openShowPath(path) }
+    function saveShow() { return showSession.saveShow() }
+    function saveShowAs() { return showSession.saveShowAs() }
     // UI self-test helper (Main.qml scenario): resolve a named item into
     // WINDOW coordinates by recursively walking this screen's item tree.
     // C++ findChild can't reach some QML-created items (Repeater delegates
     // exist — the row dump proves it — but are invisible to QObject-name
     // search), so the QML side does the walking. Invisible branches are
     // skipped so a closed menu/modal resolves to null, not a stale point.
-    function selfTestItemCenter(name) {
-        let found = null
-        function walk(item) {
-            if (found || !item || item.visible === false)
-                return
-            if (item.objectName === name) {
-                const p = item.mapToItem(null,
-                                         item.width / 2, item.height / 2)
-                found = Qt.point(p.x, p.y)
-                return
-            }
-            for (let i = 0; i < item.children.length; ++i)
-                walk(item.children[i])
-        }
-        walk(root)
-        return found
-    }
 
     // TEMP DIAGNOSTIC — reproduce "type text, exit, re-enter and type more,
     // undo WHILE still in that second edit session" exactly. Flip to true
@@ -159,7 +194,7 @@ Rectangle {
         })
     }
 
-    // Output roster comes from the OutputListModel singleton (src/OutputListModel.{h,cpp})
+    // Output roster comes from the OutputListModel singleton (qml/models/OutputListModel.cpp)
     // — the SAME model Settings · Outputs (OutputsScreen.qml) edits, so adding
     // or renaming an output there shows up here too instead of two arrays
     // drifting apart.
@@ -655,6 +690,7 @@ Rectangle {
     // can't drift apart.
     function removeCanvasItems(keys) {
         canvasHistory.push(qsTr("Delete"))
+        showSession.removeItems(keys)   // the engine deletes them first
         slideStore.removeItems(keys)
         root.selectedCanvasObjects = root.selectedCanvasObjects.filter((k) => keys.indexOf(k) < 0)
     }
@@ -681,20 +717,20 @@ Rectangle {
         canvasHistory.push(copyFrom ? qsTr("Duplicate item") : qsTr("Add item"))
         const n = slideStore.current.items.length
         const isCamera = kind === "camera"
-        const item = slideStore.createItem(
+        // The ENGINE creates the item (or duplicates the source) and issues its id;
+        // the item — text, geometry, style, meta and all — comes back as a live
+        // CanvasItem already on the slide. showSession.addItem returns null if the
+        // engine refused (no show / no slide), and nothing is added then.
+        showSession.ensureDocument()
+        const item = showSession.addItem(
             kind,
-            copyFrom ? copyFrom.text : "",
-            copyFrom ? copyFrom.x + 16 : 40 + (n % 6) * 20,
-            copyFrom ? copyFrom.y + 16 : 40 + (n % 6) * 20,
-            copyFrom ? copyFrom.width : (isCamera ? 112 : 220),
-            copyFrom ? copyFrom.height : (isCamera ? 84 : 44),
-            copyFrom ? copyFrom.style : null)
-        // createItem has no meta parameter (it's free-form per-kind config,
-        // not a generic geometry/style field) — copied separately here so
-        // Duplicate on a clock/timer item preserves its configuration.
-        if (copyFrom)
-            item.meta = copyFrom.meta
-        slideStore.addItem(item)
+            40 + (n % 6) * 20,
+            40 + (n % 6) * 20,
+            isCamera ? 112 : 220,
+            isCamera ? 84 : 44,
+            copyFrom)
+        if (!item)
+            return null
         root.handleCanvasSelect(item.key, 0)
         return item
     }
@@ -754,7 +790,8 @@ Rectangle {
         x: 280
         y: 48
         height: 48
-        width: 760
+        // Everything between the two side panels (the window is no longer a fixed 1440 wide).
+        width: root.width - 680
         color: "#15161d"
 
         Rectangle {
@@ -810,7 +847,7 @@ Rectangle {
         // before this screen existed.
         Text {
             id: saveLabelText
-            x: 556
+            x: parent.width - 204   // right-aligned cluster: stays put at the bar's right end
             y: 17
             color: "#5c6475"
             font.family: "Inter"
@@ -834,7 +871,7 @@ Rectangle {
             }
         }
         Text {
-            x: 638
+            x: parent.width - 122
             y: 17
             color: fitArea.containsMouse ? "#c8cdd9" : "#5c6475"
             font.family: "Inter"
@@ -852,7 +889,7 @@ Rectangle {
             }
         }
         Row {
-            x: 662
+            x: parent.width - 98
             y: 10
             spacing: 4
 
@@ -923,7 +960,7 @@ Rectangle {
         x: 280
         y: 96
         height: 1
-        width: 760
+        width: root.width - 680
         color: "#232530"
     }
 
@@ -932,9 +969,9 @@ Rectangle {
     // (x: 1040). 754 lands exactly on rightPanel's left edge.
     Rectangle {
         id: mCanvas
-        objectName: "selfTestCanvas"   // UI self-test grab target (Main.qml scenario)
-        x: 286
-        y: 308
+        // The design's slot at 1440 x 900, kept centred in the middle region as the window grows.
+        x: 286 + (root.width - 1440) / 2
+        y: 308 + (root.height - 900) / 2
         height: 428
         width: 754
         clip: true
@@ -1838,15 +1875,15 @@ Rectangle {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: slideModel.addSlide()
+                    onClicked: showSession.addSlide()
                 }
             }
         }
     }
 
     Rectangle {
-        x: 882
-        y: 841
+        x: root.width - 558
+        y: root.height - 59
         height: 32
         width: 124
         border.color: "#232530"
@@ -1907,9 +1944,8 @@ Rectangle {
 
     Rectangle {
         id: addContentChip
-        objectName: "selfTestAddContent" // UI self-test click target
         x: 286
-        y: 838
+        y: root.height - 62
         height: 46
         width: 46
         radius: 23
@@ -1940,9 +1976,8 @@ Rectangle {
 
     Rectangle {
         id: addContentMenu
-        objectName: "selfTestChips"   // UI self-test grab target (Main.qml scenario)
         x: 344
-        y: 837
+        y: root.height - 63
         height: 46
         width: 388
         border.color: "#2a2f3a"
@@ -1964,7 +1999,6 @@ Rectangle {
                 model: root.contentTypes
                 delegate: Rectangle {
                     id: typeChip
-                    objectName: "selfTestChip" + index // UI self-test target
                     required property var modelData
                     required property int index
                     readonly property bool active: chipHover.hoveredIndex === index
@@ -2103,7 +2137,7 @@ Rectangle {
     Rectangle {
         id: leftPanel
         y: 48
-        height: 852
+        height: root.height - 48
         width: 280
         border.color: "#232530"
         border.width: 1
@@ -2231,8 +2265,8 @@ Rectangle {
                     canvasWidth: mCanvas.width
                     canvasHeight: mCanvas.height
                     onSelected: slideModel.selectSlide(index)
-                    onDuplicateRequested: slideModel.duplicateSlide(index)
-                    onDeleteRequested: slideModel.removeSlide(index)
+                    onDuplicateRequested: showSession.duplicateSlide(index)
+                    onDeleteRequested: showSession.removeSlide(index)
                     onContextMenuRequested: (mx, my) => {
                         // Shared map+clamp helper — openAt maps into root's
                         // space and clamps to the window, so the menu escapes
@@ -2265,7 +2299,7 @@ Rectangle {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: slideModel.addSlide()
+                    onClicked: showSession.addSlide()
                 }
             }
         }
@@ -2282,9 +2316,9 @@ Rectangle {
     // ---- Right panel ----
     Rectangle {
         id: rightPanel
-        x: 1040
+        x: root.width - 400
         y: 48
-        height: 852
+        height: root.height - 48
         width: 400
         color: "#0f1015"
         // Greyed with the canvas in the empty state — Background/Size & Style
@@ -2625,19 +2659,15 @@ Rectangle {
             case "Edit":
                 slideModel.selectSlide(root.contextMenuSlideIndex)
                 break
-            case "Duplicate": {
-                // The copy gets a fresh stable id; clone the canvas onto it.
-                const newId = slideModel.duplicateSlide(root.contextMenuSlideIndex)
-                if (newId > 0)
-                    slideStore.cloneSlide(
-                        slideModel.slideIdAt(root.contextMenuSlideIndex), newId)
+            case "Duplicate":
+                // The ENGINE duplicates the slide (fresh id, its items copied); the list
+                // and the copy's canvas are rebuilt from what it made.
+                showSession.duplicateSlide(root.contextMenuSlideIndex)
                 break
-            }
             case "Delete":
-                // Drop the archive BEFORE removing the row, so the item
-                // objects die with the slide instead of leaking.
-                slideStore.dropSlide(slideModel.slideIdAt(root.contextMenuSlideIndex))
-                slideModel.removeSlide(root.contextMenuSlideIndex)
+                // The engine deletes the slide (and anything scoped to it); the UI
+                // drops its archive and lands on the neighbouring slide.
+                showSession.removeSlide(root.contextMenuSlideIndex)
                 break
             }
             slideContextMenu.visible = false

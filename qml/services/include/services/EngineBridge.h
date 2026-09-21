@@ -70,6 +70,12 @@ class EngineBridge : public QObject
     Q_PROPERTY(QVariantList ndiSources READ ndiSources NOTIFY devicesChanged)
     Q_PROPERTY(bool ndiAvailable READ ndiAvailable NOTIFY devicesChanged)
     Q_PROPERTY(QString ndiStatus READ ndiStatus NOTIFY devicesChanged)
+    // "ready" | "notInstalled" | "error" | "unknown" (engine not booted). Only
+    // "notInstalled" is something the user can fix — the UI then offers
+    // openNdiDownloadPage(). ndiVersion is the runtime's own version string.
+    Q_PROPERTY(QString ndiState READ ndiState NOTIFY devicesChanged)
+    Q_PROPERTY(QString ndiVersion READ ndiVersion NOTIFY devicesChanged)
+    Q_PROPERTY(QString ndiDownloadUrl READ ndiDownloadUrl CONSTANT)
 
 public:
     static EngineBridge &instance();
@@ -109,6 +115,13 @@ public:
     QVariantList ndiSources() const { return ndiSources_; }
     bool ndiAvailable() const { return ndiAvailable_; }
     QString ndiStatus() const { return ndiStatus_; }
+    QString ndiState() const { return ndiState_; }
+    QString ndiVersion() const { return ndiVersion_; }
+    QString ndiDownloadUrl() const;
+    // Opens the NDI runtime download page in the user's browser.
+    Q_INVOKABLE void openNdiDownloadPage();
+    // Re-checks for the runtime right now (after the user installed it).
+    Q_INVOKABLE void recheckNdi();
     // Called from main.cpp on QGuiApplication::aboutToQuit — orderly
     // teardown of the 29 systems (threads joined, database flushed) instead
     // of letting process exit cut them off mid-flight.
@@ -173,7 +186,11 @@ private:
     QVariantList videoDevices_;
     QVariantList ndiSources_;
     bool ndiAvailable_ = false;
+    bool ndiRetried_ = false;   // one deferred NDI re-query per boot/refreshDevices()
+    qint64 lastEnumerationMs_ = 0;   // throttles refreshDevices()
     QString ndiStatus_;
+    QString ndiState_ = QStringLiteral("unknown");
+    QString ndiVersion_;
 
     std::vector<bps::Subscription> relaySubs_;
     QVariantList recentEngineEvents_;   // ring capped at kMaxRecentEvents

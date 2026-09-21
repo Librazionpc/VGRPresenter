@@ -497,6 +497,11 @@ importers convert *into* and exporters convert *from*.
   UUID, created/modified timestamps, author, compression hint, integrity hash,
   dependency manifest, external asset references, search metadata, custom
   metadata.
+- **File I/O** — `VgrFile` (modules/vgr) is the one place .vgr files are read
+  and written: reads validate every CRC; writes go to a `.tmp` beside the target,
+  are read back and verified, then swapped in with the old file parked as `.bak`
+  (restored on failure) — one complete file on disk at every instant. Shows
+  (`PresentationDocument`) and templates (`TemplateFile`) both use it.
 - **Layout** — [magic][format version][header JSON length][header JSON][section
   count][sections…][whole-file CRC32]. Every section is (name, kind, length,
   crc32, payload); `document` (JSON body) + named sections + embedded assets

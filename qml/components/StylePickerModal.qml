@@ -6,7 +6,7 @@ import VGRPresenterUI
 // same scrim + centered card + preview-grid convention as
 // CameraSourceModal.qml/MediaSourceModal.qml/ShapeSourceModal.qml.
 //
-// StyleListModel (src/StyleListModel.{h,cpp}) only carries `name` + `res`
+// StyleListModel (qml/models/StyleListModel.cpp) only carries `name` + `res`
 // today — no color/theme/thumbnail data exists yet for a style to actually
 // preview. Each card's preview is a simple mock "slide" swatch, colored
 // deterministically from the style's own index so different styles at

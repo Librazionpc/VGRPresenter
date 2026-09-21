@@ -119,15 +119,20 @@ void VideoSourceListModel::removeSource(int index)
         return;
 
     // Cut this source's routing edges BEFORE the row disappears: routes key
-    // on the row's stable id, so nothing shifts or goes stale — other rows'
-    // routes are untouched by construction.
+    // on the row's stable id, so no OTHER row's route is touched.
     const QString id = m_sources.at(index).id;
-    if (BusListModel *buses = BusListModel::Instance())
+    BusListModel *buses = BusListModel::Instance();
+    if (buses)
         buses->cutVideoSourceEdges(id);
 
     beginRemoveRows(QModelIndex(), index, index);
     m_sources.removeAt(index);
     endRemoveRows();
+
+    // Rows after `index` just shifted up; the buses cache routes as ROWS, so
+    // re-derive them (the graph edges themselves are untouched).
+    if (buses)
+        buses->refreshRoutes();
 }
 
 void VideoSourceListModel::renameSource(int index, const QString &name)

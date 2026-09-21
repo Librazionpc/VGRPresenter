@@ -37,8 +37,8 @@ RawOsVersion QueryOsVersion() {
     // reports the true running OS regardless of the app's manifest, which
     // GetVersionExA/VerifyVersionInfo silently lie about without one.
     using RtlGetVersionFn = LONG(WINAPI*)(PRTL_OSVERSIONINFOW);
-    static auto fn = reinterpret_cast<RtlGetVersionFn>(
-        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
+    static auto fn = win::ProcAddress<RtlGetVersionFn>(
+        GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");
     RawOsVersion out;
     if (!fn) return out;
     OSVERSIONINFOW ovi{};

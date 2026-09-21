@@ -33,6 +33,14 @@
 
 namespace bps::platform::win {
 
+// GetProcAddress hands back a generic FARPROC; casting it straight to a typed
+// function pointer trips -Wcast-function-type. Routing through void* is the
+// standard, warning-free way to say "I know this export's real signature".
+template <typename Fn>
+inline Fn ProcAddress(HMODULE module, const char* name) {
+    return reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(module, name)));
+}
+
 // UTF-16 -> UTF-8 (WideCharToMultiByte); empty on failure.
 inline std::string Utf8(std::wstring_view w) {
     if (w.empty()) return {};

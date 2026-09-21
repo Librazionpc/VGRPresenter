@@ -93,6 +93,22 @@ QtObject {
             { [toSlideId]: { items: clones, background: entry.background } })
     }
 
+    // Forgets EVERY archive and empties the working set ("New show"). Call
+    // BEFORE SlideListModel.clear() — same ordering contract as dropSlide:
+    // the dying slide's archive must be gone before the active-slide
+    // transition fires, or load() would re-archive dead items. The current
+    // background resets to transparent so the next addSlide() starts clean.
+    function clear() {
+        store.current.items = []
+        store.current.background = "transparent"
+        for (const id in store.slides)
+            store.slides[id].items.forEach((it) => it.destroy())
+        store.slides = {}
+        // Park the active id so the active-slide transition's save() (load()
+        // opens with one) can't re-archive anything under the dying id.
+        store.activeSlideId = -1
+    }
+
     // ---- Content API (operates on the active slide) -------------------------
 
     function addItem(item) {
@@ -113,9 +129,12 @@ QtObject {
     // Creates a CanvasItem owned by the store. When `styleFrom` is given,
     // the new item starts with a copy of that style; otherwise the new item
     // uses CanvasItem's own defaults (border off, radius 0, no padding).
-    function createItem(kind, text, x, y, width, height, styleFrom) {
+    // `key`: pass the ENGINE-issued block id — the engine owns item identity, so a key
+    // it generated can never collide with one this store would invent. Omitted only
+    // for items that never reach the engine.
+    function createItem(kind, text, x, y, width, height, styleFrom, key) {
         const item = canvasItemComponent.createObject(null, {
-            key: "item-" + (store.m_nextKey++),
+            key: key !== undefined && key !== "" ? key : "item-" + (store.m_nextKey++),
             kind: kind,
             text: text,
             x: x, y: y, width: width, height: height
@@ -155,8 +174,8 @@ QtObject {
     // QQuickColorValueType to call with value QVariant(Invalid)". A plain
     // hex string has no such problem and `property color` accepts it
     // identically to a real color value on assignment.
-    function snapshotItems() {
-        return store.current.items.map((it) => ({
+    function snapshotOf(items) {
+        return items.map((it) => ({
             key: it.key, kind: it.kind, text: it.text,
             x: it.x, y: it.y, width: it.width, height: it.height,
             meta: it.meta,
@@ -168,19 +187,20 @@ QtObject {
             }
         }))
     }
+    function snapshotItems() {
+        return store.snapshotOf(store.current.items)
+    }
 
-    // Replaces the working set with fresh CanvasItem objects rebuilt from a
-    // snapshot (see snapshotItems), preserving each item's original key so
-    // selection/thumbnail bindings by key survive an undo/redo. Destroys
-    // the current items first, same as removeItems/dropSlide.
-    function restoreItems(snapshot) {
-        store.current.items.forEach((it) => it.destroy())
-        store.current.items = snapshot.map((d) => {
-            const item = store.canvasItemComponent.createObject(null, {
-                key: d.key, kind: d.kind, text: d.text,
-                x: d.x, y: d.y, width: d.width, height: d.height
-            })
-            item.meta = d.meta
+    // The same snapshot shape IS the engine's block shape (key/kind/text/x/y/width/
+    // height/meta/style) — so undo snapshots, engine syncs and .vgr files all speak
+    // one format. These two turn engine blocks into live CanvasItem objects.
+    function itemFromBlock(d) {
+        const item = store.canvasItemComponent.createObject(null, {
+            key: d.key, kind: d.kind, text: d.text,
+            x: d.x, y: d.y, width: d.width, height: d.height
+        })
+        item.meta = d.meta !== undefined ? d.meta : ({})
+        if (d.style) {
             item.style.padding = d.style.padding
             item.style.backgroundColor = d.style.backgroundColor
             item.style.cornerRadius = d.style.cornerRadius
@@ -188,8 +208,42 @@ QtObject {
             item.style.borderWidth = d.style.borderWidth
             item.style.borderStyle = d.style.borderStyle
             item.style.borderColor = d.style.borderColor
-            return item
-        })
+        }
+        return item
+    }
+    function itemsFromBlocks(blocks) {
+        return blocks.map((d) => store.itemFromBlock(d))
+    }
+
+    // Replaces the working set with fresh CanvasItem objects rebuilt from a
+    // snapshot (see snapshotItems), preserving each item's original key so
+    // selection/thumbnail bindings by key survive an undo/redo. Destroys
+    // the current items first, same as removeItems/dropSlide.
+    function restoreItems(snapshot) {
+        store.current.items.forEach((it) => it.destroy())
+        store.current.items = store.itemsFromBlocks(snapshot)
+    }
+
+    // ---- Engine sync ---------------------------------------------------------
+    // A slide's content as engine blocks — the active slide reads the live working
+    // set, any other its archive.
+    function blocksOf(slideId) {
+        return store.snapshotOf(store.items(slideId))
+    }
+    function backgroundOf(slideId) {
+        if (slideId === store.activeSlideId)
+            return store.current.background
+        const entry = store.slides[slideId]
+        return entry ? entry.background : "transparent"
+    }
+    // Archives a NON-active slide built from engine data (a duplicate, or every slide
+    // of an opened show). Replaces any existing archive (destroying its items).
+    function archiveSlide(slideId, blocks, background) {
+        const old = store.slides[slideId]
+        if (old)
+            old.items.forEach((it) => it.destroy())
+        store.slides = Object.assign({}, store.slides,
+            { [slideId]: { items: store.itemsFromBlocks(blocks), background: background || "transparent" } })
     }
 
     // ---- Live thumbnails -----------------------------------------------------

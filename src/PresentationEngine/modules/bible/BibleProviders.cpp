@@ -254,6 +254,15 @@ public:
                 std::string(meta->Find("copyright") ? meta->Find("copyright")->asString() : "");
             out.metadata.abbreviation =
                 std::string(meta->Find("abbreviation") ? meta->Find("abbreviation")->asString() : "");
+            // Common Bible-JSON dumps name these differently: "module" is the short id
+            // ("kjv"), "shortname" the abbreviation ("KJV"), "lang_short" the language.
+            auto fallback = [&](std::string& field, const char* key) {
+                if (field.empty())
+                    if (const auto* v = meta->Find(key)) field = std::string(v->asString());
+            };
+            fallback(out.metadata.id, "module");
+            fallback(out.metadata.abbreviation, "shortname");
+            fallback(out.metadata.language, "lang_short");
             out.metadata.source = "json";
         }
         if (const auto* booksArr = root.Find("books")) {
@@ -283,6 +292,14 @@ public:
             BibleVerse bv;
             bv.bookId = std::string(vv.Find("book") ? vv.Find("book")->asString()
                                                     : (vv.Find("bookId") ? vv.Find("bookId")->asString() : ""));
+            // "book" may be the canonical 1-based book number (1 = Genesis ... 66 = Revelation).
+            if (bv.bookId.empty())
+                if (const auto* num = vv.Find("book"); num && num->type() == json::Value::Type::Number) {
+                    const auto& canon = DefaultBooks();
+                    const long long n = num->asInt();
+                    if (n >= 1 && n <= static_cast<long long>(canon.size()))
+                        bv.bookId = canon[static_cast<size_t>(n - 1)].id;
+                }
             bv.chapter = static_cast<int>(vv.Find("chapter") ? vv.Find("chapter")->asInt() : 0);
             bv.verse = static_cast<int>(vv.Find("verse") ? vv.Find("verse")->asInt() : 0);
             bv.text = Collapse(std::string(vv.Find("text") ? vv.Find("text")->asString() : ""));
