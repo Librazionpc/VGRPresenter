@@ -656,10 +656,12 @@ Item {
 
             // The design libraries (the dock's Overlays / Templates tabs): brings back what ships
             // after the user deleted it. The engine fills in what is missing; nothing else is touched.
+            // Each row binds its library service directly - no string dispatch to read around.
             component RestoreRow: Item {
                 id: restoreRow
                 property string label: ""
-                property string service: "overlays"   // which library to restore
+                property var service: null          // OverlayLibraryService | TemplateLibraryService
+                readonly property string noun: service === OverlayLibraryService ? qsTr("overlay") : qsTr("template")
                 width: parent.width
                 height: 40
 
@@ -695,12 +697,9 @@ Item {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
-                            const noun = restoreRow.service === "templates" ? qsTr("template") : qsTr("overlay")
-                            const n = restoreRow.service === "templates"
-                                      ? TemplateLibraryService.restoreDefaults()
-                                      : OverlayLibraryService.restoreDefaults()
-                            EventBus.notify(n > 0 ? qsTr("Brought back %n default %1(s).", "", n).arg(noun)
-                                                  : qsTr("All the default %1s are already here.").arg(noun),
+                            const n = restoreRow.service.restoreDefaults()
+                            EventBus.notify(n > 0 ? qsTr("Brought back %n default %1(s).", "", n).arg(restoreRow.noun)
+                                                  : qsTr("All the default %1s are already here.").arg(restoreRow.noun),
                                             "info", qsTr("Settings"), "settings.libraries.restore")
                         }
                     }
@@ -709,8 +708,8 @@ Item {
 
             SettingsSection {
                 title: qsTr("Libraries")
-                RestoreRow { label: qsTr("Restore default overlays"); service: "overlays" }
-                RestoreRow { label: qsTr("Restore default templates"); service: "templates" }
+                RestoreRow { label: qsTr("Restore default overlays"); service: OverlayLibraryService }
+                RestoreRow { label: qsTr("Restore default templates"); service: TemplateLibraryService }
             }
         }
     }

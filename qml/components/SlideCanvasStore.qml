@@ -73,9 +73,12 @@ QtObject {
         const entry = store.slides[slideId]
         if (!entry)
             return
+        // The ACTIVE slide's live items are `current.items`: its archive may still list objects that an undo/redo
+        // (restoreItems) has since destroyed and replaced, and destroying those again is a TypeError.
+        const live = slideId === store.activeSlideId ? store.current.items : entry.items
         if (slideId === store.activeSlideId)
             store.current.items = []
-        entry.items.forEach((it) => it.destroy())
+        live.forEach((it) => it.destroy())
         const copy = Object.assign({}, store.slides)
         delete copy[slideId]
         store.slides = copy
@@ -99,6 +102,9 @@ QtObject {
     // transition fires, or load() would re-archive dead items. The current
     // background resets to transparent so the next addSlide() starts clean.
     function clear() {
+        // Archive what is live first. The active slide's archive can list items an undo/redo has since destroyed and
+        // replaced (restoreItems); refreshing it means the loop below only ever destroys objects that still exist.
+        store.save()
         store.current.items = []
         store.current.background = "transparent"
         for (const id in store.slides)

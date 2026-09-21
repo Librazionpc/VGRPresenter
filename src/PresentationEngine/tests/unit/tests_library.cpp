@@ -72,7 +72,12 @@ void TestOverlayLibrary() {
                 CHECK(b.x >= 0 && b.y >= 0 && b.x + b.width <= lib::kStageWidth + 0.01 && b.y + b.height <= lib::kStageHeight + 0.01);
             }
         CHECK(library->Get("rounded").value().blocks[0].kind == "corners" && library->Get("vignette").value().blocks[0].kind == "vignette");
-        CHECK(library->Get("name").value().blocks[3].text == "TITLE" && library->Get("name").value().blocks[3].style.backgroundColor == "#006fcf");
+        // The title is typed as "Title" and shown in capitals through the text Case option, not typed in capitals.
+        CHECK(library->Get("name").value().blocks[3].text == "Title" && library->Get("name").value().blocks[3].style.backgroundColor == "#006fcf"
+              && library->Get("name").value().blocks[3].metaJson.find("\"textCase\":\"upper\"") != std::string::npos);
+        // Transparent is really transparent (the recording frame is an outline, with no stand-in fill), and the clocks carry their colour.
+        CHECK(library->Get("recording").value().blocks[0].style.backgroundColor == "transparent" && library->Get("recording").value().blocks[0].style.borderEnabled);
+        CHECK(library->Get("clock").value().blocks[0].metaJson.find("\"color\":\"#ffffff\"") != std::string::npos);
         // Loading does not write a file by itself.
         CHECK(!fs.Exists(file));
     }

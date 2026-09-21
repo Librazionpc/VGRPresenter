@@ -31,9 +31,6 @@ pres::ContentBlock Shape(const char* shapeType, double x, double y, double w, do
     return b;
 }
 
-// The Edit screen draws a shape with no fill as a grey one, so an outline-only shape gets a fill nobody can see.
-constexpr const char* kInvisibleFill = "#01ffffff";
-
 pres::ContentBlock Outline(pres::ContentBlock b, double width, std::string color) {
     b.style.borderEnabled = true;
     b.style.borderWidth = width;
@@ -44,15 +41,15 @@ pres::ContentBlock Outline(pres::ContentBlock b, double width, std::string color
 pres::ContentBlock Text(double x, double y, double w, double h, std::string text, double fontSize,
                         std::string background = "transparent", bool bold = false, const char* align = "left",
                         const char* fontFamily = "Inter", std::string bind = {}, std::string color = "#ffffff",
-                        bool italic = false) {
+                        bool italic = false, const char* textCase = "none") {
     pres::ContentBlock b = At("text", x, y, w, h);
     b.text = std::move(text);
     b.style.backgroundColor = std::move(background);
     b.style.padding = 4;
     b.bind = std::move(bind);
     b.metaJson = std::format(
-        R"({{"color":"{}","fontFamily":"{}","fontSize":{:.1f},"bold":{},"italic":{},"align":"{}","autoSize":"none"}})",
-        color, fontFamily, fontSize * kSy, bold ? "true" : "false", italic ? "true" : "false", align);
+        R"({{"color":"{}","fontFamily":"{}","fontSize":{:.1f},"bold":{},"italic":{},"align":"{}","autoSize":"none","textCase":"{}"}})",
+        color, fontFamily, fontSize * kSy, bold ? "true" : "false", italic ? "true" : "false", align, textCase);
     return b;
 }
 
@@ -95,7 +92,7 @@ std::vector<Design> ShippedOverlays() {
 
     // A white frame around the picture, a red dot and "REC".
     {
-        pres::ContentBlock frame = Outline(Shape("rectangle", 36.5, 35, 1847.6, 1008.2, kInvisibleFill), 1.6, "#ffffff");
+        pres::ContentBlock frame = Outline(Shape("rectangle", 36.5, 35, 1847.6, 1008.2, "transparent"), 1.6, "#ffffff");
         out.push_back(Overlay("recording", "Recording", "red",
                               { frame, Shape("circle", 80, 80, 40, 40, "#ff0000"), Text(140, 80, 100, 40, "REC", 40) }));
     }
@@ -105,7 +102,7 @@ std::vector<Design> ShippedOverlays() {
         pres::ContentBlock clock = At("clock", 1450, 70, 470, 150);
         clock.style.backgroundColor = "#99000000";
         clock.style.cornerRadius = 6;
-        clock.metaJson = R"({"format":"24","style":"digital","showSeconds":false,"showDate":false})";
+        clock.metaJson = R"({"format":"24","style":"digital","showSeconds":false,"showDate":false,"color":"#ffffff"})";
         out.push_back(Overlay("clock", "Clock", "dodgerblue", { clock }));
     }
 
@@ -119,7 +116,7 @@ std::vector<Design> ShippedOverlays() {
         face.style.borderEnabled = true;
         face.style.borderWidth = 1;
         face.style.borderColor = "#ffffff";
-        face.metaJson = R"({"format":"24","style":"analog","showSeconds":true,"showDate":false})";
+        face.metaJson = R"({"format":"24","style":"analog","showSeconds":true,"showDate":false,"color":"#ffffff"})";
         out.push_back(Overlay("clock_analog", "Clock (Analog)", "dodgerblue", { face }));
     }
 
@@ -129,7 +126,7 @@ std::vector<Design> ShippedOverlays() {
                               { Shape("rectangle", 80, 875, 750, 135, "#0b57a2"),
                                 Shape("rectangle", 80, 875, 50, 135, "#74cbfb"),
                                 Text(130, 935, 700, 75, "Name Surname", 70, "#0b57a2", false, "left", "Arial"),
-                                Text(130, 875, 700, 60, "TITLE", 40, "#006fcf", true, "left", "Arial") });
+                                Text(130, 875, 700, 60, "Title", 40, "#006fcf", true, "left", "Arial", "", "#ffffff", false, "upper") });
         name.displayDuration = 4;
         out.push_back(std::move(name));
     }

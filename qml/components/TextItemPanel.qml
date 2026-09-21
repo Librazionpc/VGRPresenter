@@ -64,6 +64,8 @@ Column {
     readonly property string fontFamily: root.meta.fontFamily ?? "Inter"
     readonly property string fontWeight: root.meta.fontWeight ?? "SemiBold"
     readonly property string autoSize: root.meta.autoSize ?? "none"
+    // How the text is SHOWN whatever was typed: "none" | "upper" | "lower" | "capitalize". The typed text itself is never changed.
+    readonly property string textCase: root.meta.textCase ?? "none"
     readonly property real fontSize: root.meta.fontSize ?? 16
     readonly property real lineHeight: root.meta.lineHeight ?? 1.2
     readonly property real letterSpacing: root.meta.letterSpacing ?? 0
@@ -360,6 +362,64 @@ Column {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.changeColorRequested()
+                }
+            }
+        }
+    }
+
+    // Letter case - same segmented-chip language as AUTO SIZE below.
+    Column {
+        width: parent.width
+        spacing: 8
+
+        Text {
+            text: qsTr("CASE")
+            color: "#5c6475"
+            font.family: "Inter"
+            font.pixelSize: 9
+            font.weight: Font.Bold
+        }
+
+        Row {
+            width: parent.width
+            spacing: 8
+
+            Repeater {
+                model: [
+                    { key: "none", label: qsTr("As typed") },
+                    { key: "upper", label: qsTr("UPPER") },
+                    { key: "lower", label: qsTr("lower") },
+                    { key: "capitalize", label: qsTr("Title") }
+                ]
+                delegate: Rectangle {
+                    id: caseBtn
+                    required property var modelData
+                    readonly property bool active: root.textCase === caseBtn.modelData.key
+
+                    width: (parent.width - 24) / 4
+                    height: 32
+                    radius: 8
+                    color: caseBtn.active ? "#6c5ce7" : (caseArea.containsMouse ? "#20222c" : "#1a1c26")
+                    border.color: caseBtn.active ? "#6c5ce7" : "#2a2f3a"
+                    border.width: 1
+                    Behavior on color { ColorAnimation { duration: 100 } }
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: caseBtn.modelData.label
+                        color: caseBtn.active ? "#ffffff" : "#c8cdd9"
+                        font.family: "Inter"
+                        font.pixelSize: 12
+                        font.weight: caseBtn.active ? Font.DemiBold : Font.Medium
+                    }
+
+                    MouseArea {
+                        id: caseArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.setMetaDiscrete("textCase", caseBtn.modelData.key)
+                    }
                 }
             }
         }

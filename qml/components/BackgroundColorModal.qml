@@ -12,9 +12,12 @@ import QtQuick
 //
 // There is deliberately no Opacity slider: opacity was removed from the app
 // (it either did nothing or just faded things confusingly), and a fill's
-// "less visible" state is expressed by picking a dimmer color instead. If it
-// ever comes back it belongs on the consumer's style object, not in this
-// picker's payload.
+// "less visible" state is expressed by picking a dimmer color instead. What the
+// palette DOES offer for overlays and lower thirds is Transparent (nothing is
+// drawn - the checkerboard shows it, and it renders out transparent) and a few
+// TINTS: black / white at 25%, 50% and 75% (#AARRGGBB), also typeable in the
+// custom field. If a slider ever comes back it belongs on the consumer's style
+// object, not in this picker's payload.
 //
 // The whole picker state is a single `selection` value —
 //   { kind: "color", color } | { kind: "gradient", from, to, name, subtitle }
@@ -45,7 +48,9 @@ Item {
 
     property var colorSwatches: [
         root.transparentValue, "#ffffff", "#000000", "#e74c3c", "#f39c12", "#f1c40f",
-        "#2ecc71", "#14b8a6", "#3b82f6", "#8b5cf6", "#6b7280"
+        "#2ecc71", "#14b8a6", "#3b82f6", "#8b5cf6", "#6b7280",
+        // tints: translucent black and white (#AARRGGBB) for dimming bars and lower thirds
+        "#40000000", "#80000000", "#bf000000", "#40ffffff", "#80ffffff", "#bfffffff"
     ]
     property var gradientSwatches: [
         { name: "Gradient #1", subtitle: "Purple → Blue", from: "#8b5cf6", to: "#3b82f6" },
@@ -69,7 +74,7 @@ Item {
     property string liveKind: ""
 
     function isValidHex(h) {
-        return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(h)
+        return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(h)   // 8 digits = #AARRGGBB
     }
     function normalizeHex(h) {
         let hex = h.trim()
@@ -359,7 +364,9 @@ Item {
                             text: {
                                 if (root.selection.kind === "gradient")
                                     return root.selection.name
-                                return root.selection.color === root.transparentValue ? qsTr("Transparent") : qsTr("Custom color")
+                                if (root.selection.color === root.transparentValue)
+                                    return qsTr("Transparent")
+                                return Qt.color(root.selection.color).a < 1 ? qsTr("Tint") : qsTr("Custom color")
                             }
                             color: "#eef0f6"
                             font.family: "Inter"
@@ -401,6 +408,8 @@ Item {
                             required property int index
                             required property string modelData
                             readonly property bool isTransparent: modelData === root.transparentValue
+                            // opaque swatches are just their colour; Transparent and the tints sit on a checkerboard
+                            readonly property bool isSolid: !isTransparent && Qt.color(modelData).a >= 1
                             readonly property bool selected: root.selectedSwatch === index
 
                             width: 40
@@ -411,9 +420,9 @@ Item {
                             // lighten-on-hover language as every other
                             // chip/button in this file family), in addition
                             // to the selection ring below.
-                            color: colorSwatch.isTransparent
-                                   ? (colorSwatchArea.containsMouse ? "#242633" : "#1a1c26")
-                                   : (colorSwatchArea.containsMouse ? Qt.lighter(modelData, 1.15) : modelData)
+                            color: colorSwatch.isSolid
+                                   ? (colorSwatchArea.containsMouse ? Qt.lighter(modelData, 1.15) : modelData)
+                                   : (colorSwatchArea.containsMouse ? "#242633" : "#1a1c26")
                             border.width: colorSwatch.selected ? 2 : 1
                             border.color: colorSwatch.selected ? "#6c5ce7" : "#2a3140"
                             Behavior on color { ColorAnimation { duration: 100 } }
@@ -422,7 +431,7 @@ Item {
                             // Mini checkerboard so "Transparent" reads as a
                             // deliberate choice, not an empty/broken swatch.
                             Grid {
-                                visible: colorSwatch.isTransparent
+                                visible: !colorSwatch.isSolid
                                 anchors.fill: parent
                                 columns: 4
                                 rows: 4
@@ -435,6 +444,13 @@ Item {
                                         color: (Math.floor(index / 4) + (index % 4)) % 2 === 0 ? "#2a2c38" : "#15161d"
                                     }
                                 }
+                            }
+
+                            // the tint itself, over the checkerboard
+                            Rectangle {
+                                visible: !colorSwatch.isSolid && !colorSwatch.isTransparent
+                                anchors.fill: parent
+                                color: modelData
                             }
 
                             MouseArea {

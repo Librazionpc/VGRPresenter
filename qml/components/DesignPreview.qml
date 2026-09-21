@@ -92,13 +92,17 @@ Item {
                     visible: el.kind === "text"
                     anchors.fill: parent
                     leftPadding: el.style.padding ?? 0; rightPadding: el.style.padding ?? 0
-                    text: el.modelData.text !== "" ? el.modelData.text
-                        : (el.modelData.bind !== undefined && el.modelData.bind !== "" ? "{" + el.modelData.bind + "}" : "")
+                    // (a block from the canvas may carry no text at all)
+                    text: (el.modelData.text ?? "") !== "" ? el.modelData.text
+                        : ((el.modelData.bind ?? "") !== "" ? "{" + el.modelData.bind + "}" : "")
                     color: el.meta.color ?? "#f2f4fa"
                     font.family: el.meta.fontFamily ?? Theme.fontFamily
                     font.pixelSize: el.meta.fontSize ?? 16
                     font.bold: el.meta.bold === true
                     font.italic: el.meta.italic === true
+                    font.capitalization: el.meta.textCase === "upper" ? Font.AllUppercase
+                                       : el.meta.textCase === "lower" ? Font.AllLowercase
+                                       : el.meta.textCase === "capitalize" ? Font.Capitalize : Font.MixedCase
                     font.underline: el.meta.underline === true
                     font.strikeout: el.meta.strikethrough === true
                     font.letterSpacing: el.meta.letterSpacing ?? 0
@@ -138,7 +142,7 @@ Item {
                     anchors.fill: parent
                     text: Qt.formatDateTime(root.now, (el.meta.format !== "24" ? "h" : "HH") + ":mm"
                                             + (el.meta.showSeconds !== false ? ":ss" : ""))
-                    color: el.meta.color ?? "#f2f4fa"
+                    color: el.meta.color ?? "#9b8ff5"
                     font.family: el.meta.fontFamily ?? Theme.fontFamily
                     font.pixelSize: el.meta.fontSize ?? Math.min(el.width, el.height) * 0.5
                     horizontalAlignment: Text.AlignHCenter

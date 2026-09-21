@@ -30,16 +30,36 @@ DesignLibraryService::DesignLibraryService(QObject *parent)
 
 DesignLibraryService::~DesignLibraryService() = default;
 
-void DesignLibraryService::adopt(std::unique_ptr<bps::library::DesignLibrary> library, QString noun,
-                                 QString toastChannel)
+void DesignLibraryService::open(bool forTemplates, QString noun, QString toastChannel)
 {
     noun_ = std::move(noun);
     toastChannel_ = std::move(toastChannel);
-    if (!library)
-        return;   // the engine has not booted: nothing to load
-    library_ = std::move(library);
+
+    // The library's file path needs the engine's platform layer. Boot may already have run
+    // (tests, reload) or may still be pending (the singletons are created when QML first
+    // touches them, which can be before boot) — either way the library is built the moment
+    // the platform layer exists. Without the retry a service created pre-boot stayed empty
+    // for the whole session, the same gap ShowService had.
+    connect(&EngineBridge::instance(), &EngineBridge::bootedChanged, this,
+            [this, forTemplates] {
+        if (EngineBridge::instance().booted())
+            loadLibrary(forTemplates);
+    });
+    if (EngineBridge::instance().booted())
+        loadLibrary(forTemplates);
+}
+
+void DesignLibraryService::loadLibrary(bool forTemplates)
+{
+    if (library_ || !EngineBridge::instance().booted())
+        return;
+    auto &platform = bps::platform::PlatformAccessor::Get();
+    const std::string file = platform.Filesystem().Join(platform.Paths().UserDataDir(),
+                                                        forTemplates ? "templates.json" : "overlays.json");
+    library_ = forTemplates ? bl::MakeTemplateLibrary(file) : bl::MakeOverlayLibrary(file);
     if (auto loaded = library_->Load(); !loaded.ok())
         report(tr("The %1 library could not be read (%2). What ships is shown.").arg(noun_, qstr(loaded.error().message)));
+    emit changed();   // everything bound to the empty pre-boot state re-reads
 }
 
 void DesignLibraryService::report(const QString &message, const QString &level) const
@@ -306,24 +326,9 @@ QVariantMap DesignLibraryService::block(const QString &id, const QString &blockK
 // The QML singletons
 // ---------------------------------------------------------------------------
 
-namespace {
-
-// A service's library needs the engine's platform layer (paths, files); it is adopted once booted.
-std::unique_ptr<bps::library::DesignLibrary> makeLibrary(bool forTemplates)
-{
-    if (!EngineBridge::instance().booted())
-        return nullptr;
-    auto &platform = bps::platform::PlatformAccessor::Get();
-    const std::string file = platform.Filesystem().Join(platform.Paths().UserDataDir(),
-                                                        forTemplates ? "templates.json" : "overlays.json");
-    return forTemplates ? bl::MakeTemplateLibrary(file) : bl::MakeOverlayLibrary(file);
-}
-
-} // namespace
-
 OverlayLibraryService::OverlayLibraryService()
 {
-    adopt(makeLibrary(false), tr("overlay"), QStringLiteral("overlays.library"));
+    open(false, tr("overlay"), QStringLiteral("overlays.library"));
 }
 
 OverlayLibraryService &OverlayLibraryService::instance()
@@ -342,7 +347,7 @@ OverlayLibraryService *OverlayLibraryService::create(QQmlEngine *engine, QJSEngi
 
 TemplateLibraryService::TemplateLibraryService()
 {
-    adopt(makeLibrary(true), tr("template"), QStringLiteral("templates.library"));
+    open(true, tr("template"), QStringLiteral("templates.library"));
 }
 
 TemplateLibraryService &TemplateLibraryService::instance()

@@ -20,8 +20,13 @@ Item {
     property string style: "digital"
     property bool showSeconds: true
     property bool showDate: false
+    // The digits' / hands' colour, and whether the clock sits in a dark box or on nothing (transparent - the canvas
+    // shows that over its checkerboard, and it renders out transparent).
+    property string tint: "#9b8ff5"
+    property string background: "dark"       // "dark" | "none"
+    readonly property var tints: ["#9b8ff5", "#ffffff", "#ff4d3d", "#2ecc71", "#f1c40f", "#3b82f6"]
 
-    // { format, style, showSeconds, showDate } — the consumer decides what
+    // { format, style, showSeconds, showDate, color, background } — the consumer decides what
     // a "clock" canvas item does with it.
     signal applied(var config)
     signal cancelled()
@@ -120,13 +125,29 @@ Item {
                 width: parent.width
                 height: 90
                 radius: 10
-                color: "#0d0f16"
+                color: root.background === "none" ? "#15161d" : "#0d0f16"
                 border.color: "#262a38"
                 border.width: 1
+                clip: true
+
+                // "None" is shown the way the canvas shows transparency: a checkerboard.
+                Grid {
+                    visible: root.background === "none"
+                    anchors.fill: parent
+                    columns: 20
+                    Repeater {
+                        model: 20 * 9
+                        delegate: Rectangle {
+                            required property int index
+                            width: 10; height: 10
+                            color: (Math.floor(index / 20) + (index % 20)) % 2 === 0 ? "#1c1e29" : "#12131a"
+                        }
+                    }
+                }
 
                 Text {
                     anchors.centerIn: parent
-                    color: "#9b8ff5"
+                    color: root.tint
                     font.family: "Inter"
                     font.pixelSize: 28
                     font.weight: Font.DemiBold
@@ -238,6 +259,100 @@ Item {
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: root.style = styleBtn.modelData.key
+                            }
+                        }
+                    }
+                }
+            }
+
+            Column {
+                width: parent.width
+                spacing: 8
+
+                Text {
+                    text: qsTr("Colour")
+                    color: "#c8cdd9"
+                    font.family: "Inter"
+                    font.pixelSize: 12
+                    font.weight: Font.Medium
+                }
+
+                Row {
+                    spacing: 10
+
+                    Repeater {
+                        model: root.tints
+                        delegate: Rectangle {
+                            id: tintDot
+                            required property string modelData
+                            readonly property bool active: root.tint === modelData
+
+                            width: 28
+                            height: 28
+                            radius: 14
+                            color: modelData
+                            border.width: tintDot.active ? 2 : 1
+                            border.color: tintDot.active ? "#6c5ce7" : "#2a3140"
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.tint = tintDot.modelData
+                            }
+                        }
+                    }
+                }
+            }
+
+            Column {
+                width: parent.width
+                spacing: 8
+
+                Text {
+                    text: qsTr("Background")
+                    color: "#c8cdd9"
+                    font.family: "Inter"
+                    font.pixelSize: 12
+                    font.weight: Font.Medium
+                }
+
+                Row {
+                    width: parent.width
+                    spacing: 8
+
+                    Repeater {
+                        model: [
+                            { key: "dark", label: qsTr("Dark box") },
+                            { key: "none", label: qsTr("None (transparent)") }
+                        ]
+                        delegate: Rectangle {
+                            id: bgBtn
+                            required property var modelData
+                            readonly property bool active: root.background === bgBtn.modelData.key
+
+                            width: (parent.width - 8) / 2
+                            height: 32
+                            radius: 8
+                            color: bgBtn.active ? "#6c5ce7" : (bgArea.containsMouse ? "#20222c" : "#1a1c26")
+                            border.color: bgBtn.active ? "#6c5ce7" : "#2a2f3a"
+                            border.width: 1
+                            Behavior on color { ColorAnimation { duration: 100 } }
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: bgBtn.modelData.label
+                                color: bgBtn.active ? "#ffffff" : "#c8cdd9"
+                                font.family: "Inter"
+                                font.pixelSize: 12
+                                font.weight: bgBtn.active ? Font.DemiBold : Font.Medium
+                            }
+
+                            MouseArea {
+                                id: bgArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.background = bgBtn.modelData.key
                             }
                         }
                     }
@@ -357,7 +472,9 @@ Item {
                             format: root.format,
                             style: root.style,
                             showSeconds: root.showSeconds,
-                            showDate: root.showDate
+                            showDate: root.showDate,
+                            color: root.tint,
+                            background: root.background
                         })
                     }
                 }

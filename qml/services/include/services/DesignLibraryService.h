@@ -95,19 +95,19 @@ public:
     Q_INVOKABLE bool removeBlock(const QString &id, const QString &blockKey);
     Q_INVOKABLE QVariantMap block(const QString &id, const QString &blockKey) const;
 
-    // The library each singleton wraps (for the edit-target handover with the Edit screen).
-    bps::library::DesignLibrary *library() { return library_.get(); }
-
 signals:
     void changed();
 
 protected:
     explicit DesignLibraryService(QObject *parent = nullptr);
-    // Takes over the library a subclass built (null while the engine has not booted: every call is then a no-op),
-    // loads it, and says so if its file could not be read.
-    void adopt(std::unique_ptr<bps::library::DesignLibrary> library, QString noun, QString toastChannel);
+    // Wires the service up: adopts the library at once when the engine has booted (its file path needs the
+    // engine's platform layer), otherwise builds nothing and retries the moment boot completes. `noun`
+    // names the library in messages ("overlay" / "template"); `toastChannel` is where its toasts go.
+    void open(bool forTemplates, QString noun, QString toastChannel);
 
 private:
+    // Builds the library from the engine's platform layer and reads it (the boot-retry target).
+    void loadLibrary(bool forTemplates);
     // A toast on this library's channel.
     void report(const QString &message, const QString &level = QStringLiteral("error")) const;
     // Runs an engine edit that returns Result<void>: tells the UI it changed, or reports why it did not.

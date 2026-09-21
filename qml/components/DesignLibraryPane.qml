@@ -26,8 +26,6 @@ Item {
     // The noun in the UI's strings ("overlay", "template").
     property string noun: "overlay"
 
-    property var categoryNames: ({})          // per-service label overrides, unused by default
-
     // The dock tab bar's search: only designs whose name matches (the engine's search).
     property string filter: ""
     readonly property string query: filter.trim()

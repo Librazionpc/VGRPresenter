@@ -338,7 +338,6 @@ ApplicationWindow {
         interval: 500
         onTriggered: {
             SelfTest.grab("selfTestTemplatesPane", "shot_tab_templates.png")
-            selfTestEv1.restart() // TEMP DIAGNOSTIC
             window.openSettings("general")
             selfTestStage18.restart()
         }
@@ -357,7 +356,6 @@ ApplicationWindow {
         id: selfTestStage19
         interval: 400
         onTriggered: {
-            if (selfTestEv1.busy) { selfTestStage18.restart(); return } // TEMP DIAGNOSTIC
             console.log("[SELFTEST] done")
             SelfTest.quit()
         }
@@ -366,15 +364,9 @@ ApplicationWindow {
 
 
 
-    Timer { id: selfTestEv1; property bool busy: true; property string oid: ""; property string tid: ""; interval: 700; onTriggered: { settingsScrim.visible = false; oid = OverlayLibraryService.createDesign("Probe overlay", ""); SelfTest.clickItem("selfTestTab_overlays"); selfTestEv2.restart() } } // TEMP DIAGNOSTIC
-    Timer { id: selfTestEv2; interval: 900; onTriggered: { SelfTest.grab("selfTestOverlaysPane", "shot_ed_0_library.png"); const c = SelfTest.itemCenter("selfTestDesignCard_Probe overlay"); SelfTest.move(c.x, c.y); selfTestEv3.restart() } } // TEMP DIAGNOSTIC
-    Timer { id: selfTestEv3; interval: 700; onTriggered: { SelfTest.clickItem("selfTestDesignEdit_Probe overlay"); selfTestEv4.restart() } } // TEMP DIAGNOSTIC
-    Timer { id: selfTestEv4; interval: 1200; onTriggered: { SelfTest.grab("", "shot_ed_1_overlay_edit.png"); console.log("[SELFTEST] view=" + window.currentView + " designMode=" + editScreen.designMode + " kind=" + editScreen.session.designKind); editScreen.addScreenTreatment("vignette"); selfTestEv5.restart() } } // TEMP DIAGNOSTIC
-    Timer { id: selfTestEv5; interval: 1600; onTriggered: { SelfTest.grab("", "shot_ed_2_vignette.png"); console.log("[SELFTEST] overlay blocks=" + JSON.stringify(OverlayLibraryService.design(selfTestEv1.oid).blocks.map(b => b.kind + "@" + b.x + "," + b.width))); SelfTest.clickItem("selfTestDesignDone"); selfTestEv6.restart() } } // TEMP DIAGNOSTIC
-    Timer { id: selfTestEv6; interval: 900; onTriggered: { console.log("[SELFTEST] after Done view=" + window.currentView + " designMode=" + editScreen.designMode); selfTestEv1.tid = TemplateLibraryService.duplicateDesign("tpl-default"); editScreen.openDesign("template", selfTestEv1.tid); window.currentView = "edit"; selfTestEv7.restart() } } // TEMP DIAGNOSTIC
-    Timer { id: selfTestEv7; interval: 1200; onTriggered: { SelfTest.grab("", "shot_ed_3_template.png"); const items = editScreen.session.slideStore.current.items; console.log("[SELFTEST] template items=" + items.length + " bind0=" + (items.length ? items[0].bind : "-")); if (items.length) { items[0].x += 7; editScreen.session.scheduleFlush() } selfTestEv8.restart() } } // TEMP DIAGNOSTIC
-    Timer { id: selfTestEv8; interval: 1600; onTriggered: { const t = TemplateLibraryService.design(selfTestEv1.tid); console.log("[SELFTEST] template saved block0 x=" + t.blocks[0].x + " bind=" + t.blocks[0].bind + " blocks=" + t.blocks.length); editScreen.closeDesign(); window.currentView = "show"; selfTestEv9.restart() } } // TEMP DIAGNOSTIC
-    Timer { id: selfTestEv9; interval: 800; onTriggered: { console.log("[SELFTEST] closed designMode=" + editScreen.designMode + " view=" + window.currentView); OverlayLibraryService.deleteDesign(selfTestEv1.oid); TemplateLibraryService.deleteDesign(selfTestEv1.tid); console.log("[SELFTEST] cleaned overlays=" + OverlayLibraryService.totalCount + " templates=" + TemplateLibraryService.totalCount); selfTestEv1.busy = false } } // TEMP DIAGNOSTIC
+
+
+
 
     // ---- Settings overlay ----
     // Shared ModalScrim: click-dismisses, and consumes wheel events so a

@@ -46,8 +46,9 @@ Rectangle {
     readonly property var session: showSession
 
     // ---- Designs: the same screen edits an overlay or a template from a library ----
-    // While a design is open (ShowSession.openDesign) the canvas, undo, inspector and text panel edit IT, the slide list is
-    // replaced by DesignPanel, and every engine call goes to the library instead of the show. Nothing else changes.
+    // While a design is open (ShowSession.openDesign) the canvas, undo, inspector and text panel edit IT and every engine
+    // call goes to the library instead of the show. Nothing else changes: the Items and Text tabs already edit everything a
+    // design has, and the toolbar's back chevron is Done.
     readonly property bool designMode: showSession.designMode
     // Opens design `id` of `kind` ("overlay" | "template"); false if it does not exist.
     function openDesign(kind, id) { return showSession.openDesign(kind, id) }
@@ -746,7 +747,7 @@ Rectangle {
     }
 
     // Adds a whole-screen treatment (overlay designs): a vignette tinting the edges or corners cut round. It covers the
-    // stage; its colour is the item's background and meta.inset says how far in it reaches (DesignPanel edits that).
+    // stage; its colour is the item's background (edited on the Items tab like any item's) and meta.inset is how far in it reaches.
     function addScreenTreatment(kind) {
         const item = root.addCanvasItem(kind)
         if (!item)
@@ -843,6 +844,16 @@ Rectangle {
                 font.pixelSize: 13
                 text: "‹"
             }
+            // In a design (overlay / template) this is Done: back to the library it came from.
+            MouseArea {
+                anchors.fill: parent
+                enabled: root.designMode
+                cursorShape: root.designMode ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: {
+                    root.closeDesign()
+                    root.designClosed()
+                }
+            }
         }
         Text {
             x: 50
@@ -851,7 +862,8 @@ Rectangle {
             font.family: "Inter"
             font.pixelSize: 13
             font.weight: Font.Medium
-            text: qsTr("Sunday Service")
+            // (the design's name follows the library: DesignBackend re-reads it whenever it changes)
+            text: root.designMode ? (showSession.designBackend.currentShow.name ?? "") : qsTr("Sunday Service")
         }
         Rectangle {
             x: 156
@@ -869,7 +881,8 @@ Rectangle {
                 font.family: "Inter"
                 font.pixelSize: 9
                 font.weight: Font.Medium
-                text: qsTr("Template · Worship")
+                text: root.designMode ? (showSession.designKind === "template" ? qsTr("Template") : qsTr("Overlay"))
+                                      : qsTr("Template · Worship")
             }
         }
         // KERNEL-DRIVEN, not baked text: reflects real project.saved events
@@ -884,6 +897,8 @@ Rectangle {
             color: "#5c6475"
             font.family: "Inter"
             font.pixelSize: 9
+            // A design (overlay / template) has no Save: every settled edit is written to its library.
+            visible: !root.designMode
             text: qsTr("Not saved yet")
             function applySave(autosave) { text = autosave ? qsTr("Autosaved ✓") : qsTr("Saved ✓") }
             Component.onCompleted: {
@@ -894,6 +909,15 @@ Rectangle {
                         break
                     }
             }
+        }
+        Text {
+            visible: root.designMode
+            x: parent.width - 204
+            y: 17
+            color: "#5c6475"
+            font.family: "Inter"
+            font.pixelSize: 9
+            text: qsTr("Saves as you edit")
         }
         Connections {
             target: EngineBridge
@@ -1238,6 +1262,10 @@ Rectangle {
                             : itemTextLabel.tmeta.fontWeight === "Bold" ? Font.Bold
                             : Font.Medium
                         font.italic: itemTextLabel.tmeta.italic === true
+                        font.capitalization: itemTextLabel.tmeta.textCase === "upper" ? Font.AllUppercase
+                            : itemTextLabel.tmeta.textCase === "lower" ? Font.AllLowercase
+                            : itemTextLabel.tmeta.textCase === "capitalize" ? Font.Capitalize
+                            : Font.MixedCase
                         font.letterSpacing: itemTextLabel.tmeta.letterSpacing ?? 0
                         lineHeight: itemTextLabel.tmeta.lineHeight ?? 1.2
                         lineHeightMode: Text.ProportionalHeight
@@ -1290,6 +1318,10 @@ Rectangle {
                         : itemTextLabel.tmeta.fontWeight === "Bold" ? Font.Bold
                         : Font.Medium
                     font.italic: itemTextLabel.tmeta.italic === true
+                    font.capitalization: itemTextLabel.tmeta.textCase === "upper" ? Font.AllUppercase
+                        : itemTextLabel.tmeta.textCase === "lower" ? Font.AllLowercase
+                        : itemTextLabel.tmeta.textCase === "capitalize" ? Font.Capitalize
+                        : Font.MixedCase
                     font.underline: itemTextLabel.tmeta.underline === true
                     font.strikeout: itemTextLabel.tmeta.strikethrough === true
                     font.letterSpacing: itemTextLabel.tmeta.letterSpacing ?? 0
@@ -1451,6 +1483,10 @@ Rectangle {
                     readonly property bool showSeconds: clockContent.cfg.showSeconds !== false
                     readonly property bool showDate: clockContent.cfg.showDate === true
                     readonly property bool analog: clockContent.cfg.style === "analog"
+                    // The colour picked in Add Clock (digits and hands); unset keeps the original accent look.
+                    readonly property bool tinted: clockContent.cfg.color !== undefined
+                    // No background = a bare clock: the analog face loses its dark disc too.
+                    readonly property bool bare: canvasItemObject.style !== null && canvasItemObject.style.backgroundColor.a === 0
                     visible: canvasItemObject.modelData.kind === "clock"
                     anchors.fill: parent
 
@@ -1466,12 +1502,12 @@ Rectangle {
                     Rectangle {
                         anchors.fill: parent
                         radius: canvasItemObject.style ? canvasItemObject.style.cornerRadius : 8
-                        color: (canvasItemObject.style && canvasItemObject.style.backgroundColor.a > 0)
-                            ? canvasItemObject.style.backgroundColor : "#12131a"
-                        border.color: (canvasItemObject.style && canvasItemObject.style.borderEnabled)
-                            ? canvasItemObject.style.borderColor : "#3a4155"
+                        // Exactly the item's own background/border: a clock with a transparent background is just its digits
+                        // (the Add Clock picker offers a dark box or none; the palette changes it afterwards).
+                        color: canvasItemObject.style ? canvasItemObject.style.backgroundColor : "#12131a"
+                        border.color: canvasItemObject.style ? canvasItemObject.style.borderColor : "#3a4155"
                         border.width: (canvasItemObject.style && canvasItemObject.style.borderEnabled)
-                            ? canvasItemObject.style.borderWidth : 1
+                            ? canvasItemObject.style.borderWidth : 0
                     }
 
                     Column {
@@ -1481,7 +1517,7 @@ Rectangle {
 
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            color: "#9b8ff5"
+                            color: clockContent.tinted ? clockContent.cfg.color : "#9b8ff5"
                             font.family: "Inter"
                             font.weight: Font.DemiBold
                             font.pixelSize: Math.max(10, Math.min(clockContent.width, clockContent.height) * 0.22)
@@ -1490,7 +1526,7 @@ Rectangle {
                         Text {
                             visible: clockContent.showDate
                             anchors.horizontalCenter: parent.horizontalCenter
-                            color: "#5c6475"
+                            color: clockContent.tinted ? Qt.alpha(clockContent.cfg.color, 0.7) : "#5c6475"
                             font.family: "Inter"
                             font.pixelSize: 9
                             text: Qt.formatDate(clockTicker.now, "dddd, MMMM d")
@@ -1510,15 +1546,15 @@ Rectangle {
                         Rectangle {
                             anchors.fill: parent
                             radius: width / 2
-                            color: "#12131a"
-                            border.color: "#3a4155"
+                            color: clockContent.bare ? "transparent" : "#12131a"
+                            border.color: clockContent.tinted ? clockContent.cfg.color : "#3a4155"
                             border.width: 2
                         }
                         Rectangle {
                             width: 4
                             height: parent.height * 0.24
                             radius: 2
-                            color: "#eef1f8"
+                            color: clockContent.tinted ? clockContent.cfg.color : "#eef1f8"
                             anchors.horizontalCenter: parent.horizontalCenter
                             anchors.bottom: parent.verticalCenter
                             transformOrigin: Item.Bottom
@@ -1528,7 +1564,7 @@ Rectangle {
                             width: 3
                             height: parent.height * 0.34
                             radius: 1.5
-                            color: "#c8cdd9"
+                            color: clockContent.tinted ? clockContent.cfg.color : "#c8cdd9"
                             anchors.horizontalCenter: parent.horizontalCenter
                             anchors.bottom: parent.verticalCenter
                             transformOrigin: Item.Bottom
@@ -1538,7 +1574,7 @@ Rectangle {
                             visible: clockContent.showSeconds
                             width: 1.5
                             height: parent.height * 0.4
-                            color: "#6c5ce7"
+                            color: clockContent.tinted ? clockContent.cfg.color : "#6c5ce7"
                             anchors.horizontalCenter: parent.horizontalCenter
                             anchors.bottom: parent.verticalCenter
                             transformOrigin: Item.Bottom
@@ -1549,7 +1585,7 @@ Rectangle {
                             width: 6
                             height: 6
                             radius: 3
-                            color: "#6c5ce7"
+                            color: clockContent.tinted ? clockContent.cfg.color : "#6c5ce7"
                         }
                     }
 
@@ -1643,8 +1679,9 @@ Rectangle {
                     // fully transparent fill (the "shape doesn't show" bug).
                     // Verified with a standalone qml runtime probe.
                     readonly property bool hasFill: shapeContent.st && shapeContent.st.backgroundColor.a > 0
-                    readonly property color fillColor: shapeContent.hasFill
-                        ? shapeContent.st.backgroundColor : "#3a3f55"
+                    // The fill is exactly the item's background: "transparent" (picked in the colour palette) draws nothing,
+                    // so outline-only frames work. A NEW shape is given a visible fill when it is added (shapeSourceModal).
+                    readonly property color fillColor: shapeContent.st ? shapeContent.st.backgroundColor : "#3a3f55"
                     readonly property color strokeColor: shapeContent.st ? shapeContent.st.borderColor : "#6c5ce7"
                     readonly property real strokeWidth: (shapeContent.st && shapeContent.st.borderEnabled) ? shapeContent.st.borderWidth : 0
                     readonly property bool isCircle: shapeContent.shapeType === "circle"
@@ -2260,6 +2297,8 @@ Rectangle {
 
             Rectangle {
                 id: addSlideButton
+                // A design (overlay / template) is one canvas: there is nothing to add.
+                visible: !root.designMode
                 height: 36
                 width: 256
                 border.color: "#2a3140"
@@ -2291,24 +2330,6 @@ Rectangle {
             y: slideListFlick.y
             height: slideListFlick.height
             flickable: slideListFlick
-        }
-
-        // A design (overlay / template) has no slides: while one is open this panel takes the slide list's place and shows
-        // what the design IS. Declared last so it covers the list.
-        DesignPanel {
-            anchors.fill: parent
-            visible: root.designMode
-            z: 10
-            service: showSession.designService
-            designId: showSession.designId
-            kind: showSession.designKind
-            item: root.primarySelectedItem
-            undoHook: root.pushUndoSnapshot
-            focusHook: function () { mCanvas.forceActiveFocus() }
-            onDoneRequested: {
-                root.closeDesign()
-                root.designClosed()
-            }
         }
     }
 
@@ -2801,7 +2822,10 @@ Rectangle {
         open: root.clockModalOpen
         onApplied: (config) => {
             const item = root.addCanvasItem("clock")
-            item.meta = config
+            const meta = Object.assign({}, config)
+            delete meta.background            // the box is the item's own background (palette-editable), not clock config
+            item.meta = meta
+            item.style.backgroundColor = config.background === "none" ? "transparent" : "#12131a"
             root.clockModalOpen = false
         }
         onCancelled: root.clockModalOpen = false
@@ -2813,6 +2837,7 @@ Rectangle {
         onApplied: (config) => {
             const item = root.addCanvasItem("shape")
             item.meta = config
+            item.style.backgroundColor = "#3a3f55"   // visible from the start; the palette's Transparent makes it an outline
             root.shapeModalOpen = false
         }
         onCancelled: root.shapeModalOpen = false
