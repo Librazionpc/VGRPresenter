@@ -636,16 +636,19 @@ Rectangle {
                     // Tracks the dock's taller body so every pane (shows
                     // table, browsers, media grid) fills to the bottom.
                     height: parent.height - 39
-                    // The Scripture tab takes the clock's place: its preview / template column sits at the far right, the
-                    // way FreeShow's does, instead of being squeezed in beside the clock.
-                    width: media_tab_bar.currentPane === "scripture" ? parent.width : parent.width - 400
+                    // The Scripture-architecture tabs (Scripture and The
+                    // Table) take the clock's place: their preview /
+                    // template column sits at the far right, the way
+                    // FreeShow's does, instead of being squeezed in beside
+                    // the clock. Every other pane leaves the clock its 400px.
+                    width: (media_tab_bar.currentPane === "scripture" || media_tab_bar.currentPane === "table") ? parent.width : parent.width - 400
 
                     clip: true
                     color: "transparent"
 
                     // ---- Per-tab panes ---- Shows keeps the original table
                     // (gated below); Scripture and The Table share the
-                    // Scripture-architecture browser (LibraryBrowserPane).
+                    // Scripture-architecture browser (ReferencePane, shared by both tabs).
                     // BOTH PANES OWN NO DATA: the engine drives all library
                     // content — the bridge pushes each library's document
                     // into setLibrary() once wired; until then they show the
@@ -661,25 +664,16 @@ Rectangle {
                         onTemplateEditRequested: (id) => vGRPresenter_Main_Screen.designEditRequested("template", id)
                         onConvertToShowRequested: (name, slides) => vGRPresenter_Main_Screen.scriptureShowRequested(name, slides)
                     }
-                    LibraryBrowserPane {
-                        id: tablePane
+                    TheTablePane {
                         objectName: "selfTestTablePane"
                         visible: media_tab_bar.currentPane === "table"
                         width: parent.width; height: parent.height
-                        sidebarLabel: qsTr("Collections")
                         filter: media_tab_bar.searches.table !== undefined ? media_tab_bar.searches.table : ""
-                        searchHits: {
-                            const q = media_tab_bar.searches.table !== undefined ? media_tab_bar.searches.table : ""
-                            const words = q.trim().split(/\s+/).filter((w) => w.length > 0)
-                            return words.length >= 2 ? TheTableService.search(q) : []
-                        }
-                        newEntryLabel: qsTr("New sermon")
-                        Component.onCompleted: tablePane.setLibrary(TheTableService.document)
-                        Connections {
-                            target: TheTableService
-                            function onChanged() { tablePane.setLibrary(TheTableService.document) }
-                        }
-                        onNewEntryActivated: TheTableService.newSermon()
+                        // The same show-building path Scripture uses (Main.qml's
+                        // handler is generic: name + slides -> a new show).
+                        onConvertToShowRequested: (name, slides) => vGRPresenter_Main_Screen.scriptureShowRequested(name, slides)
+                        // The template card's edit pencil opens it in the Edit screen.
+                        onTemplateEditRequested: (id) => vGRPresenter_Main_Screen.designEditRequested("template", id)
                     }
                     MediaLibraryPane {
                         id: mediaPane
@@ -1393,7 +1387,7 @@ Rectangle {
                     // of the band).
                     x: parent.width - 400
                     y: 39
-                    visible: media_tab_bar.currentPane !== "scripture"   // the Scripture preview takes this spot
+                    visible: media_tab_bar.currentPane !== "scripture" && media_tab_bar.currentPane !== "table"   // the Scripture-architecture preview takes this spot
 
                     height: parent.height - 39
 

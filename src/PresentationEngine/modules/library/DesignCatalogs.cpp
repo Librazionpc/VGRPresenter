@@ -185,6 +185,7 @@ Design Template(std::string id, std::string name, std::string category, std::str
 // the card accent uses this so the chip still reads).
 constexpr const char* kTextAccent = "#747680";
 constexpr const char* kScriptureAccent = "#876543";
+constexpr const char* kTableAccent = "#7a5fb8";
 
 std::vector<Design> ShippedTemplates() {
     std::vector<Design> out;
@@ -337,6 +338,27 @@ std::vector<Design> ShippedTemplates() {
     out.push_back(Template("parentheses", "Parentheses", "scripture", "#515151",
                            { Text(50, 88, 1820, 904, "(Parentheses)", 60, "transparent", false, "center", "Inter", "", "#cccccc") }));
 
+    // ---- table: the sermon layouts (The Table tab) — the same placeholder
+    // machinery as scripture, its own content type so each tab lists only its
+    // own layouts. Paragraphs stream into the "text" box exactly as verses do.
+    {
+        std::vector<pres::ContentBlock> s = { Box(30, 30, 1860, 865, "#66000000", 20),
+                                              Text(55, 45, 1810, 835, "{scripture_number} {scripture_text}", 64, "transparent", false, "left", "Inter", "text"),
+                                              Box(30, 900, 1860, 150, "transparent"),
+                                              Text(30, 905, 1860, 80, "{scripture_reference}", 55, "transparent", false, "left", "Inter", "ref", "#cccccc"),
+                                              Text(30, 970, 1860, 70, "{scripture_name}", 40, "transparent", false, "left", "Inter", "", "#b3b3b3") };
+        out.push_back(Template("table", "Table", "table", kTableAccent, std::move(s)));
+    }
+    {
+        std::vector<pres::ContentBlock> s;
+        for (int i = 0; i < 3; ++i) {
+            s.push_back(Box(30, 40 + i * 280, 1860, 250, "#66000000", 20));
+            s.push_back(Text(55, 50 + i * 280, 1810, 230, "{scripture" + std::to_string(i + 1) + "_number} {scripture" + std::to_string(i + 1) + "_text}", 54, "transparent", false, "left", "Inter", "text"));
+        }
+        s.push_back(Text(30, 905, 1860, 80, "{scripture_reference}", 55, "transparent", false, "left", "Inter", "ref", "#cccccc"));
+        s.push_back(Text(30, 970, 1860, 70, "{scripture_name}", 40, "transparent", false, "left", "Inter", "", "#b3b3b3"));
+        out.push_back(Template("table_3", "Table 3", "table", kTableAccent, std::move(s)));
+    }
     return out;
 }
 
@@ -366,10 +388,11 @@ DesignLibraryConfig TemplateLibraryConfig() {
     c.noun = "template";
     c.defaultName = "Template";
     c.idPrefix = "tpl";
-    // FreeShow's starter set: the song / presentation / scripture templates with their categories.
+    // FreeShow's starter set: the song / presentation / scripture templates with their categories, and The Table's own sermon layouts.
     c.defaultCategories = { DesignCategory{ "song", "Song", "music", true },
                             DesignCategory{ "presentation", "Presentation", "presentation", true },
-                            DesignCategory{ "scripture", "Scripture", "bookOpen", true } };
+                            DesignCategory{ "scripture", "Scripture", "bookOpen", true },
+                            DesignCategory{ "table", "The Table", "book", true } };
     c.defaultDesigns = ShippedTemplates();
     c.starterBlocks = TemplateStarter;
     return c;

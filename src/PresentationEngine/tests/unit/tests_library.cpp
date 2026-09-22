@@ -295,15 +295,15 @@ void TestTemplateLibrary() {
 
     auto library = lib::MakeTemplateLibrary(file);
     CHECK(library->Load().ok());
-    // What ships: the three default categories and FreeShow's starter templates in them.
+    // What ships: the four default categories and FreeShow's starter templates in them.
     const auto config = lib::TemplateLibraryConfig();
-    CHECK(config.defaultCategories.size() == 3 && !config.defaultDesigns.empty());
-    CHECK(library->Categories().size() == 3);
+    CHECK(config.defaultCategories.size() == 4 && !config.defaultDesigns.empty());
+    CHECK(library->Categories().size() == 4);
     const size_t shippedCount = config.defaultDesigns.size();
     CHECK(library->Designs().size() == shippedCount);
     {
         const auto counts = library->Counts();
-        CHECK(counts.all == shippedCount && counts.unlabeled == 0 && counts.byCategory.size() == 3);
+        CHECK(counts.all == shippedCount && counts.unlabeled == 0 && counts.byCategory.size() == 4);
     }
     CHECK(library->RestoreDefaults().value() == 0);
     CHECK(library->Config().extraBlockKinds.empty());   // templates add no block kinds of their own
@@ -324,9 +324,9 @@ void TestTemplateLibrary() {
     // The user makes categories and templates beside what ships.
     auto songs = library->CreateCategory("Songs", "music");
     CHECK(songs.ok() && !songs.value().isDefault);
-    CHECK(library->Categories().size() == 4);
+    CHECK(library->Categories().size() == 5);
     CHECK(library->RenameCategory(songs.value().id, "Worship songs").ok());   // a user's category renames
-    CHECK(library->DeleteCategory(songs.value().id).ok() && library->Categories().size() == 3);
+    CHECK(library->DeleteCategory(songs.value().id).ok() && library->Categories().size() == 4);
     songs = library->CreateCategory("Songs", "music");
 
     auto lyrics = library->Create({}, songs.value().id);
@@ -360,7 +360,7 @@ void TestTemplateLibrary() {
     {
         auto again = lib::MakeTemplateLibrary(file);
         CHECK(again->Load().ok());
-        CHECK(again->Categories().size() == 4 && again->Categories()[3].name == "Songs" && again->Categories()[3].icon == "music");
+        CHECK(again->Categories().size() == 5 && again->Categories()[4].name == "Songs" && again->Categories()[4].icon == "music");
         const auto saved = again->Get(notes.value().id);
         CHECK(saved.ok() && saved.value().name == "Sermon notes" && saved.value().contentType == "notes"
               && saved.value().blocks.size() == 1 && saved.value().blocks[0].bind == "title");

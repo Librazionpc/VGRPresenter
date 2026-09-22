@@ -29,7 +29,10 @@ Item {
     // doesn't need a separate description/tag pulling double duty saying
     // the same thing a different way. The preview pane (below) reads the
     // name generically too, not a per-key hardcoded layout.
-    readonly property var templates: [
+    // Settable (not readonly): a consumer with its own registry (Scripture / The Table's engine-backed design catalog, keyed by "id"
+    // rather than a fixed "key") hands its own list in here instead - same picker, its own templates. This default list is what
+    // StylesScreen, which has none of its own, still gets.
+    property var templates: [
         { key: "lowerThird", name: qsTr("Lower Third") },
         { key: "title", name: qsTr("Title") },
         { key: "sidebar", name: qsTr("Sidebar") },
@@ -96,7 +99,10 @@ Item {
         id: card
         anchors.centerIn: parent
         width: 700
-        height: Math.min(parent.height - 60, content.height + 40)
+        // At least the header + a couple of rows + the footer, however little room a cramped parent (a tab's own content area, not
+        // the full window Settings gets) leaves - short of that, the body below scrolls instead of the footer buttons being clipped
+        // off with no way to reach them.
+        height: Math.min(Math.max(360, parent.height - 40), content.height + 40)
         radius: 14
         color: "#13151c"
         border.color: "#232530"
@@ -104,6 +110,13 @@ Item {
         clip: true
 
         MouseArea { anchors.fill: parent; onClicked: {} }
+
+        Flickable {
+            anchors.fill: parent
+            contentWidth: width
+            contentHeight: content.height + 40
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
 
         Column {
             id: content
@@ -501,6 +514,7 @@ Item {
                     }
                 }
             }
+        }
         }
     }
 }

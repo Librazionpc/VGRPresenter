@@ -374,3 +374,8 @@ bps::presentation::ScriptureSettings SettingsService::scriptureSettings() const
 {
     return settings_ ? settings_->Scripture() : bps::presentation::ScriptureSettings{};
 }
+
+bps::presentation::ScriptureSettings SettingsService::theTableSettings() const
+{
+    return settings_ ? settings_->TheTable() : bps::presentation::ScriptureSettings{};
+}

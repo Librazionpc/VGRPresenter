@@ -65,6 +65,21 @@ SettingChoice Accent(std::string value, std::string label, std::string color, st
     return c;
 }
 
+// The slide builder's options, under one tab's prefix. Scripture and The Table have the same set; only the word for a piece of text differs
+// (verse / paragraph).
+void AddSlideBuilderOptions(std::vector<SettingDef>& d, const std::string& p, const std::string& One, const std::string& Many,
+                            const std::string& one, const std::string& many) {
+    d.push_back(Bool(p + ".verseNumbers", p, One + " numbers", true));
+    d.push_back(Bool(p + ".versesOnIndividualLines", p, Many + " on individual lines", false));
+    d.push_back(Bool(p + ".splitLongVerses", p, "Divide long " + many, false));
+    d.push_back(Bool(p + ".splitLongVersesSuffix", p, "Number the parts (1a, 1b)", false));
+    d.push_back(IntRange(p + ".longVersesChars", p, "Size", 100, 3, 1000, "Characters a " + one + " may have before it is divided"));
+    d.push_back(IntRange(p + ".longVersesTolerance", p, "Tolerance", 0, 0, 100, "Percent past the size a cut may wait for a word end"));
+    d.push_back(Bool(p + ".smartSplit", p, "Smart split", true, "As many " + many + " to a slide as the template's text box holds"));
+    d.push_back(IntRange(p + ".versesPerSlide", p, "Max " + many, 3, 1, 100));
+    d.push_back(Text(p + ".template", p, "Template"));
+}
+
 std::vector<SettingDef> BuildDefinitions() {
     std::vector<SettingDef> d;
 
@@ -130,16 +145,9 @@ std::vector<SettingDef> BuildDefinitions() {
     d.push_back(IntRange("smart.cpuBudgetPct", "smart", "CPU budget", 60, 10, 100,
                          "The most of the CPU the engine may use (used in Manual mode)."));
 
-    // ---- Scripture (the tab's options, FreeShow's scripture settings) ----
-    d.push_back(Bool("scripture.verseNumbers", "scripture", "Verse numbers", true));
-    d.push_back(Bool("scripture.versesOnIndividualLines", "scripture", "Verses on individual lines", false));
-    d.push_back(Bool("scripture.splitLongVerses", "scripture", "Divide long verses", false));
-    d.push_back(Bool("scripture.splitLongVersesSuffix", "scripture", "Number the parts (1a, 1b)", false));
-    d.push_back(IntRange("scripture.longVersesChars", "scripture", "Size", 100, 3, 1000, "Characters a verse may have before it is divided"));
-    d.push_back(IntRange("scripture.longVersesTolerance", "scripture", "Tolerance", 0, 0, 100, "Percent past the size a cut may wait for a word end"));
-    d.push_back(Bool("scripture.smartSplit", "scripture", "Smart split", true, "As many verses to a slide as the template's text box holds"));
-    d.push_back(IntRange("scripture.versesPerSlide", "scripture", "Max verses", 3, 1, 100));
-    d.push_back(Text("scripture.template", "scripture", "Template"));
+    // ---- Scripture and The Table: the slide builder's options (FreeShow's scripture settings), each tab with its own keys and its own template ----
+    AddSlideBuilderOptions(d, "scripture", "Verse", "Verses", "verse", "verses");
+    AddSlideBuilderOptions(d, "table", "Paragraph", "Paragraphs", "paragraph", "paragraphs");
 
     // ---- What the app remembers between runs (not shown as settings) ----
     d.push_back(Text("session.scriptureBible", "session", "Last Bible"));
@@ -151,6 +159,11 @@ std::vector<SettingDef> BuildDefinitions() {
     d.push_back(Choice("session.slideView", "session", "Slide view", "grid", {
         C("grid", "Grid"), C("list", "List"), C("lyrics", "Lyrics"),
     }));
+    // The reference pane's (Scripture / The Table) column widths - dragged by their SplitHandle, remembered so a rebuild or a
+    // restart doesn't put them back to their defaults. Shared between the two tabs, the same as the rest of "session".
+    d.push_back(IntRange("session.referencePaneBooksWidth", "session", "Reference books column width", 150, 100, 340));
+    d.push_back(IntRange("session.referencePaneChaptersWidth", "session", "Reference chapters column width", 52, 40, 420));
+    d.push_back(IntRange("session.referencePanePreviewWidth", "session", "Reference preview column width", 360, 260, 560));
     return d;
 }
 
@@ -336,18 +349,22 @@ void AppSettings::Unsubscribe(size_t id) {
     listeners_.erase(id);
 }
 
-presentation::ScriptureSettings AppSettings::Scripture() const {
+presentation::ScriptureSettings AppSettings::SlideBuilderOptions(const std::string& p) const {
     presentation::ScriptureSettings s;
-    s.verseNumbers = GetBool("scripture.verseNumbers");
-    s.versesOnIndividualLines = GetBool("scripture.versesOnIndividualLines");
-    s.splitLongVerses = GetBool("scripture.splitLongVerses");
-    s.splitLongVersesSuffix = GetBool("scripture.splitLongVersesSuffix");
-    s.longVersesChars = static_cast<int>(GetInt("scripture.longVersesChars"));
-    s.longVersesTolerance = static_cast<int>(GetInt("scripture.longVersesTolerance"));
-    s.smartSplit = GetBool("scripture.smartSplit");
-    s.versesPerSlide = static_cast<int>(GetInt("scripture.versesPerSlide"));
+    s.verseNumbers = GetBool(p + ".verseNumbers");
+    s.versesOnIndividualLines = GetBool(p + ".versesOnIndividualLines");
+    s.splitLongVerses = GetBool(p + ".splitLongVerses");
+    s.splitLongVersesSuffix = GetBool(p + ".splitLongVersesSuffix");
+    s.longVersesChars = static_cast<int>(GetInt(p + ".longVersesChars"));
+    s.longVersesTolerance = static_cast<int>(GetInt(p + ".longVersesTolerance"));
+    s.smartSplit = GetBool(p + ".smartSplit");
+    s.versesPerSlide = static_cast<int>(GetInt(p + ".versesPerSlide"));
     return s;
 }
+
+presentation::ScriptureSettings AppSettings::Scripture() const { return SlideBuilderOptions("scripture"); }
+// The Table's options: the same settings under the "table." keys.
+presentation::ScriptureSettings AppSettings::TheTable() const { return SlideBuilderOptions("table"); }
 
 ResourceCaps AppSettings::EffectiveCaps() const {
     if (Mode() == "manual")

@@ -22,6 +22,7 @@
 
 #include "core/common/Common.hpp"
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -39,14 +40,14 @@ struct TheTableVerse {
 struct TheTableChapter {
     int number = 0;          // 1-based sermon index within the year
     std::string title;       // "0217 Only Believe" (from the file name)
-    std::vector<TableVerse> verses;
+    std::vector<TheTableVerse> verses;
 };
 
 struct TheTableBook {
     std::string id;          // "Y1953"
     std::string name;        // "1953" (display)
     int order = 0;
-    std::vector<TableChapter> chapters;
+    std::vector<TheTableChapter> chapters;
 };
 
 struct TheTableSearchHit {
@@ -65,6 +66,20 @@ public:
 
     // --- Browsing -----------------------------------------------------------------
     std::vector<TheTableBook> Books() const;
+    // The years and their sermons WITHOUT the words. Books() copies every paragraph of every sermon; once hundreds of sermons are in, that
+    // is a copy of the whole library, so anything that only lists (the year list, a reference lookup) asks for this instead.
+    struct ChapterInfo {
+        int number = 0;
+        std::string title;
+        size_t verseCount = 0;
+    };
+    struct BookInfo {
+        std::string id;
+        std::string name;
+        int order = 0;
+        std::vector<ChapterInfo> chapters;
+    };
+    std::vector<BookInfo> BookIndex() const;
     // One chapter (paragraphs in order); error when the book/chapter is unknown.
     Result<TheTableChapter> GetChapter(std::string_view bookId, int chapter) const;
     size_t VerseCount() const;
@@ -80,6 +95,27 @@ public:
     // Returns the new verse's reference ("1953 12:1") on success.
     Result<std::string> ImportSermon(std::string_view fileName, std::string_view content);
 
+    // The clean-up stage every import goes through first: a .pdf (its text read out) or a .txt (of any encoding) becomes plain UTF-8
+    // text - running heads, page numbers, control characters and stray spacing removed, one paragraph per block, a blank line between.
+    // Stores nothing; fails when the file has no readable text.
+    static Result<std::string> ConvertToCleanText(std::string_view fileName, std::string_view content);
+
+    // Whole-folder import (the "Add sermons folder" flow): every .pdf/.txt
+    // under `folderPath`, recursively, imported by the same name mapping.
+    // `progress` fires per file (done, total, current name); returns the
+    // imported / skipped-duplicate / failed counts.
+    // With `convertedRoot`, each PDF's clean text is also kept there as "<convertedRoot>/<version>/<year>/<name>.txt" (to read and check),
+    // and reused on a later import while it is newer than the PDF.
+    struct ImportReport {
+        int imported = 0;
+        int skipped = 0;   // a sermon with the same year + title is already in
+        int failed = 0;
+    };
+    Result<ImportReport> ImportFolder(
+        std::string_view folderPath,
+        const std::function<void(int done, int total, std::string_view current)>& progress = {},
+        std::string_view convertedRoot = {});
+
     // --- Persistence ---------------------------------------------------------------
     Result<void> Save() const;   // user-dir JSON (atomic write)
     Result<void> Load();
@@ -88,11 +124,17 @@ private:
     explicit TheTableLibrary(std::string filePath);
 
     TheTableBook& BookForYear(std::string_view year);
+    // Adds one sermon's clean text (see ConvertToCleanText) to the books WITHOUT saving; returns its reference ("1953 12:1").
+    // With `replaceUnreadable`, a stored sermon of the same title that does not read as text (see ReadableText) is replaced.
+    Result<std::string> AddCleanText(std::string_view fileName, const std::string& text, bool replaceUnreadable = false);
+    // Writes a snapshot of the books to the library file. It takes no lock: it works on the copy it is given, so browsing is never
+    // held up behind a file write.
+    Result<void> Persist(const std::vector<TheTableBook>& books) const;
     std::string NextFilePath() const;
 
     mutable std::mutex mutex_;
     std::string filePath_;
-    std::vector<TableBook> books_;
+    std::vector<TheTableBook> books_;
     uint32_t importSeq_ = 0;   // disambiguates same-named sermons
 };
 

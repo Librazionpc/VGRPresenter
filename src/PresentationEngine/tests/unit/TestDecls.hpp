@@ -92,6 +92,7 @@ void TestShowLibrary();
 void TestShowEditor();
 void TestNextTimer();
 void TestSlideMenu();
+void TestTheTableRealPdfs();
 void TestDocumentEdit();
 void TestShowLibraryCrud();
 void TestSearchIndexing();

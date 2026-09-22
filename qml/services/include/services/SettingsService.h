@@ -77,6 +77,8 @@ public:
 
     // The scripture options (the Scripture tab's settings) in the form the engine's slide builder takes them.
     bps::presentation::ScriptureSettings scriptureSettings() const;
+    // The Table's slide-builder options (the "table." keys).
+    bps::presentation::ScriptureSettings theTableSettings() const;
 
     // Whether a file is there (the last show may have been moved or deleted since the app was closed).
     Q_INVOKABLE bool fileExists(const QString &path) const;

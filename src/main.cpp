@@ -75,6 +75,12 @@ void ForwardToEventBus(QtMsgType type, const QMessageLogContext &context, const 
     // The same line goes to the engine log, so one file holds everything that went wrong (QML errors included).
     EngineBridge::write(level, isQml ? QStringLiteral("QML") : QStringLiteral("Qt"), msg);
 
+    // Qt's own Windows font backend, probing a legacy system font ("Fixedsys") while resolving a monospace-style hint: a harmless
+    // fallback-candidate miss (the font that actually gets used renders fine), not anything wrong in the app - logged above, but never
+    // a toast, so it stops looking like an application error.
+    if (msg.contains(QLatin1String("DirectWrite: CreateFontFaceFromHDC")))
+        return;
+
     forwarding = true;
     EventBus::instance().publish(isQml ? QStringLiteral("log.qml") : topic, QVariantMap{
         {QStringLiteral("level"), level},

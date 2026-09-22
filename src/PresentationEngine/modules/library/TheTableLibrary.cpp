@@ -6,7 +6,15 @@
 #include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <cstdio>
+#include <cstring>
+#include <functional>
+#include <map>
+#include <unordered_map>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -16,6 +24,7 @@ namespace {
 
 constexpr const char* kModule = "TheTableLibrary";
 constexpr ErrorCode kTableErr = 2650;   // the Library band's Table slot
+constexpr const char* kConvertedVersion = "v1";   // bump when the conversion changes: text kept by an older one is then made again
 
 using J = json::Value;
 
@@ -65,16 +74,15 @@ SermonName NameFromFileName(const std::string& fileName) {
     if (dot != std::string::npos) base = base.substr(0, dot);
     base = Trim(base);
 
-    // Year: a 4-digit token at the start OR in the parent path
-    // ("downloads/1953/53_0217_X.pdf"). Scan path segments.
+    // Year: a 4-digit folder in the path ("downloads/1953/53_0217_X.pdf"). The one nearest the file wins, so a folder far above the
+    // sermons ("D:/2024/Sermons/...") cannot override it. Scan path segments.
     std::string path = fileName;
     size_t seg = 0;
     while ((seg = path.find_first_not_of("/\\", seg)) != std::string::npos) {
         const size_t end = path.find_first_of("/\\", seg);
         const std::string part = path.substr(seg, end == std::string::npos ? end : end - seg);
         if (part.size() == 4 && std::all_of(part.begin(), part.end(), ::isdigit)) {
-            n.year = part;
-            break;
+            n.year = part;   // keep scanning: a nearer folder replaces it
         }
         seg = end;
     }
@@ -96,24 +104,45 @@ SermonName NameFromFileName(const std::string& fileName) {
     std::replace(title.begin(), title.end(), '_', ' ');
     n.title = Trim(Collapse(title));
     if (n.title.empty()) n.title = base;
-    // The numeric code before the title ("0217") is useful in the reference —
-    // re-attach it so chapter titles sort naturally: "0217 Only Believe".
-    const size_t codeEnd = base.find('_', t == 0 ? base.size() : 0);
-    (void)codeEnd;
     return n;
 }
 
-// The leading numeric code ("0217") kept for the chapter title.
+// The leading numeric code ("0217") kept for the chapter title. A leading
+// 2-digit group ("53_") is the year prefix, not the code — skip it.
 std::string CodeOf(const std::string& fileName) {
     std::string base = fileName;
     const size_t slash = base.find_last_of("/\\");
     if (slash != std::string::npos) base = base.substr(slash + 1);
     size_t b = base.find_first_not_of(" \t");
-    std::string code;
+    if (b == std::string::npos) return {};
     size_t i = b;
     while (i < base.size() && std::isdigit(static_cast<unsigned char>(base[i]))) ++i;
-    if (i > b && i < base.size() && base[i] == '_') code = base.substr(b, i - b);
-    return code;
+    if (i - b == 2 && i < base.size() && base[i] == '_') {
+        b = i + 1;                       // "53_" — the yy year prefix; the code follows
+        i = b;
+        while (i < base.size() && std::isdigit(static_cast<unsigned char>(base[i]))) ++i;
+    }
+    if (i > b && i < base.size() && base[i] == '_') return base.substr(b, i - b);
+    return {};
+}
+
+constexpr const char* kUnfiledYear = "Unfiled";
+
+// Where a sermon file goes: its year book and its chapter title ("0217 Only Believe" - the numeric code before the title is kept so
+// chapters sort naturally). ImportSermon and the folder import's duplicate check both ask this, so they cannot disagree about what
+// "the same sermon" is.
+struct Placement {
+    std::string year;
+    std::string title;
+};
+
+Placement PlacementOf(const std::string& fileName) {
+    const SermonName parsed = NameFromFileName(fileName);
+    Placement p;
+    p.year = parsed.year.empty() ? std::string(kUnfiledYear) : parsed.year;
+    const std::string code = CodeOf(fileName);
+    p.title = (!code.empty() && !parsed.title.starts_with(code)) ? code + " " + parsed.title : parsed.title;
+    return p;
 }
 
 // ---------------------------------------------------------------------------
@@ -150,81 +179,809 @@ std::string UnescapePdfString(const std::string& raw) {
     return out;
 }
 
-// Finds the CONTENTS stream of a page object and appends its decoded text ops.
-// Simple parser: for every "stream ... endstream" whose dict says FlateDecode,
-// inflate and scan; PDFs in the wild (and these sermons) put text ops only in
-// page content streams, so scanning every flate stream for text operators is
-// both simpler and more robust than object-graph walking.
+// ---- PDF text, the way a reader gets it -------------------------------------------------------------------------------------------
+// A page's text is not in its strings as they are: a font with an Identity-H encoding writes glyph numbers (often as hex, <0012003A>),
+// and the font's /ToUnicode table says which character each number is. So: read the objects, find the pages in order, load the fonts
+// each page uses (and their ToUnicode tables), then read the page's content stream with those fonts. Line breaks and paragraph breaks
+// come from where the lines sit on the page.
+
 bool LooksLikeTextOps(const std::string& s) {
     return s.find("Tj") != std::string::npos || s.find("TJ") != std::string::npos;
 }
 
-std::string TextFromPdf(const std::string& data) {
-    std::string ops;
-    const std::string kStream = "stream";
-    const std::string kEnd = "endstream";
-    size_t pos = 0;
-    while ((pos = data.find(kStream, pos)) != std::string::npos) {
-        // The dict just before "stream" decides the filter.
-        const size_t dictStart = data.rfind("<<", pos);
-        const std::string dict =
-            dictStart == std::string::npos ? "" : data.substr(dictStart, pos - dictStart);
-        pos += kStream.size();
-        if (pos < data.size() && data[pos] == '\r') ++pos;
-        if (pos < data.size() && data[pos] == '\n') ++pos;
-        const size_t end = data.find(kEnd, pos);
-        if (end == std::string::npos) break;
-        const std::string raw = data.substr(pos, end - pos);
-        pos = end + kEnd.size();
+bool IsPdfSpace(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\0'; }
+bool IsPdfDelim(char c) { return c == '(' || c == ')' || c == '<' || c == '>' || c == '[' || c == ']' || c == '{' || c == '}' || c == '/' || c == '%'; }
 
-        std::string body;
-        if (dict.find("FlateDecode") != std::string::npos) {
-            content::DeflateCompressor deflate;
-            auto out = deflate.Decompress(
-                reinterpret_cast<const uint8_t*>(raw.data()), raw.size());
-            if (!out.ok()) continue;
-            body.assign(out.value().begin(), out.value().end());
-        } else if (dict.find("Filter") == std::string::npos) {
-            body = raw;   // uncompressed stream
-        } else {
-            continue;     // encoded with something we do not decode (images etc.)
-        }
-        if (LooksLikeTextOps(body)) ops += body;
+void AppendCodepoint(std::string& out, uint32_t cp) {
+    if (cp < 0x80) out += static_cast<char>(cp);
+    else if (cp < 0x800) { out += static_cast<char>(0xC0 | (cp >> 6)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+    else if (cp < 0x10000) { out += static_cast<char>(0xE0 | (cp >> 12)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+    else { out += static_cast<char>(0xF0 | (cp >> 18)); out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+}
+
+// Windows-1252 (what a font without a ToUnicode table means by its one-byte codes) -> UTF-8.
+std::string Cp1252ToUtf8(const std::string& bytes) {
+    static const uint32_t high[32] = { 0x20AC, 0x81, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x8D, 0x017D, 0x8F,
+                                       0x90, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x9D, 0x017E, 0x0178 };
+    std::string out;
+    for (unsigned char c : bytes) {
+        if (c < 0x80) { if (c >= 0x20 || c == '\n' || c == '\t') out += static_cast<char>(c); }
+        else AppendCodepoint(out, c < 0xA0 ? high[c - 0x80] : c);
     }
-    if (ops.empty()) return {};
+    return out;
+}
 
-    // Harvest the strings of text-showing operators. A '(' ... ') Tj' run is a
-    // text run; newlines in the source (Td/TD/T*) become paragraph breaks.
+// --- objects: "N G obj <<dict>> stream ... endstream endobj" ---
+struct PdfObject {
+    std::string dict;      // the text of the object (up to its stream)
+    std::string stream;    // the stream, still filtered
+    bool hasStream = false;
+};
+using PdfObjects = std::map<int, PdfObject>;
+
+// The whole number that ends just before `end` (spaces skipped); false when there is none.
+bool NumberBefore(const std::string& d, size_t end, int& value, size_t& start) {
+    size_t e = end;
+    while (e > 0 && IsPdfSpace(d[e - 1])) --e;
+    size_t s = e;
+    while (s > 0 && std::isdigit(static_cast<unsigned char>(d[s - 1]))) --s;
+    if (s == e || e - s > 9) return false;
+    value = std::stoi(d.substr(s, e - s));
+    start = s;
+    return true;
+}
+
+std::string DecodeStream(const PdfObject& o);   // (defined below; ReadObjects needs it to unpack compressed object streams)
+size_t FindKey(const std::string& dict, const std::string& key, size_t from = 0);   // (defined below too)
+
+// "N" at a key ("/N 53"); `fallback` when the key is missing or not a plain number.
+int IntAfter(const std::string& dict, const char* key, int fallback) {
+    const size_t k = FindKey(dict, key);
+    if (k == std::string::npos) return fallback;
+    const char* p = dict.c_str() + k + std::strlen(key);
+    char* end = nullptr;
+    const long v = std::strtol(p, &end, 10);
+    return end != p ? static_cast<int>(v) : fallback;
+}
+
+// Compressed object streams (PDF 1.5+, "/Type /ObjStm"): many of a PDF's smaller objects - font dictionaries and their ToUnicode
+// tables among them - packed into one compressed stream instead of each appearing as its own "N 0 obj", which the scan above cannot
+// see at all. Its own header (right after decompressing) is N pairs of "object-number offset-from-First"; each object's dictionary runs
+// from its offset to the next one's (or the stream's end). None of them carries a stream of its own - the format does not allow it.
+void ReadObjectStreams(PdfObjects& out) {
+    std::vector<int> containers;
+    for (const auto& [num, obj] : out)
+        if (obj.hasStream && obj.dict.find("/ObjStm") != std::string::npos) containers.push_back(num);
+    for (const int num : containers) {
+        const std::string data = DecodeStream(out.at(num));
+        if (data.empty()) continue;
+        const std::string& dict = out.at(num).dict;
+        const int n = IntAfter(dict, "/N", 0);
+        const int first = IntAfter(dict, "/First", 0);
+        if (n <= 0 || first <= 0 || static_cast<size_t>(first) > data.size()) continue;
+        std::vector<std::pair<int, int>> header;   // (object number, offset)
+        size_t p = 0;
+        for (int i = 0; i < n; ++i) {
+            while (p < data.size() && IsPdfSpace(data[p])) ++p;
+            const size_t b1 = p;
+            while (p < data.size() && std::isdigit(static_cast<unsigned char>(data[p]))) ++p;
+            if (p == b1) break;
+            const int objNum = std::stoi(data.substr(b1, p - b1));
+            while (p < data.size() && IsPdfSpace(data[p])) ++p;
+            const size_t b2 = p;
+            while (p < data.size() && std::isdigit(static_cast<unsigned char>(data[p]))) ++p;
+            if (p == b2) break;
+            header.push_back({ objNum, std::stoi(data.substr(b2, p - b2)) });
+        }
+        for (size_t i = 0; i < header.size(); ++i) {
+            const size_t from = static_cast<size_t>(first) + header[i].second;
+            const size_t to = i + 1 < header.size() ? static_cast<size_t>(first) + header[i + 1].second : data.size();
+            if (from >= data.size() || to < from) continue;
+            // An object already found directly (an updated later revision) wins over the packed copy.
+            if (out.count(header[i].first)) continue;
+            PdfObject obj;
+            obj.dict = data.substr(from, std::min(to, data.size()) - from);
+            out[header[i].first] = std::move(obj);
+        }
+    }
+}
+
+PdfObjects ReadObjects(const std::string& d) {
+    PdfObjects out;
+    size_t pos = 0;
+    while ((pos = d.find("obj", pos)) != std::string::npos) {
+        const size_t at = pos;
+        pos += 3;
+        if (at == 0 || !IsPdfSpace(d[at - 1])) continue;              // "endobj" and other words that end in obj
+        int gen = 0, num = 0;
+        size_t genStart = 0, numStart = 0;
+        if (!NumberBefore(d, at, gen, genStart) || !NumberBefore(d, genStart, num, numStart)) continue;
+        const size_t bodyStart = at + 3;
+        size_t endobj = d.find("endobj", bodyStart);
+        if (endobj == std::string::npos) endobj = d.size();
+        const std::string body = d.substr(bodyStart, endobj - bodyStart);
+        pos = endobj + 6;
+
+        PdfObject obj;
+        size_t sp = body.find("stream");
+        while (sp != std::string::npos) {                             // the "stream" keyword follows the dictionary's ">>"
+            size_t k = sp;
+            while (k > 0 && IsPdfSpace(body[k - 1])) --k;
+            if (k >= 2 && body[k - 1] == '>' && body[k - 2] == '>') break;
+            sp = body.find("stream", sp + 6);
+        }
+        if (sp != std::string::npos) {
+            obj.dict = body.substr(0, sp);
+            size_t from = sp + 6;
+            if (from < body.size() && body[from] == '\r') ++from;
+            if (from < body.size() && body[from] == '\n') ++from;
+            size_t to = body.rfind("endstream");
+            if (to == std::string::npos || to < from) to = body.size();
+            obj.stream = body.substr(from, to - from);
+            obj.hasStream = true;
+        } else {
+            obj.dict = body;
+        }
+        out[num] = std::move(obj);
+    }
+    ReadObjectStreams(out);
+    return out;
+}
+
+std::string DecodeStream(const PdfObject& o) {
+    if (!o.hasStream) return {};
+    if (o.dict.find("FlateDecode") != std::string::npos) {
+        content::DeflateCompressor deflate;
+        auto out = deflate.Decompress(reinterpret_cast<const uint8_t*>(o.stream.data()), o.stream.size());
+        if (!out.ok()) return {};
+        return std::string(out.value().begin(), out.value().end());
+    }
+    if (o.dict.find("Filter") == std::string::npos) return o.stream;
+    return {};                                                        // a filter we do not read (images, LZW...)
+}
+
+// --- dictionary text helpers ---
+size_t FindKey(const std::string& dict, const std::string& key, size_t from) {
+    size_t k = from;
+    while ((k = dict.find(key, k)) != std::string::npos) {
+        const size_t after = k + key.size();
+        if (after >= dict.size() || !std::isalnum(static_cast<unsigned char>(dict[after]))) return k;   // "/Page" is not "/Pages"
+        k = after;
+    }
+    return std::string::npos;
+}
+
+// Reads "N G R" at `i`; returns N (0 when it is not a reference) and moves `i` past it.
+int ReadRef(const std::string& s, size_t& i) {
+    size_t j = i;
+    auto skip = [&] { while (j < s.size() && IsPdfSpace(s[j])) ++j; };
+    auto number = [&](int& v) {
+        skip();
+        const size_t b = j;
+        while (j < s.size() && std::isdigit(static_cast<unsigned char>(s[j]))) ++j;
+        if (j == b || j - b > 9) return false;
+        v = std::stoi(s.substr(b, j - b));
+        return true;
+    };
+    int n = 0, g = 0;
+    if (!number(n) || !number(g)) return 0;
+    skip();
+    if (j < s.size() && s[j] == 'R') { i = j + 1; return n; }
+    return 0;
+}
+
+std::vector<int> RefsAfter(const std::string& dict, const std::string& key) {
+    std::vector<int> out;
+    const size_t k = FindKey(dict, key);
+    if (k == std::string::npos) return out;
+    size_t i = k + key.size();
+    while (i < dict.size() && IsPdfSpace(dict[i])) ++i;
+    if (i < dict.size() && dict[i] == '[') {
+        ++i;
+        while (i < dict.size() && dict[i] != ']') {
+            const int r = ReadRef(dict, i);
+            if (r) out.push_back(r);
+            else ++i;
+        }
+    } else if (const int r = ReadRef(dict, i)) {
+        out.push_back(r);
+    }
+    return out;
+}
+
+// The "<< ... >>" that starts at `from` (nested ones included).
+std::string BalancedDict(const std::string& s, size_t from) {
+    int depth = 0;
+    for (size_t i = from; i + 1 < s.size(); ++i) {
+        if (s[i] == '<' && s[i + 1] == '<') { ++depth; ++i; }
+        else if (s[i] == '>' && s[i + 1] == '>') { --depth; ++i; if (depth == 0) return s.substr(from, i + 1 - from); }
+    }
+    return {};
+}
+
+// What a key holds when it holds a dictionary - inline, or an object it points to.
+std::string DictAfter(const std::string& dict, const std::string& key, const PdfObjects& objs) {
+    const size_t k = FindKey(dict, key);
+    if (k == std::string::npos) return {};
+    size_t i = k + key.size();
+    while (i < dict.size() && IsPdfSpace(dict[i])) ++i;
+    if (i + 1 < dict.size() && dict[i] == '<' && dict[i + 1] == '<') return BalancedDict(dict, i);
+    if (const int r = ReadRef(dict, i)) {
+        auto it = objs.find(r);
+        if (it != objs.end()) return it->second.dict;
+    }
+    return {};
+}
+
+// --- fonts and their ToUnicode tables ---
+struct PdfFont {
+    bool twoByte = false;                                   // a Type0 (composite) font: its codes are glyph numbers
+    int codeBytes = 0;                                      // from the ToUnicode table's code space (0 = not stated)
+    bool hasMap = false;
+    bool hasSpace = false;                                  // the table maps some code to a space: word spaces are real glyphs
+    std::unordered_map<uint32_t, std::string> toUnicode;   // code -> UTF-8
+    // Some PDFs, with no ToUnicode table at all, print correctly (the font's own glyphs are just not at their normal codes) but every
+    // raw code is off by the same constant from the real character - see DetectShift. 0 means: no shift found, read the bytes as they are.
+    int shift = 0;
+};
+
+std::string Utf16ToUtf8(const std::vector<uint32_t>& units) {
+    std::string out;
+    for (size_t k = 0; k < units.size(); ++k) {
+        uint32_t u = units[k];
+        if (u >= 0xD800 && u < 0xDC00 && k + 1 < units.size() && units[k + 1] >= 0xDC00 && units[k + 1] < 0xE000) {
+            u = 0x10000 + ((u - 0xD800) << 10) + (units[k + 1] - 0xDC00);
+            ++k;
+        }
+        AppendCodepoint(out, u);
+    }
+    return out;
+}
+
+std::vector<uint32_t> HexUnits(const std::string& hex) {
+    std::vector<uint32_t> units;
+    for (size_t i = 0; i + 4 <= hex.size(); i += 4) units.push_back(static_cast<uint32_t>(std::stoul(hex.substr(i, 4), nullptr, 16)));
+    return units;
+}
+
+void ParseToUnicode(const std::string& cmap, PdfFont& font) {
+    struct Tok { enum Kind { Hex, Word, Open, Close } kind; std::string text; };
+    std::vector<Tok> toks;
+    for (size_t i = 0; i < cmap.size();) {
+        const char c = cmap[i];
+        if (IsPdfSpace(c)) { ++i; continue; }
+        if (c == '<' && i + 1 < cmap.size() && cmap[i + 1] != '<') {
+            std::string hex;
+            for (++i; i < cmap.size() && cmap[i] != '>'; ++i)
+                if (std::isxdigit(static_cast<unsigned char>(cmap[i]))) hex += cmap[i];
+            ++i;
+            toks.push_back({ Tok::Hex, hex });
+        } else if (c == '[') { toks.push_back({ Tok::Open, "" }); ++i; }
+        else if (c == ']') { toks.push_back({ Tok::Close, "" }); ++i; }
+        else if (c == '%') { while (i < cmap.size() && cmap[i] != '\n') ++i; }
+        else if (c == '<' || c == '>' || c == '(' || c == ')' || c == '/') {   // a dictionary, string or name: not part of the mapping
+            if (c == '/') { ++i; while (i < cmap.size() && !IsPdfSpace(cmap[i]) && !IsPdfDelim(cmap[i])) ++i; }
+            else ++i;
+        } else {
+            const size_t b = i;
+            while (i < cmap.size() && !IsPdfSpace(cmap[i]) && !IsPdfDelim(cmap[i])) ++i;
+            toks.push_back({ Tok::Word, cmap.substr(b, i - b) });
+        }
+    }
+    auto code = [](const std::string& hex) { return static_cast<uint32_t>(std::stoul(hex.empty() ? "0" : hex.substr(0, 8), nullptr, 16)); };
+    enum { None, Space, Char, Range } mode = None;
+    for (size_t t = 0; t < toks.size(); ++t) {
+        const Tok& tk = toks[t];
+        if (tk.kind == Tok::Word) {
+            if (tk.text == "begincodespacerange") mode = Space;
+            else if (tk.text == "beginbfchar") mode = Char;
+            else if (tk.text == "beginbfrange") mode = Range;
+            else if (tk.text.rfind("end", 0) == 0) mode = None;
+            continue;
+        }
+        if (tk.kind != Tok::Hex) continue;
+        if (mode == Space) {
+            font.codeBytes = std::max(font.codeBytes, static_cast<int>(tk.text.size() / 2));
+            ++t;   // (the range's other end)
+        } else if (mode == Char && t + 1 < toks.size() && toks[t + 1].kind == Tok::Hex) {
+            font.toUnicode[code(tk.text)] = Utf16ToUtf8(HexUnits(toks[t + 1].text));
+            ++t;
+        } else if (mode == Range && t + 2 < toks.size() && toks[t + 1].kind == Tok::Hex) {
+            const uint32_t lo = code(tk.text), hi = code(toks[t + 1].text);
+            if (toks[t + 2].kind == Tok::Open) {              // [<d1> <d2> ...]: one destination for each code
+                size_t k = t + 3;
+                uint32_t c = lo;
+                for (; k < toks.size() && toks[k].kind == Tok::Hex; ++k, ++c)
+                    if (c <= hi) font.toUnicode[c] = Utf16ToUtf8(HexUnits(toks[k].text));
+                t = k;                                       // (on the closing bracket)
+            } else if (toks[t + 2].kind == Tok::Hex && hi >= lo && hi - lo < 65536) {
+                std::vector<uint32_t> units = HexUnits(toks[t + 2].text);
+                if (!units.empty())
+                    for (uint32_t c = lo; c <= hi; ++c) {
+                        font.toUnicode[c] = Utf16ToUtf8(units);
+                        ++units.back();
+                    }
+                t += 2;
+            }
+        }
+    }
+    font.hasMap = !font.toUnicode.empty();
+    for (const auto& kv : font.toUnicode)
+        if (kv.second == " ") { font.hasSpace = true; break; }
+}
+
+std::string DecodeShown(const PdfFont* font, const std::string& bytes) {
+    if (!font) return Cp1252ToUtf8(bytes);
+    if (font->hasMap) {
+        const int width = font->codeBytes > 0 ? font->codeBytes : (font->twoByte ? 2 : 1);
+        std::string out;
+        for (size_t i = 0; i + width <= bytes.size(); i += width) {
+            uint32_t c = 0;
+            for (int k = 0; k < width; ++k) c = (c << 8) | static_cast<unsigned char>(bytes[i + k]);
+            auto it = font->toUnicode.find(c);
+            if (it != font->toUnicode.end()) out += it->second;
+            else if (width == 1 && c >= 0x20 && c < 0x7F) out += static_cast<char>(c);
+        }
+        return out;
+    }
+    if (font->twoByte) return {};                            // glyph numbers with no table: nothing to read
+    if (font->shift == 0) return Cp1252ToUtf8(bytes);
+    std::string shown(bytes.size(), '\0');
+    for (size_t i = 0; i < bytes.size(); ++i)
+        shown[i] = static_cast<char>((static_cast<unsigned char>(bytes[i]) + font->shift + 256) % 256);
+    return Cp1252ToUtf8(shown);
+}
+
+// --- a page's content stream ---
+struct PdfLine {
+    double y = 0;
     std::string text;
-    bool lineStart = true;
-    for (size_t i = 0; i < ops.size(); ++i) {
-        if (ops[i] == '(') {
-            // String literal (balanced, escapes).
+};
+using FontTable = std::unordered_map<std::string, PdfFont*>;
+
+// Some sermon PDFs display correctly but carry no ToUnicode table at all: their font's own codes are the real character's ASCII code
+// plus one constant that stays the same for every letter, space and mark that font shows anywhere in the document - a copy-paste
+// deterrent, not a real encoding. It is found by trying every possible shift (0..255) and keeping the one whose result looks the most
+// like English prose - mostly lower-case letters and spaces, since those two dominate ordinary text far more than any other bytes do -
+// rather than assuming which raw byte is the space (the space is not always this font's single commonest byte). Too little text, or no
+// shift that reads convincingly as prose, is not trusted (0: read the bytes as they already are).
+int DetectShift(const std::array<int, 256>& hist) {
+    int total = 0;
+    for (int b = 0; b < 256; ++b) total += hist[b];
+    if (total < 200) return 0;
+    int bestShift = 0, bestScore = -1;
+    for (int shift = 1; shift < 256; ++shift) {
+        int score = 0;
+        for (int b = 0; b < 256; ++b) {
+            if (hist[b] == 0) continue;
+            const int shown = (b + shift) % 256;
+            if (shown == ' ' || (shown >= 'a' && shown <= 'z')) score += hist[b];
+        }
+        if (score > bestScore) { bestScore = score; bestShift = shift; }
+    }
+    return bestScore * 100 >= total * 55 ? bestShift : 0;
+}
+
+// A pass over a content stream that reads nothing but which font is showing which raw bytes (Tf switches the current font; a string
+// operand's bytes, still undecoded, are tallied against it) - everything else (positioning, other operators) is skipped over. Used
+// before the real read, to find each no-ToUnicode font's shift (see DetectShift) from its own text across the whole document.
+void CollectFontBytes(const std::string& ops, const FontTable& fonts, std::unordered_map<PdfFont*, std::array<int, 256>>& hist) {
+    PdfFont* font = nullptr;
+    std::string pendingName;
+    for (size_t i = 0; i < ops.size();) {
+        const char c = ops[i];
+        if (IsPdfSpace(c)) { ++i; continue; }
+        if (c == '%') { while (i < ops.size() && ops[i] != '\n' && ops[i] != '\r') ++i; continue; }
+        if (c == '(') {
+            int depth = 1;
+            const bool tally = font && !font->hasMap && !font->twoByte;
+            for (++i; i < ops.size(); ++i) {
+                if (ops[i] == '\\' && i + 1 < ops.size()) { ++i; continue; }
+                if (ops[i] == '(') ++depth;
+                else if (ops[i] == ')' && --depth == 0) { ++i; break; }
+                else if (tally) ++hist[font][static_cast<unsigned char>(ops[i])];
+            }
+            continue;
+        }
+        if (c == '<' && i + 1 < ops.size() && ops[i + 1] == '<') { i += 2; continue; }
+        if (c == '<') {
+            std::string hex;
+            for (++i; i < ops.size() && ops[i] != '>'; ++i)
+                if (std::isxdigit(static_cast<unsigned char>(ops[i]))) hex += ops[i];
+            if (i < ops.size()) ++i;
+            if (hex.size() % 2) hex += '0';
+            if (font && !font->hasMap && !font->twoByte)
+                for (size_t k = 0; k + 2 <= hex.size(); k += 2)
+                    ++hist[font][static_cast<unsigned char>(std::stoi(hex.substr(k, 2), nullptr, 16))];
+            continue;
+        }
+        if (c == '>' || c == '[' || c == ']') { ++i; continue; }
+        if (c == '/') {
+            const size_t b = ++i;
+            while (i < ops.size() && !IsPdfSpace(ops[i]) && !IsPdfDelim(ops[i])) ++i;
+            pendingName = ops.substr(b, i - b);
+            continue;
+        }
+        if (std::isdigit(static_cast<unsigned char>(c)) || c == '-' || c == '+' || c == '.') {
+            while (i < ops.size() && (std::isdigit(static_cast<unsigned char>(ops[i])) || ops[i] == '-' || ops[i] == '+' || ops[i] == '.')) ++i;
+            continue;
+        }
+        const size_t b = i;
+        if (c == '\'' || c == '"') ++i;
+        else while (i < ops.size() && !IsPdfSpace(ops[i]) && !IsPdfDelim(ops[i])) ++i;
+        const std::string op = ops.substr(b, i - b);
+        if (op == "Tf" && !pendingName.empty()) {
+            auto it = fonts.find(pendingName);
+            font = it != fonts.end() ? it->second : nullptr;
+        }
+    }
+}
+
+struct Operand {
+    enum Kind { Num, Str, Name, Arr } kind = Num;
+    double num = 0;
+    std::string str;
+    std::vector<Operand> items;
+};
+
+void ReadContent(const std::string& ops, const FontTable& fonts, std::vector<PdfLine>& lines) {
+    const PdfFont* font = nullptr;
+    double ly = 0, leading = 0, curY = 0;
+    bool haveLine = false;
+    std::string cur;
+    auto flush = [&] { if (!cur.empty()) lines.push_back({ curY, cur }); cur.clear(); };
+    auto moveTo = [&](double y) {
+        if (!haveLine || std::fabs(y - curY) > 0.5) { flush(); curY = y; haveLine = true; }
+    };
+    auto show = [&](const std::string& bytes) { moveTo(ly); cur += DecodeShown(font, bytes); };
+
+    std::vector<Operand> stack;
+    std::vector<size_t> arrays;   // where each open [ started in the stack
+    for (size_t i = 0; i < ops.size();) {
+        const char c = ops[i];
+        if (IsPdfSpace(c)) { ++i; continue; }
+        if (c == '%') { while (i < ops.size() && ops[i] != '\n' && ops[i] != '\r') ++i; continue; }
+        if (c == '(') {
             std::string raw;
             int depth = 1;
-            ++i;
-            for (; i < ops.size() && depth > 0; ++i) {
-                if (ops[i] == '\\' && i + 1 < ops.size()) {
-                    raw.push_back(ops[i]);
-                    raw.push_back(ops[++i]);
-                    continue;
-                }
+            for (++i; i < ops.size(); ++i) {
+                if (ops[i] == '\\' && i + 1 < ops.size()) { raw += ops[i]; raw += ops[++i]; continue; }
                 if (ops[i] == '(') ++depth;
-                else if (ops[i] == ')') {
-                    --depth;
-                    if (depth == 0) break;
-                }
-                raw.push_back(ops[i]);
+                else if (ops[i] == ')' && --depth == 0) break;
+                raw += ops[i];
             }
-            text += UnescapePdfString(raw);
-            lineStart = false;
-        } else if (ops.compare(i, 2, "Td") == 0 || ops.compare(i, 2, "TD") == 0 ||
-                   ops.compare(i, 2, "T*") == 0 || ops.compare(i, 2, "ET") == 0) {
-            if (!lineStart) text += "\n";
-            lineStart = true;
+            ++i;
+            Operand o; o.kind = Operand::Str; o.str = UnescapePdfString(raw);
+            stack.push_back(std::move(o));
+            continue;
+        }
+        if (c == '<') {
+            if (i + 1 < ops.size() && ops[i + 1] == '<') { i += 2; continue; }
+            std::string hex;
+            for (++i; i < ops.size() && ops[i] != '>'; ++i)
+                if (std::isxdigit(static_cast<unsigned char>(ops[i]))) hex += ops[i];
+            ++i;
+            if (hex.size() % 2) hex += '0';
+            Operand o; o.kind = Operand::Str;
+            for (size_t k = 0; k + 2 <= hex.size(); k += 2) o.str += static_cast<char>(std::stoi(hex.substr(k, 2), nullptr, 16));
+            stack.push_back(std::move(o));
+            continue;
+        }
+        if (c == '>') { ++i; continue; }
+        if (c == '[') { arrays.push_back(stack.size()); ++i; continue; }
+        if (c == ']') {
+            Operand arr; arr.kind = Operand::Arr;
+            const size_t from = arrays.empty() ? stack.size() : arrays.back();
+            if (!arrays.empty()) arrays.pop_back();
+            for (size_t k = from; k < stack.size(); ++k) arr.items.push_back(std::move(stack[k]));
+            stack.resize(std::min(from, stack.size()));
+            stack.push_back(std::move(arr));
+            ++i;
+            continue;
+        }
+        if (c == '/') {
+            const size_t b = ++i;
+            while (i < ops.size() && !IsPdfSpace(ops[i]) && !IsPdfDelim(ops[i])) ++i;
+            Operand o; o.kind = Operand::Name; o.str = ops.substr(b, i - b);
+            stack.push_back(std::move(o));
+            continue;
+        }
+        if (std::isdigit(static_cast<unsigned char>(c)) || c == '-' || c == '+' || c == '.') {
+            const size_t b = i;
+            while (i < ops.size() && (std::isdigit(static_cast<unsigned char>(ops[i])) || ops[i] == '-' || ops[i] == '+' || ops[i] == '.')) ++i;
+            Operand o; o.num = std::atof(ops.substr(b, i - b).c_str());
+            stack.push_back(std::move(o));
+            continue;
+        }
+        // an operator
+        size_t b = i;
+        if (c == '\'' || c == '"') ++i;
+        else while (i < ops.size() && !IsPdfSpace(ops[i]) && !IsPdfDelim(ops[i])) ++i;
+        const std::string op = ops.substr(b, i - b);
+        auto num = [&](size_t fromEnd) { return stack.size() > fromEnd ? stack[stack.size() - 1 - fromEnd].num : 0.0; };
+        auto str = [&]() -> const std::string* { return !stack.empty() && stack.back().kind == Operand::Str ? &stack.back().str : nullptr; };
+
+        if (op == "BT") { ly = 0; }
+        else if (op == "Tf") {
+            if (stack.size() >= 2 && stack[stack.size() - 2].kind == Operand::Name) {
+                auto it = fonts.find(stack[stack.size() - 2].str);
+                font = it != fonts.end() ? it->second : nullptr;
+            }
+        }
+        else if (op == "TL") { leading = num(0); }
+        else if (op == "Td") { ly += num(0); moveTo(ly); }
+        else if (op == "TD") { leading = -num(0); ly += num(0); moveTo(ly); }
+        else if (op == "Tm") { ly = num(0); moveTo(ly); }
+        else if (op == "T*") { ly -= leading; moveTo(ly); }
+        else if (op == "Tj") { if (const std::string* s = str()) show(*s); }
+        else if (op == "'" || op == "\"") { ly -= leading; moveTo(ly); if (const std::string* s = str()) show(*s); }
+        else if (op == "TJ") {
+            if (!stack.empty() && stack.back().kind == Operand::Arr)
+                for (const Operand& e : stack.back().items) {
+                    if (e.kind == Operand::Str) show(e.str);
+                    else if (e.kind == Operand::Num && e.num < -200.0 && !cur.empty() && cur.back() != ' ' && !(font && font->hasMap && font->hasSpace))
+                        cur += ' ';   // a gap the size of a word space (when spaces are not real glyphs; otherwise it is tracking)
+                }
+        }
+        stack.clear();
+        arrays.clear();
+    }
+    flush();
+}
+
+// The pages' lines -> text, paragraphs separated by a blank line. A paragraph starts where the line spacing opens up, or at a line that
+// begins with a paragraph number ("75 Now, I want you to notice...") after a line that ended a sentence.
+bool StartsWithParagraphNumber(const std::string& t) {
+    size_t i = 0;
+    while (i < t.size() && std::isdigit(static_cast<unsigned char>(t[i]))) ++i;
+    return i >= 1 && i <= 3 && i + 1 < t.size() && t[i] == ' ' && !std::isdigit(static_cast<unsigned char>(t[i + 1]));
+}
+
+bool EndsSentence(const std::string& t) {
+    if (t.empty()) return true;
+    const char c = t.back();
+    if (c == '.' || c == '?' || c == '!' || c == ':' || c == ';' || c == '"' || c == ')') return true;
+    return t.size() >= 3 && (t.compare(t.size() - 3, 3, "\xE2\x80\x9D") == 0 || t.compare(t.size() - 3, 3, "\xE2\x80\x99") == 0);   // ” ’
+}
+
+// The page's visible box (CropBox, else MediaBox) as { x0, y0, x1, y1 }; false when the page does not say.
+bool PageBox(const std::string& dict, double box[4]) {
+    for (const char* key : { "/CropBox", "/MediaBox" }) {
+        const size_t k = FindKey(dict, key);
+        if (k == std::string::npos) continue;
+        const size_t open = dict.find('[', k);
+        if (open == std::string::npos) continue;
+        const char* p = dict.c_str() + open + 1;
+        char* end = nullptr;
+        int n = 0;
+        for (; n < 4; ++n) {
+            box[n] = std::strtod(p, &end);
+            if (end == p) break;
+            p = end;
+        }
+        if (n == 4) return true;
+    }
+    return false;
+}
+
+// Em / en / thin / no-break spaces (a paragraph number is often followed by an em space) become plain spaces.
+std::string NormalizeSpaces(std::string s) {
+    for (const char* sp : { "\xE2\x80\x83", "\xE2\x80\x82", "\xE2\x80\x89", "\xC2\xA0" })   // em, en, thin, no-break
+        for (size_t at = 0; (at = s.find(sp, at)) != std::string::npos;) s.replace(at, std::strlen(sp), " ");
+    return s;
+}
+
+bool StartsLowercase(const std::string& t) { return !t.empty() && t[0] >= 'a' && t[0] <= 'z'; }
+
+// Removes what is printed on the page but is not the sermon: a bare page number, and a running head or footer - a line that opens or
+// closes many pages with the same words ("The Spoken Word", "Adoption 1 60-0515E"). Digits and spacing do not count in the comparison,
+// so "Page 3" and "Page 4" are the same line.
+void DropRunningLines(std::vector<std::vector<PdfLine>>& pages) {
+    constexpr size_t kEdge = 2;   // lines from the top and from the bottom of a page that can be a head or foot
+    auto key = [](const std::string& raw) {
+        std::string k;
+        for (const unsigned char c : NormalizeSpaces(raw))
+            if (std::isalpha(c) || c >= 0x80) k += static_cast<char>(std::tolower(c));
+        return k;
+    };
+    // A bare number that is the page's own number (give or take a cover page or two). A paragraph number standing alone at the top of a
+    // page is a different number, so it stays.
+    auto pageNumber = [](const std::string& raw, size_t pageIndex) {
+        const std::string t = Trim(NormalizeSpaces(raw));
+        if (t.empty() || t.size() > 8) return false;
+        int value = 0;
+        bool digit = false;
+        for (const char c : t) {
+            if (std::isdigit(static_cast<unsigned char>(c))) { digit = true; value = value * 10 + (c - '0'); }
+            else if (c != '-' && c != ' ' && c != '[' && c != ']' && c != '(' && c != ')') return false;
+        }
+        return digit && std::abs(value - static_cast<int>(pageIndex + 1)) <= 2;
+    };
+    auto atEdge = [&](const std::vector<PdfLine>& lines, size_t i) { return i < kEdge || i + kEdge >= lines.size(); };
+
+    std::unordered_map<std::string, size_t> seen;   // on how many pages each edge line turns up
+    for (const std::vector<PdfLine>& lines : pages) {
+        std::vector<std::string> onThisPage;
+        for (size_t i = 0; i < lines.size(); ++i) {
+            if (!atEdge(lines, i)) continue;
+            const std::string k = key(lines[i].text);
+            if (k.size() < 3 || std::find(onThisPage.begin(), onThisPage.end(), k) != onThisPage.end()) continue;
+            onThisPage.push_back(k);
+            ++seen[k];
         }
     }
-    return text;
+    const size_t needed = std::max<size_t>(3, pages.size() * 3 / 10);
+    for (size_t p = 0; p < pages.size(); ++p) {
+        std::vector<PdfLine>& lines = pages[p];
+        std::vector<PdfLine> kept;
+        for (size_t i = 0; i < lines.size(); ++i) {
+            if (atEdge(lines, i)) {
+                if (pageNumber(lines[i].text, p)) continue;
+                if (pages.size() >= 4) {
+                    const auto it = seen.find(key(lines[i].text));
+                    if (it != seen.end() && it->second >= needed) continue;
+                }
+            }
+            kept.push_back(std::move(lines[i]));
+        }
+        lines = std::move(kept);
+    }
+    pages.erase(std::remove_if(pages.begin(), pages.end(), [](const std::vector<PdfLine>& l) { return l.empty(); }), pages.end());
+}
+
+std::string PagesToText(std::vector<std::vector<PdfLine>> pages) {
+    DropRunningLines(pages);
+    std::string out;
+    std::string prev;
+    std::string carry;   // a paragraph number seen on its own line, waiting for the line it belongs to
+    for (const std::vector<PdfLine>& lines : pages) {
+        std::vector<double> gaps;
+        for (size_t i = 1; i < lines.size(); ++i) {
+            const double g = std::fabs(lines[i - 1].y - lines[i].y);
+            if (g > 0.5) gaps.push_back(g);
+        }
+        std::sort(gaps.begin(), gaps.end());
+        const double normal = gaps.empty() ? 0.0 : gaps[gaps.size() / 2];
+        for (size_t i = 0; i < lines.size(); ++i) {
+            std::string text = Collapse(Trim(NormalizeSpaces(lines[i].text)));
+            if (!text.empty() && text[0] == '`') text = Trim(text.substr(1));   // a stray paragraph mark
+            if (text.empty()) continue;
+            // A paragraph number on a line of its own belongs to the line after it: in the middle of a sentence it is dropped, after a
+            // finished one it opens the next paragraph.
+            if (text.size() <= 3 && std::all_of(text.begin(), text.end(), [](unsigned char c) { return std::isdigit(c); })) {
+                if (out.empty() || EndsSentence(prev)) carry = text;
+                continue;
+            }
+            const double gap = i > 0 ? std::fabs(lines[i - 1].y - lines[i].y) : 0.0;
+            const bool byGap = !out.empty() && normal > 0 && gap > normal * 1.35;
+            bool byNumber = !out.empty() && StartsWithParagraphNumber(text) && EndsSentence(prev);
+            if (!carry.empty()) {
+                text = carry + " " + text;
+                carry.clear();
+                byNumber = !out.empty();
+            }
+            bool newParagraph = out.empty() || byGap || byNumber;
+            // A wider gap in the middle of a sentence is a change of font or size, not a paragraph. (A paragraph number that landed at the
+            // start of such a line - "2 from Georgia" - is not part of the sentence either.)
+            if (newParagraph && !byNumber && !out.empty() && !EndsSentence(prev)) {
+                size_t k = 0;
+                while (k < text.size() && std::isdigit(static_cast<unsigned char>(text[k]))) ++k;
+                const bool numbered = k >= 1 && k <= 3 && k + 1 < text.size() && text[k] == ' ';
+                const std::string body = numbered ? text.substr(k + 1) : text;
+                if (StartsLowercase(body)) { newParagraph = false; text = body; }
+            }
+            if (newParagraph) { if (!out.empty()) out += "\n\n"; }
+            else if (!out.empty() && out.back() != ' ') out += ' ';
+            out += text;
+            prev = text;
+        }
+    }
+    return out;
+}
+
+std::string TextFromPdf(const std::string& data) {
+    const PdfObjects objs = ReadObjects(data);
+    if (objs.empty()) return {};
+
+    // fonts, built once each
+    std::map<int, PdfFont> fontCache;
+    auto fontOf = [&](int num) -> PdfFont* {
+        auto cached = fontCache.find(num);
+        if (cached != fontCache.end()) return &cached->second;
+        auto it = objs.find(num);
+        if (it == objs.end()) return nullptr;
+        PdfFont f;
+        f.twoByte = it->second.dict.find("/Type0") != std::string::npos;
+        for (const int u : RefsAfter(it->second.dict, "/ToUnicode")) {
+            auto tu = objs.find(u);
+            if (tu != objs.end()) ParseToUnicode(DecodeStream(tu->second), f);
+        }
+        return &(fontCache[num] = std::move(f));
+    };
+
+    // The pages in their order: down the page tree from the root, or (when there is none) the page objects as they come.
+    std::vector<int> pageNums;
+    std::function<void(int, int)> walk = [&](int num, int depth) {
+        auto it = objs.find(num);
+        if (it == objs.end() || depth > 40) return;
+        const std::string& d = it->second.dict;
+        if (FindKey(d, "/Kids") != std::string::npos && d.find("/Pages") != std::string::npos) {
+            for (const int kid : RefsAfter(d, "/Kids")) walk(kid, depth + 1);
+        } else {
+            pageNums.push_back(num);
+        }
+    };
+    for (const auto& [num, obj] : objs)
+        if (FindKey(obj.dict, "/Kids") != std::string::npos && obj.dict.find("/Pages") != std::string::npos && FindKey(obj.dict, "/Parent") == std::string::npos)
+            walk(num, 0);
+    if (pageNums.empty())
+        for (const auto& [num, obj] : objs)
+            if (obj.dict.find("/Type") != std::string::npos && obj.dict.find("/Page") != std::string::npos && obj.dict.find("/Pages") == std::string::npos && FindKey(obj.dict, "/Contents") != std::string::npos)
+                pageNums.push_back(num);
+
+    // Pass one: every page's fonts and content stream, gathered once (so a font used on many pages is seen whole before anything is
+    // decoded), and - for a font with no ToUnicode table - a tally of the raw bytes it shows, to find its shift (see DetectShift).
+    struct PageWork {
+        FontTable fonts;
+        std::string ops;
+        int pageNum = 0;
+    };
+    std::vector<PageWork> work;
+    std::unordered_map<PdfFont*, std::array<int, 256>> hist;
+    auto gather = [&](int pageNum, const PdfObject& page) {
+        // Resources may be inherited from a parent
+        std::string resources = DictAfter(page.dict, "/Resources", objs);
+        for (int hop = 0, at = pageNum; resources.empty() && hop < 20; ++hop) {
+            const std::vector<int> parent = RefsAfter(objs.at(at).dict, "/Parent");
+            if (parent.empty() || !objs.count(parent.front())) break;
+            at = parent.front();
+            resources = DictAfter(objs.at(at).dict, "/Resources", objs);
+        }
+        PageWork pw;
+        pw.pageNum = pageNum;
+        const std::string fontDict = DictAfter(resources, "/Font", objs);
+        for (size_t i = 0; i < fontDict.size(); ++i) {
+            if (fontDict[i] != '/') continue;
+            const size_t b = ++i;
+            while (i < fontDict.size() && !IsPdfSpace(fontDict[i]) && !IsPdfDelim(fontDict[i])) ++i;
+            const std::string name = fontDict.substr(b, i - b);
+            size_t j = i;
+            if (const int ref = ReadRef(fontDict, j)) { pw.fonts[name] = fontOf(ref); i = j - 1; }   // (the loop's ++i lands on the next "/")
+        }
+        for (const int c : RefsAfter(page.dict, "/Contents")) {
+            auto it = objs.find(c);
+            if (it != objs.end()) { pw.ops += DecodeStream(it->second); pw.ops += '\n'; }
+        }
+        CollectFontBytes(pw.ops, pw.fonts, hist);
+        work.push_back(std::move(pw));
+    };
+    for (const int pageNum : pageNums) gather(pageNum, objs.at(pageNum));
+    for (auto& [font, tally] : hist) font->shift = DetectShift(tally);
+
+    // Pass two: the real read, with every font's shift (if any) already known.
+    std::vector<std::vector<PdfLine>> pages;
+    for (const PageWork& pw : work) {
+        const PdfObject& page = objs.at(pw.pageNum);
+        std::vector<PdfLine> lines;
+        ReadContent(pw.ops, pw.fonts, lines);
+        double box[4] = { 0, 0, 0, 0 };
+        if (PageBox(page.dict, box))
+            lines.erase(std::remove_if(lines.begin(), lines.end(), [&](const PdfLine& l) { return l.y < box[1] - 2 || l.y > box[3] + 2; }), lines.end());
+        if (!lines.empty()) pages.push_back(std::move(lines));
+    }
+
+    // No page tree to follow (a stripped-down PDF): read every stream that carries text operators, in simple encoding.
+    if (pages.empty()) {
+        for (const auto& [num, obj] : objs) {
+            const std::string body = DecodeStream(obj);
+            if (!body.empty() && LooksLikeTextOps(body)) {
+                std::vector<PdfLine> lines;
+                ReadContent(body, {}, lines);
+                if (!lines.empty()) pages.push_back(std::move(lines));
+            }
+        }
+    }
+    return PagesToText(pages);
 }
 
 // Plain-text / extracted-PDF text -> paragraphs (blank-line separated).
@@ -257,6 +1014,203 @@ std::vector<std::string> ParagraphsFromText(const std::string& text) {
     return out;
 }
 
+// The sermon PDFs' own stand-ins for punctuation, put right: "_" is a dash ("after_after", "words._Ed."), "^" is a sentence broken off
+// ("we will^Some of them"). Applied to text read from a PDF only.
+std::string TidyMarkers(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 16);
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '_') {
+            out += "\xE2\x80\x94";
+        } else if (s[i] == '^') {
+            while (!out.empty() && out.back() == ' ') out.pop_back();
+            out += "\xE2\x80\xA6";
+            if (i + 1 < s.size() && (std::isalnum(static_cast<unsigned char>(s[i + 1])) || static_cast<unsigned char>(s[i + 1]) >= 0x80)) out += ' ';
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+// "The Spoken Word" - the running head printed on nearly every page of these sermons (the series' own name, not something anyone
+// said) - some pages' header font has no space glyph at all, so it (and a glued page number, and sometimes a glued "IS") comes out as
+// one run of capitals with no spaces: "2THESPOKENWORD", "THESPOKENWORDIS". Struck wherever that exact run of capitals appears - never
+// the ordinary, mixed-case "the spoken Word" the sermons themselves say constantly, which this never matches.
+std::string StripSpokenWordBanner(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size();) {
+        if (i + 3 <= s.size() && s.compare(i, 3, "THE") == 0) {
+            size_t j = i + 3;
+            while (j < s.size() && s[j] == ' ') ++j;
+            if (j + 6 <= s.size() && s.compare(j, 6, "SPOKEN") == 0) {
+                size_t k = j + 6;
+                while (k < s.size() && s[k] == ' ') ++k;
+                if (k + 4 <= s.size() && s.compare(k, 4, "WORD") == 0) {
+                    size_t end = k + 4;
+                    if (end + 2 <= s.size() && s.compare(end, 2, "IS") == 0) end += 2;
+                    // a page number can land on either side, glued the same way
+                    while (end < s.size() && std::isdigit(static_cast<unsigned char>(s[end]))) ++end;
+                    while (!out.empty() && std::isdigit(static_cast<unsigned char>(out.back()))) out.pop_back();
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        out += s[i++];
+    }
+    return out;
+}
+
+// The early sermons label their paragraphs inline - "E-1", "E-2", ... - with no gap between them: a label after a finished sentence
+// starts a paragraph.
+std::string SplitCodedParagraphs(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 64);
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == 'E' && i + 2 < s.size() && s[i + 1] == '-' && std::isdigit(static_cast<unsigned char>(s[i + 2])) && (i == 0 || s[i - 1] == ' ')) {
+            size_t j = i + 2;
+            while (j < s.size() && std::isdigit(static_cast<unsigned char>(s[j]))) ++j;
+            size_t end = out.size();
+            while (end > 0 && out[end - 1] == ' ') --end;
+            if (j - (i + 2) <= 3 && j < s.size() && s[j] == ' ' && end > 0 && out[end - 1] != '\n' &&
+                EndsSentence(out.substr(end > 3 ? end - 3 : 0, end > 3 ? 3 : end))) {
+                out.erase(end);
+                out += "\n\n";
+            }
+        }
+        out += s[i];
+    }
+    return out;
+}
+
+bool ValidUtf8(const std::string& s) {
+    for (size_t i = 0; i < s.size();) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c < 0x80) { ++i; continue; }
+        const size_t extra = (c & 0xE0) == 0xC0 && c >= 0xC2 ? 1 : (c & 0xF0) == 0xE0 ? 2 : (c & 0xF8) == 0xF0 && c <= 0xF4 ? 3 : 0;
+        if (extra == 0 || i + extra >= s.size()) return false;
+        for (size_t k = 1; k <= extra; ++k)
+            if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) return false;
+        i += extra + 1;
+    }
+    return true;
+}
+
+// The clean-up stage: any sermon text (extracted from a PDF, or a .txt of unknown make) as plain UTF-8 with one paragraph per block,
+// blocks separated by one blank line. Nothing is left that is not text: no byte-order mark, control characters, soft hyphens,
+// zero-width marks, odd spaces or runs of spaces and blank lines.
+std::string CleanSermonText(const std::string& raw) {
+    std::string text = raw;
+    if (text.compare(0, 3, "\xEF\xBB\xBF") == 0) text.erase(0, 3);
+    if (!ValidUtf8(text)) text = Cp1252ToUtf8(text);   // a .txt saved by an old editor
+
+    // characters that carry nothing: soft hyphen, zero-width space / joiners, byte-order mark
+    for (const char* mark : { "\xC2\xAD", "\xE2\x80\x8B", "\xE2\x80\x8C", "\xE2\x80\x8D", "\xEF\xBB\xBF" })
+        for (size_t at = 0; (at = text.find(mark, at)) != std::string::npos;) text.erase(at, std::strlen(mark));
+    text = NormalizeSpaces(std::move(text));
+
+    std::string out;
+    bool blank = true;   // the last thing written was a blank line (or nothing yet)
+    std::istringstream in(text);
+    std::string line;
+    while (std::getline(in, line)) {
+        for (char& c : line) {
+            const unsigned char u = static_cast<unsigned char>(c);
+            if (u < 0x20 || u == 0x7F) c = ' ';   // tabs, form feeds, stray codes, carriage returns
+        }
+        line = Collapse(line);
+        if (line.empty()) {
+            if (!blank) { out += '\n'; blank = true; }
+            continue;
+        }
+        out += line;
+        out += '\n';
+        blank = false;
+    }
+    while (!out.empty() && out.back() == '\n') out.pop_back();
+    return out;
+}
+
+// Many of these sermons print their own paragraph number ("2 And now we have a very wonderful pastor...") - the number a citation of
+// the sermon names ("53-0325 12"). Where a paragraph carries one, it becomes the verse's number (and the printed digits come out of its
+// text), and that is where a new verse begins; that is what makes the library's chapter:verse match the source.
+//
+// A sermon like this prints a number on SOME of its paragraph breaks, not all of them: the opening is one long unlabeled paragraph
+// (verse 1) that our own blank-line splitting may still have cut into several pieces (a typographic gap, not a new verse), before the
+// first number appears. So once a sermon shows it numbers its own paragraphs at all, every blank-line break with no number on it is
+// folded into the verse before it, rather than becoming a wrongly-numbered verse of its own; a sermon that never prints a number keeps
+// the plain shape (one verse per blank-line paragraph, numbered in order) it always had.
+struct NumberedParagraph {
+    int number = 0;
+    std::string text;
+};
+
+// A leading "N " on `para` that reads as a real label (a capital letter, a quote mark, or another script right after it - never a
+// digit or a lower-case letter, so "3 million people..." mid-paragraph is never mistaken for one) and goes up from `after` - a real
+// paragraph number only ever increases. 0 when there is none.
+int ParagraphLabel(const std::string& para, int after) {
+    size_t k = 0;
+    while (k < para.size() && std::isdigit(static_cast<unsigned char>(para[k]))) ++k;
+    if (k < 1 || k > 3 || k + 1 >= para.size() || para[k] != ' ') return 0;
+    const unsigned char next = static_cast<unsigned char>(para[k + 1]);
+    if (!(std::isupper(next) || next == '"' || next >= 0x80)) return 0;
+    const int n = std::atoi(para.c_str());
+    return n > after ? n : 0;
+}
+
+std::vector<NumberedParagraph> NumberParagraphs(const std::vector<std::string>& paragraphs) {
+    // Does the sermon label its own paragraphs anywhere? (The first paragraph is never a label - it is what comes before the first one.)
+    bool numbered = false;
+    for (size_t i = 1, prev = 0; i < paragraphs.size(); ++i)
+        if (const int n = ParagraphLabel(paragraphs[i], static_cast<int>(prev)); n > 0) { numbered = true; prev = n; }
+
+    std::vector<NumberedParagraph> out;
+    int prev = 0;
+    for (size_t i = 0; i < paragraphs.size(); ++i) {
+        const int n = i > 0 ? ParagraphLabel(paragraphs[i], prev) : 0;
+        if (n > 0) {
+            const size_t sp = paragraphs[i].find(' ');
+            out.push_back({ n, Trim(paragraphs[i].substr(sp + 1)) });
+            prev = n;
+        } else if (numbered && !out.empty()) {
+            out.back().text += "\n\n" + paragraphs[i];
+        } else {
+            out.push_back({ static_cast<int>(out.size()) + 1, paragraphs[i] });
+        }
+    }
+    return out;
+}
+
+// Whether text reads as text. An earlier PDF reader stored the raw glyph codes of PDFs with embedded fonts: control characters and
+// bytes that are not UTF-8. Such a sermon is replaced when it is imported again.
+bool ReadableText(const std::string& s) {
+    size_t letters = 0, junk = 0, total = 0;
+    for (size_t i = 0; i < s.size();) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c == ' ' || c == '\n' || c == '\t') { ++i; continue; }
+        ++total;
+        if (c < 0x20 || c == 0x7F) { ++junk; ++i; continue; }
+        if (c < 0x80) { if (std::isalpha(c)) ++letters; ++i; continue; }
+        const size_t extra = (c & 0xE0) == 0xC0 && c >= 0xC2 ? 1 : (c & 0xF0) == 0xE0 ? 2 : (c & 0xF8) == 0xF0 ? 3 : 0;
+        bool valid = extra > 0 && i + extra < s.size();
+        for (size_t k = 1; valid && k <= extra; ++k) valid = (static_cast<unsigned char>(s[i + k]) & 0xC0) == 0x80;
+        if (valid) { ++letters; i += extra + 1; } else { ++junk; ++i; }
+    }
+    return total > 0 && letters * 100 >= total * 55 && junk * 100 <= total * 2;
+}
+
+bool ChapterReadable(const TheTableChapter& ch) {
+    std::string sample;
+    for (const TheTableVerse& v : ch.verses) {
+        if (sample.size() > 4000) break;
+        sample += v.text;
+        sample += ' ';
+    }
+    return ReadableText(sample);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -271,11 +1225,20 @@ std::shared_ptr<TheTableLibrary> TheTableLibrary::Open(const std::string& filePa
 }
 
 Result<void> TheTableLibrary::Save() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Only the copy happens under the lock; serialising and writing a big library take seconds and must not hold up browsing.
+    std::vector<TheTableBook> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        snapshot = books_;
+    }
+    return Persist(snapshot);
+}
+
+Result<void> TheTableLibrary::Persist(const std::vector<TheTableBook>& books) const {
     J::Object root;
     root["schema"] = J::Number(1);
     J::Array booksArr;
-    for (const TheTableBook& book : books_) {
+    for (const TheTableBook& book : books) {
         J::Object b;
         b["id"] = J::String(book.id);
         b["name"] = J::String(book.name);
@@ -302,9 +1265,10 @@ Result<void> TheTableLibrary::Save() const {
     root["books"] = J(std::move(booksArr));
 
     auto& platform = platform::PlatformAccessor::Get();
-    auto dir = platform.Paths().UserDataDir();
-    // Ensure the user dir exists (Write writes files; parents must already be there).
-    (void)platform.Filesystem().CreateDirectories(dir);
+    // Ensure the file's own parent exists (the library may live anywhere —
+    // tests use a temp dir; production uses the user data dir).
+    (void)platform.Filesystem().CreateDirectories(
+        std::filesystem::path(filePath_).parent_path().generic_string());
     return platform.Filesystem().Write(filePath_, J(std::move(root)).ToString());
 }
 
@@ -358,6 +1322,21 @@ Result<void> TheTableLibrary::Load() {
 std::vector<TheTableBook> TheTableLibrary::Books() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return books_;
+}
+
+std::vector<TheTableLibrary::BookInfo> TheTableLibrary::BookIndex() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<BookInfo> out;
+    out.reserve(books_.size());
+    for (const TheTableBook& b : books_) {
+        BookInfo info;
+        info.id = b.id;
+        info.name = b.name;
+        info.order = b.order;
+        for (const TheTableChapter& ch : b.chapters) info.chapters.push_back({ ch.number, ch.title, ch.verses.size() });
+        out.push_back(std::move(info));
+    }
+    return out;
 }
 
 Result<TheTableChapter> TheTableLibrary::GetChapter(std::string_view bookId, int chapter) const {
@@ -457,53 +1436,164 @@ TheTableBook& TheTableLibrary::BookForYear(std::string_view year) {
     return books_.back();
 }
 
-Result<std::string> TheTableLibrary::ImportSermon(std::string_view fileName,
-                                                std::string_view content) {
+// Step one of an import: whatever the file is (.pdf or .txt) becomes clean UTF-8 text. Nothing is stored here.
+Result<std::string> TheTableLibrary::ConvertToCleanText(std::string_view fileName, std::string_view content) {
     const std::string data(content);
-    const std::string name(fileName);
-
-    // .pdf -> extract text ops; anything else parses as plain text.
-    std::string lower = Lower(name);
     std::string text;
-    if (lower.ends_with(".pdf")) {
+    if (Lower(std::string(fileName)).ends_with(".pdf")) {
         if (data.size() < 8 || data.substr(0, 5) != "%PDF-")
             return Error::Make(kTableErr, kModule, "not a PDF file");
-        text = TextFromPdf(data);
-        if (Trim(text).empty())
+        text = CleanSermonText(SplitCodedParagraphs(StripSpokenWordBanner(TidyMarkers(TextFromPdf(data)))));
+        if (text.empty())
             return Error::Make(kTableErr, kModule,
-                               "no text could be read from the PDF (a scanned image has no text layer)");
+                               "no text could be read from the PDF (a scan with no text layer, or fonts this reader cannot decode)");
     } else {
-        text = data;
+        text = CleanSermonText(data);
+        if (text.empty()) return Error::Make(kTableErr, kModule, "the file is empty");
     }
+    return text;
+}
 
+Result<std::string> TheTableLibrary::ImportSermon(std::string_view fileName, std::string_view content) {
+    auto clean = ConvertToCleanText(fileName, content);
+    if (!clean.ok()) return clean.error();
+    auto added = AddCleanText(fileName, clean.value());
+    if (!added.ok()) return added;
+    if (auto saved = Save(); !saved.ok())
+        Logger::Instance().Warning("TheTableLibrary save failed: " + saved.error().message, kModule);
+    return added;
+}
+
+// Step two: clean text -> paragraphs -> a chapter of the sermon's year.
+Result<std::string> TheTableLibrary::AddCleanText(std::string_view fileName, const std::string& text, bool replaceUnreadable) {
+    const std::string name(fileName);
     auto paragraphs = ParagraphsFromText(text);
     if (paragraphs.empty())
         return Error::Make(kTableErr, kModule, "no paragraphs found in the sermon");
 
-    SermonName parsed = NameFromFileName(name);
-    if (parsed.year.empty()) parsed.year = "Unfiled";
-    std::string code = CodeOf(name);
-    std::string title = parsed.title;
-    if (!code.empty() && !title.starts_with(code)) title = code + " " + title;
+    const Placement place = PlacementOf(name);
+    const std::string& title = place.title;
 
     std::lock_guard<std::mutex> lock(mutex_);
-    TheTableBook& book = BookForYear(parsed.year);
+    TheTableBook& book = BookForYear(place.year);
     TheTableChapter ch;
     ch.number = static_cast<int>(book.chapters.size()) + 1;
     ch.title = title;
-    for (size_t i = 0; i < paragraphs.size(); ++i) {
+    const auto numbered = NumberParagraphs(paragraphs);
+    for (size_t i = 0; i < numbered.size(); ++i) {
         TheTableVerse v;
-        v.number = static_cast<int>(i) + 1;
-        v.text = paragraphs[i];
+        v.number = numbered[i].number;
+        v.text = numbered[i].text;
         if (i == 0) v.heading = title;
         ch.verses.push_back(std::move(v));
     }
+    // The same sermon stored before by a reader that could not decode its fonts: put the readable text in its place.
+    if (replaceUnreadable) {
+        for (TheTableChapter& existing : book.chapters) {
+            if (existing.title == title && !ChapterReadable(existing)) {
+                existing.verses = std::move(ch.verses);
+                return book.name + " " + std::to_string(existing.number) + ":1";
+            }
+        }
+    }
     book.chapters.push_back(std::move(ch));
 
-    auto saved = const_cast<TheTableLibrary*>(this)->Save();
-    if (!saved.ok())
-        Logger::Instance().Warning("TheTableLibrary save failed: " + saved.error().message, kModule);
     return book.name + " " + std::to_string(book.chapters.size()) + ":1";
+}
+
+// ---------------------------------------------------------------------------
+// Folder import: every .pdf/.txt under a root, same mapping as ImportSermon.
+// ---------------------------------------------------------------------------
+Result<TheTableLibrary::ImportReport> TheTableLibrary::ImportFolder(
+    std::string_view folderPath,
+    const std::function<void(int, int, std::string_view)>& progress,
+    std::string_view convertedRoot) {
+    auto& platform = platform::PlatformAccessor::Get();
+    // One walk of the tree. The extension test ignores case ("SERMON.PDF" is a sermon too - FindFiles' own extension filter is
+    // case-sensitive, so it is not used).
+    auto found = platform.Filesystem().FindFiles(folderPath, "");
+    if (!found.ok()) return Error::Make(kTableErr, kModule, found.error().message);
+    std::vector<std::string> files;
+    for (const std::string& path : found.value()) {
+        const std::string lower = Lower(path);
+        if (lower.ends_with(".pdf") || lower.ends_with(".txt")) files.push_back(path);
+    }
+    std::sort(files.begin(), files.end());   // deterministic order (year, then code)
+    ImportReport report;
+
+    int done = 0;
+    const int total = static_cast<int>(files.size());
+    for (const std::string& path : files) {
+        ++done;
+        if (progress) progress(done, total, path);
+
+        // Duplicate guard: the same year + sermon title is already in.
+        const Placement place = PlacementOf(path);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            bool dup = false;
+            for (const TheTableBook& b : books_) {
+                if (b.name != place.year) continue;
+                // (a sermon stored as garbage by an older reader is not "already in": it is read again and replaced)
+                dup = std::any_of(b.chapters.begin(), b.chapters.end(), [&](const TheTableChapter& c) { return c.title == place.title && ChapterReadable(c); });
+                break;
+            }
+            if (dup) { ++report.skipped; continue; }
+        }
+
+        // Step one, outside the lock: the file as clean text. A PDF's converted text is kept as a .txt under `convertedRoot` (the same
+        // name, in its year's folder) so it can be opened and checked, and is reused while it is newer than the PDF.
+        auto& fs = platform.Filesystem();
+        std::string clean;
+        std::string keepAt;
+        if (!convertedRoot.empty() && Lower(path).ends_with(".pdf")) {
+            std::string stem = path.substr(path.find_last_of("/\\") == std::string::npos ? 0 : path.find_last_of("/\\") + 1);
+            stem = stem.substr(0, stem.find_last_of('.'));
+            keepAt = fs.Join(fs.Join(fs.Join(convertedRoot, kConvertedVersion), place.year), stem + ".txt");
+            auto kept = fs.Metadata(keepAt);
+            auto source = fs.Metadata(path);
+            if (kept.ok() && source.ok() && kept.value().modifiedEpochNs >= source.value().modifiedEpochNs) {
+                if (auto text = fs.ReadText(keepAt); text.ok() && ReadableText(text.value())) clean = std::move(text.value());
+            }
+        }
+        if (clean.empty()) {
+            auto bytes = fs.ReadBinary(path);
+            if (!bytes.ok()) {
+                ++report.failed;
+                Logger::Instance().Info("Table import: could not read " + path + ": " + bytes.error().message, kModule);
+                continue;
+            }
+            auto converted = ConvertToCleanText(path, std::string_view(reinterpret_cast<const char*>(bytes.value().data()), bytes.value().size()));
+            if (!converted.ok()) {
+                ++report.failed;
+                Logger::Instance().Info("Table import: " + path + ": " + converted.error().message, kModule);
+                continue;
+            }
+            clean = std::move(converted.value());
+            if (!keepAt.empty()) {
+                const size_t cut = keepAt.find_last_of("/\\");
+                (void)fs.CreateDirectories(keepAt.substr(0, cut));
+                if (auto wrote = fs.Write(keepAt, clean + "\n"); !wrote.ok())
+                    Logger::Instance().Info("Table import: could not keep the converted text " + keepAt + ": " + wrote.error().message, kModule);
+            }
+        }
+        // Step two: the clean text into the library.
+        auto r = AddCleanText(path, clean, /*replaceUnreadable=*/true);
+        if (r.ok()) {
+            ++report.imported;
+        } else {
+            ++report.failed;
+            Logger::Instance().Info("Table import: " + path + ": " + r.error().message, kModule);
+        }
+        // Saved every so often and once at the end - not after every sermon. Rewriting a library of hundreds of sermons for each one
+        // is what made a big folder crawl.
+        if (r.ok() && report.imported % 250 == 0) (void)Save();
+    }
+    if (report.imported > 0) {
+        if (auto saved = Save(); !saved.ok())
+            Logger::Instance().Warning("TheTableLibrary save failed: " + saved.error().message, kModule);
+    }
+    return report;
 }
 
 } // namespace bps::library

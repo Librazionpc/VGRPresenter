@@ -1,6 +1,6 @@
 beautifulsoup4>=4.15.0
 colorlog>=6.12.0
-fitz>=0.0.1.dev2
+# fitz comes from pymupdf (import fitz) — the PyPI "fitz" package is an unrelated stub
 lxml>=6.1.1
 pymupdf>=1.28.2
 requests>=2.34.2

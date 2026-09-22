@@ -465,6 +465,7 @@ Item {
             color: root.cSecondary
             y: {
                 const l = root.itemLayout
+                if (root.dropIndex < 0) return 0      // (not shown then, but the position is still worked out)
                 if (l.length === 0) return 10
                 if (root.dropIndex >= l.length) return l[l.length - 1].y + l[l.length - 1].h
                 return l[root.dropIndex].y - 1

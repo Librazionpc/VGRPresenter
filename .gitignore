@@ -26,7 +26,7 @@ src/vgr_sermons_pptx/
 src/vgr_sermons_txt/
 src/vgr_sermons_xml/
 src/VGR_XML_JSON/
-
+src/download*
 # Keeps regenerating on its own at the repo root (just an empty
 # .claude/skills/ stub) even after deletion — some external process still
 # references the old pre-flatten path. Harmless; ignored rather than fought.

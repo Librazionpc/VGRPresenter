@@ -7,6 +7,7 @@
 #include "services/EngineBridge.h"
 #include "services/SearchService.h"
 #include "services/SettingsService.h"
+#include "services/SlideBuilder.h"
 #include "services/ShowConverter.h"
 
 #include <QJSEngine>
@@ -21,6 +22,8 @@ QString qstr(const std::string &s) { return QString::fromStdString(s); }
 
 // The engine's default scripture template (the id the template catalog gives the plain "Scripture" layout).
 constexpr const char *kDefaultTemplate = "tpl-scripture";
+// This tab's place in the shared slide builder (its templates, its setting).
+const SlideBuilder::Profile kProfile{ "scripture", "scripture.template", kDefaultTemplate };
 
 std::vector<int> numbersOf(const QVariantList &verses)
 {
@@ -51,26 +54,6 @@ bool sourceFor(const QString &bibleId, const QString &bookId, int chapter, const
         if (std::find(wanted.begin(), wanted.end(), v.verse) != wanted.end())
             out.verses.push_back({ v.verse, v.text });
     return true;
-}
-
-QVariantList blocksToVariants(const std::vector<pf::ContentBlock> &blocks)
-{
-    QVariantList out;
-    for (const pf::ContentBlock &b : blocks)
-        out.append(ShowConverter::blockToVariant(b));
-    return out;
-}
-
-// The blocks of a template from the engine's template library.
-std::vector<pf::ContentBlock> templateBlocks(const QString &id, QString *background = nullptr)
-{
-    std::vector<pf::ContentBlock> out;
-    const QVariantMap design = TemplateLibraryService::instance().design(id);
-    for (const QVariant &b : design.value(QStringLiteral("blocks")).toList())
-        out.push_back(ShowConverter::blockFromVariant(b.toMap()));
-    if (background)
-        *background = design.value(QStringLiteral("background")).toString();
-    return out;
 }
 
 } // namespace
@@ -209,32 +192,22 @@ QString ScriptureService::defaultTemplateId() const { return QString::fromLatin1
 
 QString ScriptureService::templateId() const
 {
-    const QString chosen = SettingsService::instance().value(QStringLiteral("scripture.template")).toString();
-    if (!chosen.isEmpty() && !TemplateLibraryService::instance().design(chosen).isEmpty())
-        return chosen;
-    return defaultTemplateId();
+    return SlideBuilder::templateId(kProfile);
 }
 
 QVariantList ScriptureService::templates() const
 {
-    QVariantList out;
-    for (const QVariant &d : TemplateLibraryService::instance().designs()) {
-        const QVariantMap m = d.toMap();
-        if (m.value(QStringLiteral("contentType")).toString() == QLatin1String("scripture"))
-            out.append(QVariantMap{ { QStringLiteral("id"), m.value(QStringLiteral("id")) }, { QStringLiteral("name"), m.value(QStringLiteral("name")) },
-                                    { QStringLiteral("color"), m.value(QStringLiteral("color")) } });
-    }
-    return out;
+    return SlideBuilder::templates(kProfile);
 }
 
 QString ScriptureService::templateName(const QString &id) const
 {
-    return TemplateLibraryService::instance().design(id).value(QStringLiteral("name")).toString();
+    return SlideBuilder::templateName(id);
 }
 
 bool ScriptureService::templateHasValues(const QString &id) const
 {
-    return pf::HasScriptureValues(templateBlocks(id));
+    return SlideBuilder::templateHasValues(id);
 }
 
 // ---------------------------------------------------------------------------
@@ -243,42 +216,18 @@ bool ScriptureService::templateHasValues(const QString &id) const
 
 QVariantMap ScriptureService::preview(const QString &bibleId, const QString &bookId, int chapter, const QVariantList &verses) const
 {
-    QVariantMap out{ { QStringLiteral("blocks"), QVariantList() }, { QStringLiteral("background"), QString() },
-                     { QStringLiteral("reference"), QString() }, { QStringLiteral("hasValues"), true }, { QStringLiteral("slideCount"), 0 } };
-    if (!EngineBridge::instance().booted() || verses.isEmpty())
-        return out;
     pf::ScriptureSource source;
-    if (!sourceFor(bibleId, bookId, chapter, verses, source) || source.verses.empty())
-        return out;
-
-    QString background;
-    const std::vector<pf::ContentBlock> tmpl = templateBlocks(templateId(), &background);
-    const pf::ScriptureSettings options = SettingsService::instance().scriptureSettings();
-    const auto first = pf::BuildScriptureSlides(tmpl, source, options, /*onlyFirst=*/true);
-    if (first.empty())
-        return out;
-    out[QStringLiteral("blocks")] = blocksToVariants(first.front().blocks);
-    out[QStringLiteral("background")] = background;
-    out[QStringLiteral("reference")] = qstr(first.front().reference);
-    out[QStringLiteral("hasValues")] = pf::HasScriptureValues(tmpl);
-    out[QStringLiteral("slideCount")] = static_cast<int>(pf::BuildScriptureSlides(tmpl, source, options).size());
-    return out;
+    if (!EngineBridge::instance().booted() || verses.isEmpty() || !sourceFor(bibleId, bookId, chapter, verses, source))
+        return SlideBuilder::preview(templateId(), {}, {});   // (nothing to show: the empty shape)
+    return SlideBuilder::preview(templateId(), source, SettingsService::instance().scriptureSettings());
 }
 
 QVariantList ScriptureService::slides(const QString &bibleId, const QString &bookId, int chapter, const QVariantList &verses) const
 {
-    QVariantList out;
-    if (!EngineBridge::instance().booted() || verses.isEmpty())
-        return out;
     pf::ScriptureSource source;
-    if (!sourceFor(bibleId, bookId, chapter, verses, source) || source.verses.empty())
-        return out;
-    QString background;
-    const std::vector<pf::ContentBlock> tmpl = templateBlocks(templateId(), &background);
-    for (const pf::ScriptureSlide &s : pf::BuildScriptureSlides(tmpl, source, SettingsService::instance().scriptureSettings()))
-        out.append(QVariantMap{ { QStringLiteral("title"), qstr(s.title) }, { QStringLiteral("background"), background },
-                                { QStringLiteral("blocks"), blocksToVariants(s.blocks) } });
-    return out;
+    if (!EngineBridge::instance().booted() || verses.isEmpty() || !sourceFor(bibleId, bookId, chapter, verses, source))
+        return {};
+    return SlideBuilder::slides(templateId(), source, SettingsService::instance().scriptureSettings());
 }
 
 bool ScriptureService::importBible()

@@ -141,6 +141,7 @@ static const Suite kSuites[] = {
     {"library", "overlay-library", TestOverlayLibrary},
     {"library", "template-library", TestTemplateLibrary},
     {"library", "the-table-library", TestTheTableLibrary},
+    {"library", "the-table-real-pdfs", TestTheTableRealPdfs},
     {"library", "text-list-format", TestTextListFormat},
     {"library", "block-validator", TestBlockValidator},
     {"library", "drop-rules", TestDropRules},

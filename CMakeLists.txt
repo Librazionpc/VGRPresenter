@@ -421,6 +421,7 @@ qt_add_executable(appVGRPresenterUI
     qml/services/SettingsService.cpp
     qml/services/include/services/ScriptureService.h
     qml/services/ScriptureService.cpp
+    qml/services/SlideBuilder.cpp
     qml/services/include/services/ImportService.h
     qml/services/ImportService.cpp
     qml/services/include/services/ProjectService.h

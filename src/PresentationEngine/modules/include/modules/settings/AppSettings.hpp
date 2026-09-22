@@ -92,10 +92,15 @@ public:
 
     // The scripture options (Scripture tab > options) as the slide builder takes them.
     presentation::ScriptureSettings Scripture() const;
+    // The Table's options (The Table tab > options) — the same slide-builder
+    // settings, read from the "table." keys.
+    presentation::ScriptureSettings TheTable() const;
 
     const std::string& StorageFile() const noexcept { return storageFile_; }
 
 private:
+    // The slide builder's options under one tab's prefix ("scripture" | "table").
+    presentation::ScriptureSettings SlideBuilderOptions(const std::string& prefix) const;
     Result<void> SaveLocked() const;
     Result<void> Validate(const SettingDef& def, const json::Value& value) const;
 
