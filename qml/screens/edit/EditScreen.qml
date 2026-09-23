@@ -220,10 +220,10 @@ Rectangle {
     // export never captured what TEXT/SLIDE should actually show, so the
     // panel content underneath doesn't vary by tab yet.
     property string rightPanelTab: "items"
-    // Leaving the TEXT tab closes its font-weight dropdown — an open menu
+    // Leaving the TEXT tab closes its font dropdowns — an open menu
     // belonging to a tab you've left is exactly the "not tied to its
     // parent" class of bug.
-    onRightPanelTabChanged: textFontMenu.visible = false
+    onRightPanelTabChanged: { textFontMenu.visible = false; textFontFamilyMenu.visible = false }
 
     // Background-color picker (see bgColorModal near the end of this file)
     // and the current selection it applies to the "Background" row's swatch.
@@ -469,13 +469,14 @@ Rectangle {
         ? root.canvasObjectByKey(root.selectedCanvasObjects[0])
         : null
 
-    // The font-weight dropdown (textFontMenu) is opened FOR this item, so
-    // it must not outlive it: deleting the item, clicking empty canvas or
-    // switching slides all drop this to null, and the menu closes with it
-    // instead of floating over the panel with nothing left to apply to.
+    // The font dropdowns (textFontMenu, textFontFamilyMenu) are opened FOR this item, so they must not outlive it: deleting the
+    // item, clicking empty canvas or switching slides all drop this to null, and the menus close with it instead of floating
+    // over the panel with nothing left to apply to.
     onPrimarySelectedItemChanged: {
-        if (!root.primarySelectedItem)
+        if (!root.primarySelectedItem) {
             textFontMenu.visible = false
+            textFontFamilyMenu.visible = false
+        }
     }
 
     // Background/Border only have a visible effect on a "text", "shape",
@@ -847,8 +848,8 @@ Rectangle {
                 anchors.centerIn: parent
                 anchors.verticalCenterOffset: -2
                 color: "#eef0f6"
-                font.family: "Inter"
-                font.pixelSize: 13
+                font.family: "Segoe UI"
+                font.pixelSize: 15
                 text: "‹"
             }
             // In a design (overlay / template) this is Done: back to the library it came from.
@@ -866,8 +867,8 @@ Rectangle {
             x: 50
             y: 14
             color: "#eef0f6"
-            font.family: "Inter"
-            font.pixelSize: 13
+            font.family: "Segoe UI"
+            font.pixelSize: 15
             font.weight: Font.Medium
             // (the design's name follows the library: DesignBackend re-reads it whenever it changes)
             text: root.designMode ? (showSession.designBackend.currentShow.name ?? "") : qsTr("Sunday Service")
@@ -885,8 +886,8 @@ Rectangle {
             Text {
                 anchors.centerIn: parent
                 color: "#ff4d3d"
-                font.family: "Inter"
-                font.pixelSize: 9
+                font.family: "Segoe UI"
+                font.pixelSize: 10
                 font.weight: Font.Medium
                 text: root.designMode ? (showSession.designKind === "template" ? qsTr("Template") : qsTr("Overlay"))
                                       : qsTr("Template · Worship")
@@ -902,8 +903,8 @@ Rectangle {
             x: parent.width - 204   // right-aligned cluster: stays put at the bar's right end
             y: 17
             color: "#5c6475"
-            font.family: "Inter"
-            font.pixelSize: 9
+            font.family: "Segoe UI"
+            font.pixelSize: 10
             // A design (overlay / template) has no Save: every settled edit is written to its library.
             visible: !root.designMode
             text: qsTr("Not saved yet")
@@ -922,8 +923,8 @@ Rectangle {
             x: parent.width - 204
             y: 17
             color: "#5c6475"
-            font.family: "Inter"
-            font.pixelSize: 9
+            font.family: "Segoe UI"
+            font.pixelSize: 10
             text: qsTr("Saves as you edit")
         }
         Connections {
@@ -937,8 +938,8 @@ Rectangle {
             x: parent.width - 122
             y: 17
             color: fitArea.containsMouse ? "#c8cdd9" : "#5c6475"
-            font.family: "Inter"
-            font.pixelSize: 9
+            font.family: "Segoe UI"
+            font.pixelSize: 10
             text: qsTr("Fit")
             Behavior on color { ColorAnimation { duration: 100 } }
 
@@ -965,7 +966,7 @@ Rectangle {
                 color: undoArea.containsMouse ? "#20242f" : "#1a1c26"
                 Behavior on color { ColorAnimation { duration: 100 } }
 
-                Text { anchors.centerIn: parent; color: "#8a94a6"; font.pixelSize: 12; text: "↺" }
+                Text { anchors.centerIn: parent; color: "#8a94a6"; font.pixelSize: 14; text: "↺" }
 
                 MouseArea {
                     id: undoArea
@@ -984,7 +985,7 @@ Rectangle {
                 color: redoArea.containsMouse ? "#20242f" : "#1a1c26"
                 Behavior on color { ColorAnimation { duration: 100 } }
 
-                Text { anchors.centerIn: parent; color: "#8a94a6"; font.pixelSize: 12; text: "↻" }
+                Text { anchors.centerIn: parent; color: "#8a94a6"; font.pixelSize: 14; text: "↻" }
 
                 MouseArea {
                     id: redoArea
@@ -1004,8 +1005,8 @@ Rectangle {
                 Text {
                     anchors.centerIn: parent
                     color: "#8a94a6"
-                    font.family: "Inter"
-                    font.pixelSize: 10
+                    font.family: "Segoe UI"
+                    font.pixelSize: 12
                     text: Math.round(root.canvasZoom * 100) + "%"
                 }
 
@@ -1265,7 +1266,7 @@ Rectangle {
                         visible: false
                         width: itemTextLabel.width
                         text: itemTextLabel.shownText          // what is on screen, list markers included
-                        font.family: itemTextLabel.tmeta.fontFamily ?? "Inter"
+                        font.family: itemTextLabel.tmeta.fontFamily ?? "Segoe UI"
                         font.pixelSize: itemTextLabel.tmeta.fontSize ?? 16
                         font.weight: itemTextLabel.tmeta.bold ? Font.Bold
                             : itemTextLabel.tmeta.fontWeight === "Regular" ? Font.Normal
@@ -1314,7 +1315,7 @@ Rectangle {
                         : baseFontSize
                     visible: canvasItemObject.modelData.kind === "text"
                     color: itemTextLabel.tmeta.color ?? "#f2f4fa"
-                    font.family: itemTextLabel.tmeta.fontFamily ?? "Inter"
+                    font.family: itemTextLabel.tmeta.fontFamily ?? "Segoe UI"
                     // shrinkFitSize == baseFontSize in every mode except
                     // shrinkToFit, where it's the overflow-clamped size.
                     font.pixelSize: itemTextLabel.shrinkFitSize
@@ -1346,6 +1347,12 @@ Rectangle {
                             : a === "right" ? Text.AlignRight
                             : a === "justify" ? Text.AlignJustify
                             : Text.AlignHCenter
+                    }
+                    verticalAlignment: {
+                        const a = itemTextLabel.tmeta.verticalAlign ?? "center"
+                        return a === "top" ? Text.AlignTop
+                            : a === "bottom" ? Text.AlignBottom
+                            : Text.AlignVCenter
                     }
                     text: canvasItemObject.modelData.text
                     // The list style (Text tab): every line a list item, marked by the ENGINE's formatting - display only.
@@ -1441,8 +1448,8 @@ Rectangle {
                     Text {
                         x: 18; y: 7
                         color: "#e2e8f0"
-                        font.family: "Inter"
-                        font.pixelSize: 7
+                        font.family: "Segoe UI"
+                        font.pixelSize: 8
                         font.weight: Font.Medium
                         text: qsTr("LIVE")
                     }
@@ -1452,8 +1459,8 @@ Rectangle {
                     Text {
                         x: 10; y: 68
                         color: "#eef0f6"
-                        font.family: "Inter"
-                        font.pixelSize: 8
+                        font.family: "Segoe UI"
+                        font.pixelSize: 9
                         font.weight: Font.Medium
                         // The source picked in cameraSourceModal (see
                         // addCanvasItem's onApplied handler below), falling
@@ -1464,8 +1471,8 @@ Rectangle {
                     Text {
                         x: 68; y: 68
                         color: "#5c6475"
-                        font.family: "Inter"
-                        font.pixelSize: 8
+                        font.family: "Segoe UI"
+                        font.pixelSize: 9
                         text: qsTr("10:24:07")
                     }
 
@@ -1531,7 +1538,7 @@ Rectangle {
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
                             color: clockContent.tinted ? clockContent.cfg.color : "#9b8ff5"
-                            font.family: "Inter"
+                            font.family: "Segoe UI"
                             font.weight: Font.DemiBold
                             font.pixelSize: Math.max(10, Math.min(clockContent.width, clockContent.height) * 0.22)
                             text: clockTicker.formatClock(clockTicker.now, clockContent.hour12, clockContent.showSeconds)
@@ -1540,8 +1547,8 @@ Rectangle {
                             visible: clockContent.showDate
                             anchors.horizontalCenter: parent.horizontalCenter
                             color: clockContent.tinted ? Qt.alpha(clockContent.cfg.color, 0.7) : "#5c6475"
-                            font.family: "Inter"
-                            font.pixelSize: 9
+                            font.family: "Segoe UI"
+                            font.pixelSize: 10
                             text: Qt.formatDate(clockTicker.now, "dddd, MMMM d")
                         }
                     }
@@ -1651,7 +1658,7 @@ Rectangle {
                     Text {
                         anchors.centerIn: parent
                         color: "#9b8ff5"
-                        font.family: "Inter"
+                        font.family: "Segoe UI"
                         font.weight: Font.DemiBold
                         font.pixelSize: Math.max(10, Math.min(timerContent.width, timerContent.height) * 0.28)
                         text: timerTicker.formatDuration(
@@ -1838,7 +1845,7 @@ Rectangle {
                             verticalAlignment: Text.AlignVCenter
                             visible: genericPlaceholder.typeInfo.icon === "text"
                             color: "#9b8ff5"
-                            font.pixelSize: 16
+                            font.pixelSize: 18
                             text: "Aa"
                         }
                         IconGlyph {
@@ -1853,8 +1860,8 @@ Rectangle {
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
                             color: "#aeb6c8"
-                            font.family: "Inter"
-                            font.pixelSize: 11
+                            font.family: "Segoe UI"
+                            font.pixelSize: 13
                             font.weight: Font.Medium
                             text: genericPlaceholder.typeInfo.label.toUpperCase()
                         }
@@ -1866,8 +1873,8 @@ Rectangle {
                             anchors.horizontalCenter: parent.horizontalCenter
                             visible: canvasItemObject.modelData.text.length > 0
                             color: "#5c6475"
-                            font.family: "Inter"
-                            font.pixelSize: 9
+                            font.family: "Segoe UI"
+                            font.pixelSize: 10
                             text: canvasItemObject.modelData.text
                         }
                     }
@@ -1922,8 +1929,8 @@ Rectangle {
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
                 color: "#9aa0b5"
-                font.family: "Inter"
-                font.pixelSize: 13
+                font.family: "Segoe UI"
+                font.pixelSize: 15
                 text: qsTr("No slides yet")
             }
             Text {
@@ -1931,8 +1938,8 @@ Rectangle {
                 anchors.horizontalCenter: parent.horizontalCenter
                 horizontalAlignment: Text.AlignHCenter
                 color: "#5c6475"
-                font.family: "Inter"
-                font.pixelSize: 10
+                font.family: "Segoe UI"
+                font.pixelSize: 12
                 wrapMode: Text.Wrap
                 text: qsTr("Add a slide to start building — then place text, cameras and more on the canvas")
             }
@@ -1948,8 +1955,8 @@ Rectangle {
                 Text {
                     anchors.centerIn: parent
                     color: "#ffffff"
-                    font.family: "Inter"
-                    font.pixelSize: 12
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
                     font.weight: Font.Medium
                     text: qsTr("+ Add slide")
                 }
@@ -1981,7 +1988,7 @@ Rectangle {
                 width: 41; height: parent.height
                 horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                 color: zoomOutArea.containsMouse ? "#c8cdd9" : "#8a94a6"
-                font.pixelSize: 12
+                font.pixelSize: 14
                 text: "−"
                 Behavior on color { ColorAnimation { duration: 100 } }
                 MouseArea {
@@ -1996,8 +2003,8 @@ Rectangle {
                 width: 42; height: parent.height
                 horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                 color: zoomLabelArea.containsMouse ? "#c8cdd9" : "#8a94a6"
-                font.family: "Inter"
-                font.pixelSize: 10
+                font.family: "Segoe UI"
+                font.pixelSize: 12
                 text: Math.round(root.canvasZoom * 100) + "%"
                 Behavior on color { ColorAnimation { duration: 100 } }
                 MouseArea {
@@ -2012,7 +2019,7 @@ Rectangle {
                 width: 41; height: parent.height
                 horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                 color: zoomInArea.containsMouse ? "#c8cdd9" : "#8a94a6"
-                font.pixelSize: 12
+                font.pixelSize: 14
                 text: "+"
                 Behavior on color { ColorAnimation { duration: 100 } }
                 MouseArea {
@@ -2039,12 +2046,9 @@ Rectangle {
         opacity: root.hasActiveSlide ? 1 : 0.35
 
         // A "+" rotated 45 degrees reads as an "X": the open state is the same glyph turned, not a different character.
-        IconGlyph {
+        PlusGlyph {
             anchors.centerIn: parent
-            name: "plus"
-            color: "#ffffff"
-            strokeWidth: 1.2
-            scale: 2.2
+            size: 18; thickness: 2.2; color: "#ffffff"
             rotation: root.addMenuOpen ? 45 : 0
             Behavior on rotation { NumberAnimation { duration: 120 } }
         }
@@ -2115,8 +2119,8 @@ Rectangle {
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
                         color: typeChip.active ? "#9b8ff5" : "#9aa0b5"
-                        font.family: "Inter"
-                        font.pixelSize: 12
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
                         // "text" keeps its Aa letters; every other kind
                         // renders its real IconGlyph (see contentTypes above).
                         text: typeChip.modelData.icon === "text" ? "Aa"
@@ -2153,8 +2157,8 @@ Rectangle {
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
                         color: typeChip.active ? "#eef1f8" : "#6b7080"
-                        font.family: "Inter"
-                        font.pixelSize: 8
+                        font.family: "Segoe UI"
+                        font.pixelSize: 9
                         text: typeChip.modelData.label
                     }
                 }
@@ -2252,8 +2256,8 @@ Rectangle {
             x: 12
             y: 12
             color: "#5c6475"
-            font.family: "Inter"
-            font.pixelSize: 10
+            font.family: "Segoe UI"
+            font.pixelSize: 12
             text: qsTr("SLIDES · %1").arg(slideListRepeater.count)
         }
 
@@ -2317,8 +2321,8 @@ Rectangle {
                 Row {
                     anchors.centerIn: parent
                     spacing: 6
-                    Text { color: "#6c5ce7"; font.family: "Inter"; font.pixelSize: 12; font.weight: Font.Medium; text: "+" }
-                    Text { color: "#8a94a6"; font.family: "Inter"; font.pixelSize: 11; text: qsTr("Add slide") }
+                    Text { color: "#6c5ce7"; font.family: "Segoe UI"; font.pixelSize: 14; font.weight: Font.Medium; text: "+" }
+                    Text { color: "#8a94a6"; font.family: "Segoe UI"; font.pixelSize: 13; text: qsTr("Add slide") }
                 }
 
                 MouseArea {
@@ -2388,8 +2392,8 @@ Rectangle {
                 width: parent.width / 3
                 horizontalAlignment: Text.AlignHCenter
                 color: root.rightPanelTab === "items" ? "#ff4d3d" : "#8a94a6"
-                font.family: "Inter"
-                font.pixelSize: 11
+                font.family: "Segoe UI"
+                font.pixelSize: 13
                 // Constant weight in every state — a weight that changes
                 // with the active tab changes the label's advance width,
                 // which re-flows this Row and shoves the neighbouring tabs
@@ -2411,8 +2415,8 @@ Rectangle {
                 width: parent.width / 3
                 horizontalAlignment: Text.AlignHCenter
                 color: root.rightPanelTab === "text" ? "#ff4d3d" : "#8a94a6"
-                font.family: "Inter"
-                font.pixelSize: 11
+                font.family: "Segoe UI"
+                font.pixelSize: 13
                 font.weight: Font.Medium // constant — see tabItemsLabel above
                 text: qsTr("TEXT")
                 Behavior on color { ColorAnimation { duration: 100 } }
@@ -2429,8 +2433,8 @@ Rectangle {
                 width: parent.width / 3
                 horizontalAlignment: Text.AlignHCenter
                 color: root.rightPanelTab === "slide" ? "#ff4d3d" : "#8a94a6"
-                font.family: "Inter"
-                font.pixelSize: 11
+                font.family: "Segoe UI"
+                font.pixelSize: 13
                 font.weight: Font.Medium // constant — see tabItemsLabel above
                 text: qsTr("SLIDE")
                 Behavior on color { ColorAnimation { duration: 100 } }
@@ -2496,8 +2500,8 @@ Rectangle {
             x: 16
             y: 390
             color: "#8a8fa3"
-            font.family: "Inter"
-            font.pixelSize: 10
+            font.family: "Segoe UI"
+            font.pixelSize: 12
             font.weight: Font.Bold
             text: qsTr("SLIDE")
         }
@@ -2522,8 +2526,8 @@ Rectangle {
                 x: 14
                 anchors.verticalCenter: parent.verticalCenter
                 color: "#eef1f8"
-                font.family: "Inter"
-                font.pixelSize: 12
+                font.family: "Segoe UI"
+                font.pixelSize: 14
                 // Same row, two targets: the selected item's background when
                 // something's selected, the slide's own background
                 // otherwise — one control, not a duplicate built into
@@ -2557,8 +2561,8 @@ Rectangle {
                 Text {
                     anchors.centerIn: parent
                     color: "#aeb6c8"
-                    font.family: "Inter"
-                    font.pixelSize: 10
+                    font.family: "Segoe UI"
+                    font.pixelSize: 12
                     font.weight: Font.Medium
                     text: qsTr("Change")
                 }
@@ -2578,8 +2582,8 @@ Rectangle {
                 x: 368
                 anchors.verticalCenter: parent.verticalCenter
                 color: "#6b7280"
-                font.family: "Inter"
-                font.pixelSize: 14
+                font.family: "Segoe UI"
+                font.pixelSize: 16
                 text: "›"
             }
         }
@@ -2610,21 +2614,46 @@ Rectangle {
         // ITEMS/SLIDE tabs' own designs exists either (see rightTabRow's
         // header comment), so this is the first of the three actually
         // built out, per the reference panel design supplied directly.
-        TextItemPanel {
-            id: textItemPanel
+        // Wrapped in a Flickable + AppScrollBar (the same pattern leftPanel's slideListFlick already uses) -
+        // the panel grew a real Align section and a headered List section on top of everything it already
+        // had (Style/Font/Case/Auto Size/sliders/Position & Size), tall enough on a normal window to run
+        // past rightPanel's bottom with no way to reach what's below - fixed-position, unscrollable content
+        // that just got cut off at the panel's edge.
+        Flickable {
+            id: textPanelFlick
             x: 8
             y: 56
             width: 384
+            height: rightPanel.height - 56 - 12
             visible: root.rightPanelTab === "text" && root.primarySelectedItem !== null
                 && root.primarySelectedItem.kind === "text"
-            target: visible ? root.primarySelectedItem : null
-            undoHook: root.pushUndoSnapshot
-            focusHook: function () { mCanvas.forceActiveFocus() }
-            onChangeColorRequested: {
-                root.bgModalTarget = "textColor"
-                root.bgModalOpen = true
+            clip: true
+            contentWidth: width
+            contentHeight: textItemPanel.height
+            boundsBehavior: Flickable.StopAtBounds
+
+            TextItemPanel {
+                id: textItemPanel
+                width: textPanelFlick.width - (textPanelScrollBar.visible ? 12 : 0)
+                target: textPanelFlick.visible ? root.primarySelectedItem : null
+                undoHook: root.pushUndoSnapshot
+                focusHook: function () { mCanvas.forceActiveFocus() }
+                onChangeColorRequested: {
+                    root.bgModalTarget = "textColor"
+                    root.bgModalOpen = true
+                }
+                onChangeFontRequested: textFontMenu.openAt(textItemPanel, 14, 96, root)
+                onChangeFontFamilyRequested: textFontFamilyMenu.openAt(textItemPanel, 14, 96, root)
             }
-            onChangeFontRequested: textFontMenu.openAt(textItemPanel, 14, 96, root)
+        }
+
+        AppScrollBar {
+            id: textPanelScrollBar
+            x: textPanelFlick.x + textPanelFlick.width - 4
+            y: textPanelFlick.y
+            height: textPanelFlick.height
+            flickable: textPanelFlick
+            visible: textPanelFlick.visible && textPanelFlick.contentHeight > textPanelFlick.height
         }
 
         Text {
@@ -2634,8 +2663,8 @@ Rectangle {
             wrapMode: Text.Wrap
             visible: root.rightPanelTab === "text" && !(root.primarySelectedItem !== null && root.primarySelectedItem.kind === "text")
             color: "#5c6475"
-            font.family: "Inter"
-            font.pixelSize: 11
+            font.family: "Segoe UI"
+            font.pixelSize: 13
             text: qsTr("Select a text item on the canvas to edit its formatting.")
         }
 
@@ -2649,8 +2678,8 @@ Rectangle {
             horizontalAlignment: Text.AlignHCenter
             visible: root.rightPanelTab === "slide"
             color: "#5c6475"
-            font.family: "Inter"
-            font.pixelSize: 11
+            font.family: "Segoe UI"
+            font.pixelSize: 13
             text: qsTr("Coming soon")
         }
     }
@@ -2664,11 +2693,12 @@ Rectangle {
     // catcher.
     MouseArea {
         anchors.fill: parent
-        enabled: slideContextMenu.visible || canvasContextMenu.visible || textFontMenu.visible
+        enabled: slideContextMenu.visible || canvasContextMenu.visible || textFontMenu.visible || textFontFamilyMenu.visible
         onClicked: {
             slideContextMenu.visible = false
             canvasContextMenu.visible = false
             textFontMenu.visible = false
+            textFontFamilyMenu.visible = false
         }
     }
 
@@ -2762,10 +2792,8 @@ Rectangle {
         }
     }
 
-    // Font-weight picker for TextItemPanel's font row (see its
-    // changeFontRequested signal) — no font-family list yet, just the
-    // weight presets its rendering already understands (see itemTextLabel's
-    // font.weight ternary above).
+    // Font-weight picker for TextItemPanel's weight pill (see its changeFontRequested signal) - the short, fixed presets its
+    // rendering already understands (see itemTextLabel's font.weight ternary above).
     DropdownPanel {
         id: textFontMenu
         visible: false
@@ -2781,6 +2809,27 @@ Rectangle {
                 root.primarySelectedItem.meta = Object.assign({}, root.primarySelectedItem.meta, { fontWeight: label })
             }
             textFontMenu.visible = false
+        }
+    }
+
+    // Font-FAMILY picker for TextItemPanel's font row (changeFontFamilyRequested) - every family Qt found installed on this
+    // machine (Qt.fontFamilies(), the same font-enumeration QML itself uses to resolve a font.family string), not a short fixed
+    // list; long, so it scrolls (maxHeight) rather than running off the screen. The current family gets a checkmark, same
+    // convention as every other "which one is picked" menu in this app.
+    DropdownPanel {
+        id: textFontFamilyMenu
+        visible: false
+        maxHeight: 320
+        model: {
+            const current = root.primarySelectedItem ? (root.primarySelectedItem.meta.fontFamily ?? "Segoe UI") : ""
+            return Qt.fontFamilies().slice().sort().map((f) => ({ label: f, trailing: f === current ? "✓" : "" }))
+        }
+        onItemActivated: (label) => {
+            if (root.primarySelectedItem) {
+                canvasHistory.push(qsTr("Change font"))
+                root.primarySelectedItem.meta = Object.assign({}, root.primarySelectedItem.meta, { fontFamily: label })
+            }
+            textFontFamilyMenu.visible = false
         }
     }
 

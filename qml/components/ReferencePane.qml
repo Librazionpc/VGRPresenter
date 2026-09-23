@@ -39,6 +39,9 @@ Item {
     property var adapter: null
     // Scripture-only chrome: the template panel and its options button.
     property bool supportsTemplates: true
+    // The Table's sermon templates have no scripture-style placeholders to fall back to, so "Use default
+    // template" (which just clears the pick back to the built-in one) doesn't apply there - Scripture keeps it.
+    property bool showUseDefaultTemplateButton: true
 
     signal templateEditRequested(string templateId)
     // "Convert to show": the show's name and its slides ([{ title, background, blocks }]), from the engine.
@@ -131,9 +134,19 @@ Item {
         }
         if (root.currentSource)
             return
-        const last = String(SettingsService.values["session.referenceSource"] ?? "")
-        const known = list.find((b) => b.id === last)
-        root.openSource((known ?? list[0]).id)
+        // The adapter opts into "remember the last source" by naming a
+        // REGISTERED settings key (Scripture: session.scriptureBible). No key
+        // — single-source tabs like The Table — just opens the first.
+        const lastKey = (root.adapter && root.adapter.sessionSourceKey) ? String(root.adapter.sessionSourceKey) : ""
+        if (lastKey !== "") {
+            const last = String(SettingsService.values[lastKey] ?? "")
+            const known = list.find((b) => b.id === last)
+            if (known) {
+                root.openSource(known.id)
+                return
+            }
+        }
+        root.openSource(list[0].id)
     }
 
     function openSource(id) {
@@ -144,8 +157,9 @@ Item {
         root.books = root.adapter.books(id)
         const same = root.books.findIndex((b) => b.id === previousBook)
         root.openBook(same >= 0 ? same : 0, same >= 0 ? root.chapterNumber : 0)
-        if (String(SettingsService.values["session.referenceSource"] ?? "") !== id)
-            SettingsService.setValue("session.referenceSource", id)
+        const lastKey = (root.adapter && root.adapter.sessionSourceKey) ? String(root.adapter.sessionSourceKey) : ""
+        if (lastKey !== "" && String(SettingsService.values[lastKey] ?? "") !== id)
+            SettingsService.setValue(lastKey, id)
     }
 
     function openBook(index, chapter) {
@@ -281,7 +295,7 @@ Item {
                 x: 10; y: 7
                 text: (root.adapter ? root.adapter.sidebarLabel : qsTr("Sources"))
                 color: Theme.textSecondary
-                font.family: Theme.fontFamily; font.pixelSize: 11; font.bold: true
+                font.family: Theme.fontFamily; font.pixelSize: 13; font.bold: true
             }
         }
 
@@ -317,7 +331,7 @@ Item {
                             text: sourceRow.modelData.name
                             color: sourceRow.active ? Theme.textPrimary : root.textDim
                             elide: Text.ElideRight
-                            font.family: Theme.fontFamily; font.pixelSize: 12
+                            font.family: Theme.fontFamily; font.pixelSize: 14
                         }
                         HoverHandler { id: sourceHover; cursorShape: Qt.PointingHandCursor }
                         TapHandler { onTapped: root.openSource(sourceRow.modelData.id) }
@@ -330,7 +344,7 @@ Item {
                     text: root.adapter.loading() ? (root.adapter ? root.adapter.loadingText : qsTr("Loading…")) : (root.adapter ? root.adapter.emptyText : qsTr("Nothing here yet."))
                     color: Theme.textMuted
                     wrapMode: Text.Wrap
-                    font.family: Theme.fontFamily; font.pixelSize: 11
+                    font.family: Theme.fontFamily; font.pixelSize: 13
                 }
             }
         }
@@ -378,7 +392,7 @@ Item {
                           ? qsTr("%1 / %2").arg(importProgress.done).arg(importProgress.total)
                           : ""
                     color: Theme.textPrimary
-                    font.family: Theme.fontFamily; font.pixelSize: 10
+                    font.family: Theme.fontFamily; font.pixelSize: 12
                 }
             }
 
@@ -398,6 +412,9 @@ Item {
             }
             SidebarAddButton {
                 width: parent.width
+                // One install at a time: the button waits out a running import
+                // (the service rejects a second one anyway).
+                enabled: !(root.adapter && root.adapter.importing && root.adapter.importing())
                 text: (root.adapter ? root.adapter.addLabel : qsTr("Add"))
                 onClicked: root.adapter.importNew()
             }
@@ -437,7 +454,7 @@ Item {
                             text: bookRow.modelData.name
                             color: bookRow.active ? Theme.textPrimary : root.textDim
                             elide: Text.ElideRight
-                            font.family: Theme.fontFamily; font.pixelSize: 14
+                            font.family: Theme.fontFamily; font.pixelSize: 16
                         }
                         HoverHandler { id: bookHover; cursorShape: Qt.PointingHandCursor }
                         TapHandler { onTapped: root.openBook(root.books.findIndex((b) => b.id === bookRow.modelData.id), 0) }
@@ -459,7 +476,10 @@ Item {
     // and the column widens to fit it, same idea as the books column beside it.
     Rectangle {
         id: chaptersCol
-        readonly property bool hasTitles: root.book && root.book.chapterTitles && root.book.chapterTitles.length > 0
+        // !!(...) rather than the bare && chain: when root.book is undefined (not null), "undefined && x" is
+        // undefined, not false, and QML logs "Unable to assign [undefined] to bool" trying to store that in
+        // this readonly bool property - coerce it explicitly instead of relying on JS's falsy short-circuit.
+        readonly property bool hasTitles: !!(root.book && root.book.chapterTitles && root.book.chapterTitles.length > 0)
         // Widened once, the first time there turn out to be names to show (a bare Bible chapter number needs far less room than a
         // sermon's title) - after that the user's own drag is what decides, same as every other column here.
         property bool widenedForTitles: false
@@ -500,7 +520,7 @@ Item {
                             text: chapterRow.title !== "" ? chapterRow.title : chapterRow.modelData
                             elide: Text.ElideRight
                             color: chapterRow.active ? Theme.textPrimary : root.textDim
-                            font.family: Theme.fontFamily; font.pixelSize: 14
+                            font.family: Theme.fontFamily; font.pixelSize: 16
                         }
                         HoverHandler { id: chapterHover; cursorShape: Qt.PointingHandCursor }
                         TapHandler { onTapped: root.openChapter(chapterRow.modelData, true) }
@@ -554,7 +574,7 @@ Item {
                             width: 40; horizontalAlignment: Text.AlignRight
                             text: verseRow.modelData.number
                             color: Theme.danger
-                            font.family: Theme.fontFamily; font.pixelSize: 14; font.bold: true
+                            font.family: Theme.fontFamily; font.pixelSize: 16; font.bold: true
                         }
                         Text {
                             x: 60; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 70
@@ -562,7 +582,7 @@ Item {
                             color: Theme.textPrimary
                             wrapMode: Text.NoWrap
                             elide: Text.ElideRight
-                            font.family: Theme.fontFamily; font.pixelSize: 14
+                            font.family: Theme.fontFamily; font.pixelSize: 16
                         }
                         // Click selects (Ctrl / Shift add); drag carries the selection into a project; double-click adds it to the open one.
                         DragSource {
@@ -600,14 +620,14 @@ Item {
                             text: hitRow.modelData.reference
                             color: Theme.textPrimary
                             elide: Text.ElideRight
-                            font.family: Theme.fontFamily; font.pixelSize: 13
+                            font.family: Theme.fontFamily; font.pixelSize: 15
                         }
                         Text {
                             x: 190; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 198
                             text: hitRow.modelData.snippet.replace(/\s*\n+\s*/g, " ")
                             color: root.textDim
                             elide: Text.ElideRight
-                            font.family: Theme.fontFamily; font.pixelSize: 13
+                            font.family: Theme.fontFamily; font.pixelSize: 15
                         }
                         HoverHandler { id: hitHover; cursorShape: Qt.PointingHandCursor }
                         TapHandler {
@@ -623,7 +643,7 @@ Item {
                     x: 12; y: 12
                     text: (root.adapter ? root.adapter.searchHint : qsTr("Type words to find, then press Enter."))
                     color: Theme.textMuted
-                    font.family: Theme.fontFamily; font.pixelSize: 12
+                    font.family: Theme.fontFamily; font.pixelSize: 14
                 }
             }
         }
@@ -634,7 +654,7 @@ Item {
             anchors.centerIn: parent
             text: root.adapter.loading() ? (root.adapter ? root.adapter.loadingText : qsTr("Loading…")) : (root.adapter ? root.adapter.emptyText : qsTr("Nothing here yet."))
             color: Theme.textMuted
-            font.family: Theme.fontFamily; font.pixelSize: 13
+            font.family: Theme.fontFamily; font.pixelSize: 15
         }
 
         Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: Theme.border }
@@ -654,12 +674,12 @@ Item {
                     visible: versesCol.width > 560   // a narrow pane keeps just the reference
                     text: (root.currentSource ? root.currentSource.name : "") + ":"
                     color: Theme.textSecondary
-                    font.family: Theme.fontFamily; font.pixelSize: 12
+                    font.family: Theme.fontFamily; font.pixelSize: 14
                 }
                 Text {
                     text: root.referenceText
                     color: Theme.textPrimary
-                    font.family: Theme.fontFamily; font.pixelSize: 12
+                    font.family: Theme.fontFamily; font.pixelSize: 14
                 }
             }
         }
@@ -686,7 +706,7 @@ Item {
                         anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
                         verticalAlignment: TextInput.AlignVCenter
                         color: Theme.textPrimary
-                        font.family: Theme.fontFamily; font.pixelSize: 12
+                        font.family: Theme.fontFamily; font.pixelSize: 14
                         clip: true
                         onAccepted: root.runSearch(text)
                         Keys.onEscapePressed: { root.searching = false }
@@ -696,7 +716,7 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter; x: 12
                         text: (root.adapter ? root.adapter.searchPlaceholder : qsTr("Search"))
                         color: Theme.textMuted
-                        font.family: Theme.fontFamily; font.pixelSize: 12
+                        font.family: Theme.fontFamily; font.pixelSize: 14
                     }
                 }
 
@@ -746,9 +766,11 @@ Item {
     }
 
     // ---- Preview + template + options -------------------------------------------------------------------------------------------
-    // The column never scrolls as a whole: the controls (template, Convert to show, the options button) are pinned to the bottom, the
-    // preview takes whatever height is left above them (it shrinks to fit instead of pushing them off the screen), and the options -
-    // when the round button turns them on - scroll in between.
+    // FreeShow's own ScriptureInfo.svelte: ONE scrolling column (`.scroll { overflow-y: auto }`) holding the preview then the
+    // settings, and the preview itself never shrinks to make room (`.zoomed { height: initial !important }`) - it keeps its
+    // natural width-driven size, and if the settings below don't fit, you scroll the whole column instead of the preview
+    // getting squeezed. Rebuilt to match: previewTile's height comes from ITS width alone, and everything - preview, template
+    // row, options, the Convert-to-show button - lives in one Flickable with a real scrollbar, not a shrink formula.
     Rectangle {
         id: previewCol
         anchors.right: parent.right
@@ -757,182 +779,148 @@ Item {
 
         Rectangle { anchors.left: parent.left; width: 1; height: parent.height; color: Theme.border }
 
-        // ---- the controls, pinned to the bottom ----
-        Column {
-            id: controls
-            anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
-            anchors.leftMargin: 10; anchors.rightMargin: 10; anchors.bottomMargin: 12
-            spacing: 10
-
-            // ---- the template (FreeShow's "Template" row, the note about old templates, the two buttons) ----
-            Rectangle {
-                visible: root.supportsTemplates && !root.optionsOpen
-                width: parent.width; height: 56; radius: 6
-                color: "#0f1015"; border.color: Theme.border
-                clip: true
-
-                Column {
-                    x: 12; anchors.verticalCenter: parent.verticalCenter
-                    spacing: 2
-                    Text { text: qsTr("Template"); color: Theme.danger; font.family: Theme.fontFamily; font.pixelSize: 11 }
-                    Text {
-                        width: 150
-                        text: root.adapter.templateName(root.templateId)
-                        color: Theme.textPrimary; elide: Text.ElideRight
-                        font.family: Theme.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold
-                    }
-                }
-
-                Row {
-                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                    spacing: 0
-
-                    // back to the default (only when another one is chosen)
-                    Item {
-                        visible: !root.usingDefaultTemplate
-                        width: 36; height: 56
-                        IconGlyph { anchors.centerIn: parent; name: "close"; color: clearHover.hovered ? Theme.textPrimary : Theme.textSecondary; width: 10; height: 10 }
-                        HoverHandler { id: clearHover; cursorShape: Qt.PointingHandCursor }
-                        TapHandler { onTapped: root.adapter.setTemplate("") }
-                    }
-                    // choose another scripture template
-                    Item {
-                        id: pickBtn
-                        width: 36; height: 56
-                        IconGlyph { anchors.centerIn: parent; name: "layoutTemplate"; color: pickHover.hovered ? Theme.textPrimary : Theme.textSecondary; width: 14; height: 14 }
-                        HoverHandler { id: pickHover; cursorShape: Qt.PointingHandCursor }
-                        TapHandler { onTapped: root.openTemplateMenu() }
-                    }
-                    // edit it on the Edit screen
-                    Rectangle {
-                        width: 46; height: 56; color: editHover.hovered ? "#1a1b23" : "#0b0c11"
-                        IconGlyph { anchors.centerIn: parent; name: "penTool"; color: Theme.textPrimary; width: 14; height: 14 }
-                        HoverHandler { id: editHover; cursorShape: Qt.PointingHandCursor }
-                        TapHandler { onTapped: root.templateEditRequested(root.templateId) }
-                    }
-                }
-            }
-
-            Text {
-                visible: root.supportsTemplates && !root.optionsOpen && root.selected.length > 0 && !root.preview.hasValues
-                width: parent.width
-                text: qsTr("You are using a template with no values!")
-                color: Theme.textSecondary; opacity: 0.85
-                wrapMode: Text.Wrap
-                font.family: Theme.fontFamily; font.pixelSize: 12
-            }
-
-            component PanelButton: Rectangle {
-                id: btn
-                property string text: ""
-                property string info: ""
-                signal clicked()
-                width: parent.width; height: 44; radius: 6
-                color: btnHover.hovered ? "#181a22" : "#0f1015"; border.color: Theme.border
-                Row {
-                    anchors.centerIn: parent
-                    spacing: 8
-                    Text { text: btn.text; color: Theme.textPrimary; font.family: Theme.fontFamily; font.pixelSize: 13 }
-                    Text { visible: btn.info !== ""; text: btn.info; color: Theme.textMuted; font.family: Theme.fontFamily; font.pixelSize: 12 }
-                }
-                HoverHandler { id: btnHover; cursorShape: Qt.PointingHandCursor }
-                TapHandler { onTapped: btn.clicked() }
-            }
-
-            PanelButton {
-                visible: root.supportsTemplates && !root.optionsOpen && !root.usingDefaultTemplate && root.selected.length > 0 && !root.preview.hasValues
-                text: qsTr("Use default template")
-                onClicked: root.adapter.setTemplate("")
-            }
-
-            // Convert to show, with the round options button beside it (so it never floats over anything)
-            Item {
-                width: parent.width; height: 48
-
-                PanelButton {
-                    visible: !root.optionsOpen
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width - 58
-                    text: qsTr("Convert to show")
-                    info: root.preview.slideCount > 1 ? qsTr("%1 slides").arg(root.preview.slideCount) : ""
-                    onClicked: root.convertToShow()
-                }
-
-                // The round button that swaps the panel between the template and the options (FreeShow's tune button).
-                // Scripture-only chrome — The Table hides it (no scripture options apply).
-                Item {
-                    id: optionsButton
-                    visible: root.supportsTemplates
-                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                    width: 48; height: 48
-                    // a soft shadow: two faint discs under the button
-                    Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 3; width: parent.width + 6; height: width; radius: width / 2; color: "#26000000" }
-                    Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 2; width: parent.width + 2; height: width; radius: width / 2; color: "#33000000" }
-                    Rectangle {
-                        anchors.fill: parent; radius: width / 2
-                        gradient: Gradient {
-                            GradientStop { position: 0.0; color: root.optionsOpen ? (optionsHover.hovered ? "#ff6a5c" : "#ff5a4b") : (optionsHover.hovered ? "#2a2d3b" : "#222533") }
-                            GradientStop { position: 1.0; color: root.optionsOpen ? "#e23f30" : "#181a24" }
-                        }
-                        border.width: 1
-                        border.color: root.optionsOpen ? "#ff8a7e" : "#34384a"
-                        IconGlyph { anchors.centerIn: parent; name: "sliders"; color: "#ffffff"; fit: true; width: 22; height: 22 }
-                    }
-                    HoverHandler { id: optionsHover; cursorShape: Qt.PointingHandCursor }
-                    TapHandler { onTapped: root.optionsOpen = !root.optionsOpen }
-                }
-            }
-        }
-
-        // ---- the slide the engine builds for the picked verses, in the room above the controls ----
-        Item {
-            id: previewArea
-            anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
-            height: root.optionsOpen ? Math.min(previewCol.height * 0.34, 190) : Math.max(70, controls.y - 4)
-
-            Rectangle {
-                id: previewTile
-                anchors.horizontalCenter: parent.horizontalCenter
-                y: 8
-                // the largest 16:9 that fits both the width and the height that is left
-                height: Math.max(48, Math.min((parent.width - 16) * 428 / 754, parent.height - 16))
-                width: Math.round(height * 754 / 428)
-                color: "#000000"
-                clip: true
-                DesignPreview {
-                    anchors.fill: parent
-                    blocks: root.preview.blocks
-                    background: (root.preview.background ?? "") === "" || root.preview.background === "transparent" ? "#000000" : root.preview.background
-                }
-                Text {
-                    visible: root.selected.length === 0
-                    anchors.centerIn: parent
-                    text: qsTr("Pick a verse")
-                    color: "#5c6475"
-                    font.family: Theme.fontFamily; font.pixelSize: 12
-                }
-            }
-        }
-
-        // ---- the options (the round button turns this on): they scroll between the preview and the button ----
         Flickable {
-            id: optionsFlick
-            visible: root.supportsTemplates && root.optionsOpen
-            anchors.top: previewArea.bottom; anchors.left: parent.left; anchors.right: parent.right
-            anchors.bottom: controls.top; anchors.bottomMargin: 8
+            id: previewFlick
+            anchors.top: parent.top; anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right
+            anchors.leftMargin: 1
+            anchors.rightMargin: previewScrollBar.visible ? 9 : 0
+            contentWidth: width
+            contentHeight: previewFlickContent.height
             clip: true
-            contentHeight: optionsBody.height + 8
             boundsBehavior: Flickable.StopAtBounds
 
             Column {
-                id: optionsBody
-                width: parent.width
+                id: previewFlickContent
+                width: previewFlick.width
+
+                // Shared by "Use default template" (in the template section) and "Convert to show" (in the always-present
+                // footer below) - declared once here so both scopes can use it without redeclaring the same local type.
+                component PanelButton: Rectangle {
+                    id: btn
+                    property string text: ""
+                    property string info: ""
+                    signal clicked()
+                    width: parent.width; height: 44; radius: 6
+                    color: btnHover.hovered ? "#181a22" : "#0f1015"; border.color: Theme.border
+                    Row {
+                        anchors.centerIn: parent
+                        spacing: 8
+                        Text { text: btn.text; color: Theme.textPrimary; font.family: Theme.fontFamily; font.pixelSize: 15 }
+                        Text { visible: btn.info !== ""; text: btn.info; color: Theme.textMuted; font.family: Theme.fontFamily; font.pixelSize: 14 }
+                    }
+                    HoverHandler { id: btnHover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: btn.clicked() }
+                }
+
+                // ---- the slide the engine builds for the picked verses: fixed size, driven by width alone ----
+                Item {
+                    width: parent.width
+                    height: previewTile.height + 28   // 20 above (breathing room under the tab bar's search box) + 8 below
+
+                    Rectangle {
+                        id: previewTile
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        y: 20
+                        width: parent.width - 32
+                        // the 16:9-ish design ratio, purely from width - never clamped by leftover height
+                        height: Math.round(width * 428 / 754)
+                        color: "#000000"
+                        clip: true
+                        DesignPreview {
+                            anchors.fill: parent
+                            blocks: root.preview.blocks
+                            background: (root.preview.background ?? "") === "" || root.preview.background === "transparent" ? "#000000" : root.preview.background
+                        }
+                        Text {
+                            visible: root.selected.length === 0
+                            anchors.centerIn: parent
+                            text: qsTr("Pick a verse")
+                            color: "#5c6475"
+                            font.family: Theme.fontFamily; font.pixelSize: 14
+                        }
+                    }
+                }
+
+                // ---- the template controls (FreeShow's "Template" row, the note about old templates, the two buttons) ----
+                Column {
+                    visible: root.supportsTemplates && !root.optionsOpen
+                    x: 10; width: parent.width - 20
+                    spacing: 10
+
+                    Rectangle {
+                        width: parent.width; height: 56; radius: 6
+                        color: "#0f1015"; border.color: Theme.border
+                        clip: true
+
+                        Column {
+                            x: 12; anchors.verticalCenter: parent.verticalCenter
+                            spacing: 2
+                            Text { text: qsTr("Template"); color: Theme.danger; font.family: Theme.fontFamily; font.pixelSize: 13 }
+                            Text {
+                                width: 150
+                                text: root.adapter.templateName(root.templateId)
+                                color: Theme.textPrimary; elide: Text.ElideRight
+                                font.family: Theme.fontFamily; font.pixelSize: 16; font.weight: Font.DemiBold
+                            }
+                        }
+
+                        Row {
+                            anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                            spacing: 0
+
+                            // back to the default (only when another one is chosen)
+                            Item {
+                                visible: !root.usingDefaultTemplate
+                                width: 36; height: 56
+                                IconGlyph { anchors.centerIn: parent; name: "close"; color: clearHover.hovered ? Theme.textPrimary : Theme.textSecondary; width: 10; height: 10 }
+                                HoverHandler { id: clearHover; cursorShape: Qt.PointingHandCursor }
+                                TapHandler { onTapped: root.adapter.setTemplate("") }
+                            }
+                            // choose another scripture template
+                            Item {
+                                id: pickBtn
+                                width: 36; height: 56
+                                IconGlyph { anchors.centerIn: parent; name: "layoutTemplate"; color: pickHover.hovered ? Theme.textPrimary : Theme.textSecondary; width: 14; height: 14 }
+                                HoverHandler { id: pickHover; cursorShape: Qt.PointingHandCursor }
+                                TapHandler { onTapped: root.openTemplateMenu() }
+                            }
+                            // edit it on the Edit screen
+                            Rectangle {
+                                width: 46; height: 56; color: editHover.hovered ? "#1a1b23" : "#0b0c11"
+                                IconGlyph { anchors.centerIn: parent; name: "penTool"; color: Theme.textPrimary; width: 14; height: 14 }
+                                HoverHandler { id: editHover; cursorShape: Qt.PointingHandCursor }
+                                TapHandler { onTapped: root.templateEditRequested(root.templateId) }
+                            }
+                        }
+                    }
+
+                    Text {
+                        visible: root.selected.length > 0 && !root.preview.hasValues
+                        width: parent.width
+                        text: qsTr("You are using a template with no values!")
+                        color: Theme.textSecondary; opacity: 0.85
+                        wrapMode: Text.Wrap
+                        font.family: Theme.fontFamily; font.pixelSize: 14
+                    }
+
+                    PanelButton {
+                        visible: root.showUseDefaultTemplateButton && !root.usingDefaultTemplate && root.selected.length > 0 && !root.preview.hasValues
+                        text: qsTr("Use default template")
+                        onClicked: root.adapter.setTemplate("")
+                    }
+                }
+
+                // ---- the options (the round button turns this on) ----
+                Column {
+                    id: optionsBody
+                    visible: root.supportsTemplates && root.optionsOpen
+                    x: 10; width: parent.width - 20
 
                 Text {
                     x: 16; height: 26; verticalAlignment: Text.AlignVCenter
                     text: qsTr("SLIDE OPTIONS")
                     color: Theme.textMuted
-                    font.family: Theme.fontFamily; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 1.2
+                    font.family: Theme.fontFamily; font.pixelSize: 12; font.weight: Font.DemiBold; font.letterSpacing: 1.2
                 }
                 Rectangle {
                     x: 10; width: parent.width - 20; height: optionsColumn.height + 8
@@ -985,7 +973,7 @@ Item {
                                 spacing: 6
                                 Rectangle {
                                     width: 24; height: 24; radius: 6; color: minusHover.hovered ? "#22242e" : "#181a22"; border.color: Theme.border
-                                    Text { anchors.centerIn: parent; text: "−"; color: Theme.textPrimary; font.pixelSize: 13 }
+                                    Text { anchors.centerIn: parent; text: "−"; color: Theme.textPrimary; font.pixelSize: 15 }
                                     HoverHandler { id: minusHover; cursorShape: Qt.PointingHandCursor }
                                     TapHandler { onTapped: num.nudge(-num.step) }
                                 }
@@ -997,7 +985,7 @@ Item {
                                 }
                                 Rectangle {
                                     width: 24; height: 24; radius: 6; color: plusHover.hovered ? "#22242e" : "#181a22"; border.color: Theme.border
-                                    Text { anchors.centerIn: parent; text: "+"; color: Theme.textPrimary; font.pixelSize: 13 }
+                                    Text { anchors.centerIn: parent; text: "+"; color: Theme.textPrimary; font.pixelSize: 15 }
                                     HoverHandler { id: plusHover; cursorShape: Qt.PointingHandCursor }
                                     TapHandler { onTapped: num.nudge(num.step) }
                                 }
@@ -1019,6 +1007,52 @@ Item {
                     }
                 }
             }
+
+            // ---- Convert to show, with the round options button beside it - always present, part of the scroll flow ----
+            Item {
+                x: 10; width: parent.width - 20; height: 48 + 12   // 12 bottom breathing room, matching the old bottom margin
+
+                PanelButton {
+                    visible: !root.optionsOpen
+                    y: 0
+                    width: parent.width - 58
+                    text: qsTr("Convert to show")
+                    info: root.preview.slideCount > 1 ? qsTr("%1 slides").arg(root.preview.slideCount) : ""
+                    onClicked: root.convertToShow()
+                }
+
+                // The round button that swaps the panel between the template and the options (FreeShow's tune button).
+                // Scripture-only chrome — The Table hides it (no scripture options apply).
+                Item {
+                    id: optionsButton
+                    visible: root.supportsTemplates
+                    anchors.right: parent.right; y: 0
+                    width: 48; height: 48
+                    // a soft shadow: two faint discs under the button
+                    Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 3; width: parent.width + 6; height: width; radius: width / 2; color: "#26000000" }
+                    Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 2; width: parent.width + 2; height: width; radius: width / 2; color: "#33000000" }
+                    Rectangle {
+                        anchors.fill: parent; radius: width / 2
+                        gradient: Gradient {
+                            GradientStop { position: 0.0; color: root.optionsOpen ? (optionsHover.hovered ? "#ff6a5c" : "#ff5a4b") : (optionsHover.hovered ? "#2a2d3b" : "#222533") }
+                            GradientStop { position: 1.0; color: root.optionsOpen ? "#e23f30" : "#181a24" }
+                        }
+                        border.width: 1
+                        border.color: root.optionsOpen ? "#ff8a7e" : "#34384a"
+                        IconGlyph { anchors.centerIn: parent; name: "sliders"; color: "#ffffff"; fit: true; width: 22; height: 22 }
+                    }
+                    HoverHandler { id: optionsHover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: root.optionsOpen = !root.optionsOpen }
+                }
+            }
+        }
+        }
+
+        AppScrollBar {
+            id: previewScrollBar
+            flickable: previewFlick
+            anchors.top: parent.top; anchors.bottom: parent.bottom; anchors.right: parent.right
+            anchors.topMargin: 4; anchors.bottomMargin: 4; anchors.rightMargin: 3
         }
     }
 
@@ -1031,11 +1065,18 @@ Item {
     }
 
     // ---- the template chooser ------------------------------------------------------------------------------------------------------
-    // The same "Choose template" popup Settings uses (TemplatePickerModal), not a dropdown: it just gets handed this tab's own
-    // template list (the engine's design catalog, `{id, name, color}`) mapped to the picker's `{key, name}` shape instead of the
-    // fixed layouts list the picker defaults to.
+    // The same "Choose template" popup Settings uses (TemplatePickerModal), not a dropdown: every design in the engine's whole
+    // template catalog (TemplateLibraryService.designs() with no filter - not just this tab's own content type), mapped to the
+    // picker's `{key, name}` shape, category id and name included so its own category filter (defaulting to "All") can group them.
+    // A design of a different content type still applies fine (SlideBuilder's own templateId lookup only checks the id exists, not
+    // what it was made for) - its bound fields just won't match this tab's placeholders as neatly.
     function openTemplateMenu() {
-        templatePicker.templates = root.adapter.templates().map((t) => ({ key: t.id, name: t.name }))
+        const categoryNames = {}
+        for (const c of TemplateLibraryService.categories) categoryNames[c.id] = c.name
+        templatePicker.templates = TemplateLibraryService.designs().map((t) => ({
+            key: t.id, name: t.name, color: t.color,
+            category: t.category, categoryName: t.category ? (categoryNames[t.category] ?? t.category) : qsTr("Unlabeled")
+        }))
         templatePicker.selectedKey = root.templateId
         templatePicker.open = true
     }
@@ -1043,7 +1084,9 @@ Item {
         id: templatePicker
         z: 30
         contentType: root.sourceId
-        contentTypeLabel: root.adapter ? root.adapter.sidebarLabel : ""
+        // "All" now that the list is the whole catalog, not just this tab's own content type - "Collections" (this tab's sidebar
+        // label) would misname it once designs from every category are in the list.
+        contentTypeLabel: qsTr("All")
         onApplied: (tpl) => {
             templatePicker.open = false
             root.adapter.setTemplate(tpl.key === root.adapter.defaultTemplateId() ? "" : tpl.key)

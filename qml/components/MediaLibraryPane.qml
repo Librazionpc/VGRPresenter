@@ -178,7 +178,7 @@ Item {
             y: fixedRows.y + fixedRows.height + 14
             text: qsTr("FOLDERS")
             color: Theme.textMuted
-            font.family: Theme.fontFamily; font.pixelSize: 10; font.bold: true
+            font.family: Theme.fontFamily; font.pixelSize: 12; font.bold: true
         }
 
         Flickable {
@@ -296,7 +296,7 @@ Item {
                             ? qsTr("Nothing named \u201c%1\u201d.").arg(root.query)
                             : qsTr("No images, videos or audio found here.")))
                 color: Theme.textMuted
-                font.family: Theme.fontFamily; font.pixelSize: 12
+                font.family: Theme.fontFamily; font.pixelSize: 14
             }
             AppButton {
                 visible: !root.loading && MediaLibraryService.folders.length === 0
@@ -354,14 +354,14 @@ Item {
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: root.inputTabs[tabItem.index].label
                                 color: tabItem.selected ? Theme.textPrimary : Theme.textSecondary
-                                font.family: Theme.fontFamily; font.pixelSize: 13
+                                font.family: Theme.fontFamily; font.pixelSize: 15
                                 font.weight: tabItem.selected ? Font.DemiBold : Font.Medium
                             }
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: root.inputCounts[tabItem.index]
                                 color: Theme.textMuted
-                                font.family: Theme.fontFamily; font.pixelSize: 11
+                                font.family: Theme.fontFamily; font.pixelSize: 13
                             }
                         }
                         // Selected underline (full tab width, like the reference).
@@ -435,14 +435,14 @@ Item {
                                     text: root.cardName(index, kind)
                                     color: Theme.textPrimary
                                     elide: Text.ElideRight
-                                    font.family: Theme.fontFamily; font.pixelSize: 12
+                                    font.family: Theme.fontFamily; font.pixelSize: 14
                                 }
                                 Text {
                                     width: parent.width
                                     text: root.cardSub(index, kind)
                                     color: Theme.textMuted
                                     elide: Text.ElideRight
-                                    font.family: Theme.fontFamily; font.pixelSize: 10
+                                    font.family: Theme.fontFamily; font.pixelSize: 12
                                 }
                             }
                             PositionHoverArea {
@@ -463,7 +463,7 @@ Item {
                           : qsTr("Nothing here yet - add %1 in Settings - Audio & Video.")
                                 .arg(root.inputTabs[root.inputTab].label.toLowerCase())
                     color: Theme.textMuted
-                    font.family: Theme.fontFamily; font.pixelSize: 12
+                    font.family: Theme.fontFamily; font.pixelSize: 14
                     wrapMode: Text.WordWrap
                 }
             }

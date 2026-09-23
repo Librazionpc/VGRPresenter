@@ -17,6 +17,7 @@
 #include "modules/bible/ReferenceResolver.hpp"
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -113,7 +114,9 @@ private:
     Result<size_t> Validate(const BibleVersion& bible) const;
 
     // Indexes verse content into the Search Engine (docs/specs/24 §Search).
-    Result<size_t> IndexBible(const BibleVersion& bible);
+    // `onProgress`, when given, is called per verse (indexed, total, bookId).
+    Result<size_t> IndexBible(const BibleVersion& bible,
+                              const std::function<void(size_t, size_t, std::string_view)>* onProgress = nullptr);
 
     // Canonical reference key for user-data stores ("JHN 3:16").
     static std::string RefKey(const PassageRef& ref);

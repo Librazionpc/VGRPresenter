@@ -106,6 +106,7 @@ void TestThumbnailCacheConcurrency();
 void TestOverlayLibrary();
 void TestTemplateLibrary();
 void TestTheTableLibrary();
+void TestTheTableSearchIndexing();
 void TestTextListFormat();
 void TestBlockValidator();
 void TestDropRules();

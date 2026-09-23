@@ -19,6 +19,8 @@
 #include <QStringList>
 #include <QThread>
 
+#include <thread>
+
 namespace bl = bps::library;
 
 namespace {
@@ -128,6 +130,15 @@ void TheTableService::loadLibrary()
     // the raw pointer is safe and keeps the engine header out of this one.
     static std::shared_ptr<bl::TheTableLibrary> keepAlive = bl::TheTableLibrary::Open(file);
     library_ = keepAlive.get();
+    // The sermons join the platform Search Engine's index (the Bible/Song
+    // precedent): once here, the app-wide search (Ctrl+K) finds them. One
+    // document per sermon — ~1,200 upserts, done in the background so the
+    // first paint never waits on the index.
+    std::thread([] {
+        if (keepAlive->IndexWithSearchEngine().ok())
+            EngineBridge::write(QStringLiteral("info"), QStringLiteral("Table"),
+                                QStringLiteral("Sermons indexed for the app-wide search"));
+    }).detach();
     emit changed();
 }
 
@@ -391,6 +402,8 @@ bool TheTableService::newSermonFolder()
                 report(tr("Imported %1 sermons · %2 already in · %3 failed")
                            .arg(rep.imported).arg(rep.skipped).arg(rep.failed),
                        QStringLiteral("success"));
+                if (rep.imported > 0)
+                    std::thread([] { (void)TheTableService::instance().reindex(); }).detach();
                 emit changed();
             } else {
                 report(qstr(r.error().message), QStringLiteral("error"));
@@ -434,6 +447,16 @@ bool TheTableService::newSermon()
     report(tr("Added %1 · %2").arg(QFileInfo(QString::fromStdString(path)).fileName(),
                                    qstr(r.value())),
            QStringLiteral("success"));
+    std::thread([] { (void)TheTableService::instance().reindex(); }).detach();
     emit changed();
     return true;
+}
+
+// Re-upserts every sermon document into the platform Search Engine (an import
+// landed). The engine's IndexDocument is an incremental upsert, so other
+// content's documents are never touched.
+void TheTableService::reindex()
+{
+    if (library_ && EngineBridge::instance().booted())
+        (void)tableLibrary(library_)->IndexWithSearchEngine();
 }

@@ -53,7 +53,8 @@ Column {
     }
 
     signal changeColorRequested()
-    signal changeFontRequested()
+    signal changeFontRequested()        // opens the WEIGHT list (Regular/Medium/SemiBold/Bold)
+    signal changeFontFamilyRequested()  // opens the FONT list - every family this machine has, not a short fixed set
 
     readonly property var meta: root.target ? root.target.meta : ({})
     readonly property bool bold: root.meta.bold === true
@@ -61,7 +62,10 @@ Column {
     readonly property bool underline: root.meta.underline === true
     readonly property bool strikethrough: root.meta.strikethrough === true
     readonly property string align: root.meta.align ?? "center"
-    readonly property string fontFamily: root.meta.fontFamily ?? "Inter"
+    // Mirrors `align` but for the vertical axis ("top" | "center" | "bottom") - DesignPreview.qml and
+    // EditScreen.qml's canvas both already read this key; only this panel's picker was missing.
+    readonly property string verticalAlign: root.meta.verticalAlign ?? "center"
+    readonly property string fontFamily: root.meta.fontFamily ?? "Segoe UI"
     readonly property string fontWeight: root.meta.fontWeight ?? "SemiBold"
     readonly property string autoSize: root.meta.autoSize ?? "none"
     // How the text is SHOWN whatever was typed: "none" | "upper" | "lower" | "capitalize". The typed text itself is never changed.
@@ -161,14 +165,13 @@ Column {
             anchors.centerIn: parent
             text: qsTr("TEXT ITEM")
             color: "#ffffff"
-            font.family: "Inter"
-            font.pixelSize: 9
+            font.family: "Segoe UI"
+            font.pixelSize: 10
             font.weight: Font.Bold
         }
     }
 
-    // Style toggles (B/I/U/S) + alignment, one row — same segmented-chip
-    // language as SizeStyleCard's Line/Dotted/Dashed selector.
+    // Style toggles (B/I/U/S) — same segmented-chip language as SizeStyleCard's Line/Dotted/Dashed selector.
     Row {
         width: parent.width
         spacing: 6
@@ -191,8 +194,8 @@ Column {
                 anchors.centerIn: parent
                 text: toggle.label
                 color: toggle.active ? "#ffffff" : "#c8cdd9"
-                font.family: "Inter"
-                font.pixelSize: 13
+                font.family: "Segoe UI"
+                font.pixelSize: 15
                 font.bold: toggle.label === "B"
                 font.italic: toggle.label === "I"
                 font.underline: toggle.label === "U"
@@ -212,64 +215,120 @@ Column {
         StyleToggle { label: "I"; active: root.italic; onToggled: root.setMetaDiscrete("italic", !root.italic) }
         StyleToggle { label: "U"; active: root.underline; onToggled: root.setMetaDiscrete("underline", !root.underline) }
         StyleToggle { label: "S"; active: root.strikethrough; onToggled: root.setMetaDiscrete("strikethrough", !root.strikethrough) }
+    }
 
-        // Alignment — four mutually-exclusive buttons, each a tiny
-        // hand-drawn bar icon (no source SVG path data for these, same
-        // simplified-icon status as ShapeSourceModal's glyphs) showing
-        // left/center/right/justify as differently-aligned bar stacks.
-        component AlignToggle: Rectangle {
-            id: alignToggle
-            property bool active: false
-            property string mode: "left"
-            signal picked()
+    // ---- Align — its own collapsible section (SizeStyleCard's header language: label + chevron, click to
+    // fold), holding the horizontal row (left/center/right/justify) above the vertical one (top/center/
+    // bottom). Icons are FreeShow's own (src/frontend/values/icons.ts alignLeft/Center/Right/Justify/Top/
+    // Middle/Bottom), not hand-drawn bars - see IconGlyph.qml. Vertical is where the text SITS in its box
+    // top-to-bottom rather than how each line is spread left-to-right; it was fixed at "center" with no way
+    // to change it (a hardcoded engine default was the only lever, and only per-template, not per-item) - a
+    // tall box holding variable-length bound text (a sermon paragraph, say) needs this pickable per item,
+    // the same as FreeShow's own alignY (edit/values/boxes.ts: align-items flex-start/center/flex-end).
+    Column {
+        id: alignSection
+        width: parent.width
+        spacing: 10
 
-            width: 40
-            height: 32
+        property bool expanded: true
+
+        Rectangle {
+            width: parent.width
+            height: 44
             radius: 8
-            color: alignToggle.active ? "#6c5ce7" : (alignArea.containsMouse ? "#20222c" : "#1a1c26")
-            border.color: alignToggle.active ? "#6c5ce7" : "#2a2f3a"
-            border.width: 1
-            Behavior on color { ColorAnimation { duration: 100 } }
+            color: "#161823"
 
-            Column {
-                anchors.centerIn: parent
-                spacing: 2
+            Row {
+                x: 14
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 10
 
-                Repeater {
-                    model: 3
-                    delegate: Rectangle {
-                        required property int index
-                        readonly property real barWidth: alignToggle.mode === "justify" ? 16
-                            : index === 1 ? 11 : 16
-                        height: 1.5
-                        width: barWidth
-                        radius: 0.75
-                        color: alignToggle.active ? "#ffffff" : "#c8cdd9"
-                        anchors.left: alignToggle.mode === "left" ? parent.left : undefined
-                        anchors.right: alignToggle.mode === "right" ? parent.right : undefined
-                        anchors.horizontalCenter: alignToggle.mode === "center" || alignToggle.mode === "justify" ? parent.horizontalCenter : undefined
-                    }
+                IconGlyph { anchors.verticalCenter: parent.verticalCenter; name: "alignCenter"; color: "#e0399f"; width: 14; height: 14 }
+                Text {
+                    text: qsTr("Align")
+                    color: "#eef1f8"
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
+                    font.weight: Font.Medium
                 }
             }
 
+            IconGlyph {
+                x: parent.width - 28
+                anchors.verticalCenter: parent.verticalCenter
+                name: alignSection.expanded ? "chevronUp" : "chevronDown"
+                color: "#6b7280"
+                width: 12; height: 12
+            }
+
             MouseArea {
-                id: alignArea
                 anchors.fill: parent
-                hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: alignToggle.picked()
+                onClicked: alignSection.expanded = !alignSection.expanded
             }
         }
 
-        AlignToggle { mode: "left"; active: root.align === "left"; onPicked: root.setMetaDiscrete("align", "left") }
-        AlignToggle { mode: "center"; active: root.align === "center"; onPicked: root.setMetaDiscrete("align", "center") }
-        AlignToggle { mode: "right"; active: root.align === "right"; onPicked: root.setMetaDiscrete("align", "right") }
-        AlignToggle { mode: "justify"; active: root.align === "justify"; onPicked: root.setMetaDiscrete("align", "justify") }
+        Column {
+            width: parent.width
+            spacing: 6
+            visible: alignSection.expanded
+            height: visible ? implicitHeight : 0
+
+            component AlignToggle: Rectangle {
+                id: alignToggle
+                property bool active: false
+                property string icon: ""
+                // Set per-row (4 horizontal buttons vs 3 vertical ones share the row's width differently) -
+                // defaults to the 4-across math so a stray usage doesn't collapse to 0.
+                property int siblingCount: 4
+                signal picked()
+
+                width: (parent.width - (alignToggle.siblingCount - 1) * 6) / alignToggle.siblingCount
+                height: 32
+                radius: 8
+                color: alignToggle.active ? "#6c5ce7" : (alignArea.containsMouse ? "#20222c" : "#1a1c26")
+                border.color: alignToggle.active ? "#6c5ce7" : "#2a2f3a"
+                border.width: 1
+                Behavior on color { ColorAnimation { duration: 100 } }
+
+                IconGlyph {
+                    anchors.centerIn: parent
+                    name: alignToggle.icon
+                    fit: true
+                    width: 15; height: 15
+                    color: alignToggle.active ? "#ffffff" : "#c8cdd9"
+                }
+
+                MouseArea {
+                    id: alignArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: alignToggle.picked()
+                }
+            }
+
+            Row {
+                width: parent.width
+                spacing: 6
+                AlignToggle { icon: "alignLeft"; active: root.align === "left"; onPicked: root.setMetaDiscrete("align", "left") }
+                AlignToggle { icon: "alignCenter"; active: root.align === "center"; onPicked: root.setMetaDiscrete("align", "center") }
+                AlignToggle { icon: "alignRight"; active: root.align === "right"; onPicked: root.setMetaDiscrete("align", "right") }
+                AlignToggle { icon: "alignJustify"; active: root.align === "justify"; onPicked: root.setMetaDiscrete("align", "justify") }
+            }
+            Row {
+                width: parent.width
+                spacing: 6
+                AlignToggle { siblingCount: 3; icon: "alignTop"; active: root.verticalAlign === "top"; onPicked: root.setMetaDiscrete("verticalAlign", "top") }
+                AlignToggle { siblingCount: 3; icon: "alignMiddle"; active: root.verticalAlign === "center"; onPicked: root.setMetaDiscrete("verticalAlign", "center") }
+                AlignToggle { siblingCount: 3; icon: "alignBottom"; active: root.verticalAlign === "bottom"; onPicked: root.setMetaDiscrete("verticalAlign", "bottom") }
+            }
+        }
     }
 
-    // Font family/weight — informational for now (no font list/weight
-    // picker built yet); the color circle opens the shared color picker
-    // (see EditScreen.qml's bgColorModal, reused for border/background
+    // Font family + weight, each its own click target: the family name opens the FULL list (every font this machine has, via
+    // Qt.fontFamilies() - EditScreen.qml builds the dropdown), the weight pill opens the short Regular/Medium/SemiBold/Bold list,
+    // unchanged. The color circle opens the shared color picker (see EditScreen.qml's bgColorModal, reused for border/background
     // colors too) targeting this item's text color.
     Rectangle {
         width: parent.width
@@ -277,11 +336,6 @@ Column {
         radius: 8
         color: "#161823"
 
-        // Family/weight — click anywhere in this row to open the weight
-        // dropdown (see changeFontRequested below; EditScreen.qml supplies
-        // the actual DropdownPanel, same shared-menu convention as the
-        // slide/canvas context menus). No font-family list yet, just the
-        // weight presets — a family picker is future work.
         Row {
             id: fontRow
             x: 14
@@ -292,16 +346,19 @@ Column {
                 anchors.verticalCenter: parent.verticalCenter
                 text: "Aa"
                 color: "#eef1f8"
-                font.family: "Inter"
-                font.pixelSize: 14
+                font.family: "Segoe UI"
+                font.pixelSize: 16
                 font.weight: Font.DemiBold
             }
             Text {
+                id: fontFamilyLabel
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.fontFamily + " " + root.fontWeight
+                text: root.fontFamily
                 color: "#c8cdd9"
-                font.family: "Inter"
-                font.pixelSize: 12
+                font.family: "Segoe UI"
+                font.pixelSize: 14
+                elide: Text.ElideRight
+                width: Math.min(implicitWidth, 120)
             }
             IconGlyph {
                 anchors.verticalCenter: parent.verticalCenter
@@ -312,12 +369,50 @@ Column {
         }
 
         MouseArea {
+            id: familyArea
             anchors.left: parent.left
-            anchors.right: colorChip.left
+            anchors.right: weightPill.left
             anchors.top: parent.top
             anchors.bottom: parent.bottom
             cursorShape: Qt.PointingHandCursor
-            onClicked: root.changeFontRequested()
+            onClicked: root.changeFontFamilyRequested()
+        }
+
+        // A plain Item, not a Row, wraps the pill: a Row forbids anchoring (even `fill`) on its own children, and the click
+        // target here needs to extend a few px past the visible pill for an easy hit.
+        Item {
+            id: weightPill
+            anchors.right: colorChip.left
+            anchors.rightMargin: 10
+            anchors.verticalCenter: parent.verticalCenter
+            width: weightRow.width
+            height: weightRow.height
+
+            Row {
+                id: weightRow
+                spacing: 4
+
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.fontWeight
+                    color: "#8a94a6"
+                    font.family: "Segoe UI"
+                    font.pixelSize: 13
+                }
+                IconGlyph {
+                    anchors.verticalCenter: parent.verticalCenter
+                    name: "chevronDown"
+                    color: "#6b7280"
+                    width: 8; height: 8
+                }
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                anchors.margins: -6
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.changeFontRequested()
+            }
         }
 
         // Color swatch + "Change" chip — same layout language as the right
@@ -353,8 +448,8 @@ Column {
                     anchors.centerIn: parent
                     text: qsTr("Change")
                     color: "#aeb6c8"
-                    font.family: "Inter"
-                    font.pixelSize: 10
+                    font.family: "Segoe UI"
+                    font.pixelSize: 12
                     font.weight: Font.Medium
                 }
 
@@ -377,8 +472,8 @@ Column {
         Text {
             text: qsTr("CASE")
             color: "#5c6475"
-            font.family: "Inter"
-            font.pixelSize: 9
+            font.family: "Segoe UI"
+            font.pixelSize: 10
             font.weight: Font.Bold
         }
 
@@ -410,8 +505,8 @@ Column {
                         anchors.centerIn: parent
                         text: caseBtn.modelData.label
                         color: caseBtn.active ? "#ffffff" : "#c8cdd9"
-                        font.family: "Inter"
-                        font.pixelSize: 12
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
                         font.weight: caseBtn.active ? Font.DemiBold : Font.Medium
                     }
 
@@ -427,60 +522,6 @@ Column {
         }
     }
 
-    // List - like FreeShow's list option: every line becomes an item, marked with a bullet, a dash, numbers, letters ...
-    // The typed text is never changed (the marker is added when it is shown), and the styles come from the engine.
-    Column {
-        width: parent.width
-        spacing: 8
-
-        Text {
-            text: qsTr("LIST")
-            color: "#5c6475"
-            font.family: "Inter"
-            font.pixelSize: 9
-            font.weight: Font.Bold
-        }
-
-        Flow {
-            width: parent.width
-            spacing: 8
-
-            Repeater {
-                model: TextFormatService.listStyles()
-                delegate: Rectangle {
-                    id: listBtn
-                    required property var modelData
-                    readonly property bool active: root.listStyle === listBtn.modelData.key
-
-                    width: listBtn.modelData.key === "none" ? 64 : 48
-                    height: 32
-                    radius: 8
-                    color: listBtn.active ? "#6c5ce7" : (listArea.containsMouse ? "#20222c" : "#1a1c26")
-                    border.color: listBtn.active ? "#6c5ce7" : "#2a2f3a"
-                    border.width: 1
-                    Behavior on color { ColorAnimation { duration: 100 } }
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: listBtn.modelData.key === "none" ? qsTr("None") : listBtn.modelData.sample
-                        color: listBtn.active ? "#ffffff" : "#c8cdd9"
-                        font.family: "Inter"
-                        font.pixelSize: 12
-                        font.weight: listBtn.active ? Font.DemiBold : Font.Medium
-                    }
-
-                    MouseArea {
-                        id: listArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.setMetaDiscrete("list", listBtn.modelData.key)
-                    }
-                }
-            }
-        }
-    }
-
     Column {
         width: parent.width
         spacing: 8
@@ -488,8 +529,8 @@ Column {
         Text {
             text: qsTr("AUTO SIZE")
             color: "#5c6475"
-            font.family: "Inter"
-            font.pixelSize: 9
+            font.family: "Segoe UI"
+            font.pixelSize: 10
             font.weight: Font.Bold
         }
 
@@ -524,8 +565,8 @@ Column {
                         anchors.centerIn: parent
                         text: sizeBtn.modelData.label
                         color: sizeBtn.active ? "#ffffff" : "#c8cdd9"
-                        font.family: "Inter"
-                        font.pixelSize: 12
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
                         font.weight: sizeBtn.active ? Font.DemiBold : Font.Medium
                     }
 
@@ -583,6 +624,95 @@ Column {
         }
     }
 
+    // List - like FreeShow's list option: every line becomes an item, marked with a bullet, a dash, numbers, letters ...
+    // The typed text is never changed (the marker is added when it is shown), and the styles come from the engine.
+    // Same collapsible-section language as Align above (FreeShow's own "list" glyph as the header icon). Moved
+    // below Auto Size/the sliders (user call) - was sitting right after Case, ahead of the sizing controls.
+    Column {
+        id: listSection
+        width: parent.width
+        spacing: 10
+
+        property bool expanded: true
+
+        Rectangle {
+            width: parent.width
+            height: 44
+            radius: 8
+            color: "#161823"
+
+            Row {
+                x: 14
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 10
+
+                IconGlyph { anchors.verticalCenter: parent.verticalCenter; name: "listBullets"; color: "#e0399f"; width: 14; height: 14 }
+                Text {
+                    text: qsTr("List")
+                    color: "#eef1f8"
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
+                    font.weight: Font.Medium
+                }
+            }
+
+            IconGlyph {
+                x: parent.width - 28
+                anchors.verticalCenter: parent.verticalCenter
+                name: listSection.expanded ? "chevronUp" : "chevronDown"
+                color: "#6b7280"
+                width: 12; height: 12
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: listSection.expanded = !listSection.expanded
+            }
+        }
+
+        Flow {
+            width: parent.width
+            spacing: 8
+            visible: listSection.expanded
+            height: visible ? implicitHeight : 0
+
+            Repeater {
+                model: TextFormatService.listStyles()
+                delegate: Rectangle {
+                    id: listBtn
+                    required property var modelData
+                    readonly property bool active: root.listStyle === listBtn.modelData.key
+
+                    width: listBtn.modelData.key === "none" ? 64 : 48
+                    height: 32
+                    radius: 8
+                    color: listBtn.active ? "#6c5ce7" : (listArea.containsMouse ? "#20222c" : "#1a1c26")
+                    border.color: listBtn.active ? "#6c5ce7" : "#2a2f3a"
+                    border.width: 1
+                    Behavior on color { ColorAnimation { duration: 100 } }
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: listBtn.modelData.key === "none" ? qsTr("None") : listBtn.modelData.sample
+                        color: listBtn.active ? "#ffffff" : "#c8cdd9"
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
+                        font.weight: listBtn.active ? Font.DemiBold : Font.Medium
+                    }
+
+                    MouseArea {
+                        id: listArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.setMetaDiscrete("list", listBtn.modelData.key)
+                    }
+                }
+            }
+        }
+    }
+
     Column {
         width: parent.width
         spacing: 8
@@ -590,8 +720,8 @@ Column {
         Text {
             text: qsTr("POSITION & SIZE")
             color: "#5c6475"
-            font.family: "Inter"
-            font.pixelSize: 9
+            font.family: "Segoe UI"
+            font.pixelSize: 10
             font.weight: Font.Bold
         }
 
@@ -625,15 +755,15 @@ Column {
                             anchors.horizontalCenter: parent.horizontalCenter
                             text: geomBox.modelData.label
                             color: "#5c6475"
-                            font.family: "Inter"
-                            font.pixelSize: 8
+                            font.family: "Segoe UI"
+                            font.pixelSize: 9
                         }
                         TextInput {
                             id: geomInput
                             anchors.horizontalCenter: parent.horizontalCenter
                             color: "#eef1f8"
-                            font.family: "Inter"
-                            font.pixelSize: 12
+                            font.family: "Segoe UI"
+                            font.pixelSize: 14
                             font.weight: Font.Medium
                             validator: IntValidator { bottom: -100000; top: 100000 }
                             selectByMouse: true

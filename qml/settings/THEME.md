@@ -14,7 +14,7 @@ value in this one file and every screen/component that references
   (`iconMuted` → `toggleOffTrack`).
 - **Spacing** — `space1` (4px) through `space6` (24px) plus `space8` (32px).
 - **Radius** — `radiusSm`/`radiusMd`/`radiusLg`/`radiusXl`.
-- **Type** — `fontFamily` ("Inter") and `textXs` → `textXxl` pixel sizes.
+- **Type** — `fontFamily` ("Segoe UI" — Windows' own system UI font, always present, the same reasoning FreeShow's own app UI uses its OS's native font instead of shipping one) and `textXs` → `textXxl` pixel sizes.
 
 Every screen and shared component built this session (`OutputsScreen`,
 `StylesScreen`, `AudioVideoScreen`, `ModalCard`, `Pill`, `SelectableChip`,

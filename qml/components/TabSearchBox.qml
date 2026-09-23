@@ -16,8 +16,18 @@ Item {
 
     signal edited(string text)
 
-    implicitWidth: 160
+    // Hugs its own content (icon + placeholder/typed text), the same as every tab beside it - was a fixed 160, wider than "Search"
+    // ever needs, so the red underline (spanning the full box) stretched out past the visible text.
+    implicitWidth: Math.max(112, glass.x + glass.width + 12 + hint.implicitWidth + 26)
     implicitHeight: 31
+
+    readonly property string hintText: input.activeFocus && root.focusedPlaceholder !== "" ? root.focusedPlaceholder : root.placeholder
+    Text {
+        id: hint
+        visible: false   // measurement-only twin; the real placeholder is inside `input`, drawn with the same font
+        text: root.hintText
+        font: input.font
+    }
 
     IconGlyph {
         id: glass
@@ -42,7 +52,7 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         color: "#f1f5f9"
         font.family: Theme.fontFamily
-        font.pixelSize: 13
+        font.pixelSize: 15
         font.weight: Font.DemiBold
         clip: true
         selectByMouse: true

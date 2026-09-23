@@ -262,7 +262,8 @@ Result<std::string> BibleEngine::Import(std::string_view source, std::string_vie
             (void)search.RemoveDocument(DocId(bible.metadata.id, v));
     }
     if (options.index) {
-        auto indexed = IndexBible(bible);
+        auto indexed = IndexBible(bible,
+                                  options.onProgress ? &options.onProgress : nullptr);
         if (indexed.ok())
             (void)EventBus::Instance().Publish(
                 events::BibleIndexed{bible.metadata.id, indexed.value()});
@@ -307,7 +308,8 @@ Result<size_t> BibleEngine::Validate(const BibleVersion& bible) const {
     return warnings;
 }
 
-Result<size_t> BibleEngine::IndexBible(const BibleVersion& bible) {
+Result<size_t> BibleEngine::IndexBible(const BibleVersion& bible,
+                                       const std::function<void(size_t, size_t, std::string_view)>* onProgress) {
     // Incremental upsert per verse (docs/specs/24 §Search): importing a Bible
     // must never clobber the global index — other Bibles, songs, and
     // presentations stay searchable alongside this one.
@@ -340,6 +342,8 @@ Result<size_t> BibleEngine::IndexBible(const BibleVersion& bible) {
         auto r = search.IndexDocument(doc);
         if (!r.ok()) return r.error();
         ++indexed;
+        if (onProgress && *onProgress)
+            (*onProgress)(indexed, bible.verses.size(), v.bookId);
     }
     return indexed;
 }

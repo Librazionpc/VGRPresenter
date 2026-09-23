@@ -269,8 +269,8 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         text: root.title
                         color: "#eef0f6"
-                        font.family: "Inter"
-                        font.pixelSize: 18
+                        font.family: "Segoe UI"
+                        font.pixelSize: 21
                         font.weight: Font.DemiBold
                     }
 
@@ -288,7 +288,7 @@ Item {
                             anchors.centerIn: parent
                             text: "✕"
                             color: "#8a94a6"
-                            font.pixelSize: 12
+                            font.pixelSize: 14
                         }
 
                         MouseArea {
@@ -305,8 +305,8 @@ Item {
                     width: parent.width
                     text: qsTr("Pick a color or gradient for the slide background")
                     color: "#8a94a6"
-                    font.family: "Inter"
-                    font.pixelSize: 11
+                    font.family: "Segoe UI"
+                    font.pixelSize: 13
                     wrapMode: Text.Wrap
                 }
             }
@@ -386,15 +386,15 @@ Item {
                                 return Qt.color(root.selection.color).a < 1 ? qsTr("Tint") : qsTr("Custom color")
                             }
                             color: "#eef0f6"
-                            font.family: "Inter"
-                            font.pixelSize: 13
+                            font.family: "Segoe UI"
+                            font.pixelSize: 15
                             font.weight: Font.Medium
                         }
                         Text {
                             text: root.selection.kind === "gradient" ? root.selection.subtitle : root.selection.color
                             color: "#5c6475"
-                            font.family: "Inter"
-                            font.pixelSize: 10
+                            font.family: "Segoe UI"
+                            font.pixelSize: 12
                         }
                     }
                 }
@@ -408,8 +408,8 @@ Item {
                 Text {
                     text: qsTr("COLORS")
                     color: "#5c6475"
-                    font.family: "Inter"
-                    font.pixelSize: 9
+                    font.family: "Segoe UI"
+                    font.pixelSize: 10
                     font.weight: Font.Bold
                 }
 
@@ -505,8 +505,8 @@ Item {
                 Text {
                     text: qsTr("GRADIENTS")
                     color: "#5c6475"
-                    font.family: "Inter"
-                    font.pixelSize: 9
+                    font.family: "Segoe UI"
+                    font.pixelSize: 10
                     font.weight: Font.Bold
                 }
 
@@ -544,8 +544,8 @@ Item {
                 Text {
                     text: qsTr("CUSTOM COLOR")
                     color: "#5c6475"
-                    font.family: "Inter"
-                    font.pixelSize: 9
+                    font.family: "Segoe UI"
+                    font.pixelSize: 10
                     font.weight: Font.Bold
                 }
 
@@ -581,8 +581,8 @@ Item {
                             width: parent.width - 30
                             text: root.customHex
                             color: "#c9cedd"
-                            font.family: "Inter"
-                            font.pixelSize: 12
+                            font.family: "Segoe UI"
+                            font.pixelSize: 14
                             selectByMouse: true
                             // Live preview on every keystroke, not just once
                             // the field loses focus — the swatch/name above
@@ -612,8 +612,8 @@ Item {
                 Text {
                     text: qsTr("CUSTOM GRADIENT")
                     color: "#5c6475"
-                    font.family: "Inter"
-                    font.pixelSize: 9
+                    font.family: "Segoe UI"
+                    font.pixelSize: 10
                     font.weight: Font.Bold
                 }
 
@@ -652,8 +652,8 @@ Item {
                             width: 140
                             text: root.customGradFrom
                             color: "#c9cedd"
-                            font.family: "Inter"
-                            font.pixelSize: 12
+                            font.family: "Segoe UI"
+                            font.pixelSize: 14
                             selectByMouse: true
                             onTextChanged: {
                                 const from = root.normalizeHex(text)
@@ -671,7 +671,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             text: "→"
                             color: "#5c6475"
-                            font.pixelSize: 12
+                            font.pixelSize: 14
                         }
 
                         TextInput {
@@ -680,8 +680,8 @@ Item {
                             width: 140
                             text: root.customGradTo
                             color: "#c9cedd"
-                            font.family: "Inter"
-                            font.pixelSize: 12
+                            font.family: "Segoe UI"
+                            font.pixelSize: 14
                             selectByMouse: true
                             onTextChanged: {
                                 const from = root.normalizeHex(gradFromInput.text)
@@ -716,8 +716,8 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Cancel")
                         color: "#c9cedd"
-                        font.family: "Inter"
-                        font.pixelSize: 12
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
                         font.weight: Font.Medium
                     }
 
@@ -741,8 +741,8 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Apply")
                         color: "#ffffff"
-                        font.family: "Inter"
-                        font.pixelSize: 12
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
                         font.weight: Font.Medium
                     }
 

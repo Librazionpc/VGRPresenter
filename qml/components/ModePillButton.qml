@@ -54,7 +54,7 @@ Item {
             anchors.centerIn: parent
             text: root.text
             font.family: Theme.fontFamily
-            font.pixelSize: 9
+            font.pixelSize: 10
             font.weight: Font.Medium
             color: Theme.textSecondary
         }

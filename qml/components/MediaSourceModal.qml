@@ -96,8 +96,8 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Select Media")
                         color: "#f1f3f8"
-                        font.family: "Inter"
-                        font.pixelSize: 16
+                        font.family: "Segoe UI"
+                        font.pixelSize: 18
                         font.weight: Font.DemiBold
                     }
 
@@ -115,7 +115,7 @@ Item {
                             anchors.centerIn: parent
                             text: "✕"
                             color: "#8a94a6"
-                            font.pixelSize: 12
+                            font.pixelSize: 14
                         }
 
                         MouseArea {
@@ -132,8 +132,8 @@ Item {
                     width: parent.width
                     text: qsTr("Choose an image or video to add to this slide")
                     color: "#8a94a6"
-                    font.family: "Inter"
-                    font.pixelSize: 12
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
                 }
             }
 
@@ -174,8 +174,8 @@ Item {
                                 anchors.centerIn: parent
                                 text: tabBtn.modelData.label
                                 color: tabBtn.active ? "#9b8ff5" : "#8a94a6"
-                                font.family: "Inter"
-                                font.pixelSize: 12
+                                font.family: "Segoe UI"
+                                font.pixelSize: 14
                                 font.weight: Font.Medium
                             }
 
@@ -219,8 +219,8 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             width: parent.width - 24
                             color: "#c9cedd"
-                            font.family: "Inter"
-                            font.pixelSize: 11
+                            font.family: "Segoe UI"
+                            font.pixelSize: 13
                             selectByMouse: true
                             onTextChanged: root.searchQuery = text
 
@@ -228,8 +228,8 @@ Item {
                                 visible: parent.text.length === 0
                                 text: qsTr("Search media...")
                                 color: "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 11
+                                font.family: "Segoe UI"
+                                font.pixelSize: 13
                             }
                         }
                     }
@@ -280,7 +280,7 @@ Item {
                                 anchors.horizontalCenterOffset: 1
                                 text: "▶"
                                 color: "#ffffff"
-                                font.pixelSize: 11
+                                font.pixelSize: 13
                             }
                         }
 
@@ -291,8 +291,8 @@ Item {
                             horizontalAlignment: Text.AlignHCenter
                             text: mediaCard.modelData.name
                             color: "#c8cdd9"
-                            font.family: "Inter"
-                            font.pixelSize: 10
+                            font.family: "Segoe UI"
+                            font.pixelSize: 12
                             elide: Text.ElideMiddle
                         }
 
@@ -324,8 +324,8 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Cancel")
                         color: "#c8cdd9"
-                        font.family: "Inter"
-                        font.pixelSize: 13
+                        font.family: "Segoe UI"
+                        font.pixelSize: 15
                         font.weight: Font.Medium
                     }
 
@@ -351,8 +351,8 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Insert")
                         color: "#ffffff"
-                        font.family: "Inter"
-                        font.pixelSize: 13
+                        font.family: "Segoe UI"
+                        font.pixelSize: 15
                         font.weight: Font.DemiBold
                     }
 

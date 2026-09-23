@@ -47,13 +47,18 @@ Rectangle {
     // the tab pack hugs the left, Search sits at the bar's right edge with
     // the same red underline).
     TabSearchBox {
+        id: searchBox
         visible: root.canSearch
         anchors.right: parent.right
         anchors.top: parent.top
-        anchors.topMargin: 8
-        height: 31
-        // Whatever the tabs leave: up to 160 px, never less than 120.
-        width: Math.max(120, Math.min(160, root.width - tabsRow.childrenRect.width - 8 - 8))
+        // Fills the bar's full height rather than 31-in-39-centered: its icon/text are already
+        // centered internally, so this lands them exactly where the (also-centered) tab labels
+        // sit, and its own red underline - drawn at ITS bottom - lands right on the bar's border
+        // instead of floating short of it.
+        height: parent.height
+        // Hugs its own placeholder text (its implicitWidth) - clamped so a long "Search <tab>" hint still can't
+        // run into the tabs, and a very narrow window still leaves it usable.
+        width: Math.max(100, Math.min(searchBox.implicitWidth, root.width - tabsRow.childrenRect.width - 16))
         placeholder: qsTr("Search")
         focusedPlaceholder: qsTr("Search %1").arg(root.tabs[root.currentTab].label.toLowerCase())
         text: root.searches[root.currentPane] !== undefined ? root.searches[root.currentPane] : ""
@@ -66,9 +71,8 @@ Rectangle {
     Flow {
         id: tabsRow
         anchors.left: parent.left
-        anchors.top: parent.top
+        anchors.verticalCenter: parent.verticalCenter
         anchors.leftMargin: 8
-        anchors.topMargin: 8
         spacing: 10   // room between the tabs
 
         Repeater {
@@ -108,19 +112,25 @@ Rectangle {
 
                     // Heavier and lighter-on-dark than before: the tabs read as faint.
                     color: tabDelegate.selected ? "#f1f5f9" : "#b4bccb"
-                    font.family: "Inter"
-                    font.pixelSize: 12
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
                     font.weight: tabDelegate.selected ? Font.Bold : Font.DemiBold
                     horizontalAlignment: Text.AlignLeft
                     text: tabDelegate.modelData.label
                     textFormat: Text.PlainText
                 }
-                // The reference's selected-tab red underline.
+                // The reference's selected-tab red underline. The delegate sits vertically
+                // centered in the 39px bar now (4px short of its bottom on each side), so the
+                // underline needs to reach 4px past its own parent's bottom to land on the bar's
+                // border line - a negative bottomMargin off its own parent, not an anchor to a
+                // distant ancestor (that flipped it to the TOP - anchoring to a non-parent/sibling
+                // item across several levels of nesting resolved the wrong way here).
                 Rectangle {
                     visible: tabDelegate.selected
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.bottom: parent.bottom
+                    anchors.bottomMargin: -4
                     height: 2
                     radius: 1
                     color: "#ff4d3d"

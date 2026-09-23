@@ -160,7 +160,7 @@ Rectangle {
                         color: "#6c5ce7"
                         font.family: "Outfit"
                         font.letterSpacing: 0.48
-                        font.pixelSize: 48
+                        font.pixelSize: 55
                         font.weight: Font.Black
                         horizontalAlignment: Text.AlignHCenter
                         text: qsTr("VGRPresenter")
@@ -177,8 +177,8 @@ Rectangle {
                         width: 83
 
                         color: "#5c6475"
-                        font.family: "Inter"
-                        font.pixelSize: 13
+                        font.family: "Segoe UI"
+                        font.pixelSize: 15
                         font.weight: Font.Medium
                         horizontalAlignment: Text.AlignHCenter
                         text: qsTr("v1.0.5-beta.2")
@@ -204,8 +204,8 @@ Rectangle {
                         width: 521
 
                         color: "#8a94a6"
-                        font.family: "Inter"
-                        font.pixelSize: 13
+                        font.family: "Segoe UI"
+                        font.pixelSize: 15
                         font.weight: Font.Normal
                         horizontalAlignment: Text.AlignHCenter
                         lineHeight: 19.50
@@ -293,8 +293,8 @@ Rectangle {
                             width: 159
 
                             color: "#e2e8f0"
-                            font.family: "Inter"
-                            font.pixelSize: 13
+                            font.family: "Segoe UI"
+                            font.pixelSize: 15
                             font.weight: Font.Medium
                             horizontalAlignment: Text.AlignLeft
                             text: qsTr("Quick search")
@@ -409,8 +409,8 @@ Rectangle {
                             width: 159
 
                             color: "#e2e8f0"
-                            font.family: "Inter"
-                            font.pixelSize: 13
+                            font.family: "Segoe UI"
+                            font.pixelSize: 15
                             font.weight: Font.Medium
                             horizontalAlignment: Text.AlignLeft
                             text: qsTr("New project")
@@ -523,8 +523,8 @@ Rectangle {
                             width: 159
 
                             color: "#e2e8f0"
-                            font.family: "Inter"
-                            font.pixelSize: 13
+                            font.family: "Segoe UI"
+                            font.pixelSize: 15
                             font.weight: Font.Medium
                             horizontalAlignment: Text.AlignLeft
                             text: qsTr("New show")
@@ -849,7 +849,7 @@ Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     text: qsTr("All")
                                     color: media_table.currentCategory === 0 ? "#e2e8f0" : "#c7cdd8"
-                                    font.family: "Inter"; font.pixelSize: 14
+                                    font.family: "Segoe UI"; font.pixelSize: 16
                                 }
                                 Text {
                                     anchors.right: parent.right
@@ -857,7 +857,7 @@ Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     text: ShowService.libraryShows.length
                                     color: "#5c6475"
-                                    font.family: "Inter"; font.pixelSize: 12
+                                    font.family: "Segoe UI"; font.pixelSize: 14
                                 }
                                 MouseArea {
                                     id: allRowMouse
@@ -875,7 +875,7 @@ Rectangle {
                                     x: 8; y: 9
                                     text: qsTr("Categories")
                                     color: "#8a94a6"
-                                    font.family: "Inter"; font.pixelSize: 12; font.weight: Font.DemiBold
+                                    font.family: "Segoe UI"; font.pixelSize: 14; font.weight: Font.DemiBold
                                 }
                                 // The + lives at the header's RIGHT (user call) —
                                 // hover/press states, honest toast while creation
@@ -906,7 +906,7 @@ Rectangle {
                                         anchors.centerIn: parent
                                         text: "+"
                                         color: "#ffffff"
-                                        font.family: "Inter"; font.pixelSize: 16; font.weight: Font.Medium
+                                        font.family: "Segoe UI"; font.pixelSize: 18; font.weight: Font.Medium
                                     }
                                 }
                             }
@@ -997,7 +997,7 @@ Rectangle {
                                             text: modelData.name
                                             color: selected ? "#e2e8f0" : "#c7cdd8"
                                             elide: Text.ElideRight
-                                            font.family: "Inter"; font.pixelSize: 13
+                                            font.family: "Segoe UI"; font.pixelSize: 15
                                         }
                                         // Inline rename editor — opened from the
                                         // right-click menu's Rename entry.
@@ -1010,7 +1010,7 @@ Rectangle {
                                             enabled: visible
                                             text: visible ? modelData.name : ""
                                             color: "#e2e8f0"
-                                            font.family: "Inter"; font.pixelSize: 13
+                                            font.family: "Segoe UI"; font.pixelSize: 15
                                             clip: true
                                             onAccepted: media_table.renameCategory(index, text)
                                             onActiveFocusChanged: if (!activeFocus && visible)
@@ -1024,7 +1024,7 @@ Rectangle {
                                             visible: media_table.renamingIndex !== index
                                             text: modelData.count > 0 ? modelData.count : ""
                                             color: "#5c6475"
-                                            font.family: "Inter"; font.pixelSize: 12
+                                            font.family: "Segoe UI"; font.pixelSize: 14
                                         }
                                         MouseArea {
                                             id: catRowMouse
@@ -1106,7 +1106,7 @@ Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     text: qsTr("Rename")
                                     color: "#e2e8f0"
-                                    font.family: "Inter"; font.pixelSize: 13
+                                    font.family: "Segoe UI"; font.pixelSize: 15
                                 }
                                 MouseArea {
                                     id: menuRenameMouse
@@ -1134,7 +1134,7 @@ Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     text: qsTr("Delete")
                                     color: "#ff6b61"
-                                    font.family: "Inter"; font.pixelSize: 13
+                                    font.family: "Segoe UI"; font.pixelSize: 15
                                 }
                                 MouseArea {
                                     id: menuDeleteMouse
@@ -1182,8 +1182,8 @@ Rectangle {
                             width: 34
 
                             color: "#5c6475"
-                            font.family: "Inter"
-                            font.pixelSize: 11
+                            font.family: "Segoe UI"
+                            font.pixelSize: 13
                             font.weight: Font.DemiBold
                             horizontalAlignment: Text.AlignLeft
                             text: qsTr("NAME")
@@ -1201,8 +1201,8 @@ Rectangle {
                             width: 201
 
                             color: "#5c6475"
-                            font.family: "Inter"
-                            font.pixelSize: 11
+                            font.family: "Segoe UI"
+                            font.pixelSize: 13
                             font.weight: Font.DemiBold
                             horizontalAlignment: Text.AlignRight
                             text: qsTr("MODIFIED")
@@ -1269,7 +1269,7 @@ Rectangle {
                                     width: parent.width - 240
                                     color: "#e2e8f0"
                                     elide: Text.ElideRight
-                                    font.family: "Inter"; font.pixelSize: 12
+                                    font.family: "Segoe UI"; font.pixelSize: 14
                                     text: modelData.name
                                     textFormat: Text.PlainText
                                     verticalAlignment: Text.AlignTop
@@ -1281,7 +1281,7 @@ Rectangle {
                                     height: 13
                                     width: 201
                                     color: "#5c6475"
-                                    font.family: "Inter"; font.pixelSize: 11
+                                    font.family: "Segoe UI"; font.pixelSize: 13
                                     horizontalAlignment: Text.AlignRight
                                     text: {
                                         const d = new Date(modelData.modifiedMs)
@@ -1364,12 +1364,14 @@ Rectangle {
                                 y: 6
 
                                 height: 15
-                                width: 73
+                                width: 88
 
-                                color: "#000000"
-                                font.family: "Inter"
-                                font.pixelSize: 12
-                                font.weight: Font.DemiBold
+                                // Was black text on this dark maroon pill - unreadable (barely more than the pill's own shadow).
+                                // White and bolder, matching FreeShow's own "+ New show" pill.
+                                color: "#ffffff"
+                                font.family: "Segoe UI"
+                                font.pixelSize: 14
+                                font.weight: Font.Bold
                                 horizontalAlignment: Text.AlignLeft
                                 text: qsTr("+ New show")
                                 textFormat: Text.PlainText
@@ -1419,9 +1421,9 @@ Rectangle {
                             width: 242
 
                             color: "#ff523b"
-                            font.family: "Inter"
+                            font.family: "Segoe UI"
                             font.letterSpacing: 1.12
-                            font.pixelSize: 56
+                            font.pixelSize: 64
                             font.weight: Font.ExtraBold
                             horizontalAlignment: Text.AlignHCenter
                             text: showClockTicker.formatClock(showClockTicker.now, false, true)
@@ -1438,8 +1440,8 @@ Rectangle {
                             width: 158
 
                             color: "#8a94a6"
-                            font.family: "Inter"
-                            font.pixelSize: 13
+                            font.family: "Segoe UI"
+                            font.pixelSize: 15
                             font.weight: Font.DemiBold
                             horizontalAlignment: Text.AlignHCenter
                             text: Qt.formatDate(showClockTicker.now, "dddd d, MMMM yyyy")
@@ -1532,8 +1534,8 @@ Rectangle {
                                 width: 67
 
                                 color: "#ffffff"
-                                font.family: "Inter"
-                                font.pixelSize: 13
+                                font.family: "Segoe UI"
+                                font.pixelSize: 15
                                 font.weight: Font.Bold
                                 horizontalAlignment: Text.AlignLeft
                                 text: qsTr("New show")
@@ -1551,8 +1553,8 @@ Rectangle {
                             width: 116
 
                             color: "#5c6475"
-                            font.family: "Inter"
-                            font.pixelSize: 11
+                            font.family: "Segoe UI"
+                            font.pixelSize: 13
                             font.weight: Font.Normal
                             horizontalAlignment: Text.AlignHCenter
                             textFormat: Text.PlainText

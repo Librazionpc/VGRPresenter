@@ -6,7 +6,9 @@
 #include "services/ShowService.h"
 
 #include "modules/bible/BibleEngine.hpp"
+#include "modules/library/TheTableLibrary.hpp"
 #include "modules/songs/SongEngine.hpp"
+#include "services/TheTableService.h"
 
 #include <QDebug>
 #include <QDir>
@@ -14,9 +16,13 @@
 #include <QFileInfo>
 #include <QJSEngine>
 #include <QQmlEngine>
+#include <QCoreApplication>
 #include <QSet>
 #include <QStandardPaths>
 #include <QThread>
+
+#include <atomic>
+#include <memory>
 
 #include <algorithm>
 #include <functional>
@@ -25,6 +31,7 @@
 #include <vector>
 
 namespace bb = bps::bible;
+namespace bl = bps::library;
 namespace sg = bps::song;
 
 namespace {
@@ -394,6 +401,25 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
         }
     }
 
+    // ---- Sermon paragraphs (The Table's library) -------------------------------------
+    if (text.size() >= 3) {
+        const QVariantList hits = TheTableService::instance().search(text, qMax(limit, 4));
+        for (const QVariant &v : hits) {
+            const QVariantMap h = v.toMap();
+            const QString ref = h.value(QStringLiteral("reference")).toString();
+            const QString verse = h.value(QStringLiteral("verse")).toString();
+            QVariantMap r = makeResult(QStringLiteral("table"),
+                                       QStringLiteral("%1 · ¶%2").arg(ref, verse),
+                                       tr("The Table"),
+                                       h.value(QStringLiteral("bookId")).toString(),
+                                       QString(), h.value(QStringLiteral("snippet")).toString());
+            r.insert(QStringLiteral("bookId"), h.value(QStringLiteral("bookId")));
+            r.insert(QStringLiteral("chapter"), h.value(QStringLiteral("chapter")));
+            r.insert(QStringLiteral("verse"), h.value(QStringLiteral("verse")));
+            out.append(r);
+        }
+    }
+
     return out;
 }
 
@@ -457,17 +483,70 @@ void SearchService::loadBibles()
 
 bool SearchService::importBibleFile(const QString &path)
 {
-    if (!EngineBridge::instance().booted())
+    if (!EngineBridge::instance().booted() || importing_)
         return false;
-    QString why;
-    if (!importOne(path, &why)) {
-        EventBus::instance().notify(why, QStringLiteral("error"), QObject::tr("Couldn't install the Bible"),
-                                    QStringLiteral("bible.import"));
+
+    // Reading the file is cheap — done here; the parse + verse-level index is
+    // the slow part and runs on a worker thread (the same shape as The Table's
+    // folder import), so the UI stays live and its progress bar can move.
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        EventBus::instance().notify(QStringLiteral("cannot open %1").arg(path), QStringLiteral("error"),
+                                    QObject::tr("Couldn't install the Bible"), QStringLiteral("bible.import"));
         return false;
     }
-    emit bibleChanged();
-    EventBus::instance().notify(QFileInfo(path).fileName(), QStringLiteral("success"),
-                                QObject::tr("Bible installed"), QStringLiteral("bible.import"));
+    const QByteArray data = file.readAll();
+    QString ext = QFileInfo(path).suffix().toLower();
+    if (ext == QLatin1String("sfm"))
+        ext = QStringLiteral("usfm");
+
+    importing_ = true;
+    progress_ = { { QStringLiteral("done"), 0 }, { QStringLiteral("total"), 0 },
+                  { QStringLiteral("current"), QFileInfo(path).fileName() } };
+    emit bibleImportingChanged();
+    emit bibleProgressChanged();
+
+    auto *worker = QThread::create([this, data, ext = ext.toStdString(),
+                                    name = QFileInfo(path).fileName()] {
+        // The bar moves every 50th verse (and at the end) — a queued event per
+        // one of 31k verses would flood the GUI loop for nothing.
+        const auto ticks = std::make_shared<std::atomic<int>>(0);
+        bb::ImportOptions options;
+        options.onProgress = [this, ticks](size_t done, size_t total, std::string_view book) {
+            if (done != total && ticks->fetch_add(1) % 50 != 0)
+                return;
+            const QString bookName = QString::fromUtf8(book.data(), int(book.size()));
+            QMetaObject::invokeMethod(this, [this, done, total, bookName] {
+                progress_ = { { QStringLiteral("done"), qulonglong(done) },
+                              { QStringLiteral("total"), qulonglong(total) },
+                              { QStringLiteral("current"), bookName } };
+                emit bibleProgressChanged();
+            }, Qt::QueuedConnection);
+        };
+        auto r = bb::BibleEngine::Instance().Import(
+            std::string_view(data.constData(), size_t(data.size())), ext, options);
+        QMetaObject::invokeMethod(this, [this, r, name] {
+            importing_ = false;
+            progress_ = {};
+            emit bibleImportingChanged();
+            emit bibleProgressChanged();
+            if (!r.ok()) {
+                EventBus::instance().notify(qstr(r.error().message), QStringLiteral("error"),
+                                            QObject::tr("Couldn't install the Bible"),
+                                            QStringLiteral("bible.import"));
+                return;
+            }
+            emit bibleChanged();
+            EventBus::instance().notify(name, QStringLiteral("success"),
+                                        QObject::tr("Bible installed"), QStringLiteral("bible.import"));
+        }, Qt::QueuedConnection);
+    });
+    loader_ = worker;
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    // Quitting mid-import must not destroy a running thread (same as The Table's import).
+    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, worker,
+            [worker] { worker->wait(20000); });
+    worker->start();
     return true;
 }
 

@@ -28,6 +28,10 @@ Item {
     property alias color: displayText.color
     property alias font: displayText.font
     property alias horizontalAlignment: displayText.horizontalAlignment
+    // Defaults to centered (every existing template/overlay relies on that); a template whose body text
+    // reads better anchored to the top of a tall box (a sermon paragraph, say - centering floats short
+    // text in dead space and, worse, drifts the FIRST line down as the text grows) sets this explicitly.
+    property alias verticalAlignment: displayText.verticalAlignment
     property alias wrapMode: displayText.wrapMode
     // Display-only (TextInput has no lineHeight of its own in QtQuick) —
     // an acceptable gap since editing mode is transient and doesn't need
@@ -125,7 +129,7 @@ Item {
     TextEdit {
         id: editInput
         anchors.fill: parent
-        verticalAlignment: Text.AlignVCenter
+        verticalAlignment: displayText.verticalAlignment
         visible: root.editing
         text: root.text
         color: displayText.color

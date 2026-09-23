@@ -20,6 +20,10 @@ ReferencePane {
         readonly property string searchPlaceholder: qsTr("Search in this Bible")
         // Scripture's options live under the "scripture." settings prefix.
         readonly property string optionsPrefix: "scripture"
+        // REGISTERED settings key remembering the last-opened Bible across
+        // sessions (the old code wrote "session.referenceSource", which was
+        // never declared — every open toasted "there is no setting …").
+        readonly property string sessionSourceKey: "session.scriptureBible"
         readonly property var setTemplate: (id) => SettingsService.setValue("scripture.template", id)
 
         readonly property var sources: () => ScriptureService.bibles
@@ -35,6 +39,14 @@ ReferencePane {
         // No bulk folder action on Scripture — Bibles install one JSON at a time.
         readonly property string addFolderLabel: ""
         readonly property var importFolder: null
+        // The import progress bar (the same one The Table's folder import
+        // feeds): importing() shows the bar, progress() { done, total, current }
+        // moves it — verses indexed so far / verses in the file. The state
+        // lives on SearchService (it owns the Bible import worker); reading it
+        // inside these functions is what lets the pane's bindings track the
+        // service's notify signals.
+        readonly property var importing: () => SearchService.bibleImporting
+        readonly property var progress: () => SearchService.bibleProgress
         readonly property var templateId: () => ScriptureService.templateId()
         readonly property var templateName: (id) => ScriptureService.templateName(id)
         readonly property var defaultTemplateId: () => ScriptureService.defaultTemplateId()

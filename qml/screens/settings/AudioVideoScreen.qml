@@ -837,7 +837,7 @@ Item {
                                 text: qsTr("AUDIO INPUTS")
                                 color: Theme.textSecondary
                                 font.family: Theme.fontFamily
-                                font.pixelSize: 10
+                                font.pixelSize: 12
                                 font.weight: Font.Bold
                             }
                             Text {
@@ -995,7 +995,7 @@ Item {
                                 text: qsTr("BUSES & ROUTING")
                                 color: Theme.textSecondary
                                 font.family: Theme.fontFamily
-                                font.pixelSize: 10
+                                font.pixelSize: 12
                                 font.weight: Font.Bold
                             }
                             Text {
@@ -1190,7 +1190,7 @@ Item {
                                 text: qsTr("VIDEO SOURCES")
                                 color: Theme.textSecondary
                                 font.family: Theme.fontFamily
-                                font.pixelSize: 10
+                                font.pixelSize: 12
                                 font.weight: Font.Bold
                             }
                             Text {

@@ -90,7 +90,7 @@ Item {
                                   : String(strip.index + 1)
                             color: Theme.textMuted
                             font.family: Theme.fontFamily
-                            font.pixelSize: 9
+                            font.pixelSize: 10
                             font.weight: Font.DemiBold
                         }
 
@@ -200,7 +200,7 @@ Item {
                     : root.stereo ? qsTr("Stereo · L/R") : qsTr("Mono")
                 color: Theme.textMuted
                 font.family: Theme.fontFamily
-                font.pixelSize: 10
+                font.pixelSize: 12
             }
             Text {
                 anchors.right: parent.right
@@ -211,7 +211,7 @@ Item {
                      : !root.live || root.volume <= 0 ? Theme.textMuted
                      : Theme.success
                 font.family: Theme.fontFamily
-                font.pixelSize: 10
+                font.pixelSize: 12
                 font.weight: Font.DemiBold
             }
         }

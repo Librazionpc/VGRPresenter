@@ -29,6 +29,10 @@
 #include <string>
 #include <vector>
 
+namespace bps::search {
+class SearchEngine;
+}
+
 namespace bps::library {
 
 struct TheTableVerse {
@@ -88,6 +92,19 @@ public:
     // Whole-library word search (case-insensitive, ALL terms must appear in a
     // paragraph). Best-first by term coverage. `limit` caps the result count.
     Result<std::vector<TheTableSearchHit>> Search(std::string_view query, size_t limit = 60) const;
+
+    // --- Search Engine integration (docs/specs/24 §Search, the Bible pattern) -----
+    // Registers this library's index adapter with the platform Search Engine and
+    // indexes every sermon as ONE document (id "table:<bookId>:<chapter>") whose
+    // content is the sermon's title + every paragraph's text. One document per
+    // sermon, not per paragraph: 1,206 sermons index cleanly where 300k paragraph
+    // documents would not (the engine re-copies every candidate document per
+    // query); paragraph-level hits stay on this library's own Search().
+    // Incremental: a re-index upserts, so other content stays searchable. Safe to
+    // call repeatedly (a second call re-upserts the same ids).
+    Result<size_t> IndexWithSearchEngine();
+    // Drops this library's documents ("table:*") from the Search Engine index.
+    Result<void> UnindexFromSearchEngine();
 
     // --- Import (the "New sermon" flow: .txt or .pdf) ------------------------------
     // `fileName` supplies the year + sermon title when the content itself does

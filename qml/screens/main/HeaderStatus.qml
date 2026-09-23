@@ -91,8 +91,8 @@ Item {
             height: 13
             width: 59
             color: root.kernelUp ? "#8a94a6" : "#c8a06a"
-            font.family: "Inter"
-            font.pixelSize: 11
+            font.family: "Segoe UI"
+            font.pixelSize: 13
             font.weight: Font.Normal
             text: root.kernelUp ? qsTr("Connected") : root.kernelState
             textFormat: Text.PlainText

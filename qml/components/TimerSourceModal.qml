@@ -75,8 +75,8 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Add Timer")
                         color: "#f1f3f8"
-                        font.family: "Inter"
-                        font.pixelSize: 16
+                        font.family: "Segoe UI"
+                        font.pixelSize: 18
                         font.weight: Font.DemiBold
                     }
 
@@ -94,7 +94,7 @@ Item {
                             anchors.centerIn: parent
                             text: "✕"
                             color: "#8a94a6"
-                            font.pixelSize: 12
+                            font.pixelSize: 14
                         }
 
                         MouseArea {
@@ -111,8 +111,8 @@ Item {
                     width: parent.width
                     text: qsTr("Configure a countdown for this slide")
                     color: "#8a94a6"
-                    font.family: "Inter"
-                    font.pixelSize: 12
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
                 }
             }
 
@@ -125,8 +125,8 @@ Item {
                 Text {
                     text: qsTr("Mode")
                     color: "#c8cdd9"
-                    font.family: "Inter"
-                    font.pixelSize: 12
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
                     font.weight: Font.Medium
                 }
 
@@ -157,8 +157,8 @@ Item {
                                 anchors.centerIn: parent
                                 text: modeBtn.modelData.label
                                 color: modeBtn.active ? "#ffffff" : "#c8cdd9"
-                                font.family: "Inter"
-                                font.pixelSize: 12
+                                font.family: "Segoe UI"
+                                font.pixelSize: 14
                                 font.weight: modeBtn.active ? Font.DemiBold : Font.Medium
                             }
 
@@ -181,8 +181,8 @@ Item {
                 Text {
                     text: root.mode === "timeofday" ? qsTr("Time of Day") : qsTr("Duration")
                     color: "#c8cdd9"
-                    font.family: "Inter"
-                    font.pixelSize: 12
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
                     font.weight: Font.Medium
                 }
 
@@ -217,8 +217,8 @@ Item {
                                     anchors.horizontalCenter: parent.horizontalCenter
                                     text: fieldBox.modelData.value < 10 ? "0" + fieldBox.modelData.value : String(fieldBox.modelData.value)
                                     color: fieldBox.focused ? "#9b8ff5" : "#f1f3f8"
-                                    font.family: "Inter"
-                                    font.pixelSize: 20
+                                    font.family: "Segoe UI"
+                                    font.pixelSize: 23
                                     font.weight: Font.DemiBold
                                     horizontalAlignment: Text.AlignHCenter
                                     validator: IntValidator { bottom: 0; top: fieldBox.modelData.max }
@@ -235,8 +235,8 @@ Item {
                                     anchors.horizontalCenter: parent.horizontalCenter
                                     text: fieldBox.modelData.label
                                     color: fieldBox.focused ? "#9b8ff5" : "#5c6475"
-                                    font.family: "Inter"
-                                    font.pixelSize: 9
+                                    font.family: "Segoe UI"
+                                    font.pixelSize: 10
                                 }
                             }
                         }
@@ -262,8 +262,8 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         text: modelData.label
                         color: "#c8cdd9"
-                        font.family: "Inter"
-                        font.pixelSize: 12
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
                     }
 
                     Rectangle {
@@ -320,8 +320,8 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Cancel")
                         color: "#c8cdd9"
-                        font.family: "Inter"
-                        font.pixelSize: 12
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
                         font.weight: Font.Medium
                     }
 
@@ -345,8 +345,8 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Add Timer")
                         color: "#ffffff"
-                        font.family: "Inter"
-                        font.pixelSize: 12
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
                         font.weight: Font.DemiBold
                     }
 

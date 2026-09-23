@@ -197,7 +197,7 @@ Item {
                 visible: !nameEdit.visible
                 text: root.design.name !== undefined ? root.design.name : ""
                 color: Theme.textPrimary
-                font.family: Theme.fontFamily; font.pixelSize: 12
+                font.family: Theme.fontFamily; font.pixelSize: 14
                 elide: Text.ElideRight
             }
 
@@ -220,7 +220,7 @@ Item {
                 anchors.rightMargin: 8
                 anchors.verticalCenter: parent.verticalCenter
                 color: Theme.textPrimary
-                font.family: Theme.fontFamily; font.pixelSize: 12
+                font.family: Theme.fontFamily; font.pixelSize: 14
                 selectByMouse: true
                 clip: true
                 onAccepted: root.finishRename(true)

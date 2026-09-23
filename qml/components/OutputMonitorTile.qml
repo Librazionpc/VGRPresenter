@@ -86,8 +86,8 @@ Rectangle {
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     color: root.active ? "#ff6b61" : "#9aa0b5"
-                    font.family: "Inter"
-                    font.pixelSize: 9
+                    font.family: "Segoe UI"
+                    font.pixelSize: 10
                     font.weight: Font.DemiBold
                     text: root.badge
                 }
@@ -117,8 +117,8 @@ Rectangle {
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
             color: "#e2e8f0"
-            font.family: "Inter"
-            font.pixelSize: 11
+            font.family: "Segoe UI"
+            font.pixelSize: 13
             font.weight: Font.Medium
             text: root.name
         }

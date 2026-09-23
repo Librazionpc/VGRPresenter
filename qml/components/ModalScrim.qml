@@ -24,7 +24,9 @@ Rectangle {
     signal dismissed()
 
     anchors.fill: parent
-    color: "#99000000"
+    // Dark enough to read as a backdrop even over this app's own near-black panels, not just over a bright screen - 60% was
+    // correct but close to invisible against a background already this dark.
+    color: "#cc000000"
 
     MouseArea {
         anchors.fill: parent

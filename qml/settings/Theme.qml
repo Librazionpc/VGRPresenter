@@ -64,11 +64,14 @@ QtObject {
     readonly property int radiusXl: 16
 
     // ---- Typography ----
-    readonly property string fontFamily: "Inter"
-    readonly property int textXs: 9
-    readonly property int textSm: 11
-    readonly property int textMd: 13
-    readonly property int textLg: 15
-    readonly property int textXl: 20
-    readonly property int textXxl: 22
+    // Windows' own system UI font - always installed, unlike a webfont ("Inter", this app's previous choice) that has to be
+    // installed separately and silently falls back to something else when it isn't. FreeShow's own app chrome (not its output/
+    // stage display, which does ship a font) takes the same approach: the OS's native font, not a bundled one.
+    readonly property string fontFamily: "Segoe UI"
+    readonly property int textXs: 10
+    readonly property int textSm: 13
+    readonly property int textMd: 15
+    readonly property int textLg: 17
+    readonly property int textXl: 23
+    readonly property int textXxl: 25
 }

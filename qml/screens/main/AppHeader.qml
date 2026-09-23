@@ -85,7 +85,9 @@ Rectangle {
         Rectangle {
             id: pillSearch
             anchors.horizontalCenter: parent.horizontalCenter
-            y: 2
+            // Vertically centred as a unit with the caption below: pill 4..34,
+            // label glyphs ~37.5..48.5 — even margins in the 52 px row.
+            y: 4
             width: 60
             height: 30
             radius: 8
@@ -129,11 +131,11 @@ Rectangle {
         Text {
             id: searchLabel
             anchors.horizontalCenter: parent.horizontalCenter
-            y: 33
+            y: 32
             text: qsTr("Search")
             color: searchHover.hovered ? "#e2e8f0" : "#8a94a6"
-            font.family: "Inter"
-            font.pixelSize: 13
+            font.family: "Segoe UI"
+            font.pixelSize: 15
             font.bold: true
             textFormat: Text.PlainText
         }
@@ -167,7 +169,8 @@ Rectangle {
         Rectangle {
             id: pillGear
             anchors.horizontalCenter: parent.horizontalCenter
-            y: 2
+            // Same vertical centring as pillSearch above.
+            y: 4
             width: 60
             height: 30
             radius: 8
@@ -208,11 +211,11 @@ Rectangle {
         Text {
             id: settingsLabel
             anchors.horizontalCenter: parent.horizontalCenter
-            y: 33
+            y: 32
             text: qsTr("Settings")
             color: gearHover.hovered ? "#e2e8f0" : "#8a94a6"
-            font.family: "Inter"
-            font.pixelSize: 13
+            font.family: "Segoe UI"
+            font.pixelSize: 15
             font.bold: true
             textFormat: Text.PlainText
         }

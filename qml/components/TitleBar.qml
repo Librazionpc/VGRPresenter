@@ -183,7 +183,7 @@ Rectangle {
                 text: qsTr("SUGGESTIONS")
                 color: Theme.textMuted
                 font.family: Theme.fontFamily
-                font.pixelSize: 9
+                font.pixelSize: 10
                 font.weight: Font.Bold
             }
 
@@ -252,7 +252,7 @@ Rectangle {
                                 text: resultRow.modelData.section
                                 color: resultRow.selected ? "#ffffff" : Theme.textSecondary
                                 font.family: Theme.fontFamily
-                                font.pixelSize: 9
+                                font.pixelSize: 10
                             }
                         }
 
@@ -292,7 +292,7 @@ Rectangle {
                 text: qsTr("↑↓ navigate    ↵ open    esc close")
                 color: Theme.textMuted
                 font.family: Theme.fontFamily
-                font.pixelSize: 9
+                font.pixelSize: 10
             }
         }
     }

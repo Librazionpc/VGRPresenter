@@ -131,11 +131,22 @@ Item {
             entries.push({ label: qsTr("Collapse all folders") }, { label: qsTr("Expand all folders") }, { divider: true },
                          { label: root.showArchived ? qsTr("Hide archived projects") : qsTr("Show archived projects") })
         } else if (kind === "tree") {
-            if (target.type === "project") entries.push({ label: qsTr("Open") }, { label: qsTr("Rename") }, { label: qsTr("Duplicate") },
-                                                        { label: target.archived ? qsTr("Restore from archive") : qsTr("Archive") }, { divider: true }, { label: qsTr("Delete"), danger: true })
+            // A project's own right-click: FreeShow's own order exactly (contextMenus.ts' project_button) - Rename, Duplicate,
+            // Delete, then Convert to template on its own below a divider, Archive last. No separate "Open": a click already
+            // does that (see the row's own onActivated below), the same reasoning FreeShow's list has none either.
+            if (target.type === "project") entries.push({ label: qsTr("Rename") }, { label: qsTr("Duplicate"), trailing: "Ctrl+D" }, { label: qsTr("Delete"), trailing: "Del", danger: true },
+                                                        { divider: true }, { label: qsTr("Convert to template") },
+                                                        { divider: true }, { label: target.archived ? qsTr("Restore from archive") : qsTr("Archive") })
             else entries.push({ label: qsTr("New project here") }, { label: qsTr("New folder here") }, { label: qsTr("Rename") }, { divider: true }, { label: qsTr("Delete folder"), danger: true })
         } else if (kind === "item") {
             entries.push({ label: qsTr("Rename") }, { label: qsTr("Add section above") }, { divider: true }, { label: qsTr("Remove from project"), danger: true })
+        } else if (kind === "projectTemplate") {
+            // Not a separate stored "template" (the engine has no such concept) - picking an existing project duplicates it as the
+            // new one's starting point, same as its own "Duplicate" action, just reachable from the + menu the way FreeShow's own
+            // "Project template" entry is.
+            const projects = ProjectService.tree.filter((r) => r.type === "project")
+            if (projects.length === 0) entries.push({ label: qsTr("No projects yet to start from") })
+            else projects.forEach((p) => entries.push({ label: p.name }))
         } else {
             const p = ProjectService.activeProject
             entries.push({ label: qsTr("Add section") }, { label: p.sectionsLocked ? qsTr("Unlock sections") : qsTr("Lock sections") }, { divider: true },
@@ -166,6 +177,7 @@ Item {
             if (label === qsTr("Open")) ProjectService.openProject(t.id)
             else if (label === qsTr("Rename")) nameDialog.ask("rename", qsTr("Rename"), t.name, t.id)
             else if (label === qsTr("Duplicate")) ProjectService.duplicateProject(t.id)
+            else if (label === qsTr("Convert to template")) root.convertToTemplate(t.id)
             else if (label === qsTr("Archive") || label === qsTr("Restore from archive")) ProjectService.setArchived(t.id, !t.archived)
             else if (label === qsTr("Delete") || label === qsTr("Delete folder")) confirm.ask(t.id, t.name)
             else if (label === qsTr("New project here")) nameDialog.ask("project", qsTr("New project"), "", t.id)
@@ -174,6 +186,13 @@ Item {
             if (label === qsTr("Rename")) nameDialog.ask("item", qsTr("Rename"), t.name, String(t.index))
             else if (label === qsTr("Add section above")) ProjectService.addSection(qsTr("Section"), t.index)
             else if (label === qsTr("Remove from project")) ProjectService.removeItem(t.index)
+        } else if (root.menuKind === "projectTemplate") {
+            const projects = ProjectService.tree.filter((r) => r.type === "project")
+            const picked = projects.find((r) => r.name === label)
+            if (picked) {
+                const newId = ProjectService.duplicateProject(picked.id)
+                if (newId) nameDialog.ask("rename", qsTr("Name the new project"), picked.name, newId)
+            }
         } else {
             const p = ProjectService.activeProject
             if (label === qsTr("Add section")) nameDialog.ask("section", qsTr("New section"), "", "")
@@ -189,6 +208,7 @@ Item {
         root.addMenuOpen = false
         if (what === "project") nameDialog.ask("project", qsTr("New project"), "", "")
         else if (what === "folder") nameDialog.ask("folder", qsTr("New folder"), "", "")
+        else if (what === "projectTemplate") root.openProjectTemplateMenu()
         else if (what === "import") root.importRequested()
         else if (what === "show") root.searchRequested()
         else if (what === "scripture") root.dockTabRequested("scripture")
@@ -196,6 +216,23 @@ Item {
         else if (what === "section") nameDialog.ask("section", qsTr("New section"), "", "")
     }
     function openAddMenu() { root.dropdown = ""; root.addMenuOpen = true }
+    // "Convert to template" (a project's own right-click - FreeShow's copy_to_template): the engine has no separate stored
+    // "template" concept to convert it INTO, so this files it in a root "Templates" folder instead (made the first time it is
+    // needed) - a real, visible place "Project template" in the + menu's picker (which lists every project) finds it again,
+    // reusing the folder/move the engine already has rather than a new stored idea.
+    function convertToTemplate(projectId) {
+        let folder = ProjectService.tree.find((r) => r.type === "folder" && r.parent === "" && r.name === qsTr("Templates"))
+        const folderId = folder ? folder.id : ProjectService.createFolder(qsTr("Templates"), "")
+        if (folderId) ProjectService.moveNode(projectId, folderId)
+    }
+    // "Project template": the shared dots/right-click menu (`menu`), reused for a THIRD kind of list - the tray already closed
+    // itself (addChosen), so this opens where the tray was.
+    function openProjectTemplateMenu() {
+        root.menuKind = "projectTemplate"
+        root.menuTarget = null
+        menu.model = root.entriesFor("projectTemplate", null)
+        menu.openAt(addTray, 0, 0, Window.window.contentItem)
+    }
     function closeMenus() { menu.visible = false; root.dropdown = ""; root.addMenuOpen = false }
 
     // A project: FreeShow's red document.
@@ -246,7 +283,7 @@ Item {
                             width: parent.width; height: 26
                             color: root.cDarkest
                             Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.cLighter }
-                            Text { x: 14; anchors.verticalCenter: parent.verticalCenter; text: card.modelData.title; opacity: 0.8; color: root.cText; font.family: root.mono; font.pixelSize: 13; font.weight: Font.Medium }
+                            Text { x: 14; anchors.verticalCenter: parent.verticalCenter; text: card.modelData.title; opacity: 0.8; color: root.cText; font.family: root.mono; font.pixelSize: 15; font.weight: Font.Medium }
                         }
 
                         Repeater {
@@ -283,7 +320,7 @@ Item {
                                         width: card.width - treeRow.indent - (treeRow.isFolder ? 100 : 72)
                                         text: treeRow.modelData.name
                                         color: root.cText; elide: Text.ElideRight
-                                        font.family: root.mono; font.pixelSize: 14
+                                        font.family: root.mono; font.pixelSize: 16
                                         font.weight: treeRow.isFolder ? Font.Medium : Font.Normal
                                     }
                                 }
@@ -293,7 +330,7 @@ Item {
                                     anchors.right: parent.right; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
                                     width: 28; horizontalAlignment: Text.AlignRight
                                     text: treeRow.modelData.itemCount
-                                    opacity: 0.5; color: root.cText; font.family: root.mono; font.pixelSize: 11
+                                    opacity: 0.5; color: root.cText; font.family: root.mono; font.pixelSize: 13
                                 }
 
                                 HoverHandler { id: treeHover }
@@ -333,7 +370,7 @@ Item {
                 width: parent.width; topPadding: 40
                 text: qsTr("Empty")
                 opacity: 0.5; color: root.cText; horizontalAlignment: Text.AlignHCenter
-                font.family: root.mono; font.pixelSize: 14
+                font.family: root.mono; font.pixelSize: 16
             }
         }
 
@@ -429,7 +466,7 @@ Item {
                                         visible: !itemRow.isSection && itemRow.modelData.layout !== undefined && itemRow.modelData.layout !== ""
                                         anchors.right: parent.right; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
                                         text: itemRow.modelData.layout ?? ""
-                                        opacity: 0.8; color: root.cText; font.family: root.mono; font.pixelSize: 11
+                                        opacity: 0.8; color: root.cText; font.family: root.mono; font.pixelSize: 13
                                     }
 
                                     HoverHandler { id: itemHover }
@@ -454,7 +491,7 @@ Item {
                 width: parent.width; topPadding: 40
                 text: qsTr("Empty")
                 opacity: 0.5; color: root.cText; horizontalAlignment: Text.AlignHCenter
-                font.family: root.mono; font.pixelSize: 14
+                font.family: root.mono; font.pixelSize: 16
             }
         }
 
@@ -534,7 +571,7 @@ Item {
             horizontalAlignment: Text.AlignHCenter
             text: root.inProject ? (ProjectService.activeProject.name ?? "") : qsTr("Projects")
             color: root.cText; elide: Text.ElideRight
-            font.family: root.mono; font.pixelSize: 15; font.weight: Font.DemiBold
+            font.family: root.mono; font.pixelSize: 17; font.weight: Font.DemiBold
             TapHandler { enabled: root.inProject; onDoubleTapped: nameDialog.ask("rename", qsTr("Rename project"), ProjectService.activeProject.name, ProjectService.activeProject.id) }
         }
         // the dots: 32px wide, full height
@@ -573,7 +610,7 @@ Item {
                         x: 12; anchors.verticalCenter: parent.verticalCenter
                         text: entry.modelData.label ?? ""
                         color: entry.modelData.danger === true ? "#ff6b61" : root.cText
-                        font.family: root.mono; font.pixelSize: 13
+                        font.family: root.mono; font.pixelSize: 15
                     }
                     HoverHandler { id: entryHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler {
@@ -610,7 +647,7 @@ Item {
             x: 46; anchors.verticalCenter: parent.verticalCenter
             width: parent.width - 46 - (pill.hint !== "" ? 40 : 16)
             text: pill.label; color: root.cText; elide: Text.ElideRight
-            font.family: root.mono; font.pixelSize: 14; font.weight: Font.Medium
+            font.family: root.mono; font.pixelSize: 16; font.weight: Font.Medium
         }
         IconGlyph { visible: pill.hint !== ""; anchors.right: parent.right; anchors.rightMargin: 16; anchors.verticalCenter: parent.verticalCenter; name: pill.hint; color: root.cText; opacity: 0.25; fit: true; width: 12; height: 12 }
         HoverHandler { id: pillHover; cursorShape: Qt.PointingHandCursor }
@@ -629,9 +666,10 @@ Item {
             x: 6; y: 6; width: parent.width - 12
             spacing: 2
 
-            // in the tree: Project, Folder | Import
+            // in the tree: Project, Folder, Project template | Import
             AddPill { visible: !root.inProject; label: qsTr("Project"); glyph: "project"; onPicked: root.addChosen("project") }
             AddPill { visible: !root.inProject; label: qsTr("Folder"); glyph: "folder"; onPicked: root.addChosen("folder") }
+            AddPill { visible: !root.inProject; label: qsTr("Project template"); glyph: "layoutTemplate"; onPicked: root.addChosen("projectTemplate") }
             Item { visible: !root.inProject; width: 1; height: 6 }
             AddPill { visible: !root.inProject; label: qsTr("Import"); glyph: "download"; hint: "folder"; onPicked: root.addChosen("import") }
 
@@ -668,10 +706,9 @@ Item {
             Rectangle {
                 anchors.fill: parent; anchors.margins: 2; radius: width / 2
                 color: addHover.hovered ? "#f01f1f2c" : "#d9191923"     // rgba(25, 25, 35, .85)
-                IconGlyph {
+                PlusGlyph {
                     anchors.centerIn: parent
-                    name: "plus"; color: root.cText
-                    strokeWidth: 0.75; scale: 2.6
+                    size: 21; thickness: 2.4; color: root.cText
                     rotation: root.addMenuOpen ? 135 : 0
                     Behavior on rotation { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
                 }
@@ -690,6 +727,9 @@ Item {
         visible: false
         z: 25
         width: 200
+        // Harmless for every short menu this is also used for (view/tree/item/project) - only "projectTemplate" (one entry per
+        // existing project, however many there are) ever grows past this and needs the scroll it turns on.
+        maxHeight: 320
         onItemActivated: (label) => root.menuChosen(label)
     }
     MenuCatcher { menu: menu }

@@ -10,6 +10,9 @@ ReferencePane {
     id: pane
 
     supportsTemplates: true
+    // No "Use default template" here (user call) - The Table's sermon templates aren't scripture-style
+    // placeholders with a single built-in fallback the way Scripture's are.
+    showUseDefaultTemplateButton: false
 
     adapter: QtObject {
         // The tab's wording (the shared pane is fully generic).

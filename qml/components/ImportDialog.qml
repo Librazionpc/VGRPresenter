@@ -98,20 +98,20 @@ Item {
                 width: parent.width
                 text: card.format.name
                 color: "#e2e8f0"; elide: Text.ElideRight
-                font.family: "Inter"; font.pixelSize: 13; font.weight: Font.Medium
+                font.family: "Segoe UI"; font.pixelSize: 15; font.weight: Font.Medium
             }
             Text {
                 visible: !card.format.available
                 text: qsTr("Coming soon")
                 color: "#f5c26b"
-                font.family: "Inter"; font.pixelSize: 10
+                font.family: "Segoe UI"; font.pixelSize: 12
             }
             Text {
                 visible: card.format.available && card.format.description !== ""
                 width: parent.width
                 text: card.format.description
                 color: "#5c6475"; elide: Text.ElideRight
-                font.family: "Inter"; font.pixelSize: 10
+                font.family: "Segoe UI"; font.pixelSize: 12
             }
         }
         HoverHandler { id: hover; cursorShape: card.format.available ? Qt.PointingHandCursor : Qt.ArrowCursor }
@@ -127,7 +127,7 @@ Item {
             anchors.centerIn: parent
             width: label.width + 16; height: parent.height
             color: "#13151c"
-            Text { id: label; anchors.centerIn: parent; text: parent.parent.title; color: "#8a94a6"; font.family: "Inter"; font.pixelSize: 11; font.weight: Font.DemiBold }
+            Text { id: label; anchors.centerIn: parent; text: parent.parent.title; color: "#8a94a6"; font.family: "Segoe UI"; font.pixelSize: 13; font.weight: Font.DemiBold }
         }
     }
 
@@ -139,7 +139,7 @@ Item {
         width: parent.width; height: 40; radius: 8
         color: btnHover.hovered ? "#1b1d27" : "#161821"
         border.color: "#262a38"
-        Text { anchors.centerIn: parent; text: btn.text; color: "#e2e8f0"; font.family: "Inter"; font.pixelSize: 13 }
+        Text { anchors.centerIn: parent; text: btn.text; color: "#e2e8f0"; font.family: "Segoe UI"; font.pixelSize: 15 }
         HoverHandler { id: btnHover; cursorShape: Qt.PointingHandCursor }
         TapHandler { onTapped: btn.clicked() }
     }
@@ -177,7 +177,7 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.page === "freeshow_more" ? qsTr("More FreeShow formats") : qsTr("Import")
                 color: "#f1f3f8"
-                font.family: "Inter"; font.pixelSize: 17; font.weight: Font.DemiBold
+                font.family: "Segoe UI"; font.pixelSize: 20; font.weight: Font.DemiBold
             }
             Rectangle {
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
@@ -229,7 +229,7 @@ Item {
                         Rectangle {
                             width: (body.width - 16) / 3; height: 60; radius: 8
                             color: moreHover.hovered ? "#1b1d27" : "#161821"; border.color: "#262a38"
-                            Text { x: 16; anchors.verticalCenter: parent.verticalCenter; text: qsTr("More options"); color: "#c9cedd"; font.family: "Inter"; font.pixelSize: 13 }
+                            Text { x: 16; anchors.verticalCenter: parent.verticalCenter; text: qsTr("More options"); color: "#c9cedd"; font.family: "Segoe UI"; font.pixelSize: 15 }
                             IconGlyph { anchors.right: parent.right; anchors.rightMargin: 16; anchors.verticalCenter: parent.verticalCenter; name: "chevronRight"; color: "#8a94a6"; width: 12; height: 12 }
                             HoverHandler { id: moreHover; cursorShape: Qt.PointingHandCursor }
                             TapHandler { onTapped: root.page = "freeshow_more" }

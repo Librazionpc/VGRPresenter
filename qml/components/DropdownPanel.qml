@@ -164,8 +164,8 @@ Rectangle {
                 topPadding: 4 // Theme.space1
                 text: root.headerTitle
                 color: "#6C5CE7" // Theme.accent
-                font.family: "Inter" // Theme.fontFamily
-                font.pixelSize: 13 // Theme.textMd
+                font.family: "Segoe UI" // Theme.fontFamily
+                font.pixelSize: 15 // Theme.textMd
                 font.weight: Font.Bold
             }
             Text {
@@ -173,8 +173,8 @@ Rectangle {
                 bottomPadding: 8 // Theme.space2
                 text: root.headerSubtitle
                 color: "#5c6475" // Theme.textMuted
-                font.family: "Inter" // Theme.fontFamily
-                font.pixelSize: 9 // Theme.textXs
+                font.family: "Segoe UI" // Theme.fontFamily
+                font.pixelSize: 10 // Theme.textXs
             }
             Rectangle { width: parent.width; height: 1; color: "#232530" /* Theme.border */ }
         }
@@ -254,8 +254,8 @@ Rectangle {
                                     text: modelData.label
                                     color: modelData.disabled ? "#5c6475" /* Theme.textMuted */
                                         : modelData.danger ? "#ff6b61" /* Theme.dangerLight */ : "#e2e8f0" /* Theme.textPrimary */
-                                    font.family: "Inter" // Theme.fontFamily
-                                    font.pixelSize: 13 // Theme.textMd
+                                    font.family: "Segoe UI" // Theme.fontFamily
+                                    font.pixelSize: 15 // Theme.textMd
                                     font.weight: Font.Medium
                                 }
 
@@ -265,8 +265,8 @@ Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     text: modelData.trailing || ""
                                     color: "#5c6475" // Theme.textMuted
-                                    font.family: "Inter" // Theme.fontFamily
-                                    font.pixelSize: 9 // Theme.textXs
+                                    font.family: "Segoe UI" // Theme.fontFamily
+                                    font.pixelSize: 10 // Theme.textXs
                                 }
 
                                 // Position truth, not containsMouse — hover-exit

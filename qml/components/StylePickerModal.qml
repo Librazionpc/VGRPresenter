@@ -73,8 +73,8 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Select Style")
                         color: "#f1f3f8"
-                        font.family: "Inter"
-                        font.pixelSize: 16
+                        font.family: "Segoe UI"
+                        font.pixelSize: 18
                         font.weight: Font.DemiBold
                     }
 
@@ -92,7 +92,7 @@ Item {
                             anchors.centerIn: parent
                             text: "✕"
                             color: "#8a94a6"
-                            font.pixelSize: 12
+                            font.pixelSize: 14
                         }
 
                         MouseArea {
@@ -109,8 +109,8 @@ Item {
                     width: parent.width
                     text: qsTr("Choose a presentation theme for this output.")
                     color: "#8a94a6"
-                    font.family: "Inter"
-                    font.pixelSize: 12
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
                 }
             }
 
@@ -124,8 +124,8 @@ Item {
                 horizontalAlignment: Text.AlignHCenter
                 text: qsTr("No styles yet — add one from Settings · Styles first.")
                 color: "#5c6475"
-                font.family: "Inter"
-                font.pixelSize: 12
+                font.family: "Segoe UI"
+                font.pixelSize: 14
                 wrapMode: Text.Wrap
             }
 
@@ -167,8 +167,8 @@ Item {
                                 anchors.centerIn: parent
                                 text: "Aa"
                                 color: "#ffffff"
-                                font.family: "Inter"
-                                font.pixelSize: 22
+                                font.family: "Segoe UI"
+                                font.pixelSize: 25
                                 font.weight: Font.DemiBold
                             }
                         }
@@ -184,8 +184,8 @@ Item {
                                 horizontalAlignment: Text.AlignHCenter
                                 text: styleCard.name
                                 color: "#eef1f8"
-                                font.family: "Inter"
-                                font.pixelSize: 12
+                                font.family: "Segoe UI"
+                                font.pixelSize: 14
                                 font.weight: Font.Medium
                                 elide: Text.ElideRight
                             }
@@ -194,8 +194,8 @@ Item {
                                 horizontalAlignment: Text.AlignHCenter
                                 text: styleCard.res
                                 color: "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 10
+                                font.family: "Segoe UI"
+                                font.pixelSize: 12
                             }
                         }
 
@@ -227,8 +227,8 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Cancel")
                         color: "#c8cdd9"
-                        font.family: "Inter"
-                        font.pixelSize: 12
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
                         font.weight: Font.Medium
                     }
 
@@ -254,8 +254,8 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Select")
                         color: "#ffffff"
-                        font.family: "Inter"
-                        font.pixelSize: 12
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
                         font.weight: Font.DemiBold
                     }
 

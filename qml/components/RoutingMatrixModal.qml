@@ -162,7 +162,7 @@ ModalCard {
                                 text: (root.busList[colHead.index] || {}).name || ""
                                 color: Theme.textSecondary
                                 font.family: Theme.fontFamily
-                                font.pixelSize: 10
+                                font.pixelSize: 12
                                 horizontalAlignment: Text.AlignHCenter
                                 elide: Text.ElideRight
                             }

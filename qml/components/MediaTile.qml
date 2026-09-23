@@ -188,7 +188,7 @@ Item {
                 color: Theme.textPrimary
                 elide: Text.ElideRight
                 font.family: Theme.fontFamily
-                font.pixelSize: 11
+                font.pixelSize: 13
                 textFormat: Text.PlainText
             }
         }

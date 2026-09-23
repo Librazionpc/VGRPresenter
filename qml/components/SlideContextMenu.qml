@@ -86,7 +86,7 @@ Item {
                         anchors.centerIn: parent
                         spacing: 8
                         IconGlyph { anchors.horizontalCenter: parent.horizontalCenter; name: row.modelData.icon ?? ""; color: row.modelData.color ?? root.cText; fit: true; width: 24; height: 24 }
-                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: row.modelData.label ?? ""; color: root.cText; font.family: root.mono; font.pixelSize: 13; font.weight: Font.Bold }
+                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: row.modelData.label ?? ""; color: root.cText; font.family: root.mono; font.pixelSize: 15; font.weight: Font.Bold }
                     }
 
                     // a row: icon, label, then the shortcut or the submenu's chevron
@@ -99,12 +99,12 @@ Item {
                             width: parent.width - 52 - 46
                             text: row.modelData.label ?? ""; elide: Text.ElideRight
                             color: row.modelData.disabled === true ? "#6b7280" : root.cText
-                            font.family: root.mono; font.pixelSize: 15; font.weight: Font.Medium
+                            font.family: root.mono; font.pixelSize: 17; font.weight: Font.Medium
                         }
                         Text {
                             visible: !row.hasSub && (row.modelData.shortcut ?? "") !== ""
                             anchors.right: parent.right; anchors.rightMargin: 16; anchors.verticalCenter: parent.verticalCenter
-                            text: row.modelData.shortcut ?? ""; opacity: 0.4; color: root.cText; font.family: root.mono; font.pixelSize: 12
+                            text: row.modelData.shortcut ?? ""; opacity: 0.4; color: root.cText; font.family: root.mono; font.pixelSize: 14
                         }
                         IconGlyph { visible: row.hasSub; anchors.right: parent.right; anchors.rightMargin: 18; anchors.verticalCenter: parent.verticalCenter; name: "chevronRight"; color: root.cText; opacity: 0.5; width: 8; height: 8 }
                     }
@@ -163,7 +163,7 @@ Item {
                         width: parent.width - 44 - 12
                         text: subRow.modelData.label ?? ""; elide: Text.ElideRight
                         color: subRow.modelData.disabled === true ? "#6b7280" : root.cText
-                        font.family: root.mono; font.pixelSize: 14
+                        font.family: root.mono; font.pixelSize: 16
                     }
                     HoverHandler { id: subHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler {

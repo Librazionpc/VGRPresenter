@@ -78,7 +78,7 @@ Item {
                         text: qsTr("Installed plugins")
                         color: Theme.textPrimary
                         font.family: Theme.fontFamily
-                        font.pixelSize: 14
+                        font.pixelSize: 16
                         font.weight: Font.DemiBold
                         bottomPadding: 6
                     }
@@ -139,7 +139,7 @@ Item {
                                               : pluginRow.live ? qsTr("Active") : qsTr("Installed")
                                         color: pluginRow.live ? Theme.success : Theme.warning
                                         font.family: Theme.fontFamily
-                                        font.pixelSize: 10
+                                        font.pixelSize: 12
                                         font.weight: Font.Medium
                                     }
                                 }

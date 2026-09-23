@@ -19,7 +19,7 @@ Item {
     // such as folder or search: their natural size is not a 24 grid.)
     property bool fit: false
     // The glyphs drawn on the Lucide 24-unit grid (the ones `fit` can scale). The others are hand-sized.
-    readonly property bool grid24: ["camera", "mic", "micOff", "volume2", "clock", "play", "bookOpen", "wrench", "music", "star", "info", "cash", "lock", "sliders", "zoomIn", "gridView", "listView", "textLines", "download", "pencil", "flag", "link", "typeCase", "blend", "ban", "copy", "trash"].indexOf(name) >= 0
+    readonly property bool grid24: ["camera", "mic", "micOff", "volume2", "clock", "play", "bookOpen", "wrench", "music", "star", "info", "cash", "lock", "sliders", "zoomIn", "gridView", "listView", "textLines", "download", "pencil", "flag", "link", "typeCase", "blend", "ban", "copy", "trash", "alignLeft", "alignCenter", "alignRight", "alignJustify", "alignTop", "alignMiddle", "alignBottom", "listBullets"].indexOf(name) >= 0
     implicitWidth: 14
     implicitHeight: 14
 
@@ -79,6 +79,14 @@ Item {
             case "info": return infoC
             case "cash": return cashC
             case "lock": return lockC
+            case "alignLeft": return alignLeftC
+            case "alignCenter": return alignCenterC
+            case "alignRight": return alignRightC
+            case "alignJustify": return alignJustifyC
+            case "alignTop": return alignTopC
+            case "alignMiddle": return alignMiddleC
+            case "alignBottom": return alignBottomC
+            case "listBullets": return listBulletsC
             default: return dotC
             }
     }
@@ -733,6 +741,68 @@ Item {
                 joinStyle: ShapePath.RoundJoin
                 PathSvg { path: "M 10 2 L 14 2 M 12 14 L 15 11 M 12 6 A 8 8 0 1 0 12 22 A 8 8 0 1 0 12 6" }
             }
+        }
+    }
+
+    // ---- Align icons — FreeShow's OWN Material-style glyphs (src/frontend/values/icons.ts), pulled path-for-
+    // path rather than hand-drawn, per the user's ask for "icons that freeshow used". Filled (not stroked),
+    // like FreeShow's own SVGs. Used by TextItemPanel.qml's Align section (horizontal + vertical rows).
+    Component {
+        id: alignLeftC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M15 15H3v2h12v-2zm0-8H3v2h12V7zM3 13h18v-2H3v2zm0 8h18v-2H3v2zM3 3v2h18V3H3z"
+        }
+    }
+    Component {
+        id: alignCenterC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M7 15v2h10v-2H7zm-4 6h18v-2H3v2zm0-8h18v-2H3v2zm4-6v2h10V7H7zM3 3v2h18V3H3z"
+        }
+    }
+    Component {
+        id: alignRightC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M3 21h18v-2H3v2zm6-4h12v-2H9v2zm-6-4h18v-2H3v2zm6-4h12V7H9v2zM3 3v2h18V3H3z"
+        }
+    }
+    Component {
+        id: alignJustifyC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M3 21h18v-2H3v2zm0-4h18v-2H3v2zm0-4h18v-2H3v2zm0-4h18V7H3v2zm0-6v2h18V3H3z"
+        }
+    }
+    Component {
+        id: alignTopC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M8 11h3v10h2V11h3l-4-4-4 4zM4 3v2h16V3H4z"
+        }
+    }
+    Component {
+        id: alignMiddleC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M8 19h3v4h2v-4h3l-4-4-4 4zm8-14h-3V1h-2v4H8l4 4 4-4zM4 11v2h16v-2H4z"
+        }
+    }
+    Component {
+        id: alignBottomC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M16 13h-3V3h-2v10H8l4 4 4-4zM4 19v2h16v-2H4z"
+        }
+    }
+
+    // FreeShow's own "list" glyph (src/frontend/values/icons.ts) — three bullet squares beside three text bars.
+    Component {
+        id: listBulletsC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M3,14h4v-4H3V14z M3,19h4v-4H3V19z M3,9h4V5H3V9z M8,14h13v-4H8V14z M8,19h13v-4H8V19z M8,5v4h13V5H8z"
         }
     }
 

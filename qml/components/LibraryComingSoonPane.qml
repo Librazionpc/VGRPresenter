@@ -74,11 +74,11 @@ Item {
                 id: newPillRow
                 anchors.centerIn: parent
                 spacing: 8
-                IconGlyph { name: "plus"; color: Theme.danger; width: 14; height: 14; anchors.verticalCenter: parent.verticalCenter }
+                PlusGlyph { size: 14; thickness: 1.6; color: Theme.danger; anchors.verticalCenter: parent.verticalCenter }
                 Text {
                     text: root.newLabel
                     color: Theme.textPrimary
-                    font.family: Theme.fontFamily; font.pixelSize: 12
+                    font.family: Theme.fontFamily; font.pixelSize: 14
                     anchors.verticalCenter: parent.verticalCenter
                 }
             }

@@ -96,7 +96,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             color: Theme.textPrimary
                             font.family: Theme.fontFamily
-                            font.pixelSize: 14
+                            font.pixelSize: 16
                             font.weight: Font.DemiBold
                         }
                         // Readiness pill — honest state: green READY only
@@ -126,7 +126,7 @@ Item {
                                     text: root.ready ? qsTr("READY") : qsTr("KEY NEEDED")
                                     color: root.ready ? Theme.success : Theme.textMuted
                                     font.family: Theme.fontFamily
-                                    font.pixelSize: 9
+                                    font.pixelSize: 10
                                     font.weight: Font.Bold
                                 }
                             }
@@ -220,7 +220,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             color: Theme.textPrimary
                             font.family: Theme.fontFamily
-                            font.pixelSize: 14
+                            font.pixelSize: 16
                             font.weight: Font.DemiBold
                         }
                         Text {
@@ -268,7 +268,7 @@ Item {
                         text: qsTr("Recording")
                         color: Theme.textPrimary
                         font.family: Theme.fontFamily
-                        font.pixelSize: 14
+                        font.pixelSize: 16
                         font.weight: Font.DemiBold
                     }
 
@@ -400,7 +400,7 @@ Item {
                         text: qsTr("Screens to record")
                         color: Theme.textPrimary
                         font.family: Theme.fontFamily
-                        font.pixelSize: 14
+                        font.pixelSize: 16
                         font.weight: Font.DemiBold
                         bottomPadding: 6
                     }

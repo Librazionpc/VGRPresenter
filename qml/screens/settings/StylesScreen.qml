@@ -136,7 +136,7 @@ Item {
                             text: qsTr("All styles")
                             color: Theme.textPrimary
                             font.family: Theme.fontFamily
-                            font.pixelSize: 14
+                            font.pixelSize: 16
                             font.weight: Font.DemiBold
                         }
 
@@ -269,7 +269,7 @@ Item {
                                             text: styleRow.contentTypeInfo.label
                                             color: styleRow.contentTypeInfo.color
                                             font.family: Theme.fontFamily
-                                            font.pixelSize: 9
+                                            font.pixelSize: 10
                                             font.weight: Font.Bold
                                         }
                                     }

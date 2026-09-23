@@ -118,7 +118,7 @@ Item {
                             text: qsTr("SMART CONFIG")
                             color: Theme.accentLight
                             font.family: Theme.fontFamily
-                            font.pixelSize: 9
+                            font.pixelSize: 10
                             font.weight: Font.Bold
                         }
                     }
@@ -128,7 +128,7 @@ Item {
                         text: SettingsService.hardwareHeadline !== "" ? SettingsService.hardwareHeadline : qsTr("Analyzing this hardware…")
                         color: Theme.textPrimary
                         font.family: Theme.fontFamily
-                        font.pixelSize: 15
+                        font.pixelSize: 17
                         font.weight: Font.DemiBold
                     }
                     Text {
@@ -197,7 +197,7 @@ Item {
                             text: qsTr("Appearance")
                             color: Theme.textPrimary
                             font.family: Theme.fontFamily
-                            font.pixelSize: 14
+                            font.pixelSize: 16
                             font.weight: Font.DemiBold
                             bottomPadding: 10
                         }
@@ -324,7 +324,7 @@ Item {
                             text: qsTr("Startup")
                             color: Theme.textPrimary
                             font.family: Theme.fontFamily
-                            font.pixelSize: 14
+                            font.pixelSize: 16
                             font.weight: Font.DemiBold
                             bottomPadding: 10
                         }
@@ -418,7 +418,7 @@ Item {
                                     text: qsTr("Check")
                                     color: Theme.textSecondary
                                     font.family: Theme.fontFamily
-                                    font.pixelSize: 10
+                                    font.pixelSize: 12
                                 }
 
                                 MouseArea {
@@ -460,7 +460,7 @@ Item {
                     text: root.definitions["resources.profile"].label
                     color: Theme.textPrimary
                     font.family: Theme.fontFamily
-                    font.pixelSize: 14
+                    font.pixelSize: 16
                     font.weight: Font.DemiBold
                 }
                 Text {
@@ -481,7 +481,7 @@ Item {
                     text: qsTr("RECOMMENDED · %1").arg(root.profileLabel(SettingsService.recommendedProfile).toUpperCase())
                     color: Theme.accentLight
                     font.family: Theme.fontFamily
-                    font.pixelSize: 8
+                    font.pixelSize: 9
                     font.weight: Font.Bold
                 }
 
@@ -596,7 +596,7 @@ Item {
                     text: section.title
                     color: Theme.textPrimary
                     font.family: Theme.fontFamily
-                    font.pixelSize: 14
+                    font.pixelSize: 16
                     font.weight: Font.DemiBold
                 }
 
@@ -724,7 +724,7 @@ Item {
                         text: actionRow.buttonText
                         color: Theme.textSecondary
                         font.family: Theme.fontFamily
-                        font.pixelSize: 10
+                        font.pixelSize: 12
                     }
 
                     MouseArea {

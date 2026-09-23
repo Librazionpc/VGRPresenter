@@ -119,10 +119,14 @@ Item {
 
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
-            y: 33
+            // Icon pill (2..32) + caption ink centred as one unit in the 52 px
+            // row: ink runs ~35.7..50, leaving even 2 px margins above the pill
+            // and below the caption. Was y: 33, which pushed the caption's
+            // descenders onto the row's bottom border.
+            y: 30
             color: tabRoot.isActive ? "#e2e8f0" : (tabRoot.isHover ? "#c7cdd8" : "#8a94a6")
-            font.family: "Inter"
-            font.pixelSize: 13
+            font.family: "Segoe UI"
+            font.pixelSize: 15
             // One weight for every tab: mixing Bold and DemiBold shifts the glyphs by a pixel.
             font.weight: Font.Bold
             text: tabRoot.label

@@ -82,8 +82,8 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Add Shape")
                         color: "#f1f3f8"
-                        font.family: "Inter"
-                        font.pixelSize: 16
+                        font.family: "Segoe UI"
+                        font.pixelSize: 18
                         font.weight: Font.DemiBold
                     }
 
@@ -101,7 +101,7 @@ Item {
                             anchors.centerIn: parent
                             text: "✕"
                             color: "#8a94a6"
-                            font.pixelSize: 12
+                            font.pixelSize: 14
                         }
 
                         MouseArea {
@@ -118,8 +118,8 @@ Item {
                     width: parent.width
                     text: qsTr("Choose a shape to add to this slide")
                     color: "#8a94a6"
-                    font.family: "Inter"
-                    font.pixelSize: 12
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
                 }
             }
 
@@ -153,7 +153,7 @@ Item {
                             anchors.verticalCenterOffset: -10
                             text: root.glyphs[shapeCell.modelData.key]
                             color: shapeCell.selected ? "#9b8ff5" : "#525a72"
-                            font.pixelSize: 26
+                            font.pixelSize: 30
                         }
 
                         Text {
@@ -163,8 +163,8 @@ Item {
                             horizontalAlignment: Text.AlignHCenter
                             text: shapeCell.modelData.label
                             color: shapeCell.selected ? "#eef1f8" : "#c8cdd9"
-                            font.family: "Inter"
-                            font.pixelSize: 11
+                            font.family: "Segoe UI"
+                            font.pixelSize: 13
                         }
 
                         MouseArea {
@@ -197,8 +197,8 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Cancel")
                         color: "#c8cdd9"
-                        font.family: "Inter"
-                        font.pixelSize: 12
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
                         font.weight: Font.Medium
                     }
 
@@ -223,8 +223,8 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Add Shape")
                         color: "#ffffff"
-                        font.family: "Inter"
-                        font.pixelSize: 12
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
                         font.weight: Font.DemiBold
                     }
 

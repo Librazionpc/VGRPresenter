@@ -32,6 +32,7 @@ ModalCard {
         "category": { group: qsTr("Categories"), badge: qsTr("CATEGORY"), color: "#8a94a6" },
         "setting":  { group: qsTr("Settings"),   badge: qsTr("SETTING"),  color: "#8a94a6" },
         "song":     { group: qsTr("Songs"),      badge: qsTr("SONG"),     color: "#e06c8a" },
+        "table":    { group: qsTr("Sermons"),    badge: qsTr("SERMON"),   color: "#4ae0b0" },
         "media":    { group: qsTr("Media"),      badge: qsTr("MEDIA"),    color: "#e08a4a" }
     })
 
@@ -191,7 +192,7 @@ ModalCard {
                     text: entry.info.group.toUpperCase()
                     color: Theme.textMuted
                     font.family: Theme.fontFamily
-                    font.pixelSize: 10
+                    font.pixelSize: 12
                     font.bold: true
                     font.letterSpacing: 0.6
                 }
@@ -220,7 +221,7 @@ ModalCard {
                             text: entry.info.badge
                             color: entry.info.color
                             font.family: Theme.fontFamily
-                            font.pixelSize: 9
+                            font.pixelSize: 10
                             font.bold: true
                             font.letterSpacing: 0.5
                         }

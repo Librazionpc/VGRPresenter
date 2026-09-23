@@ -7,8 +7,10 @@
 
 #include "core/common/Common.hpp"
 
+#include <functional>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace bps::bible {
@@ -136,6 +138,12 @@ struct ImportOptions {
     std::string name;            // override display name
     bool index = true;           // auto-index into the Search Engine
     bool replace = false;        // replace an existing Bible with the same id
+    // Optional progress sink: called from inside Import with (verses indexed,
+    // total verses, book id being indexed). The caller keeps it alive for the
+    // duration of the call; Import runs on the caller's thread. Default-empty
+    // (with the default initializer here) so existing aggregate inits keep
+    // compiling warning-free.
+    std::function<void(size_t, size_t, std::string_view)> onProgress = {};
 };
 
 struct FormatOptions {

@@ -85,8 +85,8 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Select Camera Source")
                         color: "#f1f3f8"
-                        font.family: "Inter"
-                        font.pixelSize: 16
+                        font.family: "Segoe UI"
+                        font.pixelSize: 18
                         font.weight: Font.DemiBold
                     }
 
@@ -104,7 +104,7 @@ Item {
                             anchors.centerIn: parent
                             text: "✕"
                             color: "#8a94a6"
-                            font.pixelSize: 12
+                            font.pixelSize: 14
                         }
 
                         MouseArea {
@@ -121,8 +121,8 @@ Item {
                     width: parent.width
                     text: qsTr("Choose a live camera feed to add to this slide")
                     color: "#8a94a6"
-                    font.family: "Inter"
-                    font.pixelSize: 12
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
                 }
             }
 
@@ -156,8 +156,8 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         width: parent.width - 24
                         color: "#c9cedd"
-                        font.family: "Inter"
-                        font.pixelSize: 12
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
                         selectByMouse: true
                         onTextChanged: root.searchQuery = text
 
@@ -165,8 +165,8 @@ Item {
                             visible: parent.text.length === 0
                             text: qsTr("Search cameras...")
                             color: "#5c6475"
-                            font.family: "Inter"
-                            font.pixelSize: 12
+                            font.family: "Segoe UI"
+                            font.pixelSize: 14
                         }
                     }
                 }
@@ -213,8 +213,8 @@ Item {
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: sourceCard.isOffline ? qsTr("OFFLINE") : qsTr("LIVE")
                                 color: sourceCard.isOffline ? "#5c6475" : "#2ed573"
-                                font.family: "Inter"
-                                font.pixelSize: 9
+                                font.family: "Segoe UI"
+                                font.pixelSize: 10
                                 font.weight: Font.DemiBold
                             }
                         }
@@ -243,8 +243,8 @@ Item {
                                 horizontalAlignment: Text.AlignHCenter
                                 text: sourceCard.modelData.name
                                 color: sourceCard.isOffline ? "#7a8094" : "#eef1f8"
-                                font.family: "Inter"
-                                font.pixelSize: 13
+                                font.family: "Segoe UI"
+                                font.pixelSize: 15
                                 font.weight: Font.Medium
                             }
                             Text {
@@ -252,8 +252,8 @@ Item {
                                 horizontalAlignment: Text.AlignHCenter
                                 text: sourceCard.modelData.description
                                 color: sourceCard.isOffline ? "#4a5162" : "#5c6475"
-                                font.family: "Inter"
-                                font.pixelSize: 10
+                                font.family: "Segoe UI"
+                                font.pixelSize: 12
                             }
                         }
 
@@ -286,8 +286,8 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Cancel")
                         color: "#c8cdd9"
-                        font.family: "Inter"
-                        font.pixelSize: 13
+                        font.family: "Segoe UI"
+                        font.pixelSize: 15
                         font.weight: Font.Medium
                     }
 
@@ -313,8 +313,8 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Add Camera")
                         color: "#ffffff"
-                        font.family: "Inter"
-                        font.pixelSize: 13
+                        font.family: "Segoe UI"
+                        font.pixelSize: 15
                         font.weight: Font.DemiBold
                     }
 

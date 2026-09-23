@@ -112,7 +112,7 @@ Item {
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: index + 1
                     color: "#ffffff"
-                    font.pixelSize: 320
+                    font.pixelSize: 368
                     font.weight: Font.Bold
                 }
 
@@ -120,7 +120,7 @@ Item {
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: modelData.width + " × " + modelData.height
                     color: "#9aa0b5"
-                    font.pixelSize: 30
+                    font.pixelSize: 35
                 }
             }
         }
@@ -391,7 +391,7 @@ Item {
                                         text: displayTile.modeText
                                         color: Theme.textMuted
                                         font.family: Theme.fontFamily
-                                        font.pixelSize: 9
+                                        font.pixelSize: 10
                                         elide: Text.ElideRight
                                     }
                                 }
@@ -414,7 +414,7 @@ Item {
                                         anchors.centerIn: parent
                                         text: "LIVE"
                                         color: Theme.dangerLight
-                                        font.pixelSize: 8
+                                        font.pixelSize: 9
                                         font.weight: Font.Bold
                                     }
                                 }
@@ -468,7 +468,7 @@ Item {
                             text: "No display"
                             color: Theme.textMuted
                             font.family: Theme.fontFamily
-                            font.pixelSize: 9
+                            font.pixelSize: 10
                         }
                     }
 

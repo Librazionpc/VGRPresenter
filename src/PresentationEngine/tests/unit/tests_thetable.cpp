@@ -8,6 +8,7 @@
 #include "TestHarness.hpp"
 
 #include "modules/library/TheTableLibrary.hpp"
+#include "modules/search/SearchEngine.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -353,4 +354,88 @@ void TestTheTableRealPdfs() {
             std::printf("[folder] %d imported, %d skipped, %d failed; converted texts in %s\n", report.value().imported, report.value().skipped, report.value().failed, kept.c_str());
     }
     std::fflush(stdout);
+}
+
+// Search Engine integration (docs/specs/20 §DocumentAdapterRegistry, the Bible
+// precedent): IndexWithSearchEngine puts one document per sermon into the
+// platform index — type "table", upsert-safe, removable — so the app-wide
+// search finds the sermons alongside everything else. Runs after the library
+// tests, on a fresh library file, so the document ids are deterministic.
+void TestTheTableSearchIndexing() {
+    auto& eng = s::SearchEngine::Instance();
+    CHECK(eng.Initialize().ok());
+
+    // A clean slate for the document ids this test owns ("table:*") — and for
+    // the library file itself, so the suite is idempotent (a previous run's
+    // sermons would otherwise still be in it).
+    std::filesystem::remove_all(kRoot);
+    auto lib = lib::TheTableLibrary::Open(PathOf("index.json"));
+    CHECK(lib->UnindexFromSearchEngine().ok());
+    CHECK(lib->Books().empty());
+
+    // Two sermons in one year book.
+    CHECK(lib->ImportSermon("downloads/1953/53_0217_Only_Believe.txt",
+                            "Only believe, all things are possible to them that believe in His name today.\n\n"
+                            "The second paragraph carries more words so it survives the length filter easily.").ok());
+    CHECK(lib->ImportSermon("downloads/1953/53_0218_My_Angel.txt",
+                            "My angel shall go before thee and the road is prepared for the journey ahead of you.\n\n"
+                            "Its closing paragraph also carries more than the forty characters needed to stand.").ok());
+
+    // Indexing: one document per sermon.
+    auto indexed = lib->IndexWithSearchEngine();
+    CHECK(indexed.ok());
+    CHECK(indexed.value() == 2);
+
+    // The library's own documents are searchable through the engine, by text...
+    auto hit = eng.Search("road is prepared");
+    CHECK(hit.ok() && !hit.value().empty());
+    bool foundAngel = false;
+    for (const auto& r : hit.value())
+        foundAngel |= r.documentId == "table:Y1953:2" && r.type == "table";
+    CHECK(foundAngel);
+
+    // ...by title (the sermon code keeps it unique)...
+    auto byTitle = eng.Search("0217");
+    CHECK(byTitle.ok() && !byTitle.value().empty());
+    bool foundOnly = false;
+    for (const auto& r : byTitle.value())
+        foundOnly |= r.documentId == "table:Y1953:1";
+    CHECK(foundOnly);
+
+    // ...and through the type filter.
+    s::SearchFilter tableOnly;
+    tableOnly.type = "table";
+    auto typed = eng.Search("paragraph", tableOnly);
+    CHECK(typed.ok());
+    for (const auto& r : typed.value()) CHECK(r.type == "table");
+
+    // A re-index upserts (no duplicates), and the document content follows the library.
+    CHECK(lib->IndexWithSearchEngine().ok());
+    auto afterUpsert = eng.Search("road is prepared", tableOnly);
+    CHECK(afterUpsert.ok());
+    size_t angelDocs = 0;
+    for (const auto& r : afterUpsert.value())
+        angelDocs += r.documentId == "table:Y1953:2" ? 1u : 0u;
+    CHECK(angelDocs == 1);
+
+    // Other content in the index is untouched (the upsert never clobbers the rest).
+    s::SearchDocument song;
+    song.id = "index-test-song";
+    song.type = "song";
+    song.title = "Index Test Song";
+    song.content = "unrelated hymn words entirely";
+    CHECK(eng.IndexDocument(song).ok());
+    CHECK(lib->IndexWithSearchEngine().ok());
+    auto songStill = eng.Search("unrelated hymn");
+    CHECK(songStill.ok() && !songStill.value().empty());
+
+    // Unindexing drops exactly this library's documents.
+    CHECK(lib->UnindexFromSearchEngine().ok());
+    auto gone = eng.Search("road is prepared", tableOnly);
+    CHECK(gone.ok() && gone.value().empty());
+    auto songRemains = eng.Search("unrelated hymn");
+    CHECK(songRemains.ok() && !songRemains.value().empty());
+
+    CHECK(eng.Shutdown().ok());
+    CHECK(eng.Initialize().ok());   // other tests re-start the engine
 }

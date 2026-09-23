@@ -3,6 +3,7 @@
 #include "core/config/Json.hpp"
 #include "core/logging/Logger.hpp"
 #include "modules/content/AssetCompressor.hpp"
+#include "modules/search/SearchEngine.hpp"
 #include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
@@ -11,8 +12,10 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <format>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <unordered_map>
 #include <filesystem>
 #include <fstream>
@@ -1313,6 +1316,101 @@ Result<void> TheTableLibrary::Load() {
     }
     std::sort(books_.begin(), books_.end(),
               [](const TheTableBook& a, const TheTableBook& b) { return a.order < b.order; });
+    return Ok();
+}
+
+// ---------------------------------------------------------------------------
+// Search Engine integration (docs/specs/20 §DocumentAdapterRegistry): makes the
+// platform Search Engine content-aware for type "table". Verse documents would
+// carry their paragraph text as content; this adapter extracts it verbatim.
+// ---------------------------------------------------------------------------
+namespace {
+class TheTableIndexAdapter final : public search::IIndexAdapter {
+public:
+    const char* Type() const noexcept override { return "table"; }
+    bool CanIndex(const search::SearchDocument& doc) const override {
+        return doc.type == "table";
+    }
+    Result<std::string> ExtractContent(const search::SearchDocument& doc) const override {
+        return doc.content;
+    }
+};
+} // namespace
+
+// The document id of one sermon in the platform Search Engine. `chapter` is the
+// 1-based sermon index within its year book — the same shape the Bible module
+// uses ("bible:<bibleId>:<book>:<chapter>:<verse>", one level shorter).
+std::string TheTableDocId(std::string_view bookId, int chapter) {
+    return std::format("table:{}:{}", bookId, chapter);
+}
+
+// One document per SERMON: title + every paragraph's text. A paragraph-per-
+// document split (the Bible's granularity) would put 300k+ documents into the
+// engine for this library alone — the engine re-copies every candidate document
+// per query — so the sermon stays one document and paragraph-level hits keep
+// coming from this library's own Search().
+std::string TheTableContent(const TheTableChapter& ch) {
+    std::string content = ch.title;
+    for (const TheTableVerse& v : ch.verses) {
+        content += '\n';
+        content += v.text;
+    }
+    return content;
+}
+
+Result<size_t> TheTableLibrary::IndexWithSearchEngine() {
+    search::SearchEngine& engine = search::SearchEngine::Instance();
+
+    // The adapter registers once per process; a re-register is a benign no-op
+    // failure here (the engine rejects the duplicate).
+    static std::once_flag adapterOnce;
+    std::call_once(adapterOnce, [&engine] {
+        (void)engine.RegisterAdapter(std::make_shared<TheTableIndexAdapter>());
+    });
+
+    // The library copy happens under the lock; indexing (an upsert per sermon)
+    // runs on it so browsing is never held up behind the engine's work.
+    std::vector<TheTableBook> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        snapshot = books_;
+    }
+
+    size_t indexed = 0;
+    for (const TheTableBook& book : snapshot) {
+        for (const TheTableChapter& ch : book.chapters) {
+            search::SearchDocument doc;
+            doc.id = TheTableDocId(book.id, ch.number);
+            doc.type = "table";
+            doc.title = ch.title;
+            doc.content = TheTableContent(ch);
+            // The author field carries the year book id (the Bible precedent:
+            // filters type + author scope a search to one book).
+            doc.author = book.id;
+            doc.source = "table";
+            doc.metadata["book"] = book.id;
+            doc.metadata["year"] = book.name;
+            doc.metadata["chapter"] = std::to_string(ch.number);
+            doc.metadata["reference"] = book.name + " " + std::to_string(ch.number);
+            doc.tags = {"sermon", "table"};
+            auto r = engine.IndexDocument(doc);
+            if (!r.ok()) return r.error();
+            ++indexed;
+        }
+    }
+    return indexed;
+}
+
+Result<void> TheTableLibrary::UnindexFromSearchEngine() {
+    search::SearchEngine& engine = search::SearchEngine::Instance();
+    std::vector<TheTableBook> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        snapshot = books_;
+    }
+    for (const TheTableBook& book : snapshot)
+        for (const TheTableChapter& ch : book.chapters)
+            (void)engine.RemoveDocument(TheTableDocId(book.id, ch.number));
     return Ok();
 }
 

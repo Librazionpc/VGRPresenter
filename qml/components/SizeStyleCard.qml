@@ -97,8 +97,8 @@ Column {
             Text {
                 text: qsTr("Size & Style")
                 color: "#eef1f8"
-                font.family: "Inter"
-                font.pixelSize: 12
+                font.family: "Segoe UI"
+                font.pixelSize: 14
                 font.weight: Font.Medium
             }
         }
@@ -168,8 +168,8 @@ Column {
                 anchors.verticalCenter: parent.verticalCenter
                 text: qsTr("Border")
                 color: "#eef1f8"
-                font.family: "Inter"
-                font.pixelSize: 12
+                font.family: "Segoe UI"
+                font.pixelSize: 14
             }
 
             // Enable checkbox — the swatch/Change chip below stay visible
@@ -192,7 +192,7 @@ Column {
                     visible: root.borderEnabled
                     text: "✓"
                     color: "#ffffff"
-                    font.pixelSize: 11
+                    font.pixelSize: 13
                     font.weight: Font.Bold
                 }
 
@@ -237,8 +237,8 @@ Column {
                     anchors.centerIn: parent
                     text: qsTr("Change")
                     color: "#aeb6c8"
-                    font.family: "Inter"
-                    font.pixelSize: 10
+                    font.family: "Segoe UI"
+                    font.pixelSize: 12
                     font.weight: Font.Medium
                 }
 
@@ -255,8 +255,8 @@ Column {
                 x: 368
                 anchors.verticalCenter: parent.verticalCenter
                 color: "#6b7280"
-                font.family: "Inter"
-                font.pixelSize: 14
+                font.family: "Segoe UI"
+                font.pixelSize: 16
                 text: "›"
             }
         }
@@ -306,8 +306,8 @@ Column {
                         anchors.centerIn: parent
                         text: styleBtn.modelData.label
                         color: styleBtn.active ? "#ffffff" : "#aeb6c8"
-                        font.family: "Inter"
-                        font.pixelSize: 11
+                        font.family: "Segoe UI"
+                        font.pixelSize: 13
                         font.weight: Font.Medium
                     }
 

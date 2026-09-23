@@ -47,16 +47,16 @@ Item {
         anchors.top: parent.top
         text: root.label
         color: "#aeb6c8"
-        font.family: "Inter"
-        font.pixelSize: 12
+        font.family: "Segoe UI"
+        font.pixelSize: 14
     }
     Text {
         anchors.right: parent.right
         anchors.top: parent.top
         text: (root.decimals > 0 ? root.value.toFixed(root.decimals) : Math.round(root.value)) + root.suffix
         color: "#aeb6c8"
-        font.family: "Inter"
-        font.pixelSize: 12
+        font.family: "Segoe UI"
+        font.pixelSize: 14
     }
 
     Item {

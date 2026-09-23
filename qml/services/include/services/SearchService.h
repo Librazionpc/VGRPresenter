@@ -41,6 +41,12 @@ class SearchService : public QObject
     Q_PROPERTY(bool bibleLoading READ bibleLoading NOTIFY bibleChanged)
     // Ids of the Bibles the engine has installed ("kjv", ...).
     Q_PROPERTY(QStringList bibles READ bibles NOTIFY bibleChanged)
+    // True while an import (startup load or a "New scripture" install) runs on
+    // the worker thread; `bibleProgress` is { done, total, current } — verses
+    // indexed so far, verses in the file, and the book being indexed (or the
+    // file name between files).
+    Q_PROPERTY(bool bibleImporting READ bibleImporting NOTIFY bibleImportingChanged)
+    Q_PROPERTY(QVariantMap bibleProgress READ bibleProgress NOTIFY bibleProgressChanged)
 
 public:
     static SearchService &instance();
@@ -48,6 +54,8 @@ public:
     ~SearchService() override;
 
     bool bibleLoading() const { return loading_; }
+    bool bibleImporting() const { return importing_; }
+    QVariantMap bibleProgress() const { return progress_; }
     QStringList bibles() const;
 
     // Searches everything. At most `perKind` results per kind, best first; results
@@ -64,8 +72,10 @@ public:
     // (development builds) the KJV shipped in the source tree. Needs the engine booted.
     Q_INVOKABLE void loadBibles();
 
-    // Installs one Bible file now (json / xml / osis / usfm / txt). false + an error
-    // toast on failure. Blocks for the length of the import — prefer loadBibles().
+    // Installs one Bible file now (json / xml / osis / usfm / txt). Returns false
+    // (and toasts the error) when the import fails or another one is already
+    // running; the work happens on a worker thread — bibleImporting/
+    // bibleProgress follow it, and bibleChanged fires when it lands.
     Q_INVOKABLE bool importBibleFile(const QString &path);
 
     // Waits for a running Bible import to finish. Call before the engine shuts down.
@@ -73,6 +83,8 @@ public:
 
 signals:
     void bibleChanged();
+    void bibleImportingChanged();
+    void bibleProgressChanged();
 
 private:
     explicit SearchService(QObject *parent = nullptr);
@@ -81,4 +93,6 @@ private:
     QPointer<QThread> loader_;
     bool loading_ = false;
     bool loadStarted_ = false;
+    bool importing_ = false;
+    QVariantMap progress_;
 };

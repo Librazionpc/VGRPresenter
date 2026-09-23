@@ -239,7 +239,7 @@ Item {
         y: 4
 
         height: 23
-        width: 271
+        width: sys_menu.x + sys_menu.width
 
         color: "transparent"
 
@@ -277,14 +277,22 @@ Item {
                 // — same root cause as the x/y-binding workaround elsewhere
                 // in this codebase. Value matches Theme.accent.
                 color: "#6C5CE7"
-                font.family: "Outfit"
+                // Was "Outfit" - a Google Font this app never bundles (same gap "Inter" had everywhere else), so it silently fell
+                // back to a plain system font and never looked like the distinctive wordmark it was meant to be. Bahnschrift is
+                // Microsoft's own font (every Windows 10/11 install has it), with the geometric, slightly condensed look a
+                // logotype wants, so it renders as intended instead of gambling on a font that isn't there.
+                font.family: "Bahnschrift"
                 font.letterSpacing: 0.09
-                font.pixelSize: 18
+                font.pixelSize: 21
                 font.weight: Font.ExtraBold
                 horizontalAlignment: Text.AlignLeft
                 text: qsTr("VGRPresenter")
                 textFormat: Text.PlainText
-                verticalAlignment: Text.AlignTop
+                // Was AlignTop: the label sat high in its 23 px box while the File/Edit/View/Help row beside it is vertically
+                // centered in its own box - two different anchors that happened to read as "not level with each other". Both
+                // boxes share the same vertical middle (see header_left/sys_menu below), so centering this the same way lines
+                // the two up exactly instead of by coincidence.
+                verticalAlignment: Text.AlignVCenter
             }
 
             PositionHoverArea {
@@ -298,7 +306,9 @@ Item {
         Rectangle {
             id: sys_menu
 
-            x: 138
+            // Was a fixed 138 (a Figma-export pixel-pin): the logo's own font size grew and started overlapping it. Placed
+            // relative to the logo's ACTUAL rendered width instead, so a font (or text) change here can never collide with it again.
+            x: logoButton.width + 24
             y: 4
 
             height: 15
@@ -337,8 +347,8 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     // Literal, not Theme.textPrimary — see logoText above.
                     color: "#e2e8f0"
-                    font.family: "Inter"
-                    font.pixelSize: 12
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
                     font.weight: Font.Normal
                     horizontalAlignment: Text.AlignLeft
                     textFormat: Text.PlainText

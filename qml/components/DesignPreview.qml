@@ -131,7 +131,13 @@ Item {
                         return a === "left" ? Text.AlignLeft : a === "right" ? Text.AlignRight
                              : a === "justify" ? Text.AlignJustify : Text.AlignHCenter
                     }
-                    verticalAlignment: Text.AlignVCenter
+                    // Mirrors the canvas's own EditableCanvasLabel/EditScreen.qml verticalAlignment binding -
+                    // defaults centered, a template can set "top" (or "bottom") on a block that reads better
+                    // anchored to an edge (a big sermon-paragraph box, say) instead of floating mid-box.
+                    verticalAlignment: {
+                        const a = el.meta.verticalAlign ?? "center"
+                        return a === "top" ? Text.AlignTop : a === "bottom" ? Text.AlignBottom : Text.AlignVCenter
+                    }
                     wrapMode: Text.WordWrap
                     elide: Text.ElideRight
                 }
@@ -179,7 +185,7 @@ Item {
                         anchors.horizontalCenter: parent.horizontalCenter
                         text: fmt.formatClock(root.now, el.meta.format !== "24", el.meta.showSeconds !== false)
                         color: el.meta.color ?? "#9b8ff5"
-                        font.family: "Inter"
+                        font.family: "Segoe UI"
                         font.weight: Font.DemiBold
                         font.pixelSize: Math.max(10, Math.min(el.width, el.height) * 0.22)
                     }
@@ -188,8 +194,8 @@ Item {
                         anchors.horizontalCenter: parent.horizontalCenter
                         text: Qt.formatDate(root.now, "dddd, MMMM d")
                         color: el.meta.color !== undefined ? Qt.alpha(el.meta.color, 0.7) : "#5c6475"
-                        font.family: "Inter"
-                        font.pixelSize: 9
+                        font.family: "Segoe UI"
+                        font.pixelSize: 10
                     }
                 }
                 Item {
@@ -250,7 +256,7 @@ Item {
                         text: fmt.formatDuration(fmt.timerSeconds(root.now, el.meta.mode ?? "countdown", el.meta.durationSeconds ?? 300,
                                                                   el.meta.startedAt ?? root.now.getTime()))
                         color: "#9b8ff5"
-                        font.family: "Inter"
+                        font.family: "Segoe UI"
                         font.weight: Font.DemiBold
                         font.pixelSize: Math.max(10, Math.min(el.width, el.height) * 0.28)
                     }
@@ -266,13 +272,13 @@ Item {
                         GradientStop { position: 1; color: "#07130e" }
                     }
                     Rectangle { x: 8; y: 9; width: 5; height: 5; radius: 3; color: "#ff5d5d" }
-                    Text { x: 18; y: 7; text: qsTr("LIVE"); color: "#e2e8f0"; font.family: "Inter"; font.pixelSize: 7; font.weight: Font.Medium }
+                    Text { x: 18; y: 7; text: qsTr("LIVE"); color: "#e2e8f0"; font.family: "Segoe UI"; font.pixelSize: 8; font.weight: Font.Medium }
                     Rectangle { x: 10; y: 24; width: 36; height: 34; radius: 4; color: "#14503a" }
                     Rectangle { x: 30; y: 24; width: 24; height: 34; radius: 4; color: "#0f3a2c" }
                     Text {
                         x: 10; y: 68
                         text: (el.modelData.text ?? "") !== "" ? el.modelData.text : qsTr("Camera")
-                        color: "#eef0f6"; font.family: "Inter"; font.pixelSize: 8; font.weight: Font.Medium
+                        color: "#eef0f6"; font.family: "Segoe UI"; font.pixelSize: 9; font.weight: Font.Medium
                     }
                 }
 
@@ -296,13 +302,13 @@ Item {
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
                             text: el.kind.toUpperCase()
-                            color: "#aeb6c8"; font.family: "Inter"; font.pixelSize: 11; font.weight: Font.Medium
+                            color: "#aeb6c8"; font.family: "Segoe UI"; font.pixelSize: 13; font.weight: Font.Medium
                         }
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
                             visible: (el.modelData.text ?? "") !== ""
                             text: el.modelData.text ?? ""
-                            color: "#5c6475"; font.family: "Inter"; font.pixelSize: 9
+                            color: "#5c6475"; font.family: "Segoe UI"; font.pixelSize: 10
                         }
                     }
                 }

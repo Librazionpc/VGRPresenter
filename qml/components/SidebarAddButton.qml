@@ -36,7 +36,7 @@ Rectangle {
         Text {
             text: root.text
             color: Theme.textSecondary
-            font.family: Theme.fontFamily; font.pixelSize: 11
+            font.family: Theme.fontFamily; font.pixelSize: 13
             anchors.verticalCenter: parent.verticalCenter
         }
     }

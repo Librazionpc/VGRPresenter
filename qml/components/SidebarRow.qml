@@ -50,7 +50,7 @@ Rectangle {
         text: root.label
         color: root.selected ? Theme.textPrimary : Theme.textSecondary
         elide: Text.ElideRight
-        font.family: Theme.fontFamily; font.pixelSize: 12
+        font.family: Theme.fontFamily; font.pixelSize: 14
     }
     Text {
         visible: root.count !== "" && !root.busy && !removeButton.visible
@@ -59,7 +59,7 @@ Rectangle {
         anchors.verticalCenter: parent.verticalCenter
         text: root.count
         color: Theme.textMuted
-        font.family: Theme.fontFamily; font.pixelSize: 11
+        font.family: Theme.fontFamily; font.pixelSize: 13
     }
 
     BusySpinner {

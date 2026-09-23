@@ -152,7 +152,7 @@ Item {
             y: fixedRows.y + fixedRows.height + 14
             text: qsTr("CATEGORIES")
             color: Theme.textMuted
-            font.family: Theme.fontFamily; font.pixelSize: 10; font.bold: true
+            font.family: Theme.fontFamily; font.pixelSize: 12; font.bold: true
         }
 
         Flickable {
@@ -282,7 +282,7 @@ Item {
                             ? qsTr("Every %1 is in a category.").arg(root.noun)
                             : qsTr("Nothing in “%1” yet. The button below adds one here.").arg(root.categoryName(root.selection))))
                 color: Theme.textMuted
-                font.family: Theme.fontFamily; font.pixelSize: 12
+                font.family: Theme.fontFamily; font.pixelSize: 14
             }
         }
 
@@ -305,17 +305,15 @@ Item {
                 id: newRow
                 anchors.centerIn: parent
                 spacing: 8
-                IconGlyph {
+                PlusGlyph {
                     anchors.verticalCenter: parent.verticalCenter
-                    name: "plus"
-                    color: "#ffffff"
-                    width: 12; height: 12
+                    size: 12; thickness: 1.6; color: "#ffffff"
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     text: qsTr("New %1").arg(root.noun)
                     color: "#ffffff"
-                    font.family: Theme.fontFamily; font.pixelSize: 12; font.weight: Font.DemiBold
+                    font.family: Theme.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold
                 }
             }
             PositionHoverArea {
@@ -357,7 +355,7 @@ Item {
                 leftPadding: 8; topPadding: 4; bottomPadding: 4
                 text: qsTr("FILE IN")
                 color: Theme.textMuted
-                font.family: Theme.fontFamily; font.pixelSize: 10; font.bold: true
+                font.family: Theme.fontFamily; font.pixelSize: 12; font.bold: true
             }
             Repeater {
                 // "" is "Unlabeled".

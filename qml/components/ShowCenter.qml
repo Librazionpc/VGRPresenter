@@ -100,7 +100,7 @@ Item {
             width: parent.width - 60
             text: root.item ? root.item.name : ""
             color: root.cText; elide: Text.ElideRight
-            font.family: root.mono; font.pixelSize: 13; font.weight: Font.DemiBold
+            font.family: root.mono; font.pixelSize: 15; font.weight: Font.DemiBold
         }
         Item {
             x: parent.width - width; width: 32; height: parent.height
@@ -130,7 +130,7 @@ Item {
                     height: modelData === "-" ? 1 : 34
                     Rectangle { visible: menuEntry.modelData === "-"; width: parent.width; height: 1; color: root.cLighter }
                     Rectangle { visible: menuEntry.modelData !== "-"; anchors.fill: parent; color: menuEntryHover.hovered ? "#0dffffff" : "transparent" }
-                    Text { visible: menuEntry.modelData !== "-"; x: 12; anchors.verticalCenter: parent.verticalCenter; text: menuEntry.modelData; color: root.cText; font.family: root.mono; font.pixelSize: 13 }
+                    Text { visible: menuEntry.modelData !== "-"; x: 12; anchors.verticalCenter: parent.verticalCenter; text: menuEntry.modelData; color: root.cText; font.family: root.mono; font.pixelSize: 15 }
                     HoverHandler { id: menuEntryHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler {
                         enabled: menuEntry.modelData !== "-"
@@ -201,7 +201,7 @@ Item {
                                 visible: (cell.modelData.nextTimer ?? 0) > 0
                                 anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 4
                                 width: timerLabel.width + 8; height: 16; radius: 3; color: "#cc0b0b14"
-                                Text { id: timerLabel; anchors.centerIn: parent; text: root.formatTime(cell.modelData.nextTimer ?? 0); color: "#ff8a7e"; font.family: root.mono; font.pixelSize: 10 }
+                                Text { id: timerLabel; anchors.centerIn: parent; text: root.formatTime(cell.modelData.nextTimer ?? 0); color: "#ff8a7e"; font.family: root.mono; font.pixelSize: 12 }
                             }
                         }
                         // the label: the number, the group's name, a line in the group's colour under it
@@ -210,13 +210,13 @@ Item {
                             y: thumb.height; width: parent.width; height: 25
                             color: root.cDarkest
                             Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 2; color: cell.group }
-                            Text { x: 5; y: 5; text: cell.index + 1; opacity: 0.85; color: root.cText; font.family: root.mono; font.pixelSize: 11 }
+                            Text { x: 5; y: 5; text: cell.index + 1; opacity: 0.85; color: root.cText; font.family: root.mono; font.pixelSize: 13 }
                             Text {
                                 x: 22; y: 4; width: parent.width - 44
                                 horizontalAlignment: Text.AlignHCenter
                                 text: (cell.modelData.title ?? "") !== "" ? cell.modelData.title : "—"
                                 color: root.cText; elide: Text.ElideRight
-                                font.family: root.mono; font.pixelSize: 11; font.weight: Font.Bold
+                                font.family: root.mono; font.pixelSize: 13; font.weight: Font.Bold
                             }
                         }
                         // the chosen slide: FreeShow's 2px outline in the accent, inside the cell
@@ -256,12 +256,12 @@ Item {
                             checkerSize: 24
                         }
                     }
-                    Text { x: 130; y: 10; text: (listRow.index + 1) + "  " + (listRow.modelData.title ?? "") + ((listRow.modelData.nextTimer ?? 0) > 0 ? "  ·  " + root.formatTime(listRow.modelData.nextTimer) : ""); color: "#e2e8f0"; font.family: "Inter"; font.pixelSize: 12; font.weight: Font.DemiBold }
+                    Text { x: 130; y: 10; text: (listRow.index + 1) + "  " + (listRow.modelData.title ?? "") + ((listRow.modelData.nextTimer ?? 0) > 0 ? "  ·  " + root.formatTime(listRow.modelData.nextTimer) : ""); color: "#e2e8f0"; font.family: "Segoe UI"; font.pixelSize: 14; font.weight: Font.DemiBold }
                     Text {
                         x: 130; y: 30; width: parent.width - 146
                         text: root.slideText(listRow.modelData)
                         color: "#8a94a6"; wrapMode: Text.Wrap; elide: Text.ElideRight; maximumLineCount: 3
-                        font.family: "Inter"; font.pixelSize: 12
+                        font.family: "Segoe UI"; font.pixelSize: 14
                     }
                     HoverHandler { id: listHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler {
@@ -294,14 +294,14 @@ Item {
                         text: (lyricRow.modelData.title ?? "") !== "" ? lyricRow.modelData.title : qsTr("Slide %1").arg(lyricRow.index + 1)
                         color: "#ff4d3d"; font.capitalization: Font.AllUppercase
                         Component.onCompleted: if ((lyricRow.modelData.nextTimer ?? 0) > 0) text += "  ·  " + root.formatTime(lyricRow.modelData.nextTimer)
-                        font.family: "Inter"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1
+                        font.family: "Segoe UI"; font.pixelSize: 12; font.weight: Font.Bold; font.letterSpacing: 1
                     }
                     Text {
                         id: lyricText
                         x: 14; y: lyricTitle.y + lyricTitle.height + 4; width: parent.width - 28
                         text: root.slideText(lyricRow.modelData)
                         color: "#e2e8f0"; wrapMode: Text.Wrap
-                        font.family: "Inter"; font.pixelSize: 15; lineHeight: 1.25
+                        font.family: "Segoe UI"; font.pixelSize: 17; lineHeight: 1.25
                     }
                     HoverHandler { id: lyricHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler {
@@ -379,7 +379,7 @@ Item {
                         x: 16; y: 14; width: parent.width - 32
                         spacing: 12
 
-                        Text { text: qsTr("NEXT TIMER"); color: "#8a94a6"; font.family: "Inter"; font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1.2 }
+                        Text { text: qsTr("NEXT TIMER"); color: "#8a94a6"; font.family: "Segoe UI"; font.pixelSize: 12; font.weight: Font.Bold; font.letterSpacing: 1.2 }
 
                         // seconds: - [ 10 ] +
                         Rectangle {
@@ -397,7 +397,7 @@ Item {
                                     id: timerInput
                                     width: 44; horizontalAlignment: TextInput.AlignRight
                                     color: "#ffffff"; selectByMouse: true
-                                    font.family: "Inter"; font.pixelSize: 16; font.weight: Font.DemiBold
+                                    font.family: "Segoe UI"; font.pixelSize: 18; font.weight: Font.DemiBold
                                     validator: IntValidator { bottom: 0; top: 3600 }
                                     inputMethodHints: Qt.ImhDigitsOnly
                                     onTextEdited: root.timerSeconds = Number(text) || 0
@@ -407,7 +407,7 @@ Item {
                                         function onTimerSecondsChanged() { if (timerInput.text !== String(root.timerSeconds)) timerInput.text = String(root.timerSeconds) }
                                     }
                                 }
-                                Text { anchors.baseline: timerInput.baseline; text: qsTr("seconds"); color: "#5c6475"; font.family: "Inter"; font.pixelSize: 12 }
+                                Text { anchors.baseline: timerInput.baseline; text: qsTr("seconds"); color: "#5c6475"; font.family: "Segoe UI"; font.pixelSize: 14 }
                             }
                             Item {
                                 anchors.right: parent.right
@@ -429,8 +429,8 @@ Item {
                             border.color: root.timerApplied ? "#3a3d4c" : "#ff4d3d"
                             Row {
                                 anchors.centerIn: parent; spacing: 8
-                                Text { text: root.timerApplied ? qsTr("Reset") : qsTr("To all slides"); color: "#ffffff"; font.family: "Inter"; font.pixelSize: 13; font.weight: Font.DemiBold }
-                                Text { visible: !root.timerApplied && root.timerSeconds > 0; text: root.formatTime(root.timerSeconds * root.slides.length); color: "#ffb4ab"; font.family: "Inter"; font.pixelSize: 12 }
+                                Text { text: root.timerApplied ? qsTr("Reset") : qsTr("To all slides"); color: "#ffffff"; font.family: "Segoe UI"; font.pixelSize: 15; font.weight: Font.DemiBold }
+                                Text { visible: !root.timerApplied && root.timerSeconds > 0; text: root.formatTime(root.timerSeconds * root.slides.length); color: "#ffb4ab"; font.family: "Segoe UI"; font.pixelSize: 14 }
                             }
                             HoverHandler { id: applyHover; cursorShape: parent.usable ? Qt.PointingHandCursor : Qt.ArrowCursor }
                             TapHandler { enabled: parent.usable; onTapped: root.applyTimer() }
@@ -440,7 +440,7 @@ Item {
                             visible: root.timerTotal > 0
                             width: parent.width; horizontalAlignment: Text.AlignHCenter
                             text: qsTr("Duration: %1").arg(root.formatTime(root.timerTotal))
-                            color: "#8a94a6"; font.family: "Inter"; font.pixelSize: 11
+                            color: "#8a94a6"; font.family: "Segoe UI"; font.pixelSize: 13
                         }
                     }
                 }
@@ -469,7 +469,7 @@ Item {
                         anchors.fill: parent; anchors.topMargin: 1
                         Item {
                             width: parent.width; height: 38
-                            Text { anchors.centerIn: parent; text: Math.round(100 / root.columns) + "%"; color: "#8a94a6"; font.family: "Inter"; font.pixelSize: 11 }
+                            Text { anchors.centerIn: parent; text: Math.round(100 / root.columns) + "%"; color: "#8a94a6"; font.family: "Segoe UI"; font.pixelSize: 13 }
                             HoverHandler { cursorShape: Qt.PointingHandCursor }
                             TapHandler { onTapped: root.setColumns(4) }   // the usual size
                         }
@@ -516,7 +516,7 @@ Item {
         visible: root.type === "show" && root.show === null
         anchors.centerIn: parent
         text: root.loaded && root.loaded.error ? qsTr("This show could not be read: %1").arg(root.loaded.error) : ""
-        color: "#ff6b61"; font.family: "Inter"; font.pixelSize: 13
+        color: "#ff6b61"; font.family: "Segoe UI"; font.pixelSize: 15
     }
 
     // ---- a picture ----
@@ -582,7 +582,7 @@ Item {
             anchors.horizontalCenter: parent.horizontalCenter
             visible: root.type === "section"
             text: root.item ? root.item.name : ""
-            color: "#e2e8f0"; font.family: "Inter"; font.pixelSize: 26; font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase
+            color: "#e2e8f0"; font.family: "Segoe UI"; font.pixelSize: 30; font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase
         }
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
@@ -590,7 +590,7 @@ Item {
             width: Math.min(root.width - 60, 520); horizontalAlignment: Text.AlignHCenter
             text: root.item ? String(root.item.ref) : ""
             color: "#5c6475"; elide: Text.ElideMiddle
-            font.family: "Inter"; font.pixelSize: 12
+            font.family: "Segoe UI"; font.pixelSize: 14
         }
     }
 }

@@ -170,6 +170,14 @@ ApplicationWindow {
             window.currentView = "show"
             showScreen.showInLibrary("media", r.title)
             break
+        case "table": {
+            // Open The Table tab on that sermon: its pane search takes the
+            // sermon code ("65-0117") when the title alone is not unique.
+            window.currentView = "show"
+            showScreen.showInLibrary("table", r.title)
+            EventBus.notify(qsTr("Opened %1 in The Table.").arg(r.title), "success", qsTr("The Table"), "search.table.opened")
+            break
+        }
         case "bible": {
             // A verse becomes a slide in the working show.
             ShowService.ensureShow(qsTr("Untitled show"))

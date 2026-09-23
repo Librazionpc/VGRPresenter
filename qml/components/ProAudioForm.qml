@@ -296,7 +296,7 @@ Column {
 
             Text {
                 anchors.centerIn: downArea
-                text: "\u25BC"; color: Theme.textMuted; font.pixelSize: 7
+                text: "\u25BC"; color: Theme.textMuted; font.pixelSize: 8
             }
             MouseArea {
                 id: downArea
@@ -309,7 +309,7 @@ Column {
             }
             Text {
                 anchors.centerIn: upArea
-                text: "\u25B2"; color: Theme.textMuted; font.pixelSize: 7
+                text: "\u25B2"; color: Theme.textMuted; font.pixelSize: 8
             }
             MouseArea {
                 id: upArea
@@ -511,7 +511,7 @@ Column {
                         visible: chRow.chOn
                         text: "\u2713"
                         color: "#ffffff"
-                        font.pixelSize: 11
+                        font.pixelSize: 13
                     }
                     MouseArea {
                         anchors.fill: parent

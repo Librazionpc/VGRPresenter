@@ -76,8 +76,8 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Add Clock")
                         color: "#f1f3f8"
-                        font.family: "Inter"
-                        font.pixelSize: 16
+                        font.family: "Segoe UI"
+                        font.pixelSize: 18
                         font.weight: Font.DemiBold
                     }
 
@@ -95,7 +95,7 @@ Item {
                             anchors.centerIn: parent
                             text: "✕"
                             color: "#8a94a6"
-                            font.pixelSize: 12
+                            font.pixelSize: 14
                         }
 
                         MouseArea {
@@ -112,8 +112,8 @@ Item {
                     width: parent.width
                     text: qsTr("Configure a live clock display for this slide")
                     color: "#8a94a6"
-                    font.family: "Inter"
-                    font.pixelSize: 12
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
                 }
             }
 
@@ -148,8 +148,8 @@ Item {
                 Text {
                     anchors.centerIn: parent
                     color: root.tint
-                    font.family: "Inter"
-                    font.pixelSize: 28
+                    font.family: "Segoe UI"
+                    font.pixelSize: 32
                     font.weight: Font.DemiBold
                     text: previewClock.formatClock(previewClock.now, root.format === "12", root.showSeconds)
                 }
@@ -162,8 +162,8 @@ Item {
                 Text {
                     text: qsTr("Format")
                     color: "#c8cdd9"
-                    font.family: "Inter"
-                    font.pixelSize: 12
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
                     font.weight: Font.Medium
                 }
 
@@ -193,8 +193,8 @@ Item {
                                 anchors.centerIn: parent
                                 text: fmtBtn.modelData.label
                                 color: fmtBtn.active ? "#ffffff" : "#c8cdd9"
-                                font.family: "Inter"
-                                font.pixelSize: 12
+                                font.family: "Segoe UI"
+                                font.pixelSize: 14
                                 font.weight: fmtBtn.active ? Font.DemiBold : Font.Medium
                             }
 
@@ -217,8 +217,8 @@ Item {
                 Text {
                     text: qsTr("Style")
                     color: "#c8cdd9"
-                    font.family: "Inter"
-                    font.pixelSize: 12
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
                     font.weight: Font.Medium
                 }
 
@@ -248,8 +248,8 @@ Item {
                                 anchors.centerIn: parent
                                 text: styleBtn.modelData.label
                                 color: styleBtn.active ? "#ffffff" : "#c8cdd9"
-                                font.family: "Inter"
-                                font.pixelSize: 12
+                                font.family: "Segoe UI"
+                                font.pixelSize: 14
                                 font.weight: styleBtn.active ? Font.DemiBold : Font.Medium
                             }
 
@@ -272,8 +272,8 @@ Item {
                 Text {
                     text: qsTr("Colour")
                     color: "#c8cdd9"
-                    font.family: "Inter"
-                    font.pixelSize: 12
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
                     font.weight: Font.Medium
                 }
 
@@ -311,8 +311,8 @@ Item {
                 Text {
                     text: qsTr("Background")
                     color: "#c8cdd9"
-                    font.family: "Inter"
-                    font.pixelSize: 12
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
                     font.weight: Font.Medium
                 }
 
@@ -342,8 +342,8 @@ Item {
                                 anchors.centerIn: parent
                                 text: bgBtn.modelData.label
                                 color: bgBtn.active ? "#ffffff" : "#c8cdd9"
-                                font.family: "Inter"
-                                font.pixelSize: 12
+                                font.family: "Segoe UI"
+                                font.pixelSize: 14
                                 font.weight: bgBtn.active ? Font.DemiBold : Font.Medium
                             }
 
@@ -375,8 +375,8 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         text: modelData.label
                         color: "#c8cdd9"
-                        font.family: "Inter"
-                        font.pixelSize: 12
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
                     }
 
                     Rectangle {
@@ -433,8 +433,8 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Cancel")
                         color: "#c8cdd9"
-                        font.family: "Inter"
-                        font.pixelSize: 12
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
                         font.weight: Font.Medium
                     }
 
@@ -458,8 +458,8 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Add Clock")
                         color: "#ffffff"
-                        font.family: "Inter"
-                        font.pixelSize: 12
+                        font.family: "Segoe UI"
+                        font.pixelSize: 14
                         font.weight: Font.DemiBold
                     }
 

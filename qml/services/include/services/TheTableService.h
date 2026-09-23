@@ -98,6 +98,7 @@ private:
 
     void loadLibrary();
     QVariantMap documentFromEngine() const;
+    void reindex();   // re-upserts the sermons into the platform Search Engine (after an import)
 
     void *library_ = nullptr;   // bps::library::TheTableLibrary* (void* keeps the engine header out of QML builds)
     bool loading_ = false;

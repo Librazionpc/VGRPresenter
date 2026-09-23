@@ -99,7 +99,7 @@ Item {
                         text: qsTr("Configuration mode")
                         color: Theme.textPrimary
                         font.family: Theme.fontFamily
-                        font.pixelSize: 14
+                        font.pixelSize: 16
                         font.weight: Font.DemiBold
                     }
 
@@ -177,7 +177,7 @@ Item {
                         text: qsTr("Hardware detected")
                         color: Theme.textPrimary
                         font.family: Theme.fontFamily
-                        font.pixelSize: 14
+                        font.pixelSize: 16
                         font.weight: Font.DemiBold
                         bottomPadding: 6
                     }
@@ -211,7 +211,7 @@ Item {
                                         anchors.verticalCenter: parent.verticalCenter
                                         text: hwRow.modelData.ok ? "✓" : "!"
                                         color: hwRow.modelData.ok ? Theme.success : Theme.warning
-                                        font.pixelSize: 11
+                                        font.pixelSize: 13
                                         font.weight: Font.Bold
                                     }
                                     Text {
@@ -251,7 +251,7 @@ Item {
                         text: qsTr("Recommended profile: %1").arg(root.profileLabel(SettingsService.recommendedProfile))
                         color: Theme.textPrimary
                         font.family: Theme.fontFamily
-                        font.pixelSize: 14
+                        font.pixelSize: 16
                         font.weight: Font.DemiBold
                     }
                     Text {
@@ -314,7 +314,7 @@ Item {
                         text: qsTr("Resource budgets")
                         color: Theme.textPrimary
                         font.family: Theme.fontFamily
-                        font.pixelSize: 14
+                        font.pixelSize: 16
                         font.weight: Font.DemiBold
                         bottomPadding: 4
                     }
