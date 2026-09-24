@@ -1251,23 +1251,81 @@ Rectangle {
                             : "none"
                     }
 
-                    // Shrink-fit measurement: an invisible twin of the
-                    // display text rendering at the BASE font size so the
-                    // needed scale can be computed without feedback (the
-                    // displayed text's own content size depends on its
-                    // already-scaled size, so measuring it would oscillate).
-                    // Same width as the label so wrapped text measures its
-                    // wrapped height; NoWrap text measures its natural
-                    // single-line width. Mirrors the display font's
-                    // properties explicitly — keep in sync with the
-                    // displayText bindings below.
+                    // ---- the font size actually rendered: an explicit solver ----
+                    // NOT Qt's Text.Fit: Fit converged differently on the canvas than
+                    // in the scaled-down DesignPreview subtree (lineHeight + wrap at
+                    // large sizes) and the canvas could still spill text below the box.
+                    // recomputeFit() bisects candidate sizes, re-measuring through the
+                    // twin at each step (each write re-lays the twin's text out,
+                    // wrapping included) and stores the largest size whose REAL laid-
+                    // out size fits the box — containment is guaranteed by the last
+                    // measurement, not by a formula's assumption. ~11 probes over
+                    // [3, 400] converge to sub-pixel. It is IMPERATIVE on purpose: a
+                    // binding doing this would write its own dependency (the twin's
+                    // pixelSize) mid-evaluation and QML would kill it as a loop.
+                    readonly property real baseFontSize: itemTextLabel.tmeta.fontSize ?? 16
+                    property real measureSize: baseFontSize     // the twin's current probe size
+                    property real fittedSize: baseFontSize      // the solver's answer
+                    property bool solving: false
+                    // Every input the solution depends on, in one binding: text, box
+                    // geometry, and every font knob (direct meta-field writes — the
+                    // sliders — mutate `tmeta` in place without replacing it, so the
+                    // per-field reads here are what make those live).
+                    readonly property var fitInputs: [
+                        itemTextLabel.shownText, itemTextLabel.width,
+                        canvasItemObject.modelData.height, canvasItemObject.modelData.width,
+                        autoSizeMode, baseFontSize,
+                        itemTextLabel.tmeta.fontFamily, itemTextLabel.tmeta.fontWeight, itemTextLabel.tmeta.bold,
+                        itemTextLabel.tmeta.italic, itemTextLabel.tmeta.textCase,
+                        itemTextLabel.tmeta.letterSpacing, itemTextLabel.tmeta.lineHeight
+                    ]
+                    onFitInputsChanged: if (!solving)
+                        Qt.callLater(itemTextLabel.recomputeFit)
+                    Component.onCompleted: itemTextLabel.recomputeFit()
+                    function recomputeFit() {
+                        if (solving)
+                            return
+                        solving = true
+                        // EVERY mode solves ("none" included): the box is the master and
+                        // the text must always sit inside it — a block renders at its set
+                        // size while that fits and SQUEEZES the moment it doesn't. Nothing
+                        // is ever cut or spilled on any surface.
+                        const pad = canvasItemObject.modelData.style ? (canvasItemObject.modelData.style.padding ?? 0) : 0
+                        const bw = canvasItemObject.modelData.width - pad * 2
+                        const bh = canvasItemObject.modelData.height - pad * 2
+                        if (bw <= 0 || bh <= 0) {
+                            fittedSize = baseFontSize
+                        } else {
+                            let lo = 3, hi = 400
+                            for (let i = 0; i < 11; ++i) {
+                                const mid = (lo + hi) / 2
+                                measureSize = mid
+                                if (fitMeasure.contentWidth <= bw && fitMeasure.contentHeight <= bh)
+                                    lo = mid
+                                else
+                                    hi = mid
+                            }
+                            // growToFit fills the box; shrinkToFit/none cap at the set size.
+                            fittedSize = autoSizeMode === "growToFit" ? lo : Math.min(baseFontSize, lo)
+                            measureSize = fittedSize
+                        }
+                        solving = false
+                    }
+
+                    // Fit solver measurement twin: an invisible Text rendering the same
+                    // content at the current PROBE size (`measureSize` above) so the solver
+                    // can measure whether that size really fits the box (wrapping included)
+                    // before committing it to the visible label. Measuring the visible label
+                    // itself would oscillate (its content size depends on its already-
+                    // applied size). Mirrors the display font's properties explicitly —
+                    // keep in sync with the displayText bindings below.
                     Text {
-                        id: shrinkMeasure
+                        id: fitMeasure
                         visible: false
                         width: itemTextLabel.width
                         text: itemTextLabel.shownText          // what is on screen, list markers included
                         font.family: itemTextLabel.tmeta.fontFamily ?? "Segoe UI"
-                        font.pixelSize: itemTextLabel.tmeta.fontSize ?? 16
+                        font.pixelSize: itemTextLabel.measureSize
                         font.weight: itemTextLabel.tmeta.bold ? Font.Bold
                             : itemTextLabel.tmeta.fontWeight === "Regular" ? Font.Normal
                             : itemTextLabel.tmeta.fontWeight === "SemiBold" ? Font.DemiBold
@@ -1281,44 +1339,19 @@ Rectangle {
                         font.letterSpacing: itemTextLabel.tmeta.letterSpacing ?? 0
                         lineHeight: itemTextLabel.tmeta.lineHeight ?? 1.2
                         lineHeightMode: Text.ProportionalHeight
-                        wrapMode: itemTextLabel.wrapMode
+                        wrapMode: Text.WordWrap
                     }
 
-                    // The font size actually rendered, computed entirely
-                    // from the measurement twin — deliberately NOT via Qt's
-                    // fontSizeMode: Fit, because Fit treats font.pixelSize
-                    // as a CEILING (it scales down from it but never up),
-                    // so a Fit-based "grow" could never grow. One formula:
-                    // the largest font size whose text fits the box's inner
-                    // area, assuming size scales linearly from the measured
-                    // base render. Floored at 8px (FreeShow's MIN_FONT_SIZE).
-                    readonly property real baseFontSize: itemTextLabel.tmeta.fontSize ?? 16
-                    readonly property real fitsBoxSize: {
-                        const pad = canvasItemObject.modelData.style ? canvasItemObject.modelData.style.padding : 0
-                        const bw = canvasItemObject.modelData.width - pad * 2
-                        const bh = canvasItemObject.modelData.height - pad * 2
-                        const cw = shrinkMeasure.contentWidth
-                        const ch = shrinkMeasure.contentHeight
-                        if (bw <= 0 || bh <= 0 || cw <= 0 || ch <= 0)
-                            return baseFontSize
-                        return Math.max(8, baseFontSize * Math.min(bw / cw, bh / ch))
-                    }
-                    // shrinkToFit: the box may shrink the text but never
-                    // grow it past the set size (FreeShow's exact rule —
-                    // "set font size by default, but can shrink if the text
-                    // does not fit"). growToFit: the text fills the box in
-                    // BOTH directions (PowerPoint-style grow-to-fit), capped
-                    // at a sane rendering max. none: the set size, always.
-                    readonly property real shrinkFitSize: autoSizeMode === "shrinkToFit"
-                        ? Math.min(baseFontSize, fitsBoxSize)
-                        : autoSizeMode === "growToFit" ? Math.min(400, fitsBoxSize)
-                        : baseFontSize
                     visible: canvasItemObject.modelData.kind === "text"
                     color: itemTextLabel.tmeta.color ?? "#f2f4fa"
                     font.family: itemTextLabel.tmeta.fontFamily ?? "Segoe UI"
-                    // shrinkFitSize == baseFontSize in every mode except
-                    // shrinkToFit, where it's the overflow-clamped size.
-                    font.pixelSize: itemTextLabel.shrinkFitSize
+
+                    font.pixelSize: fittedSize
+                    fontSizeMode: Text.FixedSize
+                    // Matches DesignPreview's (the thumbnails') hardcoded WordWrap:
+                    // the canvas and the preview must lay text out identically or
+                    // their auto-size results diverge.
+                    wrapMode: Text.WordWrap
                     // "bold" (the B toggle) is an emphasis override on top
                     // of whatever base weight is picked in the font-family
                     // row's dropdown — matching common rich-text-editor UX
@@ -1338,9 +1371,6 @@ Rectangle {
                     font.strikeout: itemTextLabel.tmeta.strikethrough === true
                     font.letterSpacing: itemTextLabel.tmeta.letterSpacing ?? 0
                     lineHeight: itemTextLabel.tmeta.lineHeight ?? 1.2
-                    // Always Fixed — every mode's size is computed above;
-                    // Qt's Fit is never used (see fitsBoxSize's comment).
-                    fontSizeMode: Text.FixedSize
                     horizontalAlignment: {
                         const a = itemTextLabel.tmeta.align ?? "center"
                         return a === "left" ? Text.AlignLeft

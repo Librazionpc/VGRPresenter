@@ -29,6 +29,35 @@ int ToInt(const std::string& s, int dflt = 0) {
     return i == 0 ? dflt : v;
 }
 
+// XML tags arrive in whatever case the source wrote them: Zefania writes every
+// tag uppercase (<XMLBIBLE>/<BIBLEBOOK>/<CHAPTER>/<VERS>), other tools write
+// lowercase. Compare case-insensitively so both shapes parse.
+bool TagIs(const XmlNode& n, std::string_view name) {
+    if (n.tag.size() != name.size()) return false;
+    for (size_t i = 0; i < name.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(n.tag[i])) !=
+            std::tolower(static_cast<unsigned char>(name[i])))
+            return false;
+    return true;
+}
+
+// Case-insensitive attribute lookup (Zefania: biblename / bnumber / cnumber /
+// vnumber alongside the platform's lowercase name / num).
+std::string AttrNoCase(const XmlNode& n, std::string_view name) {
+    for (const auto& [key, value] : n.attrs) {
+        if (key.size() != name.size()) continue;
+        bool eq = true;
+        for (size_t i = 0; i < key.size(); ++i)
+            if (std::tolower(static_cast<unsigned char>(key[i])) !=
+                std::tolower(static_cast<unsigned char>(name[i]))) {
+                eq = false;
+                break;
+            }
+        if (eq) return value;
+    }
+    return {};
+}
+
 // Default 66-book table when the source provides no book names (plain text,
 // USFM without a mapping). Mirrors ReferenceResolver's canonical table.
 std::vector<BibleBook> DefaultBooks() {
@@ -145,32 +174,38 @@ public:
         auto parsed = xml::Parse(source);
         if (!parsed.ok()) return parsed.error();
         const XmlNode& bible = parsed.value();
-        if (bible.tag != "bible")
+        // The platform's own <bible> shape or Zefania's <XMLBIBLE> (which
+        // uppercases every tag) — both accepted, compared case-insensitively.
+        if (!TagIs(bible, "bible") && !TagIs(bible, "xmlbible"))
             return Error::Make(Err::Bible_UnsupportedFormat, "BibleProvider",
-                               "root element is not <bible> (got <" + bible.tag + ">)");
+                               "root element is not <bible>/<XMLBIBLE> (got <" + bible.tag + ">)");
 
         BibleVersion out;
         out.metadata.abbreviation = bible.Attr("abbrev");
         out.metadata.name = bible.Attr("name");
+        if (out.metadata.name.empty()) out.metadata.name = AttrNoCase(bible, "biblename");
         out.metadata.source = "xml";
 
         for (const auto& bookNode : bible.children) {
-            if (bookNode.tag != "book") continue;
+            if (!TagIs(bookNode, "book") && !TagIs(bookNode, "biblebook")) continue;
             // Canonical id: prefer the short id (bsname), then derive it from
-            // the full name or Zefania book number (bnum) — real Zefania files
-            // carry bnum="43" bname="John" with no bsname, and a numeric id
-            // would break reference resolution. Uppercase for consistency.
+            // the full name or Zefania book number (bnum/bnumber) — real Zefania
+            // files carry bnumber="43" bname="John" with no bsname, and a numeric
+            // id would break reference resolution. Uppercase for consistency.
             std::string id;
+            std::string bnum = AttrNoCase(bookNode, "bnum");
+            if (bnum.empty()) bnum = AttrNoCase(bookNode, "bnumber");
             std::string name = !bookNode.Attr("bname").empty() ? bookNode.Attr("bname")
                                                                : bookNode.Attr("name");
             if (!bookNode.Attr("bsname").empty()) {
                 id = bookNode.Attr("bsname");
-            } else if (!bookNode.Attr("bnum").empty()) {
-                // bnum is the unambiguous canonical 1-66 ordering in Zefania;
-                // prefer it over the display name, which may be abbreviated
-                // ("Psalm", "1 Sam.") and not match the canonical table.
-                id = CanonicalIdFromNumber(ToInt(bookNode.Attr("bnum")));
-                if (id.empty()) id = bookNode.Attr("bnum");
+            } else if (!bnum.empty()) {
+                // bnum/bnumber is the unambiguous canonical 1-66 ordering in
+                // Zefania; prefer it over the display name, which may be
+                // abbreviated ("Psalm", "1 Sam.") and not match the canonical
+                // table.
+                id = CanonicalIdFromNumber(ToInt(bnum));
+                if (id.empty()) id = bnum;
             } else if (!name.empty()) {
                 id = CanonicalIdFromName(name);
                 if (id.empty()) id = name;
@@ -192,22 +227,27 @@ public:
             if (const auto* h = bookNode.FindChild("h")) bookHeading = Collapse(Trim(h->text));
 
             for (const auto& chNode : bookNode.children) {
-                if (chNode.tag != "chapter") continue;
-                int chapter = ToInt(chNode.Attr("number") != "" ? chNode.Attr("number")
-                                                                : chNode.Attr("num"));
+                if (!TagIs(chNode, "chapter")) continue;
+                std::string cnum = chNode.Attr("number");
+                if (cnum.empty()) cnum = chNode.Attr("num");
+                if (cnum.empty()) cnum = AttrNoCase(chNode, "cnumber");
+                int chapter = ToInt(cnum);
                 if (chapter <= 0) continue;
                 std::string chapTitle = bookHeading;
                 if (const auto* t = chNode.FindChild("t"))
                     chapTitle = Collapse(Trim(t->text));
                 std::string heading;
                 for (const auto& vNode : chNode.children) {
-                    if (vNode.tag == "h") {
+                    if (TagIs(vNode, "h")) {
                         heading = Collapse(Trim(vNode.text));
                         continue;
                     }
-                    if (vNode.tag != "verse" && vNode.tag != "v") continue;
-                    int verse = ToInt(vNode.Attr("number") != "" ? vNode.Attr("number")
-                                                                 : vNode.Attr("num"));
+                    if (!TagIs(vNode, "verse") && !TagIs(vNode, "v") && !TagIs(vNode, "vers"))
+                        continue;
+                    std::string vnum = vNode.Attr("number");
+                    if (vnum.empty()) vnum = vNode.Attr("num");
+                    if (vnum.empty()) vnum = AttrNoCase(vNode, "vnumber");
+                    int verse = ToInt(vnum);
                     if (verse <= 0) continue;
                     BibleVerse bv;
                     bv.bookId = id;

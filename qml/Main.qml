@@ -171,32 +171,20 @@ ApplicationWindow {
             showScreen.showInLibrary("media", r.title)
             break
         case "table": {
-            // Open The Table tab on that sermon: its pane search takes the
-            // sermon code ("65-0117") when the title alone is not unique.
+            // Straight to the sermon AT its paragraph — the hit carries bookId/chapter/verse.
+            // (Pasting the title into the pane's citation search matched nothing: the
+            // title is a scripture-shaped label, the pane searches citation lines.)
             window.currentView = "show"
-            showScreen.showInLibrary("table", r.title)
+            showScreen.openSermonAt(r.bookId, r.chapter, r.verse)
             EventBus.notify(qsTr("Opened %1 in The Table.").arg(r.title), "success", qsTr("The Table"), "search.table.opened")
             break
         }
         case "bible": {
-            // A verse becomes a slide in the working show.
-            ShowService.ensureShow(qsTr("Untitled show"))
-            const ref = r.title + (r.subtitle !== "" ? " (" + r.subtitle + ")" : "")
-            const body = r.fullText !== undefined && r.fullText !== "" ? r.fullText : r.text
-            const id = ShowService.addSlide({
-                title: r.title,
-                ref: ref,
-                line1: body,
-                blocks: [
-                    { kind: "text", text: body, x: 24, y: 24, width: 420, height: 110 },
-                    { kind: "text", text: ref, x: 24, y: 144, width: 420, height: 30 }
-                ]
-            })
-            if (id !== "") {
-                window.currentView = "edit"
-                editScreen.session.refresh(id)
-                EventBus.notify(qsTr("Added %1 to the show.").arg(r.title), "success", qsTr("Bible"), "search.bible.added")
-            }
+            // Open the SCRIPTURE tab at the verse (user call: picking a Bible result
+            // used to build a slide instead — nothing took you to the passage).
+            window.currentView = "show"
+            showScreen.openVerseAt(r)
+            EventBus.notify(qsTr("Opened %1 in Scripture.").arg(r.title), "success", qsTr("Bible"), "search.bible.opened")
             break
         }
         default:
@@ -307,132 +295,158 @@ ApplicationWindow {
 
 
     // ---- UI self-test scenario (TEMPORARY diagnostic, env-gated) ----------
-    // Drives the real UI with real OS cursor moves through SelfTestDriver
-    // (main.cpp only wires it when VGR_SELFTEST=1) and grabs PNGs for
-    // offline pixel sampling. Covers the Show screen's live surfaces:
-    // the New show CTA's hover reaction and the library dock tabs (Shows
-    // table, Media rosters, Scripture/The Table engine-waiting panes,
-    // coming-soon). The old Edit-screen probes (shape-canvas painting,
-    // chip-row flicker) were removed once those bugs were fixed and
-    // verified — the harness stays lean.
+    // Drives the REAL scripture search flow: click the box, type "est", grab
+    // (commit state), type " 1:4" (auto-colon + verse), grab the popup and the
+    // full window, then quit. The grabs land in the working dir as PNGs for
+    // offline pixel/property sampling.
     Timer {
         id: selfTestStage1
         running: typeof SelfTest !== "undefined"
-        interval: 1200
+        interval: 1500
         onTriggered: {
-            console.log("[SELFTEST] stage 1: show view, park cursor on New show CTA")
+            console.log("[SELFTEST] stage 1: open The TABLE tab, focus the search input")
             window.currentView = "show"
-            const cta = SelfTest.itemCenter("selfTestNewShowBtn")
-            if (cta) SelfTest.move(cta.x, cta.y)
-            // Seed one REAL show through the engine's own save path so the
-            // library feed (categories sidebar, shows table, Media playlists)
-            // proves itself non-empty — never mocks, always the engine.
-            if (!ShowService.hasShow)
-                ShowService.newShowDocument("Probe Sunday Service")
-            ShowService.saveShowFile(ShowService.currentShow, ShowService.libraryPath + "/Probe Sunday Service.vgr")
-            selfTestStage1b.restart()
+            const bar = SelfTest.findItem("selfTestLibraryTabBar")
+            if (bar) {
+                // currentPane is read-only (derived) — the tab INDEX is the writable one.
+                const idx = bar.tabs.findIndex((t) => t.pane === "table")
+                if (idx >= 0) bar.currentTab = idx   // property write: no OS click can miss
+            }
+            if (SelfTest.findItem("selfTestLibraryTabBar") === null || SelfTest.findItem("selfTestLibraryTabBar").currentPane !== "table")
+                SelfTest.clickItem("selfTestTab_table")
+            selfTestStage2.restart()
         }
     }
     Timer {
-        id: selfTestStage1b
+        id: selfTestStage2
+        interval: 700
+        onTriggered: {
+            if (!SelfTest.focusItem("selfTestSearchInput"))
+                SelfTest.clickItem("selfTestSearchBox")
+            selfTestStage3.restart()
+        }
+    }
+    Timer {
+        id: selfTestStage3
         interval: 400
         onTriggered: {
-            // Cursor parked on the CTA — the full-window grab shows the
-            // hovered (lightened) pill.
-            SelfTest.grab("", "shot_cta_hover.png")
-            SelfTest.grab("selfTestShowsTable", "shot_tab_shows.png")
-            SelfTest.clickItem("selfTestTab_media")
-            selfTestStage13.restart()
+        console.log("[SELFTEST] stage 3: type '47-11' (5-char rule: multiple matches -> dropdown)")
+        SelfTest.type("47-11")
+            selfTestStage4.restart()
         }
     }
     Timer {
-        id: selfTestStage13
-        interval: 500
+        id: selfTestStage4
+        interval: 700
         onTriggered: {
-            SelfTest.grab("selfTestMediaPane", "shot_tab_media.png")
-            SelfTest.clickItem("selfTestTab_scripture")
-            selfTestStage14.restart()
+        console.log("[SELFTEST] stage 4: after '47-11' — popup should LIST the matches (1100X, 1102, 1123, ...)")
+        const box = SelfTest.findItem("selfTestSearchBox")
+        if (box) console.log("[SELFTEST] box text =", JSON.stringify(box.text))
+        const sug = SelfTest.findItem("selfTestSuggestPopup")
+        console.log("[SELFTEST] popup:", sug ? (sug.visible ? "VISIBLE (FAIL — Table matches live in the pane now)" : "hidden (ok)") : "never built (ok)")
+        const pane0 = SelfTest.findItem("selfTestTablePane")
+        if (pane0) console.log("[SELFTEST] in-pane matches =", pane0.citationMatches.length)
+        console.log("[SELFTEST] pane must NOT have jumped (multiple matches):",
+                    (function () { const p = SelfTest.findItem("selfTestTablePane"); return p ? (p.book ? p.book.name + " ch" + p.chapterNumber : "no book") : "no pane" })())
+        SelfTest.grab("", "shot_table_multimatch.png")
+            selfTestStage4b.restart()
         }
     }
+    // Hover-peek probe: the REAL cursor onto the popup's second row — the verses
+    // column must swap to that sermon's paragraphs while the hover lasts, and
+    // return to the open chapter when the cursor leaves the popup.
     Timer {
-        id: selfTestStage14
-        interval: 500
-        onTriggered: {
-            SelfTest.grab("selfTestScripturePane", "shot_tab_scripture.png")
-            SelfTest.grab("", "shot_tab_scripture_full.png")   // whole window: the tab bar row
-            SelfTest.clickItem("selfTestTab_table")
-            selfTestStage15.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage15
-        interval: 500
-        onTriggered: {
-            SelfTest.grab("selfTestTablePane", "shot_tab_table.png")
-            SelfTest.clickItem("selfTestTab_soon")
-            selfTestStage16.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage16
-        interval: 500
-        onTriggered: {
-            SelfTest.grab("selfTestSoonPane", "shot_tab_soon.png")
-            SelfTest.clickItem("selfTestTab_templates")
-            selfTestStage17.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage17
-        interval: 500
-        onTriggered: {
-            SelfTest.grab("selfTestTemplatesPane", "shot_tab_templates.png")
-            window.openSettings("general")
-            selfTestStage18.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage18
-        interval: 500
-        onTriggered: {
-            // Grab alone this tick: grabToImage is async, so scrolling in the
-            // same onTriggered lands the scroll inside the capture.
-            SelfTest.grab("selfTestSettingsShell", "shot_settings_general.png")
-            selfTestStage18b.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage18b
+        id: selfTestStage4b
         interval: 400
         onTriggered: {
-            // Scroll General to its bottom (the Libraries section) and grab it:
-            const fl = SelfTest.findItem("selfTestGeneralFlick")
-            if (fl) fl.contentY = Math.max(0, fl.contentHeight - fl.height)
-            SelfTest.grab("selfTestSettingsShell", "shot_settings_general_bottom.png")
-            // Behavioral probe: click the templates row's Restore button (row
-            // center + half row width minus the button's ~62px inset). With
-            // nothing deleted the expected toast is "All the default templates
-            // are already here." — a toast at all proves the row's wiring.
-            const c = SelfTest.itemCenter("selfTestRestoreTemplates")
-            console.log("[SELFTEST] restore row center:", c)
-            if (c.x || c.y)
-                SelfTest.click(c.x + 433, c.y)
-            selfTestStage18c.restart()
+            console.log("[SELFTEST] stage 4b: hover popup row 1 — peek ON?")
+            // Hover the SECOND in-pane match row by position truth (what the
+            // catcher feeds on a real user move).
+            const row = SelfTest.findItem("selfTestMatchRow_1")
+            if (row) {
+                const c = row.mapToItem(null, row.width / 2, row.height / 2)
+                SelfTest.move(c.x, c.y)
+                AppCursor.setPointerPos(Qt.point(c.x, c.y))
+                console.log("[SELFTEST] hovering match row 1 at", JSON.stringify(c))
+            } else console.log("[SELFTEST] NO match rows to hover")
+            selfTestStage4c.restart()
         }
     }
     Timer {
-        id: selfTestStage18c
+        id: selfTestStage4c
         interval: 500
         onTriggered: {
-            SelfTest.grab("", "shot_restore_toast.png")
-            // Quit on a LATER tick: grabToImage saves asynchronously, and
-            // quitting this frame killed the last save (missing soon shot).
-            selfTestStage19.restart()
+            const pane = SelfTest.findItem("selfTestTablePane")
+            if (pane) console.log("[SELFTEST] peek index =", pane.peekIndex,
+                                  "peek verses =", pane.peekVerses.length,
+                                  "open verses =", pane.chapterVerses.length,
+                                  "content swapped =",
+                                  pane.peekVerses.length > 0 && pane.peekVerses[0].text !== pane.chapterVerses[0].text)
+            const row = SelfTest.findItem("selfTestMatchRow_1")
+            console.log("[SELFTEST] AppCursor point =", JSON.stringify(AppCursor._point),
+                        "point-in-row =", row ? AppCursor.hovered(row) : false)
+            SelfTest.grab("", "shot_table_hoverpeek.png")
+            SelfTest.move(600, 500)   // off the rows, over the verses area
+            AppCursor.setPointerPos(Qt.point(600, 500))
+            selfTestStage4d.restart()
         }
     }
     Timer {
-        id: selfTestStage19
-        interval: 400
+        id: selfTestStage4d
+        interval: 500
+        onTriggered: {
+            const pane = SelfTest.findItem("selfTestTablePane")
+            if (pane) console.log("[SELFTEST] after leave — peek index =", pane.peekIndex, "(must be -1)")
+            selfTestStage5.restart()
+        }
+    }
+    Timer {
+        id: selfTestStage5
+        interval: 500
+        onTriggered: {
+            console.log("[SELFTEST] stage 5: type '02' — '47-1102' is UNIQUE: inline fill + jump, popup closes")
+            SelfTest.type("02")
+            selfTestStage6.restart()
+        }
+    }
+    Timer {
+        id: selfTestStage6
+        interval: 700
+        onTriggered: {
+            console.log("[SELFTEST] stage 6: after '47-1102'")
+            const box = SelfTest.findItem("selfTestSearchBox")
+            if (box) console.log("[SELFTEST] box text =", JSON.stringify(box.text), "(should carry the filled citation)")
+            const sug = SelfTest.findItem("selfTestSuggestPopup")
+            console.log("[SELFTEST] popup:", sug ? (sug.visible ? "VISIBLE (FAIL)" : "hidden (ok)") : "never built (ok)")
+            const pane = SelfTest.findItem("selfTestTablePane")
+            if (pane) console.log("[SELFTEST] pane jumped to:", pane.book ? pane.book.name + " sermon " + pane.chapterNumber : "none (FAIL)")
+            SelfTest.grab("", "shot_table_faith.png")
+            selfTestStage7.restart()
+        }
+    }
+    Timer {
+        id: selfTestStage7
+        interval: 500
+        onTriggered: {
+            console.log("[SELFTEST] stage 7: backspace sweep (the filled citation is ~32 chars)")
+            SelfTest.type("\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b")
+            selfTestStage8.restart()
+        }
+    }
+    Timer {
+        id: selfTestStage8
+        interval: 700
+        onTriggered: {
+            console.log("[SELFTEST] stage 8: after sweep — box must be empty")
+            const box = SelfTest.findItem("selfTestSearchBox")
+            if (box) console.log("[SELFTEST] box text =", JSON.stringify(box.text), "(empty = PASS)")
+            SelfTest.grab("", "shot_table_cleared.png")
+            selfTestStage9.restart()
+        }
+    }
+    Timer {
+        id: selfTestStage9
+        interval: 600
         onTriggered: {
             console.log("[SELFTEST] done")
             SelfTest.quit()

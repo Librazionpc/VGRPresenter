@@ -36,6 +36,24 @@ Rectangle {
 
     signal itemActivated(string label)
 
+    // --- autocomplete mode (opt-in) ------------------------------------------
+    // An inline suggestion list for a text field (the tab search box's live
+    // reference completions): picks carry an arbitrary payload, keyboard
+    // Up/Down moves a highlight, Enter/click accepts, and — when
+    // `dismissOnOutsideClick` is set — a click anywhere else closes it
+    // (AppMenuBar's menus close via the menu bar's own catcher, so the flag
+    // is off there and the behavior is unchanged for every existing menu).
+    property bool dismissOnOutsideClick: false
+    property int highlightedIndex: -1
+    signal itemPicked(int index, var payload)
+
+    // The field's own click is the toggle: without this the catcher would eat
+    // the very press that should re-open a closed popup.
+    function outsidePressed() {
+        if (root.dismissOnOutsideClick && root.visible)
+            root.visible = false
+    }
+
     // Scroll the item list by `step` px (clamped) — the catcher calls this
     // for wheels over the anchor control, so a wheel on the open combobox's
     // box scrolls the MENU's options, never the dialog/page behind it.
@@ -54,7 +72,9 @@ Rectangle {
     // Rectangle, in THIS panel's coordinate space, so a consumer that wants
     // to open a flyout submenu next to it can map from a known-good item
     // instead of re-deriving the row's position from the model index.
-    signal itemHovered(string label, bool hovering, var rowItem)
+    // `index` is the row's model position (the autocomplete consumers relay it
+    // so the owner can find the row's payload; menu consumers ignore it).
+    signal itemHovered(string label, bool hovering, var rowItem, int index)
 
     // Opens the panel at (x, y) — coordinates in `sourceItem`'s local space —
     // clamped to stay fully inside `bounds` (any common ancestor, usually
@@ -135,7 +155,7 @@ Rectangle {
     // Matches Theme.space4 — see x/y note below.
     readonly property int insetPad: 16
 
-    width: 240
+    width: 480
     height: root.maxHeight > 0
             ? Math.min(headerCol.height + itemList.height + 16, root.maxHeight)
             : headerCol.height + itemList.height + 16
@@ -216,6 +236,7 @@ Rectangle {
                     model: root.model
                     delegate: Loader {
                         required property var modelData
+                        required property int index
                         width: itemList.width
                         sourceComponent: modelData.divider === true ? dividerC : itemC
 
@@ -242,24 +263,16 @@ Rectangle {
                                 // Disabled entries (e.g. capture modes a
                                 // device's max fps can't reach) sit greyed
                                 // with no hover wash and swallow activation.
-                                color: !modelData.disabled && itemArea.hovered
+                                // Autocomplete mode draws the keyboard highlight (the row
+                                // Up/Down will accept) under the mouse hover, same wash.
+                                color: !modelData.disabled && (itemArea.hovered || root.highlightedIndex === index)
                                        ? (modelData.danger ? "#24ff4d3d" /* Theme.danger @ 14% */
                                                            : "#232530" /* Theme.border */)
                                        : "transparent"
                                 Behavior on color { ColorAnimation { duration: 100 } }
 
                                 Text {
-                                    x: root.insetPad
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    text: modelData.label
-                                    color: modelData.disabled ? "#5c6475" /* Theme.textMuted */
-                                        : modelData.danger ? "#ff6b61" /* Theme.dangerLight */ : "#e2e8f0" /* Theme.textPrimary */
-                                    font.family: "Segoe UI" // Theme.fontFamily
-                                    font.pixelSize: 15 // Theme.textMd
-                                    font.weight: Font.Medium
-                                }
-
-                                Text {
+                                    id: rowTrailing
                                     anchors.right: parent.right
                                     anchors.rightMargin: 16 // Theme.space4
                                     anchors.verticalCenter: parent.verticalCenter
@@ -267,6 +280,25 @@ Rectangle {
                                     color: "#5c6475" // Theme.textMuted
                                     font.family: "Segoe UI" // Theme.fontFamily
                                     font.pixelSize: 10 // Theme.textXs
+                                }
+
+                                Text {
+                                    x: root.insetPad
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    // Autocomplete labels elide, but only when they genuinely
+                                    // don't fit: the label reserves the ACTUAL trailing-code
+                                    // width ("51-0501"), not a flat 40% of the row — the flat
+                                    // reserve truncated short titles long before the row edge
+                                    // (user call: the dropdown must show the full name).
+                                    width: parent.width - root.insetPad
+                                            - (modelData.trailing ? rowTrailing.implicitWidth + 26 : 0) - 8
+                                    elide: Text.ElideRight
+                                    text: modelData.label
+                                    color: modelData.disabled ? "#5c6475" /* Theme.textMuted */
+                                        : modelData.danger ? "#ff6b61" /* Theme.dangerLight */ : "#e2e8f0" /* Theme.textPrimary */
+                                    font.family: "Segoe UI" // Theme.fontFamily
+                                    font.pixelSize: 15 // Theme.textMd
+                                    font.weight: Font.Medium
                                 }
 
                                 // Position truth, not containsMouse — hover-exit
@@ -279,9 +311,12 @@ Rectangle {
                                 PositionHoverArea {
                                     id: itemArea
                                     anchors.fill: parent
-                                    onClicked: if (!modelData.disabled) root.itemActivated(modelData.label)
-                                    onEntered: root.itemHovered(modelData.label, true, itemRow)
-                                    onExited: root.itemHovered(modelData.label, false, itemRow)
+                                    onClicked: if (!modelData.disabled) {
+                                        root.itemActivated(modelData.label)
+                                        root.itemPicked(index, modelData.payload)
+                                    }
+                                    onEntered: root.itemHovered(modelData.label, true, itemRow, index)
+                                    onExited: root.itemHovered(modelData.label, false, itemRow, index)
                                 }
                             }
                         }
@@ -299,5 +334,16 @@ Rectangle {
             height: itemFlick.height
             z: 1
         }
+    }
+
+    // The dismissal catcher — only in autocomplete mode (menus are closed by
+    // the menu bar's own catcher; a second catcher there would eat the field's
+    // toggle click).
+    MouseArea {
+        enabled: root.visible && root.dismissOnOutsideClick
+        parent: root.parent
+        anchors.fill: parent
+        z: root.z - 1
+        onPressed: (mouse) => { root.visible = false; mouse.accepted = false }
     }
 }

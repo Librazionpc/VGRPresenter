@@ -54,6 +54,34 @@ Rectangle {
             }
         }
     }
+    // The app-wide search jumps straight to a sermon: switch to The Table and open
+    // the hit AT its paragraph (goTo). The result's title is a reference label
+    // ("1953 12 · ¶3") — pasted into the pane's citation search it matches nothing
+    // (the citation line reads "47-0412 - Faith Is The Substance"), which is the
+    // "quick search lands on an empty tab" bug.
+    function openSermonAt(bookId, chapter, verse) {
+        showInLibrary("table", "")          // the tab + a cleared query
+        tablePane.clearCitationMatches()    // (a stale filter list must not cover the sermon)
+        tablePane.goTo({ bookId: bookId, chapter: chapter, verseStart: verse, verseEnd: verse })
+    }
+    // The app-wide search jumps straight to a Bible verse: switch to the Scripture
+    // tab and open the passage there (goTo selects the verse and scrolls to it).
+    // The hit carries its bibleId (which translation) + bookId/chapter/verse; a
+    // reference-pick result carries only the reference string (resolve it).
+    function openVerseAt(r) {
+        showInLibrary("scripture", "")      // the tab + a cleared query
+        scripturePane.clearCitationMatches()
+        if (r.bookId !== undefined && r.bookId !== "") {
+            const bible = r.bibleId !== undefined && r.bibleId !== "" ? r.bibleId : scripturePane.sourceId
+            if (bible !== scripturePane.sourceId)
+                scripturePane.openSource(bible)
+            scripturePane.goTo({ bookId: r.bookId, chapter: r.chapter, verseStart: r.verse, verseEnd: r.verse })
+        } else {
+            const ref = scripturePane.adapter.resolve(r.title, scripturePane.sourceId)
+            if (ref.bookId !== undefined)
+                scripturePane.goTo(ref)
+        }
+    }
 
     Rectangle {
         id: workspace_body
@@ -299,7 +327,11 @@ Rectangle {
                             horizontalAlignment: Text.AlignLeft
                             text: qsTr("Quick search")
                             textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
+                            // Optical centering: the icon container is centered in the
+                            // 36px row; a top-aligned 15px Segoe line box put the glyphs
+                            // ~3px low (user call). VCenter centers the LINE BOX in the
+                            // item, which recenters the glyphs on the icon.
+                            verticalAlignment: Text.AlignVCenter
                             wrapMode: Text.Wrap
                         }
                         Rectangle {
@@ -415,7 +447,7 @@ Rectangle {
                             horizontalAlignment: Text.AlignLeft
                             text: qsTr("New project")
                             textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
+                            verticalAlignment: Text.AlignVCenter   // (see quick_search: glyph/icon alignment)
                             wrapMode: Text.Wrap
                         }
                         Rectangle {
@@ -529,7 +561,7 @@ Rectangle {
                             horizontalAlignment: Text.AlignLeft
                             text: qsTr("New show")
                             textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
+                            verticalAlignment: Text.AlignVCenter   // (see quick_search: glyph/icon alignment)
                             wrapMode: Text.Wrap
                         }
                         Rectangle {
@@ -624,6 +656,24 @@ Rectangle {
                         y: 0
                         width: parent.width
                         height: 39
+                        // A picked suggestion row (a sermon from The Table's multi-match
+                        // dropdown, a book from Scripture's) routes back to the pane that
+                        // offered it — the pane jumps to the row's ref. (The signal existed
+                        // but nothing consumed it: a dropdown pick did nothing.)
+                        onSuggestionPicked: (paneKey, ref) => {
+                            if (paneKey === "scripture")
+                                scripturePane.applySuggestion(ref)
+                            else if (paneKey === "table")
+                                tablePane.applySuggestion(ref)
+                        }
+                        // Hovering a suggestion row previews its content in the pane's
+                        // verses column until the pointer leaves (peekSuggestion(-1)).
+                        onSuggestionHovered: (paneKey, index, hovering) => {
+                            if (paneKey === "scripture")
+                                scripturePane.peekSuggestion(hovering ? index : -1)
+                            else if (paneKey === "table")
+                                tablePane.peekSuggestion(hovering ? index : -1)
+                        }
                     }
                 }
                 Rectangle {
@@ -657,18 +707,27 @@ Rectangle {
                     // else gets the consistent coming-soon pane until its
                     // content lands.
                     ScripturePane {
+                        id: scripturePane
                         objectName: "selfTestScripturePane"
                         visible: media_tab_bar.currentPane === "scripture"
                         width: parent.width; height: parent.height
                         filter: media_tab_bar.searches.scripture !== undefined ? media_tab_bar.searches.scripture : ""
                         onTemplateEditRequested: (id) => vGRPresenter_Main_Screen.designEditRequested("template", id)
                         onConvertToShowRequested: (name, slides) => vGRPresenter_Main_Screen.scriptureShowRequested(name, slides)
+                        // Live reference autocomplete: the pane builds the rows (its suggest()),
+                        // the tab bar feeds them to the search box and routes picks back here.
+                        Component.onCompleted: media_tab_bar.registerSuggester("scripture", scripturePane)
+                        onSuggestionChosen: (ref) => scripturePane.applySuggestion(ref)
                     }
                     TheTablePane {
+                        id: tablePane
                         objectName: "selfTestTablePane"
                         visible: media_tab_bar.currentPane === "table"
                         width: parent.width; height: parent.height
                         filter: media_tab_bar.searches.table !== undefined ? media_tab_bar.searches.table : ""
+                        // The Table autocompletes the same way (its suggest() offers sermons).
+                        Component.onCompleted: media_tab_bar.registerSuggester("table", tablePane)
+                        onSuggestionChosen: (ref) => tablePane.applySuggestion(ref)
                         // The same show-building path Scripture uses (Main.qml's
                         // handler is generic: name + slides -> a new show).
                         onConvertToShowRequested: (name, slides) => vGRPresenter_Main_Screen.scriptureShowRequested(name, slides)

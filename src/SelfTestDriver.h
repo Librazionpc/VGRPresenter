@@ -39,6 +39,12 @@ public:
 
     Q_INVOKABLE void move(double x, double y);
     Q_INVOKABLE void click(double x, double y);
+    // Real key events (press+release) to the focused object — types into whatever
+    // TextInput has focus, exercising the app's own key/text pipeline.
+    Q_INVOKABLE void type(const QString &text);
+    // Deterministic focus: calls forceActiveFocus() on the named item (the synthetic
+    // OS click needs window-foreground luck; this does not).
+    Q_INVOKABLE bool focusItem(const QString &objectName);
     // Self-locating variants: resolve an item's center by objectName in
     // window coordinates, so the scenario never depends on hand-typed
     // pixel positions that drift when the UI layout changes.

@@ -8,6 +8,7 @@
 // UI — it only provides structured Scripture.
 
 #include "core/common/Common.hpp"
+#include "core/config/Json.hpp"
 #include "core/events/EventBus.hpp"
 #include "core/events/Events.hpp"
 #include "interfaces/IService.hpp"
@@ -44,6 +45,14 @@ public:
     // --- Provider registry (docs/specs/24 §Plugin Support) ---
     Result<void> RegisterProvider(std::shared_ptr<IBibleProvider> provider);
     Result<void> UnregisterProvider(std::string_view name);
+
+    // --- Installed-bible persistence ----------------------------------------
+    // Imported bibles survive restarts: Import()/RemoveBible() rewrite the JSON
+    // store at `path`, Initialize() restores it. OFF until a path is set (unit
+    // tests import freely without touching the user's real store); the Kernel
+    // boot points it at the app's engine data dir ("bibles.json" inside it).
+    void SetStorePath(std::string_view path);
+    const std::string& StorePath() const noexcept { return storePath_; }
     std::vector<std::string> ProviderNames() const;
 
     // --- Import pipeline: detect -> validate -> convert -> store -> index ---
@@ -118,6 +127,21 @@ private:
     Result<size_t> IndexBible(const BibleVersion& bible,
                               const std::function<void(size_t, size_t, std::string_view)>* onProgress = nullptr);
 
+    // Installed-bible store (see SetStorePath): whole-store JSON rewrite per
+    // import/remove — a bible is ~4 MB of verse text, well within the same
+    // write-per-change budget the library stores already pay.
+    Result<void> SaveStoreLocked();
+    Result<size_t> LoadStoreLocked();
+
+    // JSON (de)serialization of one bible (metadata + books + chapters).
+    json::Value BibleToJsonLocked(const BibleVersion& bible) const;
+    BibleVersion BibleFromJsonLocked(const json::Value& node) const;
+    // RESTORE of the flattened verse list from the stored chapters: the store
+    // keeps only the canonical shape (GetChapter/Outline read `chapters`), so
+    // rebuild `verses` in book order — Import()'s own shape — never a per-read
+    // re-flatten on every GetPassage call.
+    void FlattenVersesLocked(BibleVersion& bible) const;
+
     // Canonical reference key for user-data stores ("JHN 3:16").
     static std::string RefKey(const PassageRef& ref);
 
@@ -128,6 +152,9 @@ private:
     mutable std::mutex mutex_;
     std::vector<std::shared_ptr<IBibleProvider>> providers_;
     std::map<std::string, BibleVersion, std::less<>> bibles_;
+    // Where imported bibles persist ("" = persistence off — unit tests). Set
+    // by the Kernel boot before Initialize()'s restore reads it.
+    std::string storePath_;
     // User data — never inside Scripture (docs/specs/24 §User Data).
     std::map<std::string, std::vector<UserNote>, std::less<>> notes_;       // bible|ref
     std::map<std::string, std::vector<PassageRef>, std::less<>> highlights_; // bibleId

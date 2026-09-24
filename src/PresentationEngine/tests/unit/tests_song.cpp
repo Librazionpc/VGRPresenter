@@ -145,6 +145,7 @@ void TestSongProviders() {
     // Failure modes.
     CHECK(!eng.Import("not a song", "zzz", {}).ok());
     CHECK(!eng.Import("<song></song>", "opensong", {}).ok());
+    CHECK(!eng.Import("<bible></bible>", "xml", {}).ok());   // XML but no song in it
     CHECK(eng.Import(chordpro, "chordpro", sn::ImportOptions{std::string("grace"), false, false})
               .error().code == Err::Song_AlreadyExists);
 

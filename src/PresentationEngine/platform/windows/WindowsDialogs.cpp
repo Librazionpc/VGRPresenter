@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <shobjidl.h>
 
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -27,20 +28,56 @@ private:
     HRESULT hr_ = E_FAIL;
 };
 
+// Normalizes one pattern token to a form IFileDialog matches ("*.xml",
+// "*.*"). Bare "*" (the "All files (*)" entry) means every file.
+std::string NormalizePattern(std::string tok) {
+    while (!tok.empty() && (tok.back() == ' ' || tok.back() == '\t')) tok.pop_back();
+    size_t b = 0;
+    while (b < tok.size() && (tok[b] == ' ' || tok[b] == '\t')) ++b;
+    tok = tok.substr(b);
+    if (tok == "*" || tok == "*.*") return "*.*";
+    if (!tok.empty() && tok.front() != '*') tok.insert(tok.begin(), '*');
+    return tok;
+}
+
+// Turns "Name (*.a *.b)" — the Qt-style filter the callers pass — into the
+// name/pattern pair IFileDialog::SetFileTypes needs. The Common Item Dialog
+// separates patterns with SEMICOLONS ("*.a;*.b"); space-separated patterns
+// arrive as one malformed token that matches nothing, which is why pickers
+// showed no files before. Returns false when the entry has no "(...)" part.
+bool SplitFilter(const std::string& f, std::string& nameOut, std::string& patternOut) {
+    size_t open = f.find('(');
+    size_t close = f.find(')', open);
+    if (open == std::string::npos || close == std::string::npos || close <= open + 1)
+        return false;
+    nameOut = f.substr(0, open);
+    // Trim the display name's trailing space ("Bible files " -> "Bible files").
+    while (!nameOut.empty() && (nameOut.back() == ' ' || nameOut.back() == '\t'))
+        nameOut.pop_back();
+    std::string joined;
+    std::istringstream pats{f.substr(open + 1, close - open - 1)};
+    std::string tok;
+    while (pats >> tok) {
+        std::string p = NormalizePattern(tok);
+        if (p.empty()) continue;
+        if (!joined.empty()) joined.push_back(';');
+        joined += p;
+    }
+    patternOut = joined.empty() ? "*.*" : joined;
+    return true;
+}
+
 std::vector<COMDLG_FILTERSPEC> ToFilterSpec(const std::vector<std::string>& filters) {
     std::vector<COMDLG_FILTERSPEC> spec;
     std::vector<std::wstring> names, patterns;
     for (const auto& f : filters) {
         // Accept "Display Name (*.ext;*.ext)" entries and split them.
-        size_t open = f.find('(');
-        size_t close = f.find(')', open);
-        if (open != std::string::npos && close != std::string::npos && close > open + 1) {
-            names.push_back(win::Wide(f.substr(0, open)));
-            std::string pat = f.substr(open + 1, close - open - 1);
-            // Remove the leading "*" so "*.png;*.jpg" becomes "*.png;*.jpg"
-            // (Windows accepts "*.png;*.jpg" directly).
+        std::string name, pat;
+        if (SplitFilter(f, name, pat)) {
+            names.push_back(win::Wide(name));
             patterns.push_back(win::Wide(pat));
         } else {
+            // No "(...)" part: a bare display name matches every file.
             names.push_back(win::Wide(f));
             patterns.push_back(L"*.*");
         }

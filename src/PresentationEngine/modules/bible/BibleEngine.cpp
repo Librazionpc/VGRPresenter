@@ -2,12 +2,15 @@
 
 #include "core/logging/Logger.hpp"
 #include "modules/search/SearchEngine.hpp"
+#include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <format>
+#include <thread>
 
 namespace bps::bible {
 
@@ -84,6 +87,40 @@ Result<void> BibleEngine::Initialize() {
         providers_.push_back(CreatePlainTextBibleProvider());
     }
     WireEvents();
+    // Restore the installed-bible store (imported bibles survive restarts —
+    // the user must never re-upload a full translation). A missing store is
+    // the normal first boot; a corrupt one degrades to an empty library with
+    // a warning, the same shape as a first run.
+    size_t restored = 0;
+    if (!storePath_.empty()) {
+        if (auto loaded = LoadStoreLocked(); loaded.ok())
+            restored = loaded.value();
+        else
+            Logger::Instance().Warning("BibleEngine: bible store restore failed: " +
+                                           loaded.error().message, "BibleEngine");
+    }
+    if (restored > 0) {
+        // The Search Engine's index is per-process: re-index what the store
+        // brought back, off the boot path (the The Table library's precedent).
+        std::vector<BibleVersion> reindex;
+        for (const auto& [id, b] : bibles_) reindex.push_back(b);
+        std::thread([bibles = std::move(reindex)] {
+            for (const BibleVersion& b : bibles) {
+                auto indexed = BibleEngine::Instance().IndexBible(b);
+                if (indexed.ok())
+                    (void)EventBus::Instance().Publish(
+                        events::BibleIndexed{b.metadata.id, indexed.value()});
+                else
+                    Logger::Instance().Warning("BibleEngine: re-index failed for " +
+                                                   b.metadata.id + ": " + indexed.error().message,
+                                               "BibleEngine");
+            }
+            Logger::Instance().Info("BibleEngine: restored bibles re-indexed for search",
+                                    "BibleEngine");
+        }).detach();
+        Logger::Instance().Info(std::format("BibleEngine: restored {} bible(s) from store",
+                                            bibles_.size()), "BibleEngine");
+    }
     return Ok();
 }
 
@@ -141,6 +178,8 @@ Result<void> BibleEngine::Reset() {
     collections_.clear();
     for (auto& [id, bible] : bibles_) bible.verses.clear();
     bibles_.clear();
+    // An emptied library persists as an empty store (no path = tests, no-op).
+    if (!storePath_.empty()) (void)SaveStoreLocked();
     return Ok();
 }
 
@@ -201,21 +240,37 @@ Result<std::string> BibleEngine::Import(std::string_view source, std::string_vie
     if (fmt.empty())
         return Error::Make(Err::Bible_UnsupportedFormat, "BibleEngine", "no format given");
 
-    std::shared_ptr<IBibleProvider> provider;
+    // Collect every provider claiming this format — format-name matches first,
+    // then extension-only claims — and try each until one parses: several
+    // formats share an extension (Zefania <XMLBIBLE> and OSIS both ship as
+    // ".xml"), so the first claimant must not have the last word.
+    std::vector<std::shared_ptr<IBibleProvider>> candidates;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& p : providers_)
+            if (Lower(p->Format()) == fmt) candidates.push_back(p);
         for (const auto& p : providers_) {
-            if (Lower(p->Format()) == fmt) { provider = p; break; }
-            for (const auto& ext : p->SupportedExtensions())
-                if (Lower(ext) == fmt) { provider = p; break; }
-            if (provider) break;
+            if (Lower(p->Format()) == fmt) continue;
+            for (const auto& ext : p->SupportedExtensions()) {
+                // Extensions carry a leading dot (".xml"); the requested
+                // format is the bare suffix ("xml") — compare without it.
+                std::string e = Lower(ext);
+                if (!e.empty() && e.front() == '.') e.erase(0, 1);
+                if (e == fmt) { candidates.push_back(p); break; }
+            }
         }
     }
-    if (!provider)
+    if (candidates.empty())
         return Error::Make(Err::Bible_UnsupportedFormat, "BibleEngine",
                            "no provider for format: " + std::string(format));
 
-    auto parsed = provider->Parse(source, fmt);
+    Result<BibleVersion> parsed = Error::Make(Err::Bible_UnsupportedFormat, "BibleEngine",
+                                              "no provider could parse format: " +
+                                                  std::string(format));
+    for (const auto& provider : candidates) {
+        parsed = provider->Parse(source, fmt);
+        if (parsed.ok()) break;
+    }
     if (!parsed.ok()) return parsed.error();
 
     BibleVersion bible = std::move(parsed.value());
@@ -251,6 +306,13 @@ Result<std::string> BibleEngine::Import(std::string_view source, std::string_vie
             oldBible = it->second;
         }
         bibles_[bible.metadata.id] = bible;
+        // Persist the whole store so the import survives a restart (no-op
+        // while no store path is set — unit tests stay in memory).
+        if (!storePath_.empty()) {
+            if (auto saved = SaveStoreLocked(); !saved.ok())
+                Logger::Instance().Warning("BibleEngine: bible store save failed: " +
+                                               saved.error().message, "BibleEngine");
+        }
     }
 
     // Replacing a translation: drop its stale index documents first so the
@@ -358,12 +420,189 @@ Result<void> BibleEngine::RemoveBible(std::string_view bibleId) {
                                "bible not found: " + std::string(bibleId));
         removed = std::move(it->second);
         bibles_.erase(it);
+        // Keep the store in sync so a removed translation stays removed after
+        // a restart (no-op while no store path is set).
+        if (!storePath_.empty()) {
+            if (auto saved = SaveStoreLocked(); !saved.ok())
+                Logger::Instance().Warning("BibleEngine: bible store save failed: " +
+                                               saved.error().message, "BibleEngine");
+        }
     }
     // Drop this translation's documents from the global search index.
     auto& search = search::SearchEngine::Instance();
     for (const auto& v : removed.verses) (void)search.RemoveDocument(DocId(bibleId, v));
     (void)EventBus::Instance().Publish(events::BibleRemoved{std::string(bibleId)});
     return Ok();
+}
+
+// ---------------------------------------------------------------------------
+// Installed-bible persistence (docs/specs/24 §Import — restart survival)
+// ---------------------------------------------------------------------------
+void BibleEngine::SetStorePath(std::string_view path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    storePath_ = std::string(path);
+}
+
+// One bible -> JSON. Only the canonical shape persists: metadata + books +
+// chapters ("GEN.1" keys, the map GetChapter()/Outline() read). `verses` is
+// the flattened view and rebuilds on restore (FlattenVersesLocked), halving
+// the store size versus keeping both shapes.
+json::Value BibleEngine::BibleToJsonLocked(const BibleVersion& bible) const {
+    using J = json::Value;
+    J::Object meta;
+    meta["id"] = J::String(bible.metadata.id);
+    meta["name"] = J::String(bible.metadata.name);
+    meta["language"] = J::String(bible.metadata.language);
+    meta["copyright"] = J::String(bible.metadata.copyright);
+    meta["license"] = J::String(bible.metadata.license);
+    meta["source"] = J::String(bible.metadata.source);
+    meta["version"] = J::String(bible.metadata.version);
+    meta["abbreviation"] = J::String(bible.metadata.abbreviation);
+    meta["readOnly"] = J::Bool(bible.metadata.readOnly);
+
+    J::Array books;
+    for (const BibleBook& b : bible.books) {
+        J::Object bo;
+        bo["id"] = J::String(b.id);
+        bo["name"] = J::String(b.name);
+        bo["testament"] = J::String(b.testament);
+        bo["order"] = J::Number(b.order);
+        if (!b.aliases.empty()) {
+            J::Array al;
+            for (const std::string& a : b.aliases) al.push_back(J::String(a));
+            bo["aliases"] = J(std::move(al));
+        }
+        books.push_back(J(std::move(bo)));
+    }
+
+    J::Array chapters;
+    for (const auto& [key, ch] : bible.chapters) {
+        J::Object co;
+        co["key"] = J::String(key);
+        co["bookId"] = J::String(ch.bookId);
+        co["number"] = J::Number(ch.number);
+        if (!ch.title.empty()) co["title"] = J::String(ch.title);
+        J::Array vs;
+        for (const BibleVerse& v : ch.verses) {
+            J::Object vo;
+            vo["bookId"] = J::String(v.bookId);
+            vo["chapter"] = J::Number(v.chapter);
+            vo["verse"] = J::Number(v.verse);
+            vo["text"] = J::String(v.text);
+            if (!v.heading.empty()) vo["heading"] = J::String(v.heading);
+            if (v.redLetter) vo["redLetter"] = J::Bool(true);
+            vs.push_back(J(std::move(vo)));
+        }
+        co["verses"] = J(std::move(vs));
+        chapters.push_back(J(std::move(co)));
+    }
+
+    J::Object root;
+    root["metadata"] = J(std::move(meta));
+    root["books"] = J(std::move(books));
+    root["chapters"] = J(std::move(chapters));
+    return J(std::move(root));
+}
+
+BibleVersion BibleEngine::BibleFromJsonLocked(const json::Value& node) const {
+    using J = json::Value;
+    BibleVersion bible;
+    const J* meta = node.Find("metadata");
+    if (meta && meta->asObject()) {
+        bible.metadata.id = std::string(meta->Find("id") ? meta->Find("id")->asString() : "");
+        bible.metadata.name = std::string(meta->Find("name") ? meta->Find("name")->asString() : "");
+        bible.metadata.language = std::string(meta->Find("language") ? meta->Find("language")->asString() : "");
+        bible.metadata.copyright = std::string(meta->Find("copyright") ? meta->Find("copyright")->asString() : "");
+        bible.metadata.license = std::string(meta->Find("license") ? meta->Find("license")->asString() : "");
+        bible.metadata.source = std::string(meta->Find("source") ? meta->Find("source")->asString() : "");
+        bible.metadata.version = std::string(meta->Find("version") ? meta->Find("version")->asString() : "");
+        bible.metadata.abbreviation = std::string(meta->Find("abbreviation") ? meta->Find("abbreviation")->asString() : "");
+        bible.metadata.readOnly = meta->Find("readOnly") ? meta->Find("readOnly")->asBool() : false;
+    }
+    if (const J* books = node.Find("books"); books && books->asArray()) {
+        for (const J& bv : *books->asArray()) {
+            BibleBook b;
+            b.id = std::string(bv.Find("id") ? bv.Find("id")->asString() : "");
+            b.name = std::string(bv.Find("name") ? bv.Find("name")->asString() : "");
+            b.testament = std::string(bv.Find("testament") ? bv.Find("testament")->asString() : "");
+            b.order = bv.Find("order") ? static_cast<int>(bv.Find("order")->asInt()) : 0;
+            if (const J* aliases = bv.Find("aliases"); aliases && aliases->asArray())
+                for (const J& a : *aliases->asArray()) b.aliases.emplace_back(a.asString());
+            bible.books.push_back(std::move(b));
+        }
+    }
+    if (const J* chapters = node.Find("chapters"); chapters && chapters->asArray()) {
+        for (const J& cv : *chapters->asArray()) {
+            BibleChapter ch;
+            ch.bookId = std::string(cv.Find("bookId") ? cv.Find("bookId")->asString() : "");
+            ch.number = cv.Find("number") ? static_cast<int>(cv.Find("number")->asInt()) : 0;
+            ch.title = std::string(cv.Find("title") ? cv.Find("title")->asString() : "");
+            if (const J* vs = cv.Find("verses"); vs && vs->asArray()) {
+                for (const J& vv : *vs->asArray()) {
+                    BibleVerse v;
+                    v.bookId = std::string(vv.Find("bookId") ? vv.Find("bookId")->asString() : "");
+                    v.chapter = vv.Find("chapter") ? static_cast<int>(vv.Find("chapter")->asInt()) : 0;
+                    v.verse = vv.Find("verse") ? static_cast<int>(vv.Find("verse")->asInt()) : 0;
+                    v.text = std::string(vv.Find("text") ? vv.Find("text")->asString() : "");
+                    v.heading = std::string(vv.Find("heading") ? vv.Find("heading")->asString() : "");
+                    v.redLetter = vv.Find("redLetter") ? vv.Find("redLetter")->asBool() : false;
+                    ch.verses.push_back(std::move(v));
+                }
+            }
+            bible.chapters[std::format("{}.{}", ch.bookId, ch.number)] = std::move(ch);
+        }
+    }
+    FlattenVersesLocked(bible);
+    return bible;
+}
+
+void BibleEngine::FlattenVersesLocked(BibleVersion& bible) const {
+    bible.verses.clear();
+    for (const BibleBook& b : bible.books) {
+        for (const auto& [key, ch] : bible.chapters) {
+            if (ch.bookId != b.id) continue;
+            for (const BibleVerse& v : ch.verses) bible.verses.push_back(v);
+        }
+    }
+}
+
+Result<size_t> BibleEngine::LoadStoreLocked() {
+    bibles_.clear();
+    if (storePath_.empty()) return size_t{0};
+    auto& platform = platform::PlatformAccessor::Get();
+    auto body = platform.Filesystem().ReadText(storePath_);
+    if (!body.ok()) return size_t{0};   // first boot: no store yet
+    auto parsed = json::Parse(body.value());
+    if (!parsed.ok())
+        return Error::Make(Err::Bible_ValidationFailed, "BibleEngine",
+                           "corrupt bible store JSON: " + parsed.error().message);
+    size_t count = 0;
+    if (const json::Value* arr = parsed.value().Find("bibles"); arr && arr->asArray()) {
+        for (const json::Value& bv : *arr->asArray()) {
+            BibleVersion bible = BibleFromJsonLocked(bv);
+            if (bible.metadata.id.empty() || bible.books.empty() || bible.chapters.empty())
+                continue;   // skip a damaged entry, keep the rest
+            bibles_[bible.metadata.id] = std::move(bible);
+            ++count;
+        }
+    }
+    return count;
+}
+
+Result<void> BibleEngine::SaveStoreLocked() {
+    if (storePath_.empty()) return Ok();
+    using J = json::Value;
+    J::Array arr;
+    for (const auto& [id, bible] : bibles_)
+        arr.push_back(BibleToJsonLocked(bible));
+    J::Object root;
+    root["schema"] = J::Number(1);
+    root["bibles"] = J(std::move(arr));
+
+    auto& platform = platform::PlatformAccessor::Get();
+    (void)platform.Filesystem().CreateDirectories(
+        std::filesystem::path(storePath_).parent_path().generic_string());
+    return platform.Filesystem().Write(storePath_, J(std::move(root)).ToString());
 }
 
 std::vector<std::string> BibleEngine::BibleIds() const {

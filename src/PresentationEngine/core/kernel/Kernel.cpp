@@ -507,9 +507,12 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     // The first-class Scripture knowledge system: imports, validates, indexes,
     // resolves references, queries, formats, and compares Bibles — completely
     // independent of the UI. Boots after the Search Engine (20) which it uses
-    // for verse indexing.
+    // for verse indexing. Imported bibles persist as a JSON store inside the
+    // data dir: SetStorePath BEFORE Initialize() so boot restores them.
     {
         auto& bible = bible::BibleEngine::Instance();
+        if (!options.dataDir.empty())
+            bible.SetStorePath(options.dataDir + "/bibles.json");
         if (auto r = bible.Initialize(); !r.ok()) {
             logger.Warning("BibleEngine init: " + r.error().message, "Kernel");
         } else {

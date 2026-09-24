@@ -55,6 +55,37 @@ QString displayTitle(const QString &title)
     return stripped.isEmpty() ? title : stripped;
 }
 
+// The year book's display name is the full year ("1947") — one year groups many
+// sermons, so the row itself can't carry a single sermon code; the shorthand
+// "47-…" lives in the citation line only. When TYPING a reference, the short
+// form ("47") still matches, see resolve()/reference().
+QString displayYear(const QString &name)
+{
+    return name;
+}
+
+// A typed book token matches a year book: the full form ("1947") or the
+// sermon-citation shorthand ("47"). Display is always the full year; this is
+// for resolve()/reference() input only.
+bool matchesYear(const QString &name, const QString &typed)
+{
+    return name == typed || (typed.size() == 2 && name == QStringLiteral("19") + typed);
+}
+
+// Citation search's engage threshold: FIVE chars, for every needle (user call:
+// "all the types of search for the table should be at least 5"). The reason is the
+// code shape: every citation line opens "<yy>-<dd…> - Title", so short fragments
+// ("47-", "fai") match dozens of sermons and the resolve would always land on the
+// first one. Five chars means the needle is already a real narrowing. (Year-shaped
+// input — "47", "1948" — never reaches citation search: resolve() answers it before
+// falling through.) Mirrored in ReferencePane.suggest (the inline completion +
+// dropdown) so the two sides engage on the same keystroke.
+int citationSearchMinChars(const QString &needle)
+{
+    Q_UNUSED(needle)
+    return 5;
+}
+
 bool sourceFor(bl::TheTableLibrary *lib, const QString &bookId, int chapter,
                const QVariantList &verses, pf::ScriptureSource &out)
 {
@@ -67,10 +98,17 @@ bool sourceFor(bl::TheTableLibrary *lib, const QString &bookId, int chapter,
     for (const auto &b : lib->BookIndex()) {   // (the index: Books() would copy every sermon's words just to find a name)
         if (b.id != bookId.toStdString())
             continue;
-        out.book = b.name;
+        // The citation line ("53-0217 - Only Believe") is what the engine's
+        // reference builder prepends: ScriptureReference(book, chapter, verses)
+        // writes `<book> <chapter>:<verses>`, and with the citation as book +
+        // chapter 0 that becomes exactly the sermon citation + paragraph
+        // numbers. (Scripture keeps its own plain book name.)
+        out.book = lib->Citation(bookId.toStdString(), chapter, 0);
         break;
     }
-    out.chapter = chapter;
+    // The engine skips the chapter and ":" for chapter 0 (ScriptureReference);
+    // the verses still come out as "1-3" after the citation.
+    out.chapter = 0;
     for (const QVariant &v : verses) {
         const int n = v.toInt();
         for (const bl::TheTableVerse &tv : ch.value().verses) {
@@ -209,6 +247,26 @@ QVariantList TheTableService::chapter(const QString &bookId, int chapter) const
     return out;
 }
 
+QString TheTableService::paragraphPair(const QString &bookId, int chapter, int verse, int count) const
+{
+    if (!library_ || !EngineBridge::instance().booted())
+        return {};
+    auto ch = tableLibrary(library_)->GetChapter(bookId.toStdString(), chapter);
+    if (!ch.ok())
+        return {};
+    QString out;
+    for (const auto &v : ch.value().verses) {
+        if (v.number < verse)
+            continue;
+        if (!out.isEmpty())
+            out += QStringLiteral("\n\n");   // (the sermon's own blank-line paragraph break)
+        out += qstr(v.text);
+        if (v.number >= verse + count - 1)
+            break;   // the asked-for paragraph(s), then stop
+    }
+    return out;
+}
+
 QVariantList TheTableService::search(const QString &text, int limit) const
 {
     QVariantList out;
@@ -220,10 +278,18 @@ QVariantList TheTableService::search(const QString &text, int limit) const
     for (const bl::TheTableSearchHit &h : hits.value()) {
         QVariantMap row;
         row.insert(QStringLiteral("reference"), qstr(h.reference));
+        // The sermon's citation line ("47-0412 - Faith Is The Substance") — the
+        // label every UI shows for a sermon (the pane's match rows, the app-wide
+        // search results). `reference` is the scripture shape ("1953 12:3").
+        row.insert(QStringLiteral("citation"),
+                   qstr(tableLibrary(library_)->Citation(qstr(h.bookId).toStdString(), h.chapter, 0)));
         row.insert(QStringLiteral("bookId"), qstr(h.bookId));
         row.insert(QStringLiteral("chapter"), h.chapter);
         row.insert(QStringLiteral("verse"), h.verse);
         row.insert(QStringLiteral("snippet"), qstr(h.snippet));
+        // Words spread across this paragraph and its next: the preview must fetch
+        // BOTH (paragraphPair) — a single-paragraph hit previews alone.
+        row.insert(QStringLiteral("spanned"), h.spanned);
         out.append(row);
     }
     return out;
@@ -252,7 +318,11 @@ QVariantList TheTableService::books(const QString &sourceId) const
         QVariantList titles;   // parallel to `chapters`: the sermon's own name, not just its number in the year (a Bible has none)
         for (const auto &ch : b.chapters) {
             chapters.append(ch.number);
-            titles.append(displayTitle(qstr(ch.title)));
+            // Chapter rows read like the citation line minus the paragraph — "47-0412 -
+            // Faith Is The Substance" (user call). Falls back to the bare stored title
+            // (code stripped) when no citation can be built for it.
+            const std::string cite = tableLibrary(library_)->Citation(qstr(b.id).toStdString(), ch.number, 0);
+            titles.append(!cite.empty() ? qstr(cite) : displayTitle(qstr(ch.title)));
         }
         out.append(QVariantMap{ { QStringLiteral("id"), qstr(b.id) },
                                 { QStringLiteral("name"), qstr(b.name) },
@@ -264,31 +334,55 @@ QVariantList TheTableService::books(const QString &sourceId) const
 
 QString TheTableService::reference(const QString &book, int chapter, const QVariantList &verses) const
 {
-    // The engine writes the reference (ranges for runs, commas between separate picks) - the same as Scripture, not a first-to-last guess.
+    // The engine writes the verse ranges (runs collapse, commas between picks);
+    // The Table's sermon part comes from the library's citation line
+    // ("53-0217 - Only Believe 3"), not the scripture-shaped "1953 1:3".
+    // `book` arrives as the pane's book NAME ("1947"); the library matches by
+    // id ("Y1947") — resolve the name to the id here.
     std::vector<int> numbers;
     for (const QVariant &v : verses)
         numbers.push_back(v.toInt());
+    if (library_ && EngineBridge::instance().booted()) {
+        QString bookId = book;
+        if (!book.startsWith(QStringLiteral("Y"))) {
+            for (const auto &b : tableLibrary(library_)->BookIndex())
+                if (matchesYear(qstr(b.name), book)) {
+                    bookId = qstr(b.id);
+                    break;
+                }
+        }
+        const std::string citation = tableLibrary(library_)->Citation(bookId.toStdString(), chapter, 0);
+        if (!citation.empty()) {
+            const QString cite = qstr(citation);
+            return numbers.empty() ? cite
+                                   : cite + QStringLiteral(" %1").arg(qstr(pf::ScriptureVerseRange(numbers)));
+        }
+    }
+    // Unknown book/chapter (a stale pane): the scripture shape still resolves.
     return qstr(pf::ScriptureReference(book.toStdString(), chapter, numbers));
 }
 
 QVariantMap TheTableService::resolve(const QString &text) const
 {
-    // "1953 12:3" / "1953 12" -> the passage to jump to.
-    static const QRegularExpression re(QStringLiteral("^\\s*(\\d{4})\\s+(\\d{1,3})(?:\\s*:\\s*(\\d{1,4})(?:\\s*-\\s*(\\d{1,4}))?)?\\s*$"));
+    // "1953 12:3" / "1953 12" — and the short forms the years column shows —
+    // "53 12:3" / "47 3", or a bare year ("1947" / "47") for the book itself.
+    static const QRegularExpression re(QStringLiteral("^\\s*(\\d{2}|\\d{4})(?:\\s+(\\d{1,3})(?:\\s*:\\s*(\\d{1,4})(?:\\s*-\\s*(\\d{1,4}))?)?)?\\s*$"));
     const auto m = re.match(text.trimmed());
     if (!m.hasMatch())
-        return {};
-    const QString year = m.captured(1);
+        return resolveCitation(text);   // not a year/paragraph shape: search the citation lines
+    QString year = m.captured(1);
+    if (year.size() == 2)
+        year.prepend(QStringLiteral("19"));   // "47" names the same year book "1947"
     QVariantList books;
     if (library_ && EngineBridge::instance().booted()) {
         for (const auto &b : tableLibrary(library_)->BookIndex())
-            if (b.name == year)
+            if (matchesYear(qstr(b.name), year))
                 books.append(QVariantMap{ { QStringLiteral("id"), qstr(b.id) },
                                           { QStringLiteral("name"), qstr(b.name) } });
     }
     if (books.isEmpty())
-        return {};
-    const int chapter = m.captured(2).toInt();
+        return resolveCitation(text);   // digits but no year match: try it as a code ("47-0412")
+    const int chapter = m.captured(2).isEmpty() ? 0 : m.captured(2).toInt();
     const int start = m.captured(3).isEmpty() ? 0 : m.captured(3).toInt();
     const int end = m.captured(4).isEmpty() ? start : m.captured(4).toInt();
     return { { QStringLiteral("bookId"), books.first().toMap().value(QStringLiteral("id")) },
@@ -296,6 +390,46 @@ QVariantMap TheTableService::resolve(const QString &text) const
              { QStringLiteral("chapter"), chapter },
              { QStringLiteral("verseStart"), start },
              { QStringLiteral("verseEnd"), end } };
+}
+
+// CITATION SEARCH (the tab search's real use, user call): typed text that is not a
+// year/paragraph reference ("faith", "47-0412", "only believe") matches the sermons'
+// citation lines ("47-0412 - Faith Is The Substance", CONTAINS, case-insensitive).
+// UNIQUE match: the resolve returns it and the pane jumps straight into that sermon.
+// MULTIPLE matches: the resolve returns NOTHING — the pane must not pick for the user
+// (it always guessed the first hit); the QML side lists the matches in the dropdown
+// (suggest, THE TABLE branch) and the user picks the actual sermon. The resolve
+// re-runs per keystroke, so typing past the ambiguity jumps the moment one sermon is
+// left. Five-char minimum for every needle (citationSearchMinChars above).
+QVariantMap TheTableService::resolveCitation(const QString &text) const
+{
+    const QString needle = text.trimmed();
+    // Five chars minimum, every needle (citationSearchMinChars above).
+    if (needle.size() < citationSearchMinChars(needle) || !library_
+        || !EngineBridge::instance().booted())
+        return {};
+    const QString lower = needle.toLower();
+    QVariantMap best;
+    int matches = 0;
+    for (const auto &b : tableLibrary(library_)->BookIndex()) {
+        if (b.chapters.empty())
+            continue;
+        const QString bookId = qstr(b.id);
+        for (const auto &ch : b.chapters) {
+            const QString cite = qstr(tableLibrary(library_)->Citation(bookId.toStdString(), ch.number, 0));
+            if (cite.isEmpty())
+                continue;
+            if (cite.indexOf(lower, 0, Qt::CaseInsensitive) < 0)
+                continue;
+            if (++matches > 1)
+                return {};   // several sermons match: the dropdown lists them, the user picks
+            best = { { QStringLiteral("bookId"), bookId },
+                     { QStringLiteral("chapter"), ch.number },
+                     { QStringLiteral("verseStart"), 0 },
+                     { QStringLiteral("verseEnd"), 0 } };
+        }
+    }
+    return matches == 1 ? best : QVariantMap{};
 }
 
 QVariantMap TheTableService::preview(const QString &bookId, int chapter, const QVariantList &verses) const

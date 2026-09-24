@@ -231,6 +231,17 @@ QVariantList SearchService::searchSettings(const QString &text, int limit) const
     return q.isEmpty() ? QVariantList{} : settingsMatches(q, limit);
 }
 
+// One verse's full text — the Quick search hover preview (see the header).
+QString SearchService::fullVerse(const QString &bibleId, const QString &bookId,
+                                 int chapter, int verse) const
+{
+    if (!EngineBridge::instance().booted())
+        return {};
+    auto &bible = bb::BibleEngine::Instance();
+    auto v = bible.GetVerse(bibleId.toStdString(), bookId.toStdString(), chapter, verse);
+    return v.ok() ? cleanVerse(qstr(v.value().text)) : QString();
+}
+
 // ===========================================================================
 // Search
 // ===========================================================================
@@ -394,28 +405,47 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
                 }
                 QVariantMap r = makeResult(QStringLiteral("bible"),
                                            QStringLiteral("%1 %2:%3").arg(name).arg(h.chapter).arg(h.verse),
-                                           bibleLabel(h.bibleId), qstr(h.reference), body);
+                                           bibleLabel(h.bibleId), qstr(h.reference), QString(), body);
+                // (the verse text rides the `text` slot — an earlier version passed
+                // it as `path`, so the dialog showed no text and every fuzzy match
+                // looked wrong; the reference-resolution result below had it right)
                 r.insert(QStringLiteral("bibleId"), qstr(h.bibleId));
+                // Where the verse lives — the dialog's hover preview fetches the FULL
+                // text through fullVerse() with these (the snippet is only an excerpt).
+                r.insert(QStringLiteral("bookId"), qstr(h.bookId));
+                r.insert(QStringLiteral("chapter"), h.chapter);
+                r.insert(QStringLiteral("verse"), h.verse);
                 out.append(r);
             }
         }
     }
 
     // ---- Sermon paragraphs (The Table's library) -------------------------------------
-    if (text.size() >= 3) {
+    // (2 chars on: the library's own Search() takes two-char words — "my" —
+    // and matches terms spread across up to two consecutive paragraphs.)
+    if (text.size() >= 2) {
         const QVariantList hits = TheTableService::instance().search(text, qMax(limit, 4));
         for (const QVariant &v : hits) {
             const QVariantMap h = v.toMap();
-            const QString ref = h.value(QStringLiteral("reference")).toString();
-            const QString verse = h.value(QStringLiteral("verse")).toString();
+            // Title = the sermon's citation line minus the paragraph — the same
+            // label the pane's own match rows show ("Faith Is The Substance"),
+            // with the code in the subtitle. The old scripture-shaped title
+            // ("1953 12 · ¶3") matched nothing when picked (the pane searches
+            // citation lines), so picking a sermon landed on an empty tab.
+            const QString cite = h.value(QStringLiteral("citation")).toString();
+            const QString title = cite.isEmpty()
+                                      ? h.value(QStringLiteral("reference")).toString()
+                                      : cite.mid(cite.indexOf(QStringLiteral(" - ")) + 3);
             QVariantMap r = makeResult(QStringLiteral("table"),
-                                       QStringLiteral("%1 · ¶%2").arg(ref, verse),
-                                       tr("The Table"),
+                                       QStringLiteral("%1 · ¶%2").arg(title,
+                                           h.value(QStringLiteral("verse")).toString()),
+                                       cite.isEmpty() ? tr("The Table") : cite,
                                        h.value(QStringLiteral("bookId")).toString(),
                                        QString(), h.value(QStringLiteral("snippet")).toString());
             r.insert(QStringLiteral("bookId"), h.value(QStringLiteral("bookId")));
             r.insert(QStringLiteral("chapter"), h.value(QStringLiteral("chapter")));
             r.insert(QStringLiteral("verse"), h.value(QStringLiteral("verse")));
+            r.insert(QStringLiteral("spanned"), h.value(QStringLiteral("spanned")));
             out.append(r);
         }
     }

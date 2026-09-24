@@ -113,6 +113,7 @@ void TestDropRules();
 void TestProjectLibrary();
 void TestAppSettings();
 void TestBibleOutline();
+void TestBiblePersistence();
 void TestScriptureSlides();
 void TestSmartConfig();
 void TestDataProtection();

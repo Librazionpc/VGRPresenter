@@ -42,6 +42,10 @@ public:
 
     // One sermon's paragraphs: [{ number, text, heading }]
     Q_INVOKABLE QVariantList chapter(const QString &bookId, int chapter) const;
+    // A paragraph's FULL text — `count` 1 = just that paragraph, 2 = it and its
+    // successor blank-line joined. The hover preview asks for 2 on a spanned
+    // match (words spread across both), 1 otherwise. "" when unknown.
+    Q_INVOKABLE QString paragraphPair(const QString &bookId, int chapter, int verse, int count = 2) const;
     // Whole-library search: [{ reference, bookId, chapter, verse, snippet }]
     Q_INVOKABLE QVariantList search(const QString &text, int limit = 60) const;
 
@@ -57,6 +61,13 @@ public:
     Q_INVOKABLE QString reference(const QString &book, int chapter, const QVariantList &verses) const;
     // "1953 12:3" typed into search -> { bookId, book, chapter, verseStart, verseEnd }, else {}.
     Q_INVOKABLE QVariantMap resolve(const QString &text) const;
+    // Citation search: typed text ("faith", "47-0412") matched against the sermons'
+    // citation lines (CONTAINS). Engages at 5 chars for EVERY needle (short fragments
+    // like "47-" or "fai" match dozens of sermons — the resolve would just pick the
+    // first one). UNIQUE match -> the ref (the pane jumps); MULTIPLE matches ->
+    // {} (the dropdown lists them, the user picks the actual sermon).
+    // Used by resolve() when the text is not a year/paragraph reference.
+    QVariantMap resolveCitation(const QString &text) const;
     // The preview slide for the picked paragraphs, in the Edit screen's block
     // shape (DesignPreview draws it): { blocks, background, reference, slideCount }.
     Q_INVOKABLE QVariantMap preview(const QString &bookId, int chapter, const QVariantList &verses) const;

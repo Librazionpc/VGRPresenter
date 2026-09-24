@@ -4,6 +4,7 @@
 #include "TestHarness.hpp"
 
 #include "modules/presentation/ScriptureSlides.hpp"
+#include "platform/PlatformAccessor.hpp"
 
 void TestBibleResolver() {
     // Reference resolution against the canonical table (no Bible loaded).
@@ -25,6 +26,33 @@ void TestBibleResolver() {
     CHECK(r6.ok() && r6.value().bookId == "PSA");
     auto r7 = bb::ReferenceResolver::Resolve("Romans 8", {});
     CHECK(r7.ok() && r7.value().bookId == "ROM" && r7.value().chapter == 8);
+    // Spaces around the separators are typed constantly ("Genesis 1: 4" from the
+    // screenshot): they must not break the verse out of the reference.
+    auto r8 = bb::ReferenceResolver::Resolve("Genesis 1: 4", {});
+    CHECK(r8.ok() && r8.value().chapter == 1 && r8.value().verseStart == 4 && r8.value().verseEnd == 4);
+    auto r9 = bb::ReferenceResolver::Resolve("John 3: 16 - 18", {});
+    CHECK(r9.ok() && r9.value().verseStart == 16 && r9.value().verseEnd == 18);
+    // Trailing colon (the auto-colon leaves "John 3:" in the box mid-typing): whole chapter.
+    auto r10 = bb::ReferenceResolver::Resolve("John 3:", {});
+    CHECK(r10.ok() && r10.value().chapter == 3 && r10.value().verseStart == 0);
+    // FreeShow-parity prefix resolution: a typed PREFIX that uniquely names one book
+    // resolves ("gene" opens Genesis) — with or without a chapter/verse tail.
+    auto p1 = bb::ReferenceResolver::Resolve("gene", {});
+    CHECK(p1.ok() && p1.value().bookId == "GEN");
+    auto p2 = bb::ReferenceResolver::Resolve("gene 1:4", {});
+    CHECK(p2.ok() && p2.value().bookId == "GEN" && p2.value().chapter == 1 && p2.value().verseStart == 4);
+    auto p3 = bb::ReferenceResolver::Resolve("genes", {});
+    CHECK(p3.ok() && p3.value().bookId == "GEN");
+    auto p4 = bb::ReferenceResolver::Resolve("1 sam", {});
+    CHECK(p4.ok() && p4.value().bookId == "1SA");
+    auto p5 = bb::ReferenceResolver::Resolve("rev 1", {});
+    CHECK(p5.ok() && p5.value().bookId == "REV" && p5.value().chapter == 1);
+    // Ambiguous prefixes must NOT guess: "j" starts Joshua/Job/John/..., "1 c"
+    // starts 1 Chronicles and 1 Corinthians — both stay unresolved.
+    auto amb1 = bb::ReferenceResolver::Resolve("j 3:16", {});
+    CHECK(!amb1.ok());
+    auto amb2 = bb::ReferenceResolver::Resolve("1 c 13", {});
+    CHECK(!amb2.ok());
     auto bad = bb::ReferenceResolver::Resolve("Xyzzy 3:16", {});
     CHECK(!bad.ok());
     CHECK(bad.error().code == Err::Bible_InvalidReference);
@@ -72,6 +100,42 @@ void TestBibleProviders() {
     CHECK(idN.ok() && idN.value() == "NBS");
     auto vN = eng.GetVerse("NBS", "JHN", 3, 16);
     CHECK(vN.ok() && vN.value().text.find("loved the world") != std::string::npos);
+
+    // Real Zefania shape: <XMLBIBLE> root, uppercase tags throughout, the
+    // bnumber/cnumber/vnumber attribute spellings, and the bible name in
+    // <information><biblename> — as distributed on bible websites.
+    const char* zefCaps =
+        "<XMLBIBLE biblename=\"King James Caps\" status=\"v\">"
+        "<BIBLEBOOK bnumber=\"43\" bname=\"John\">"
+        "<CHAPTER cnumber=\"3\">"
+        "<VERS vnumber=\"16\">For God so loved the world that he gave his one and only Son.</VERS>"
+        "<VERS vnumber=\"17\">For God did not send his Son into the world to condemn the world.</VERS>"
+        "</CHAPTER></BIBLEBOOK></XMLBIBLE>";
+    auto idCaps = eng.Import(zefCaps, "xml",
+                             bb::ImportOptions{std::string("ZFNC"), std::string(), false, false});
+    CHECK(idCaps.ok() && idCaps.value() == "ZFNC");
+    CHECK(eng.VerseCount("ZFNC").ok() && eng.VerseCount("ZFNC").value() == 2);
+    auto vCaps = eng.GetVerse("ZFNC", "JHN", 3, 16);
+    CHECK(vCaps.ok() && vCaps.value().text.find("loved the world") != std::string::npos);
+    auto capsBible = eng.GetBible("ZFNC");
+    CHECK(capsBible.ok() && capsBible.value().metadata.name == "King James Caps");
+
+    // OSIS content that ships in a ".xml" file: the extension-based lookup
+    // must fall back to the OSIS provider when the Zefania XML provider
+    // declines the payload (docs/specs/24 §Providers).
+    const char* osisXml =
+        "<osis><osisText>"
+        "<div type=\"book\" osisID=\"Jhn\"><title>John</title>"
+        "<chapter osisID=\"Jhn.3\">"
+        "<verse osisID=\"Jhn.3.16\">For God so loved the world that he gave his one and only Son.</verse>"
+        "</chapter></div>"
+        "</osisText></osis>";
+    auto idFx = eng.Import(osisXml, "xml",
+                           bb::ImportOptions{std::string("OSIX"), std::string(), false, false});
+    CHECK(idFx.ok() && idFx.value() == "OSIX");
+    CHECK(eng.VerseCount("OSIX").ok() && eng.VerseCount("OSIX").value() == 1);
+    auto vFx = eng.GetVerse("OSIX", "JHN", 3, 16);
+    CHECK(vFx.ok() && vFx.value().text.find("loved the world") != std::string::npos);
 
     // Platform <bible><book num> shape.
     const char* plat =
@@ -141,6 +205,8 @@ void TestBibleProviders() {
     // Failure modes.
     CHECK(!eng.Import("not xml at all", "xml", {}).ok());
     CHECK(!eng.Import("<bible></bible>", "xml", {}).ok());
+    CHECK(!eng.Import("<XMLBIBLE></XMLBIBLE>", "xml", {}).ok());   // no verses
+    CHECK(!eng.Import("<song></song>", "xml", {}).ok());           // not a bible at all
     CHECK(!eng.Import("{}", "json", {}).ok());
     CHECK(!eng.Import("anything", "zzz", {}).ok());
     CHECK(eng.Import(zefania, "xml", bb::ImportOptions{std::string("KJV"), std::string(), false, false}).error().code ==
@@ -277,6 +343,83 @@ void TestBibleEngine() {
 // ---------------------------------------------------------------------------
 // The cheap ways to browse a Bible (Scripture tab): details, outline, one chapter.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Installed-bible persistence: an import survives a full engine restart when a
+// store path is set; the store stays OFF (in-memory only) without one.
+// ---------------------------------------------------------------------------
+void TestBiblePersistence() {
+    auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    const std::string root = "/tmp/bps_bible_store";
+    const std::string store = root + "/bibles.json";
+    (void)fs.RemoveAll(root);
+
+    auto& eng = bb::BibleEngine::Instance();
+    const char* xml =
+        "<bible abbrev=\"PRZ\" name=\"Persist Bible\">"
+        "<book bnum=\"1\" bsname=\"GEN\" bname=\"Genesis\">"
+        "<chapter number=\"1\">"
+        "<verse number=\"1\">In the beginning God created the heaven and the earth.</verse>"
+        "<verse number=\"2\">And the earth was without form and void.</verse>"
+        "<verse number=\"3\">And God said, Let there be light.</verse>"
+        "</chapter></book></bible>";
+
+    // ---- lifecycle 1: import with a store path -> the store holds the bible ----
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.Start().ok());
+    eng.SetStorePath(store);
+    auto id = eng.Import(xml, "xml", bb::ImportOptions{std::string("PRZ"), std::string(), false, false});
+    CHECK(id.ok() && id.value() == "PRZ");
+    CHECK(eng.BibleCount() == 1);
+    CHECK(fs.Exists(store));
+    CHECK(eng.Metadata("PRZ").ok() && eng.Metadata("PRZ").value().name == "Persist Bible");
+
+    // The store keeps the canonical shape only (books + chapters), so the saved
+    // JSON must read back through GetChapter/Outline identically.
+    auto before = eng.GetChapter("PRZ", "GEN", 1);
+    CHECK(before.ok() && before.value().verses.size() == 3);
+
+    // ---- a full restart: Shutdown clears memory, Initialize restores from disk ----
+    CHECK(eng.Stop().ok());
+    CHECK(eng.Shutdown().ok());
+    CHECK(eng.BibleCount() == 0);
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.Start().ok());
+    CHECK(eng.BibleCount() == 1);   // restored from the store, no re-import
+    auto meta = eng.Metadata("PRZ");
+    CHECK(meta.ok() && meta.value().name == "Persist Bible");
+    auto after = eng.GetChapter("PRZ", "GEN", 1);
+    CHECK(after.ok() && after.value().verses.size() == 3);
+    CHECK(after.ok() && after.value().verses[2].text == "And God said, Let there be light.");
+    auto outline = eng.Outline("PRZ");
+    CHECK(outline.ok() && outline.value().size() == 1);
+    CHECK(outline.ok() && outline.value().front().verseCounts == std::vector<int>{3});
+    CHECK(eng.VerseCount("PRZ").ok() && eng.VerseCount("PRZ").value() == 3);
+
+    // ---- remove persists too: a deleted translation stays deleted ----
+    CHECK(eng.RemoveBible("PRZ").ok());
+    CHECK(eng.BibleCount() == 0);
+    CHECK(eng.Stop().ok());
+    CHECK(eng.Shutdown().ok());
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.Start().ok());
+    CHECK(eng.BibleCount() == 0);   // not resurrected by the store
+
+    // ---- no store path = no persistence (the unit-test default) ----
+    eng.SetStorePath("");
+    auto mem = eng.Import(xml, "xml", bb::ImportOptions{std::string("PRZ"), std::string(), false, false});
+    CHECK(mem.ok());
+    CHECK(eng.BibleCount() == 1);
+    CHECK(eng.Stop().ok());
+    CHECK(eng.Shutdown().ok());
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.Start().ok());
+    CHECK(eng.BibleCount() == 0);   // in-memory only: a restart loses it
+
+    CHECK(eng.Stop().ok());
+    CHECK(eng.Shutdown().ok());
+    (void)fs.RemoveAll(root);
+}
+
 void TestBibleOutline() {
     auto& eng = bb::BibleEngine::Instance();
     CHECK(eng.Initialize().ok());
@@ -359,10 +502,19 @@ void TestScriptureSlides() {
     pf::ScriptureSettings lines; lines.versesOnIndividualLines = true;
     CHECK(pf::BuildScriptureSlides(tmpl, src, lines, true)[0].blocks[0].text.find("\n2 And") != std::string::npos);
     pf::ScriptureSource single = src; single.verses = { src.verses[1] };
-    CHECK(pf::BuildScriptureSlides(tmpl, single, {}, true)[0].blocks[0].text == "And the earth was without form, and void.");   // the reference already says which verse
+    // tmpl reserves a number slot ({scripture_number}), so the number stays even though
+    // the reference also names the verse (the slot is the author's explicit request).
+    CHECK(pf::BuildScriptureSlides(tmpl, single, {}, true)[0].blocks[0].text == "2 And the earth was without form, and void.");
     CHECK(pf::BuildScriptureSlides(tmpl, single, {}, true)[0].blocks[1].text == "Genesis 1:2");
-    // the same verse in a template that does not name the verse keeps its number
+    // without a reserved number slot the de-dup still fires (the reference says it)
+    CHECK(pf::BuildScriptureSlides({ text("{scripture_text}"), text("{scripture_reference}") }, single, {}, true)[0].blocks[0].text == "And the earth was without form, and void.");
+    // and in a template that does not name the verse at all the number always stays
     CHECK(pf::BuildScriptureSlides({ text("{scripture_text}") }, single, {}, true)[0].blocks[0].text == "2 And the earth was without form, and void.");
+    // a template that RESERVES a number slot ({scripture_number}) keeps the number even
+    // for a single verse with the verse in the reference — the marker is the author's
+    // explicit "render the number here" request (the old heuristic suppressed it and the
+    // number vanished everywhere)
+    CHECK(pf::BuildScriptureSlides({ text("{scripture_number} {scripture_text}"), text("{scripture_reference}") }, single, {}, true)[0].blocks[0].text == "2 And the earth was without form, and void.");
     // the other Bibles of a parallel set are blank, {scripture_number} is only a style marker
     CHECK(pf::BuildScriptureSlides({ text("{scripture2_text}|{scripture1_name}|{scripture_number}x") }, src, {}, true)[0].blocks[0].text == "|King James Version|x");
 

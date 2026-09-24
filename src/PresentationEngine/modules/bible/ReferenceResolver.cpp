@@ -102,7 +102,11 @@ Result<PassageRef> ReferenceResolver::ParseBody(const std::string& normalized,
     // Whole book ("John", "Psalms").
     if (normalized.empty()) return ref;
 
-    // Chapter[:verseStart[-verseEnd]].
+    // Chapter[:verseStart[-verseEnd]] — spaces around the separators are fine
+    // ("Genesis 1: 4", "John 3:16 - 18"); people type them mid-sentence.
+    auto skipSpaces = [&normalized](size_t& p) {
+        while (p < normalized.size() && normalized[p] == ' ') ++p;
+    };
     size_t i = 0;
     int chapter = 0;
     while (i < normalized.size() && std::isdigit(static_cast<unsigned char>(normalized[i]))) {
@@ -114,12 +118,15 @@ Result<PassageRef> ReferenceResolver::ParseBody(const std::string& normalized,
                            "no chapter after book name: " + raw);
     ref.chapter = chapter;
 
+    skipSpaces(i);
     if (i == normalized.size()) return ref;   // whole chapter
 
     if (normalized[i] != ':')
         return Error::Make(Err::Bible_InvalidReference, "BibleEngine",
                            "unexpected text after chapter: " + raw);
     ++i;
+    skipSpaces(i);
+    if (i == normalized.size()) return ref;   // "John 3:" mid-typing (the input's auto-colon): whole chapter
 
     int verse = 0;
     while (i < normalized.size() && std::isdigit(static_cast<unsigned char>(normalized[i]))) {
@@ -132,9 +139,11 @@ Result<PassageRef> ReferenceResolver::ParseBody(const std::string& normalized,
     ref.verseStart = verse;
     ref.verseEnd = verse;
 
-    // Optional range: "16-18".
+    // Optional range: "16-18" (spaces around the dash fine).
+    skipSpaces(i);
     if (i < normalized.size() && normalized[i] == '-') {
         ++i;
+        skipSpaces(i);
         int end = 0;
         while (i < normalized.size() && std::isdigit(static_cast<unsigned char>(normalized[i]))) {
             end = end * 10 + (normalized[i] - '0');
@@ -202,9 +211,48 @@ Result<PassageRef> ReferenceResolver::Resolve(std::string_view text,
             }
         }
     }
-    if (!best)
+    if (!best) {
+        // FreeShow parity (their Scripture input bookSearch): a typed PREFIX that
+        // uniquely names one book resolves - "gene" opens Genesis, "1 sam" opens
+        // 1 Samuel. Drop trailing tokens until some book key starts with the
+        // remaining head; require a SINGLE distinct book across the matching keys
+        // (ambiguous prefixes like "j" or "1 c" stay unresolved, no guessing).
+        std::vector<std::string> tokens;
+        size_t pos = 0;
+        while (pos < normalized.size()) {
+            size_t end = normalized.find(' ', pos);
+            if (end == std::string::npos) { tokens.push_back(normalized.substr(pos)); break; }
+            tokens.push_back(normalized.substr(pos, end - pos));
+            pos = end + 1;
+        }
+        for (size_t keep = tokens.size(); keep >= 1; --keep) {
+            std::string head = tokens[0];
+            for (size_t i = 1; i < keep; ++i) head += " " + tokens[i];
+            const Key* found = nullptr;
+            bool ambiguous = false;
+            for (const auto& k : keys) {
+                if (k.key.size() > head.size() && k.key.compare(0, head.size(), head) == 0) {
+                    if (!found) found = &k;
+                    else if (found->book.id != k.book.id) { ambiguous = true; break; }
+                }
+            }
+            if (ambiguous) break;              // shorter heads only shrink the match set
+            if (found) {
+                // Prefer the caller's book record so casing/metadata match the
+                // loaded Bible ("Genesis", not the canonical lowercase name).
+                BibleBook resolved = found->book;
+                for (const auto& b : books)
+                    if (b.id == found->book.id) { resolved = b; break; }
+                std::string body = normalized.substr(head.size());
+                if (!body.empty() && body.front() == ' ') body.erase(0, 1);
+                if (body.empty() || body[0] == ':' || std::isdigit(static_cast<unsigned char>(body[0])))
+                    return ParseBody(body, std::string(text), resolved);
+                break;                         // tail is not a reference -> unknown
+            }
+        }
         return Error::Make(Err::Bible_InvalidReference, "BibleEngine",
                            "unknown book in reference: " + std::string(text));
+    }
 
     // Keep the caller's book metadata when available (aliases + testament).
     std::string body = normalized.substr(bestLen);

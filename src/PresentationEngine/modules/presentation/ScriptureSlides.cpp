@@ -165,7 +165,12 @@ std::string ScriptureVerseRange(const std::vector<int>& verses) {
 std::string ScriptureReference(const std::string& book, int chapter, const std::vector<int>& verses) {
     std::string out = book;
     if (chapter > 0) out += std::format(" {}", chapter);
-    if (!verses.empty()) out += std::format(":{}", ScriptureVerseRange(verses));
+    // No chapter (The Table: the book IS the sermon citation "47-0412 - Faith Is The
+    // Substance") -> the verse/paragraph range joins with a space, reading like the
+    // citation line ("... Substance 1"), not a scripture colon ("... Substance:1").
+    if (!verses.empty())
+        out += chapter > 0 ? std::format(":{}", ScriptureVerseRange(verses))
+                           : std::format(" {}", ScriptureVerseRange(verses));
     return out;
 }
 
@@ -176,9 +181,16 @@ std::vector<ScriptureSlide> BuildScriptureSlides(const std::vector<ContentBlock>
 
     const bool styled = HasScriptureValues(tmpl);
 
-    // One selected verse with the verse in the reference: the number would say it twice.
+    // One selected verse with the verse in the reference: the number would say it twice —
+    // UNLESS the template explicitly reserves a number slot ({scripture_number}): that
+    // marker is the template author's "the number renders here" request, and it beats the
+    // de-duplication heuristic (a user-reported gap: the toggle was ON and the marker was
+    // in the template, yet a single-verse pick showed no number anywhere).
     bool numbers = settings.verseNumbers;
-    if (source.verses.size() == 1 && styled) {
+    const bool templateWantsNumberSlot = std::any_of(tmpl.begin(), tmpl.end(), [](const ContentBlock& b) {
+        return b.kind == "text" && b.text.find("_number}") != std::string::npos;
+    });
+    if (source.verses.size() == 1 && styled && !templateWantsNumberSlot) {
         for (const ContentBlock& b : tmpl)
             if (b.text.find("{scripture_reference") != std::string::npos || b.text.find("{scripture1_reference") != std::string::npos ||
                 b.text.find("{scripture_verse") != std::string::npos || b.text.find("{scripture1_verse") != std::string::npos)
@@ -252,7 +264,9 @@ std::vector<ScriptureSlide> BuildScriptureSlides(const std::vector<ContentBlock>
         values.name = WithoutBrackets(source.versionName);
         values.book = source.book;
         values.bookAbbr = source.bookAbbr;
-        values.chapter = std::to_string(source.chapter);
+        // Chapter 0 (The Table: the "chapter" is folded into the citation in
+        // `book`) renders empty rather than a bare "0".
+        values.chapter = source.chapter > 0 ? std::to_string(source.chapter) : std::string();
         values.copyright = source.copyright;
 
         ScriptureSlide slide;

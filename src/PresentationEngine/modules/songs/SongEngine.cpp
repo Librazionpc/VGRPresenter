@@ -191,21 +191,37 @@ Result<std::string> SongEngine::Import(std::string_view source, std::string_view
     if (fmt.empty())
         return Error::Make(Err::Song_UnsupportedFormat, "SongEngine", "no format given");
 
-    std::shared_ptr<ISongProvider> provider;
+    // Collect every provider claiming this format — format-name matches first,
+    // then extension-only claims — and try each until one parses: several song
+    // formats share ".xml" (OpenSong, OpenLP, EasyWorship), so the first
+    // claimant must not have the last word.
+    std::vector<std::shared_ptr<ISongProvider>> candidates;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& p : providers_)
+            if (Lower(p->Format()) == fmt) candidates.push_back(p);
         for (const auto& p : providers_) {
-            if (Lower(p->Format()) == fmt) { provider = p; break; }
-            for (const auto& ext : p->SupportedExtensions())
-                if (Lower(ext) == fmt) { provider = p; break; }
-            if (provider) break;
+            if (Lower(p->Format()) == fmt) continue;
+            for (const auto& ext : p->SupportedExtensions()) {
+                // Extensions carry a leading dot (".xml"); the requested
+                // format is the bare suffix ("xml") — compare without it.
+                std::string e = Lower(ext);
+                if (!e.empty() && e.front() == '.') e.erase(0, 1);
+                if (e == fmt) { candidates.push_back(p); break; }
+            }
         }
     }
-    if (!provider)
+    if (candidates.empty())
         return Error::Make(Err::Song_UnsupportedFormat, "SongEngine",
                            "no provider for format: " + std::string(format));
 
-    auto parsed = provider->Parse(source, fmt);
+    Result<Song> parsed = Error::Make(Err::Song_UnsupportedFormat, "SongEngine",
+                                      "no provider could parse format: " +
+                                          std::string(format));
+    for (const auto& provider : candidates) {
+        parsed = provider->Parse(source, fmt);
+        if (parsed.ok()) break;
+    }
     if (!parsed.ok()) return parsed.error();
     Song song = std::move(parsed.value());
     // Some interchange formats carry no title; a library entry still needs one

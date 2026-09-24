@@ -160,6 +160,7 @@ static const Suite kSuites[] = {
     {"bible", "bible", TestBibleProviders},
     {"bible", "bible", TestBibleEngine},
     {"bible", "bible-outline", TestBibleOutline},
+    {"bible", "bible-persist", TestBiblePersistence},
     {"bible", "scripture-slides", TestScriptureSlides},
     {"song", "song", TestSongChords},
     {"song", "song", TestSongProviders},

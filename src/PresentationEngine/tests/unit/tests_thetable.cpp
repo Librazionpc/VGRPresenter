@@ -117,12 +117,33 @@ void TestTheTableLibrary() {
     CHECK(reopened->VerseCount() == 3);
 
     // ---- search: all-terms matching, reference shape ----
+    // The reference is the citation line ("53-0218 - My Angel 1"): year minus
+    // the "19", a dash, the sermon's own date-code, the title stripped to
+    // alphanumerics, then the paragraph number.
     auto hits = reopened->Search("angel road");
     CHECK(hits.ok());
     CHECK(hits.value().size() == 1);
-    CHECK(hits.value()[0].reference == "1953 2:1");
+    CHECK(hits.value()[0].reference == "53-0218 - My Angel 1");
     CHECK(hits.value()[0].bookId == "Y1953");
     CHECK(hits.value()[0].chapter == 2);
+
+    // ---- citation(): sermon-level and paragraph-level ----
+    CHECK(lib->Citation("Y1953", 1, 0) == "53-0217 - Only Believe");
+    CHECK(lib->Citation("Y1953", 1, 2) == "53-0217 - Only Believe 2");
+    CHECK(lib->Citation("Y1953", 2, 1) == "53-0218 - My Angel 1");
+    CHECK(lib->Citation("Y1953", 99).empty());   // unknown chapter
+    // A code-less sermon keeps its slot empty instead of inventing one.
+    auto rNoCode = lib->ImportSermon("downloads/1953/Believest Thou This.txt",
+                                     "Believest thou this? We would know for sure here.\n\n"
+                                     "The second paragraph stands on its own words entirely.");
+    CHECK(rNoCode.ok());
+    CHECK(lib->Citation("Y1953", 3, 1) == "53 - Believest Thou This 1");
+    // Punctuation runs collapse to one space, alphanumerics only.
+    auto rPunct = lib->ImportSermon("downloads/1947/47_0412_Faith_Is_The_Substance.txt",
+                                    "Faith is the substance of things hoped for, the evidence unseen.\n\n"
+                                    "The second paragraph carries more words so it survives the length filter easily.");
+    CHECK(rPunct.ok());
+    CHECK(lib->Citation("Y1947", 1, 3) == "47-0412 - Faith Is The Substance 3");
 
     auto miss = reopened->Search("angel unmountable");
     CHECK(miss.ok());

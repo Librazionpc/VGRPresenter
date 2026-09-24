@@ -5,6 +5,8 @@
 #include <QQuickItemGrabResult>
 #include <QQuickWindow>
 #include <QGuiApplication>
+#include <QEvent>
+#include <QKeyEvent>
 #include <QDebug>
 
 #ifdef Q_OS_WIN
@@ -81,6 +83,28 @@ void SelfTestDriver::click(double x, double y)
 #endif
 }
 
+void SelfTestDriver::type(const QString &text)
+{
+    if (!m_window)
+        return;
+    // One QKeyEvent press+release per character, delivered to the window's
+    // focus object through the SAME event pipeline a hardware key uses
+    // (window->event() is what QQuickWindow's key handling routes through).
+    for (const QChar ch : text) {
+        const QString s(ch);
+        // '\b' = a real backspace (Qt::Key_Backspace, no text) — the erase path
+        // must be drivable, a Space here would poison the scenario.
+        const bool isBackspace = ch == QLatin1Char('\b');
+        const int key = isBackspace ? Qt::Key_Backspace
+                                    : (ch.isLetterOrNumber() ? ch.toUpper().unicode() : Qt::Key_Space);
+        QEvent::Type t = QEvent::KeyPress;
+        QKeyEvent press(t, key, Qt::NoModifier, isBackspace ? QString() : s);
+        QKeyEvent release(QEvent::KeyRelease, key, Qt::NoModifier, isBackspace ? QString() : s);
+        QGuiApplication::sendEvent(m_window, &press);
+        QGuiApplication::sendEvent(m_window, &release);
+    }
+}
+
 QObject *SelfTestDriver::findItem(const QString &objectName)
 {
     return m_window ? lookup(m_window, objectName) : nullptr;
@@ -110,6 +134,17 @@ bool SelfTestDriver::grab(const QString &itemName, const QString &pngPath)
 void SelfTestDriver::quit()
 {
     QGuiApplication::quit();
+}
+
+bool SelfTestDriver::focusItem(const QString &objectName)
+{
+    QQuickItem *item = m_window ? lookup(m_window, objectName) : nullptr;
+    if (!item) {
+        qWarning() << "SelfTestDriver: no item named" << objectName;
+        return false;
+    }
+    item->forceActiveFocus();
+    return item->hasActiveFocus();
 }
 
 QPointF SelfTestDriver::itemCenter(const QString &objectName)

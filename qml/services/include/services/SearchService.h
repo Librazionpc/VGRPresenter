@@ -62,6 +62,12 @@ public:
     // are grouped by kind in a fixed order. Empty/blank text -> {}.
     Q_INVOKABLE QVariantList search(const QString &text, int perKind = 5) const;
 
+    // One verse's FULL text (typesetting marks cleaned) — the Quick search dialog's
+    // hover preview: a result row only carries a capped snippet, hovering fetches
+    // the whole verse with this. "" when the bible/book/chapter/verse is unknown.
+    Q_INVOKABLE QString fullVerse(const QString &bibleId, const QString &bookId,
+                                  int chapter, int verse) const;
+
     // Only the Settings entries (the Settings popup's search box): best first, at most
     // `limit`. Each is { kind: "setting", title, section, subtitle, key } - `key` is the
     // settings section to open. Matches the entry's name or its section's.

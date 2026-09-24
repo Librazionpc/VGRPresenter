@@ -129,6 +129,60 @@ std::string CodeOf(const std::string& fileName) {
     return {};
 }
 
+// The date-code inside a stored TITLE ("0217 Only Believe" -> "0217"): the
+// leading numeric run before the first space. Empty when the title opens with
+// words (sermons imported without a code in their file name).
+std::string CodeFromTitle(const std::string& title) {
+    size_t sp = title.find(' ');
+    std::string head = sp == std::string::npos ? title : title.substr(0, sp);
+    if (!head.empty() && head.find_first_not_of("0123456789") == std::string::npos)
+        return head;
+    return {};
+}
+
+// A sermon's citation line, the way these sermons are cited: the year without
+// its "19" prefix, a dash, the sermon's own date-code, another dash, the
+// title with every non-alphanumeric character dropped, then the paragraph
+// number — "1947" + "0412 Faith Is The Substance" + 3 becomes
+//   47-0412 - Faith Is The Substance 3
+// The stored parts (year / code / title) stay as imported; only the display
+// cleans them up. An empty `code` keeps its slot out of the line; a zero
+// `verse` drops the trailing paragraph number (the sermon-level citation).
+std::string SermonCitation(const std::string& year, const std::string& code,
+                           const std::string& title, int verse) {
+    // The book name ("1947") loses a leading "19" when what is left is still
+    // a plausible yy form (2 digits) — "1947" -> "47"; anything else as-is.
+    std::string yy = year;
+    if (yy.size() == 4 && yy.substr(0, 2) == "19") yy = yy.substr(2);
+    std::string clean;
+    clean.reserve(title.size());
+    bool pendingSpace = false;
+    for (char c : title) {
+        if (std::isalnum(static_cast<unsigned char>(c))) {
+            if (pendingSpace && !clean.empty()) clean.push_back(' ');
+            pendingSpace = false;
+            clean.push_back(c);
+        } else if (!clean.empty()) {
+            pendingSpace = true;   // runs of punctuation/spaces become one space
+        }
+    }
+    // The stored title opens with the code when there is one ("0217 Only
+    // Believe"); the code stands on its own in the citation, so the leading
+    // numeric run comes out of the title (kept when the title is ONLY a code).
+    std::string display = clean;
+    if (!code.empty()) {
+        size_t d = 0;
+        while (d < display.size() && std::isdigit(static_cast<unsigned char>(display[d]))) ++d;
+        if (d > 0 && d < display.size() && display[d] == ' ') display = display.substr(d + 1);
+    }
+    if (display.empty()) display = clean;
+    std::string out = yy;
+    if (!code.empty()) out += "-" + code;
+    if (!display.empty()) out += " - " + display;
+    if (verse > 0) out += " " + std::to_string(verse);
+    return out;
+}
+
 constexpr const char* kUnfiledYear = "Unfiled";
 
 // Where a sermon file goes: its year book and its chapter title ("0217 Only Believe" - the numeric code before the title is kept so
@@ -1251,6 +1305,7 @@ Result<void> TheTableLibrary::Persist(const std::vector<TheTableBook>& books) co
             J::Object c;
             c["number"] = J::Number(ch.number);
             c["title"] = J::String(ch.title);
+            if (!ch.code.empty()) c["code"] = J::String(ch.code);
             J::Array vs;
             for (const TheTableVerse& v : ch.verses) {
                 J::Object vo;
@@ -1300,6 +1355,10 @@ Result<void> TheTableLibrary::Load() {
                 TheTableChapter ch;
                 ch.number = static_cast<int>(cv.Find("number") ? cv.Find("number")->asInt() : 0);
                 ch.title = std::string(cv.Find("title") ? cv.Find("title")->asString() : "");
+                // The code joined this schema later: older files carry none, and
+                // the title always opens with it when there is one.
+                ch.code = std::string(cv.Find("code") ? cv.Find("code")->asString() : "");
+                if (ch.code.empty()) ch.code = CodeFromTitle(ch.title);
                 if (const J* vs = cv.Find("verses"); vs && vs->asArray()) {
                     for (const J& vv : *vs->asArray()) {
                         TheTableVerse v;
@@ -1391,7 +1450,9 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine() {
             doc.metadata["book"] = book.id;
             doc.metadata["year"] = book.name;
             doc.metadata["chapter"] = std::to_string(ch.number);
-            doc.metadata["reference"] = book.name + " " + std::to_string(ch.number);
+            // The citation line ("47-0412 - Faith Is The Substance") travels
+            // with the document so search surfaces can quote it verbatim.
+            doc.metadata["reference"] = SermonCitation(book.name, ch.code.empty() ? CodeFromTitle(ch.title) : ch.code, ch.title, 0);
             doc.tags = {"sermon", "table"};
             auto r = engine.IndexDocument(doc);
             if (!r.ok()) return r.error();
@@ -1448,6 +1509,19 @@ Result<TheTableChapter> TheTableLibrary::GetChapter(std::string_view bookId, int
         return Error::Make(Err::NotFound, kModule, "no such chapter");
 }
 
+std::string TheTableLibrary::Citation(std::string_view bookId, int chapter, int verse) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const TheTableBook& book : books_) {
+        if (book.id != bookId) continue;
+        for (const TheTableChapter& ch : book.chapters)
+            if (ch.number == chapter)
+                return SermonCitation(book.name, ch.code.empty() ? CodeFromTitle(ch.title) : ch.code,
+                                      ch.title, verse);
+        break;
+    }
+    return {};
+}
+
 size_t TheTableLibrary::VerseCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
     size_t n = 0;
@@ -1462,57 +1536,146 @@ size_t TheTableLibrary::VerseCount() const {
 // ---------------------------------------------------------------------------
 Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view query,
                                                           size_t limit) const {
-    // Term extraction: lowercase words >= 3 chars.
+    // Term extraction: lowercase words >= 2 chars (user call: "my" must find the
+    // sermons that have it — the old 3-char floor silently dropped half of English).
     std::vector<std::string> terms;
     std::string cur;
     for (char c : Lower(std::string(query))) {
         if (std::isalnum(static_cast<unsigned char>(c))) {
             cur.push_back(c);
         } else if (!cur.empty()) {
-            if (cur.size() >= 3) terms.push_back(cur);
+            if (cur.size() >= 2) terms.push_back(cur);
             cur.clear();
         }
     }
-    if (!cur.empty() && cur.size() >= 3) terms.push_back(cur);
+    if (!cur.empty() && cur.size() >= 2) terms.push_back(cur);
     if (terms.empty())
         return Error::Make(Err::InvalidArgument, kModule, "search needs a word");
     if (limit == 0) limit = 1;
 
-    struct Acc { const TheTableVerse* v; const TheTableBook* b; int chapter; int matches; };
-    std::vector<Acc> hits;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (const TheTableBook& book : books_) {
-            for (const TheTableChapter& ch : book.chapters) {
-                for (const TheTableVerse& v : ch.verses) {
-                    const std::string hay = Lower(v.text);
-                    int matches = 0;
-                    for (const std::string& t : terms)
-                        if (hay.find(t) != std::string::npos) ++matches;
-                    if (matches == static_cast<int>(terms.size()))
-                        hits.push_back({&v, &book, ch.number, matches});
-                }
+    // Words shorter than 3 chars are below the platform index's own token floor:
+    // it cannot rank candidates for them, so those queries take the direct scan
+    // (engineQueried stays false) instead of a silently-empty index answer.
+    bool hasShortTerm = false;
+    for (const std::string& t : terms)
+        if (t.size() < 3) hasShortTerm = true;
+
+    // Candidate sermons come from the platform Search Engine's index (one document
+    // per sermon, built once in the background at boot). The old path here was the
+    // app-wide search's lag: it LOWER-CAST EVERY PARAGRAPH OF THE WHOLE LIBRARY
+    // under the library mutex on EVERY query (hundreds of sermons x full text =
+    // megabytes of fresh strings per keystroke, on the GUI thread). Now the engine's
+    // inverted index ranks the sermons and only those few candidates' paragraphs are
+    // scanned below — a handful of string searches instead of the whole library.
+    struct Cand { std::string bookId; int chapter; };
+    std::vector<Cand> cands;
+    bool engineQueried = false;
+    if (!hasShortTerm) {
+        search::SearchEngine& engine = search::SearchEngine::Instance();
+        search::SearchFilter filter;
+        filter.type = "table";
+        if (auto results = engine.Search(std::string(query), filter, size_t(limit) * 8 + 8); results.ok()) {
+            engineQueried = true;
+            for (const auto& r : results.value()) {
+                // "table:<bookId>:<chapter>" (TheTableDocId).
+                const size_t a = r.documentId.find(':');
+                const size_t b = a == std::string::npos ? std::string::npos : r.documentId.find(':', a + 1);
+                if (a == std::string::npos || b == std::string::npos) continue;
+                Cand c;
+                c.bookId = r.documentId.substr(a + 1, b - a - 1);
+                c.chapter = std::atoi(r.documentId.c_str() + b + 1);
+                if (c.chapter > 0) cands.push_back(std::move(c));
             }
         }
     }
-    // Best-first: more coverage wins (== all terms here), longer paragraphs tie-break.
-    std::sort(hits.begin(), hits.end(), [](const Acc& a, const Acc& b) {
-        if (a.matches != b.matches) return a.matches > b.matches;
-        return a.v->text.size() < b.v->text.size();
-    });
+
+    // One sermon's paragraphs against the terms. TWO match shapes (user call: the
+    // words need not sit in ONE paragraph — "it can be in a paragraph or max two"):
+    //   exact     — every term in the one paragraph (the original rule, best rank);
+    //   spanned   — every term across the paragraph and its NEXT one together
+    //               (neither alone has all of them). The hit reports the FIRST of
+    //               the pair, so picking it opens at where the passage starts.
+    struct Acc { const TheTableVerse* v; const TheTableBook* b; const TheTableChapter* ch; int matches; bool spanned; };
+    std::vector<Acc> hits;
+    auto scanChapter = [&](const TheTableBook& book, const TheTableChapter& ch) {
+        const size_t n = ch.verses.size();
+        std::vector<unsigned> bm(n, 0u);   // per-paragraph term-hit bitmask
+        for (size_t i = 0; i < n; ++i) {
+            const std::string hay = Lower(ch.verses[i].text);
+            unsigned m = 0;
+            for (size_t t = 0; t < terms.size(); ++t)
+                if (hay.find(terms[t]) != std::string::npos) m |= (1u << t);
+            bm[i] = m;
+        }
+        const unsigned all = terms.size() >= 32 ? 0xFFFFFFFFu : ((1u << terms.size()) - 1u);
+        for (size_t i = 0; i < n; ++i)
+            if (bm[i] == all)
+                hits.push_back({&ch.verses[i], &book, &ch, static_cast<int>(terms.size()), false});
+        for (size_t i = 0; i + 1 < n; ++i) {
+            const unsigned pair = bm[i] | bm[i + 1];
+            // (a pair whose halves already qualify alone was pushed above — only
+            // genuinely spread-out matches land here)
+            if (pair == all && bm[i] != all && bm[i + 1] != all)
+                hits.push_back({&ch.verses[i], &book, &ch,
+                                terms.size() >= 32 ? 0 : __builtin_popcount(bm[i]), true});
+        }
+    };
+    bool fromEngine = false;
+    if (!cands.empty()) {
+        fromEngine = true;
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const Cand& c : cands) {
+            const TheTableBook* book = nullptr;
+            for (const TheTableBook& b : books_)
+                if (b.id == c.bookId) { book = &b; break; }
+            if (!book) continue;
+            for (const TheTableChapter& ch : book->chapters) {
+                if (ch.number != c.chapter) continue;
+                scanChapter(*book, ch);
+                break;   // (chapters are unique within a book)
+            }
+        }
+    } else if (!engineQueried) {
+        // The index was skipped (short terms) or answered with an ERROR (engine not
+        // initialized): the direct scan keeps search working. An ok-but-empty index
+        // answer with only long terms is a genuine no-match — the boot path indexes
+        // every sermon, so post-boot emptiness means emptiness, and rescanning would
+        // reintroduce the lag this rewrite exists to remove.
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const TheTableBook& book : books_)
+            for (const TheTableChapter& ch : book.chapters)
+                scanChapter(book, ch);
+    }
+    if (fromEngine) {
+        // Keep the ENGINE's relevance order (candidates arrive best-first); within
+        // a sermon the paragraphs stay in reading order.
+    } else {
+        // Fallback order: single-paragraph matches before spanned ones, then more
+        // coverage, then book/chapter order.
+        std::sort(hits.begin(), hits.end(), [](const Acc& a, const Acc& b) {
+            if (a.spanned != b.spanned) return !a.spanned;
+            if (a.matches != b.matches) return a.matches > b.matches;
+            if (a.b != b.b) return a.b->order < b.b->order;
+            return a.ch->number < b.ch->number;
+        });
+    }
     if (hits.size() > limit) hits.resize(limit);
 
     std::vector<TheTableSearchHit> out;
     out.reserve(hits.size());
     for (const Acc& h : hits) {
         TheTableSearchHit s;
-        s.reference = h.b->name + " " + std::to_string(h.chapter) + ":" +
-                      std::to_string(h.v->number);
+        // The citation line, the sermon-citation way ("47-0412 - Faith Is The
+        // Substance 3"), not the scripture-shaped "1953 2:1".
+        s.reference = SermonCitation(h.b->name,
+                                     h.ch->code.empty() ? CodeFromTitle(h.ch->title) : h.ch->code,
+                                     h.ch->title, h.v->number);
         s.bookId = h.b->id;
-        s.chapter = h.chapter;
+        s.chapter = h.ch->number;
         s.verse = h.v->number;
         s.snippet = h.v->text.substr(0, 220);
         s.score = static_cast<double>(h.matches);
+        s.spanned = h.spanned;
         out.push_back(std::move(s));
     }
     return out;
@@ -1577,6 +1740,7 @@ Result<std::string> TheTableLibrary::AddCleanText(std::string_view fileName, con
     TheTableChapter ch;
     ch.number = static_cast<int>(book.chapters.size()) + 1;
     ch.title = title;
+    ch.code = CodeOf(name);
     const auto numbered = NumberParagraphs(paragraphs);
     for (size_t i = 0; i < numbered.size(); ++i) {
         TheTableVerse v;

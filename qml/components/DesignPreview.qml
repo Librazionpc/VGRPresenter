@@ -101,7 +101,67 @@ Item {
                 }
 
                 // --- text (and a bound template field's placeholder) ---
+                // Auto-size runs through the SAME explicit fit solver as the edit
+                // canvas (EditScreen.qml's recomputeFit): Qt's Text.Fit converged
+                // differently in this scaled-down subtree than on the canvas, and
+                // grown text could spill below its box on one surface but not the
+                // other. A tiny bisection over candidate sizes, re-measuring an
+                // invisible twin each step, gives both surfaces the same answer
+                // (the largest size whose real laid-out height/width fit the box).
+                property real fitProbe: el.meta.fontSize ?? 16
+                property real fitAnswer: el.meta.fontSize ?? 16
+                property bool fitSolving: false
+                readonly property var fitInputs: [fitText.text, el.width, el.height, el.fitMode,
+                                                  el.meta.fontSize ?? 16, el.meta.lineHeight ?? 1.2,
+                                                  el.style.padding ?? 0]
+                // EVERY text block solves — "none" included: the box is the master and the
+                // text must always sit inside it (a "none" block renders at its set size
+                // while that fits, and SQUEEZES the moment it doesn't; nothing is ever cut).
+                onFitInputsChanged: if (!fitSolving)
+                    Qt.callLater(el.solveFit)
+                Component.onCompleted: if (!fitSolving)
+                    Qt.callLater(el.solveFit)
+                function solveFit() {
+                    if (fitSolving)
+                        return
+                    fitSolving = true
+                    const pad = el.style.padding ?? 0
+                    const bw = el.width - pad * 2, bh = el.height - pad * 2
+                    let lo = 3, hi = 400
+                    if (bw <= 0 || bh <= 0) {
+                        lo = el.meta.fontSize ?? 16
+                    } else {
+                        for (let i = 0; i < 11; ++i) {
+                            const mid = (lo + hi) / 2
+                            fitProbe = mid
+                            if (fitMeasure.contentWidth <= bw && fitMeasure.contentHeight <= bh)
+                                lo = mid
+                            else
+                                hi = mid
+                        }
+                    }
+                    // grow: fill the box; shrink/none: at most the set size (the squeeze).
+                    fitAnswer = el.fitMode === "grow" ? lo : Math.min(el.meta.fontSize ?? 16, lo)
+                    fitProbe = fitAnswer
+                    fitSolving = false
+                }
                 Text {
+                    id: fitMeasure
+                    visible: false
+                    width: el.width - (el.style.padding ?? 0) * 2
+                    text: fitText.text
+                    font.family: fitText.font.family
+                    font.pixelSize: el.fitProbe
+                    font.weight: fitText.font.weight
+                    font.italic: fitText.font.italic
+                    font.capitalization: fitText.font.capitalization
+                    font.letterSpacing: fitText.font.letterSpacing
+                    lineHeight: fitText.lineHeight
+                    lineHeightMode: Text.ProportionalHeight
+                    wrapMode: Text.WordWrap
+                }
+                Text {
+                    id: fitText
                     visible: el.kind === "text"
                     anchors.fill: parent
                     leftPadding: el.style.padding ?? 0; rightPadding: el.style.padding ?? 0
@@ -110,10 +170,11 @@ Item {
                         : ((el.modelData.bind ?? "") !== "" ? "{" + el.modelData.bind + "}" : ""), el.meta.list ?? "")
                     color: el.meta.color ?? "#f2f4fa"
                     font.family: el.meta.fontFamily ?? Theme.fontFamily
-                    // shrink: the set size, shrinking only on overflow; grow: fill the box (Fit from a large size) - the canvas's modes
-                    font.pixelSize: el.fitMode === "grow" ? 400 : (el.meta.fontSize ?? 16)
-                    fontSizeMode: el.fitMode === "none" ? Text.FixedSize : Text.Fit
-                    minimumPixelSize: 3
+                    // Always the solver's answer: grow fills the box, shrink/none render
+                    // at the set size and squeeze only on overflow — the text ALWAYS sits
+                    // inside its box, on every surface this item draws for.
+                    font.pixelSize: el.fitAnswer
+                    fontSizeMode: Text.FixedSize
                     font.weight: el.meta.bold ? Font.Bold
                         : el.meta.fontWeight === "Regular" ? Font.Normal
                         : el.meta.fontWeight === "SemiBold" ? Font.DemiBold
@@ -139,7 +200,9 @@ Item {
                         return a === "top" ? Text.AlignTop : a === "bottom" ? Text.AlignBottom : Text.AlignVCenter
                     }
                     wrapMode: Text.WordWrap
-                    elide: Text.ElideRight
+                    // (No elide: the solver above guarantees the laid-out text fits the
+                    // box, so there is nothing to truncate — swallowed tails with an
+                    // ellipsis were this line's doing.)
                 }
 
                 // --- shapes: the Edit screen's drawing - the fill is the item's background (transparent draws nothing, so an

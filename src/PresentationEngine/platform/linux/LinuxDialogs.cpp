@@ -3,6 +3,7 @@
 #include "platform/linux/LinuxExec.hpp"
 
 #include <cstdlib>
+#include <sstream>
 
 namespace bps::platform {
 
@@ -23,6 +24,29 @@ bool HasDisplay() {
 
 const char* DialogTool() { return CommandAvailable(kZenity) ? kZenity : "kdialog"; }
 
+// zenity's --file-filter wants "NAME | *.a *.b" (patterns after a pipe).
+// The callers pass the Qt-style "NAME (*.a *.b)" — rewritten here so the
+// filter actually matches files instead of being a name with no patterns.
+std::string ZenityFileFilter(const std::string& f) {
+    size_t open = f.find('(');
+    size_t close = f.find(')', open);
+    if (open == std::string::npos || close == std::string::npos || close <= open + 1)
+        return f;
+    std::string name = f.substr(0, open);
+    while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
+    std::string pats = f.substr(open + 1, close - open - 1);
+    // One pattern per token; bare "*" becomes zenity's every-file "*".
+    std::string joined;
+    std::istringstream pats_in{pats};
+    std::string tok;
+    while (pats_in >> tok) {
+        if (!joined.empty()) joined.push_back(' ');
+        joined += tok;
+    }
+    if (joined.empty()) return name;
+    return name + " | " + joined;
+}
+
 // Runs the zenity file-selection dialog; returns the picked path or nullopt on
 // cancel. File pickers are zenity-only (kdialog uses a different syntax); the
 // kdialog fallback is used for message/question boxes via DialogTool().
@@ -42,7 +66,8 @@ Result<std::optional<std::string>> LinuxDialogs::OpenFileDialog(
     std::string_view title, const std::vector<std::string>& filters) {
     std::string cmd = std::string(kZenity) + " --file-selection --title=" +
                       ShellQuote(title);
-    for (const auto& f : filters) cmd += " --file-filter=" + ShellQuote(f);
+    for (const auto& f : filters)
+        cmd += " --file-filter=" + ShellQuote(ZenityFileFilter(f));
     return RunFileDialog(cmd + " 2>/dev/null");
 }
 

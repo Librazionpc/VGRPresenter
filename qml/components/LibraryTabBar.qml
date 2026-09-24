@@ -9,6 +9,7 @@ import VGRPresenterUI
 
 Rectangle {
     id: root
+    objectName: "selfTestLibraryTabBar"
 
     // Index into `tabs` of the selected tab; the host binds its pane
     // switcher to this. Shows is the landing tab (the Figma export froze
@@ -41,6 +42,29 @@ Rectangle {
         root.searches = next
     }
 
+    // ---- Live autocomplete (Scripture / The Table) -------------------------------------
+    // Panes with reference suggestions register a provider under their pane key
+    // (registerSuggester); `suggestions` wraps the ACTIVE tab's provider as one function
+    // (text) => rows — read fresh at every call, so each keystroke gets current rows. A
+    // picked row is routed to the pane that offered it via suggestionPicked(paneKey, ref).
+    property var suggesters: ({})
+    function registerSuggester(pane, item) {
+        const next = Object.assign({}, root.suggesters)
+        next[pane] = item
+        root.suggesters = next
+    }
+    readonly property var suggestions: (text) => {
+        const s = root.suggesters[root.currentPane]
+        if (!root.canSearch || !s || !s.paneSuggestions)
+            return { rows: [], complete: "" }
+        const res = s.paneSuggestions(text)
+        return Array.isArray(res) ? { rows: res, complete: "" } : res
+    }
+    signal suggestionPicked(string pane, var ref)
+    // A suggestion row was hovered / un-hovered — relayed to the pane that offered
+    // the rows (the pane previews the row's content while the hover lasts).
+    signal suggestionHovered(string pane, int index, bool hovering)
+
     color: "transparent"
 
     // The far right of the bar, in the tabs' own row (the FreeShow sample:
@@ -48,6 +72,7 @@ Rectangle {
     // the same red underline).
     TabSearchBox {
         id: searchBox
+        objectName: "selfTestSearchBox"
         visible: root.canSearch
         anchors.right: parent.right
         anchors.top: parent.top
@@ -61,8 +86,43 @@ Rectangle {
         width: Math.max(100, Math.min(searchBox.implicitWidth, root.width - tabsRow.childrenRect.width - 16))
         placeholder: qsTr("Search")
         focusedPlaceholder: qsTr("Search %1").arg(root.tabs[root.currentTab].label.toLowerCase())
-        text: root.searches[root.currentPane] !== undefined ? root.searches[root.currentPane] : ""
+        // Per-tab queries are pushed in imperatively (TabSearchBox.resetText) instead of
+        // bound — the autofill's programmatic writes would silently break a `text:` binding
+        // and tab switches would stop restoring that tab's query. Every keystroke also
+        // re-fires onSearchesChanged (setSearch rebuilds the map), so both handlers only
+        // push when the stored value DIFFERS from the box — the user's own typing is a no-op.
+        function pushStored() {
+            const want = root.searches[root.currentPane] !== undefined ? root.searches[root.currentPane] : ""
+            if (searchBox.text !== want)
+                searchBox.resetText(want)
+        }
+        Component.onCompleted: pushStored()
+        Connections {
+            target: root
+            // (Qualified: a Connections handler's unqualified lookup skips intermediate
+            // objects, so a bare pushStored() here threw "pushStored is not defined".)
+            function onSearchesChanged() { searchBox.pushStored() }
+        }
+        Connections {
+            target: root
+            function onCurrentPaneChanged() { searchBox.pushStored() }
+        }
         onEdited: (value) => root.setSearch(value)
+        // The active tab's live reference suggestions (null on plain-filter tabs).
+        suggestions: root.suggestions
+        // The Table's matches render IN THE PANE (matchesList) — the floating popup
+        // never opens there (user call: it covered the search box and the preview).
+        popupSuppressed: root.currentPane === "table"
+        onSuggestionPicked: (index, payload) => {
+            const s = root.suggesters[root.currentPane]
+            if (s && payload && payload.ref)
+                root.suggestionPicked(root.currentPane, payload.ref)
+        }
+        onSuggestionHovered: (index, hovering) => {
+            const s = root.suggesters[root.currentPane]
+            if (s)
+                root.suggestionHovered(root.currentPane, index, hovering)
+        }
     }
 
     // Left-packed row — the tabs hug the LEFT edge of the bar (user call:

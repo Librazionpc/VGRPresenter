@@ -46,6 +46,9 @@ Item {
     signal templateEditRequested(string templateId)
     // "Convert to show": the show's name and its slides ([{ title, background, blocks }]), from the engine.
     signal convertToShowRequested(string name, var slides)
+    // A suggestion row from the tab search box was accepted — carried up so the host can
+    // route it back into the pane that offered it (see applySuggestion).
+    signal suggestionChosen(var ref)
 
     // ---- what is open ----
     property string sourceId: ""
@@ -167,14 +170,39 @@ Item {
         const b = root.book
         if (!b)
             return
+        revealBook(root.bookIndex)
         const wanted = chapter > 0 && b.chapters.indexOf(chapter) >= 0 ? chapter : b.chapters[0]
         root.openChapter(wanted, true)
     }
 
+    // Scrolls the books / chapters columns so the active row is in view — a resolved
+    // reference ("psalms 119") highlights a row that can sit far below the fold, and
+    // a highlight you cannot see reads as "the chapters didn't move".
+    function revealBook(index) {
+        const y = 4 + index * 28
+        if (y < booksFlick.contentY)
+            booksFlick.contentY = Math.max(0, y - 4)
+        else if (y + 28 > booksFlick.contentY + booksFlick.height)
+            booksFlick.contentY = Math.max(0, Math.min(y + 28 - booksFlick.height + 4, booksFlick.contentHeight - booksFlick.height))
+    }
+    function revealChapter(chapter) {
+        const idx = root.book ? root.book.chapters.indexOf(chapter) : -1
+        if (idx < 0)
+            return
+        const y = 4 + idx * 28
+        if (y < chaptersFlick.contentY)
+            chaptersFlick.contentY = Math.max(0, y - 4)
+        else if (y + 28 > chaptersFlick.contentY + chaptersFlick.height)
+            chaptersFlick.contentY = Math.max(0, Math.min(y + 28 - chaptersFlick.height + 4, chaptersFlick.contentHeight - chaptersFlick.height))
+    }
+
     function openChapter(number, selectFirst) {
+        root.peekIndex = -1                   // (a real open ends any hover peek)
+        root.peekVerses = []
         root.chapterNumber = number
         root.chapterVerses = root.book ? root.adapter.chapter(root.sourceId, root.book.id, number) : []
         root.searching = false
+        revealChapter(number)
         if (selectFirst && root.chapterVerses.length > 0) {
             root.selected = [root.chapterVerses[0].number]
             root.anchorVerse = root.chapterVerses[0].number
@@ -230,21 +258,36 @@ Item {
 
     // Jumps to a passage the engine resolved from typed text: { bookId, chapter, verseStart, verseEnd }.
     function goTo(ref) {
+        // Any jump ends a hover peek — including the pick-a-row kind. (A pick that
+        // lands on the ALREADY-open chapter skips openBook/openChapter below, so
+        // without this the peeked content would stick after the selection.)
+        root.peekIndex = -1
+        root.peekVerses = []
         const index = root.books.findIndex((b) => b.id === ref.bookId)
         if (index < 0)
             return
-        root.openBook(index, ref.chapter > 0 ? ref.chapter : 0)
+        // Re-opening the chapter resets the selection and scroll, and the search box fires a
+        // resolve on EVERY keystroke — so only reload when the spot actually changed (typing
+        // "genesis 1:1" then "genesis 1:16" must move the highlight, not blank the chapter).
+        const chapters = root.book ? root.book.chapters : []
+        const target = ref.chapter > 0 && chapters.indexOf(ref.chapter) >= 0 ? ref.chapter : (chapters.length > 0 ? chapters[0] : 0)
+        if (root.bookIndex !== index || root.chapterNumber !== target)
+            root.openBook(index, ref.chapter > 0 ? ref.chapter : 0)
         if (ref.verseStart > 0) {
             const to = ref.verseEnd > 0 ? ref.verseEnd : ref.verseStart
             const picked = root.chapterVerses.map((v) => v.number).filter((n) => n >= ref.verseStart && n <= to)
             if (picked.length > 0) {
                 root.selected = picked
                 root.anchorVerse = picked[0]
+                // Bring the first picked verse into view (rows are a fixed 38, as in the list).
+                versesFlick.contentY = Math.max(0, (picked[0] - 1) * 38 - 40)
             }
         }
     }
 
     onFilterChanged: {
+        if (root.filter.trim() === "")
+            root.clearCitationMatches()   // (the box never calls the provider with "")
         const ref = root.adapter.resolve(root.filter, root.sourceId)
         if (ref.bookId !== undefined)
             root.goTo(ref)
@@ -252,13 +295,257 @@ Item {
 
     readonly property var visibleBooks: {
         const needle = root.filter.trim().toLowerCase()
-        if (needle === "" || root.adapter.resolve(root.filter, root.sourceId).bookId !== undefined)
+        if (needle === "")
             return root.books
-        return root.books.filter((b) => b.name.toLowerCase().indexOf(needle) >= 0)
+        // A complete reference resolves — jump done, whole list stays (the popup does the moving).
+        if (root.adapter.resolve(root.filter, root.sourceId).bookId !== undefined)
+            return root.books
+        const named = root.books.filter((b) => b.name.toLowerCase().indexOf(needle) >= 0)
+        // NEVER empty while typing: a half-typed reference ("gene", "genesis 1:") matches no
+        // book NAME, and blanking the books/chapters column mid-type looked like the pane lost
+        // its data. Fall back to the full list — the suggestion popup handles the jumping.
+        return named.length > 0 ? named : root.books
+    }
+
+    // Yellow highlight of the typed words in displayed text — the SAME idiom
+    // Quick search uses (see QuickSearchDialog.highlight): escape first, then wrap
+    // each query word (2+ chars) in a bright-yellow chip, rendered via StyledText.
+    // The query to highlight with: the PILL's text while it is searching, else the
+    // tab search box. (Keying only on root.filter left pill-searched text plain —
+    // the "no highlight at all" case.)
+    readonly property string activeQuery: root.searching ? searchInput.text : root.filter
+
+    function highlight(text) {
+        const source = String(text ?? "")
+        if (source === "")
+            return ""
+        const words = root.activeQuery.trim().toLowerCase().split(/\s+/).filter((w) => w.length >= 2)
+        if (words.length === 0)
+            return source
+        const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        const safeWords = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        const re = new RegExp("(" + safeWords.join("|") + ")", "gi")
+        // Qt StyledText ignores background-color on spans (bold survived, the yellow
+        // didn't render — user screenshot). A colored <font> is honored.
+        return esc(source).replace(re, '<b><font color="#ffd54a">$1</font></b>')
+    }
+    readonly property bool canHighlight: root.activeQuery.trim().length >= 2
+
+    // One dropdown row for a sermon citation line ("47-0412 - Faith Is The
+    // Substance"): the title as the label, the citation code ("47-0412") in the
+    // right-hand trailing slot (user call — the two shapes they named, both
+    // visible). The stored chapter title IS the citation line; split it. Letters
+    // after the code ("53-0217A") ride the code, not the title.
+    // Two stored shapes (spaces around dashes tolerated, code space-stripped):
+    //   "47-0412 - Faith Is The Substance"  code - title (the separator dash)
+    //   "47 - 1100X Fellowship"             code title  (no separator dash)
+    function citeRow(book, index, cite) {
+        let code = "", title = cite
+        let m = /^(\d{2}\s*-\s*\d{4}[A-Za-z]?)\s*-\s*(.+)$/.exec(cite)
+        if (!m)
+            m = /^(\d{2}\s*-\s*\d{4}[A-Za-z]?)\s+(\S.*)$/.exec(cite)
+        if (m) {
+            code = m[1].replace(/\s+/g, "")
+            title = m[2].trim()
+        }
+        return { label: title,
+                 trailing: code,
+                 cite: cite,
+                 ref: { bookId: book.id, chapter: book.chapters[index], verseStart: 0, verseEnd: 0 } }
+    }
+
+    // Live autocomplete for the tab search box: what the typed text still means, as plain data
+    // rows for TabSearchBox's popup. Books whose name contains the text, then — when the text
+    // IS a book ("genesis", "genesis 1") — that book's chapters with their sizes (verse counts
+    // for a Bible, sermon titles for The Table). Each row carries a full `ref` so picking one
+    // jumps straight there; clicking elsewhere in the box (or focusing it with text already
+    // in) re-opens the list. Empty when there is nothing useful to offer.
+    function suggest(text, sourceId) {
+        // { rows: [popup rows], complete: string|null } — the inline completion rides
+        // BESIDE the rows, never ON the array: the first version attached it as `out.complete`
+        // and every return path went through out.slice(...), which returns a fresh plain array
+        // and silently dropped the property (the autocomplete looked dead).
+        const rows = []
+        let completion = null
+        if (!root.adapter || !text)
+            return { rows: rows, complete: completion }
+        const needle = String(text).trim().toLowerCase()
+        if (needle === "")
+            return { rows: rows, complete: completion }
+        // THE TABLE (its books carry chapterTitles; Bibles never do). The citation
+        // lines ("47-0412 - Faith Is The Substance") are the search targets, and
+        // the user call sets a SPLIT threshold:
+        //   - from TWO chars the in-pane list FILTERS live ("47-" lists the year's
+        //     sermons, "fa" lists every title containing it) — the list is the
+        //     filter, the user scrolls/picks; nothing is ever chosen for them;
+        //   - the AUTO-FILL/JUMP stays strict: FIVE chars minimum (resolveCitation's
+        //     threshold, TheTableService.cpp) AND exactly one match — short needles
+        //     like "47-" match dozens of sermons and must never complete or jump.
+        // So a unique match below 5 chars still shows as a one-row list to click;
+        // from 5 chars up, uniqueness completes the rest of the line inline.
+        if (root.books.length > 0 && root.books[0].chapterTitles !== undefined) {
+            if (needle.length >= 2) {
+                const matches = []
+                for (const b of root.books) {
+                    const titles = b.chapterTitles || []
+                    for (let i = 0; i < b.chapters.length; i++) {
+                        const cite = String(titles[i] || "")
+                        if (cite === "")
+                            continue
+                        if (cite.toLowerCase().indexOf(needle) >= 0)
+                            matches.push({ book: b, index: i, cite: cite })
+                    }
+                }
+                // Unique at 5+ chars: complete inline, no list (the resolve jumps).
+                // Unique below 5: one-row list — click it, the fill must not fire.
+                if (matches.length === 1 && needle.length >= 5) {
+                    const at = matches[0].cite.toLowerCase().indexOf(needle)
+                    return { rows: [], complete: matches[0].cite.slice(at + needle.length) }
+                }
+                if (matches.length > 0)
+                    // The list scrolls (matchesList sits in the pane's Flickable);
+                    // the cap bounds the worst 2-char case (~a thousand delegates).
+                    return { rows: matches.slice(0, 150).map((m) => root.citeRow(m.book, m.index, m.cite)), complete: "" }
+            }
+            return { rows: [], complete: "" }
+        }
+        // Inline autofill (the FreeShow Scripture input): the best completion for the typed
+        // prefix as it reads ("gene" -> "sis ", "genesis 1" -> ": "). TabSearchBox COMMITS
+        // the word into the box with the caret at the end (their searchValue =
+        // result.autocompleted), so the next keystroke is the chapter digit; the ": "
+        // marker inserts the colon so the digits after it type the verse.
+        const starts = root.books.filter((b) => b.name.toLowerCase().indexOf(needle) === 0 ||
+                                                needle.indexOf(b.name.toLowerCase()) === 0)
+        if (starts.length === 1) {
+            const bk = starts[0], bkLower = bk.name.toLowerCase()
+            if (bkLower.indexOf(needle) === 0)
+                completion = bk.name.slice(needle.length) + " "
+            else {
+                // Book typed in full + a chapter number -> the ": " marker, the next
+                // digits type the verse straight through. Scripture-only now: The Table
+                // returns above (citation inline search, no book completions).
+                const rest = needle.slice(bkLower.length).trim()
+                if (/^\d+$/.test(rest) && bk.chapters.indexOf(parseInt(rest)) >= 0)
+                    completion = ": "
+            }
+        }
+        // The Table (a book WITH chapterTitles): once the year is typed in full, the rows
+        // ARE that year's sermons — each row carries bookId + chapter so picking one jumps
+        // straight into the sermon (user call: "use chapter not book"). Runs BEFORE the
+        // resolved check (a bare year resolves, but the sermon list is exactly what should
+        // show). Bibles (no chapterTitles) never enter this and keep the rows below.
+        if (starts.length === 1 && starts[0].chapterTitles && starts[0].chapterTitles.length > 0 &&
+                needle === starts[0].name.toLowerCase()) {
+            const yr = starts[0]
+            for (let i = 0; i < yr.chapters.length; i++) {
+                const cite = String(yr.chapterTitles[i] || "")
+                if (cite !== "")
+                    rows.push(root.citeRow(yr, i, cite))
+            }
+            // No 8-row cap here (books keep theirs): a year holds a hundred+ sermons and
+            // the popup list is a Flickable — it scrolls under its own maxHeight cap.
+            return { rows: rows, complete: completion }
+        }
+        // RESOLVED -> NO dropdown (user call): the pane has already jumped and the
+        // chapters column has moved, so a chapter list in a popup is redundant — the
+        // inline completion + auto-colon carry the rest and the chapter is typed straight in.
+        const resolved = root.adapter.resolve(String(text), sourceId)
+        if (resolved.bookId !== undefined)
+            return { rows: [], complete: completion }
+        // Not resolved yet (an ambiguous prefix like "sa", or no book at all): the books
+        // whose NAME contains the text, as rows to pick from.
+        for (const b of root.books) {
+            if (b.name.toLowerCase().indexOf(needle) >= 0) {
+                const size = b.verseCounts && b.verseCounts.length === b.chapters.length
+                             ? b.verseCounts.reduce((a, c) => a + c, 0) : b.chapters.length
+                rows.push({ label: b.name, detail: b.verseCounts ? size + " verses" : size + " sermons",
+                            ref: { bookId: b.id, chapter: 0, verseStart: 0, verseEnd: 0 } })
+            }
+        }
+        return { rows: rows.slice(0, 8), complete: completion }
     }
 
     function runSearch(text) {
         root.searchResults = text.trim() === "" ? [] : root.adapter.search(text, root.sourceId)
+    }
+
+    // ---- tab-search autocomplete ------------------------------------------------
+    // Called per keystroke by the tab bar (which registered this pane as its tab's
+    // provider): rows for the popup (label + right-hand detail + payload.ref), straight
+    // from suggest() above. (The tab bar looks this method up by name — paneSuggestions
+    // — so the name is the contract; a rename here silently kills the popup AND the
+    // inline autofill while the resolve-jump keeps working, which is exactly the
+    // "jumped but nothing completed" bug this name once caused.)
+    function paneSuggestions(text) {
+        const res = root.suggest(text, root.sourceId)
+        // THE TABLE: the matches live IN THE PANE (FreeShow's scripture search —
+        // results render in the drawer, nothing floats over the content; the old
+        // floating popup covered the search box AND the hover preview). Stored for
+        // the in-pane matches list (citationMatches); NO rows returned, so the
+        // popup never opens here. Scripture keeps the popup path below.
+        if (root.books.length > 0 && root.books[0].chapterTitles !== undefined) {
+            root.citationMatches = res.rows || []
+            root.lastSuggestRows = root.citationMatches
+            return { rows: [], complete: res.complete || "" }
+        }
+        root.lastSuggestRows = res.rows || []
+        // `trailing` is what DropdownPanel actually draws on the right (its rows read
+        // label + trailing; `detail` was silently ignored). Sermon rows carry their own
+        // trailing (the citation code); book rows fall back to detail ("1189 verses"),
+        // which never rendered before either.
+        // `cite` rides the payload too (sermon rows): on a pick the search box replaces
+        // the typed needle with the FULL citation line, so the box ends up naming the
+        // sermon the user actually chose (not the one the fill guessed).
+        return { rows: (res.rows || []).map((row) => ({ label: row.label, trailing: row.trailing || row.detail || "",
+                                                        payload: row.cite !== undefined ? { ref: row.ref, cite: row.cite } : { ref: row.ref } })),
+                 complete: res.complete || "" }
+    }
+    // A picked row jumps to its passage: book only = open the book; chapter = open that
+    // chapter (vessels through goTo, so selection/scroll behave exactly like a resolve).
+    function applySuggestion(ref) {
+        if (ref && ref.bookId !== undefined)
+            root.goTo(ref)
+    }
+
+    // ---- search matches (The Table, IN THE PANE) + hover peek --------------------
+    // The tab search's citation matches render as a list INSIDE the verses column
+    // (matchesRow below) — FreeShow's scripture-search model: the results are pane
+    // content, so nothing floats over the search box or the text. Hovering a match
+    // shows that sermon's FULL paragraphs in the right half (the peek) — no visibility
+    // swaps, so moving between rows can't oscillate. Cleared when the text empties
+    // (onFilterChanged) or a match is clicked (the sermon opens for real).
+    property var citationMatches: []    // [{ label, trailing, cite, ref }] (citeRow shape)
+    property var lastSuggestRows: []    // (the popup's rows — Scripture only now)
+    property int peekIndex: -1
+    property var peekVerses: []          // [{ number, text }] while hovering a match
+    function peekSuggestion(index) {
+        if (index < 0 || !root.adapter) {
+            root.peekIndex = -1
+            root.peekVerses = []
+            return
+        }
+        const row = root.citationMatches[index]
+        const ref = row ? row.ref : null
+        const ch = ref ? ref.chapter : 0
+        if (!(ch > 0)) {
+            root.peekIndex = -1
+            root.peekVerses = []
+            return
+        }
+        root.peekVerses = root.adapter.chapter(root.sourceId, ref.bookId, ch)
+        root.peekIndex = index
+    }
+    function clearCitationMatches() {
+        root.citationMatches = []
+        root.lastSuggestRows = []
+        root.peekIndex = -1
+        root.peekVerses = []
+    }
+    // The debounced clear behind the row-to-row hover hand-off (see matchHover).
+    Timer {
+        id: peekClear
+        interval: 0
+        onTriggered: root.peekSuggestion(-1)
     }
 
     // What a dragged verse carries into a project: the passage (the selected verses when this one is among them, else just this one).
@@ -429,6 +716,7 @@ Item {
         color: "#12131a"
 
         Flickable {
+            id: booksFlick
             anchors.fill: parent
             clip: true
             contentHeight: booksList.height + 8
@@ -489,6 +777,7 @@ Item {
         color: "#101118"
 
         Flickable {
+            id: chaptersFlick
             anchors.fill: parent
             clip: true
             contentHeight: chapterList.height + 8
@@ -547,12 +836,13 @@ Item {
             id: versesFlick
             anchors.fill: parent
             clip: true
-            contentHeight: (root.searching ? searchList.height : versesList.height) + 60
+            contentHeight: (root.searching ? searchList.height
+                                            : (root.citationMatches.length > 0 ? matchesList.height : versesList.height)) + 60
             boundsBehavior: Flickable.StopAtBounds
 
             Column {
                 id: versesList
-                visible: !root.searching
+                visible: !root.searching && root.citationMatches.length === 0
                 x: 0; y: 4; width: parent.width - 8
                 Repeater {
                     model: root.chapterVerses
@@ -567,7 +857,18 @@ Item {
                         width: versesList.width; height: 38
                         Rectangle {
                             anchors.fill: parent; anchors.margins: 1; radius: 4
-                            color: verseRow.active ? "#2a2b35" : (verseSource.containsMouse ? "#16171e" : "transparent")
+                            // Position-truth hover (PositionHoverArea), not DragSource's
+                            // containsMouse — the latter LATCHES in this build (hover-enter
+                            // delivers, hover-exit never does; see PositionHoverArea's
+                            // header), which is exactly the "verse row stays highlighted
+                            // after I click it" report.
+                            color: verseRow.active ? "#2a2b35"
+                                                   : (verseHover.hovered ? "#16171e" : "transparent")
+                        }
+                        PositionHoverArea {
+                            id: verseHover
+                            anchors.fill: parent
+                            checkAncestors: false   // (rows inside a Flickable; no hover-gated visibility in the chain)
                         }
                         Text {
                             x: 10; anchors.verticalCenter: parent.verticalCenter
@@ -578,10 +879,14 @@ Item {
                         }
                         Text {
                             x: 60; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 70
-                            text: verseRow.oneLine
+                            // While a search (or citation filter) is showing, the typed
+                            // words light up yellow in the visible text — the same obvious
+                            // chip Quick search uses.
+                            text: root.canHighlight ? root.highlight(verseRow.oneLine) : verseRow.oneLine
                             color: Theme.textPrimary
                             wrapMode: Text.NoWrap
                             elide: Text.ElideRight
+                            textFormat: root.canHighlight ? Text.StyledText : Text.PlainText
                             font.family: Theme.fontFamily; font.pixelSize: 16
                         }
                         // Click selects (Ctrl / Shift add); drag carries the selection into a project; double-click adds it to the open one.
@@ -624,9 +929,11 @@ Item {
                         }
                         Text {
                             x: 190; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 198
-                            text: hitRow.modelData.snippet.replace(/\s*\n+\s*/g, " ")
+                            text: root.canHighlight ? root.highlight(hitRow.modelData.snippet.replace(/\s*\n+\s*/g, " "))
+                                                    : hitRow.modelData.snippet.replace(/\s*\n+\s*/g, " ")
                             color: root.textDim
                             elide: Text.ElideRight
+                            textFormat: root.canHighlight ? Text.StyledText : Text.PlainText
                             font.family: Theme.fontFamily; font.pixelSize: 15
                         }
                         HoverHandler { id: hitHover; cursorShape: Qt.PointingHandCursor }
@@ -644,6 +951,129 @@ Item {
                     text: (root.adapter ? root.adapter.searchHint : qsTr("Type words to find, then press Enter."))
                     color: Theme.textMuted
                     font.family: Theme.fontFamily; font.pixelSize: 14
+                }
+            }
+
+            // THE TABLE's citation matches — IN THE PANE (FreeShow's scripture
+            // search: results are drawer content, nothing floats over the search
+            // box or the text). One row per sermon matching the typed text; HOVER
+            // a row and the right half (peekPanel) shows that sermon's full
+            // paragraphs — the preview can't cover anything because it lives in
+            // its own half. Click opens the sermon for real.
+            Column {
+                id: matchesList
+                visible: !root.searching && root.citationMatches.length > 0
+                // FIXED half-split while the matches show (never re-laid-out by the
+                // hover): an early version narrowed the list only WHILE the preview
+                // was open, so a pointer near a row's right edge oscillated — hover
+                // opens the panel, the row shrinks away under the pointer, the panel
+                // closes, the row widens back, hover again…
+                x: 0; y: 4; width: parent.width * 0.52
+                Repeater {
+                    model: root.citationMatches
+                    delegate: Item {
+                        id: matchRow
+                        required property var modelData
+                        required property int index
+                        objectName: "selfTestMatchRow_" + index   // (the self-test hovers these by name)
+                        readonly property bool active: root.peekIndex === index
+                        width: matchesList.width; height: 30
+                        Rectangle {
+                            anchors.fill: parent; anchors.margins: 1; radius: 4
+                            color: matchRow.active ? "#2a2b35" : (matchHover.hovered ? "#16171e" : "transparent")
+                            Rectangle { visible: matchRow.active; x: 0; y: 4; width: 2; height: parent.height - 8; color: Theme.danger }
+                        }
+                        Text {
+                            x: 10; anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width - 86
+                            text: matchRow.modelData.label
+                            color: Theme.textPrimary
+                            elide: Text.ElideRight
+                            font.family: Theme.fontFamily; font.pixelSize: 15
+                        }
+                        Text {
+                            anchors.right: parent.right; anchors.rightMargin: 10
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: matchRow.modelData.trailing
+                            color: Theme.textSecondary
+                            font.family: Theme.fontFamily; font.pixelSize: 11
+                        }
+                        // Position truth (PositionHoverArea), the codebase convention —
+                        // also what the self-test can drive deterministically.
+                        PositionHoverArea {
+                            id: matchHover
+                            anchors.fill: parent
+                            checkAncestors: false
+                            onHoveredChanged: {
+                                if (hovered) {
+                                    peekClear.stop()
+                                    root.peekSuggestion(matchRow.index)
+                                } else {
+                                    peekClear.restart()   // row-to-row moves deliver exit(A)/enter(B) unordered — the 0-timer lets a following enter cancel the clear
+                                }
+                            }
+                            onClicked: {
+                                root.applySuggestion(matchRow.modelData.ref)
+                                root.clearCitationMatches()
+                            }
+                        }
+                    }
+                }
+            }
+
+            // The hovered match's sermon, FULL TEXT, in the right half — a real pane
+            // (not an overlay), so it covers nothing and needs no visibility swap on
+            // the left list. Appears only while a match is hovered; the open sermon's
+            // view is untouched underneath and comes straight back.
+            Item {
+                id: peekPanel
+                visible: root.peekIndex >= 0 && root.peekVerses.length > 0
+                x: parent.width * 0.52 + 8; y: 4
+                width: parent.width * 0.48 - 16
+                height: parent.height - 8
+                clip: true
+                Rectangle { anchors.fill: parent; radius: 6; color: "#101118"; border.color: Theme.border; border.width: 1 }
+                Text {
+                    id: peekHeader
+                    x: 12; y: 8
+                    width: parent.width - 24
+                    text: root.peekIndex >= 0 && root.citationMatches[root.peekIndex] ? (root.citationMatches[root.peekIndex].cite || root.citationMatches[root.peekIndex].label) : ""
+                    color: Theme.textSecondary
+                    elide: Text.ElideRight
+                    font.family: Theme.fontFamily; font.pixelSize: 12
+                }
+                Flickable {
+                    anchors.fill: parent
+                    anchors.topMargin: 26
+                    clip: true
+                    contentHeight: peekCol.height + 20
+                    boundsBehavior: Flickable.StopAtBounds
+                    Column {
+                        id: peekCol
+                        x: 4; width: parent.width - 8
+                        Repeater {
+                            model: root.peekVerses
+                            delegate: Item {
+                                width: peekCol.width; height: peekText.implicitHeight + 10
+                                Text {
+                                    id: peekNum
+                                    x: 6; y: 5
+                                    width: 26; horizontalAlignment: Text.AlignRight
+                                    text: modelData.number
+                                    color: Theme.danger
+                                    font.family: Theme.fontFamily; font.pixelSize: 14; font.bold: true
+                                }
+                                Text {
+                                    id: peekText
+                                    x: 40; y: 5; width: parent.width - 48
+                                    text: modelData.text
+                                    color: Theme.textPrimary
+                                    wrapMode: Text.Wrap
+                                    font.family: Theme.fontFamily; font.pixelSize: 14
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -708,8 +1138,19 @@ Item {
                         color: Theme.textPrimary
                         font.family: Theme.fontFamily; font.pixelSize: 14
                         clip: true
-                        onAccepted: root.runSearch(text)
+                        // LIVE filtering (user call: no Enter press first) — every edit
+                        // re-runs the search through a short debounce (the engine's
+                        // indexed search is fast enough); Enter still commits instantly.
+                        onTextChanged: {
+                            pillDebounce.restart()
+                        }
+                        onAccepted: { pillDebounce.stop(); root.runSearch(text) }
                         Keys.onEscapePressed: { root.searching = false }
+                    }
+                    Timer {
+                        id: pillDebounce
+                        interval: 160
+                        onTriggered: root.runSearch(searchInput.text)
                     }
                     Text {
                         visible: searchInput.text === ""

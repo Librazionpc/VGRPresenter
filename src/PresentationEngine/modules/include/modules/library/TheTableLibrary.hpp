@@ -44,6 +44,7 @@ struct TheTableVerse {
 struct TheTableChapter {
     int number = 0;          // 1-based sermon index within the year
     std::string title;       // "0217 Only Believe" (from the file name)
+    std::string code;        // the sermon's own date-code number ("0217"), when the file name carries one
     std::vector<TheTableVerse> verses;
 };
 
@@ -61,6 +62,10 @@ struct TheTableSearchHit {
     int verse = 0;
     std::string snippet;     // the hit's paragraph (trimmed)
     double score = 0.0;
+    // True when the words were spread across this paragraph AND its next one
+    // (neither alone had them all) — the preview shows both paragraphs for
+    // these, the one paragraph for every other hit.
+    bool spanned = false;
 };
 
 class TheTableLibrary final {
@@ -92,6 +97,15 @@ public:
     // Whole-library word search (case-insensitive, ALL terms must appear in a
     // paragraph). Best-first by term coverage. `limit` caps the result count.
     Result<std::vector<TheTableSearchHit>> Search(std::string_view query, size_t limit = 60) const;
+
+    // A sermon's citation line in the way these sermons are cited: the year
+    // without its "19", the sermon's date code, its title stripped to
+    // alphanumerics, then the paragraph number —
+    //   "1947" + "0412 Faith Is The Substance" + 3 ->
+    //   "47-0412 - Faith Is The Substance 3"
+    // `chapter` is the sermon's number within its year book; `verse` 0 gives
+    // the sermon-level citation (no paragraph number). Unknown chapter -> {}.
+    std::string Citation(std::string_view bookId, int chapter, int verse = 0) const;
 
     // --- Search Engine integration (docs/specs/24 §Search, the Bible pattern) -----
     // Registers this library's index adapter with the platform Search Engine and
