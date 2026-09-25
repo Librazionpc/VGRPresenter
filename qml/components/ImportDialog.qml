@@ -191,6 +191,7 @@ Item {
         Rectangle { x: 0; y: header.y + header.height + 12; width: parent.width; height: 1; color: "#232530" }
 
         Flickable {
+            id: importFlick
             x: 0; y: header.y + header.height + 13
             width: parent.width; height: parent.height - y
             clip: true
@@ -277,6 +278,14 @@ Item {
                         }
                     }
                 }
+            }
+
+            // All the format sections overflow the dialog — real scrollbar,
+            // not wheel-only.
+            AppScrollBar {
+                flickable: importFlick
+                anchors.top: parent.top; anchors.bottom: parent.bottom
+                anchors.right: parent.right; anchors.rightMargin: 3
             }
         }
     }

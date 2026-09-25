@@ -247,7 +247,8 @@ QVariantList ScriptureService::slides(const QString &bibleId, const QString &boo
     pf::ScriptureSource source;
     if (!EngineBridge::instance().booted() || verses.isEmpty() || !sourceFor(bibleId, bookId, chapter, verses, source))
         return {};
-    return SlideBuilder::slides(templateId(), source, SettingsService::instance().scriptureSettings());
+    return SlideBuilder::slides(templateId(), source, SettingsService::instance().scriptureSettings(),
+                                QStringLiteral("scripture"));
 }
 
 bool ScriptureService::importBible()

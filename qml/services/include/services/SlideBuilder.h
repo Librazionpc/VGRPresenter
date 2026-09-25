@@ -37,8 +37,12 @@ bool templateHasValues(const QString &id);               // false: the template 
 QVariantMap preview(const QString &templateId, const bps::presentation::ScriptureSource &source,
                     const bps::presentation::ScriptureSettings &options);
 
-// Every slide the template makes of the source: [{ title, background, blocks }].
+// Every slide the template makes of the source: [{ title, background, blocks,
+// contentType }]. `contentType` ("scripture" | "table") rides on each slide so
+// the output style's own engine template only restyles ITS content family —
+// the style's template must not steamroll the other tab's layout.
 QVariantList slides(const QString &templateId, const bps::presentation::ScriptureSource &source,
-                    const bps::presentation::ScriptureSettings &options);
+                    const bps::presentation::ScriptureSettings &options,
+                    const QString &contentType = QString());
 
 } // namespace SlideBuilder

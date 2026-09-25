@@ -231,6 +231,24 @@ ModalCard {
         }
         }
 
+        // The matrix wrapper: an Item so the horizontal scrollbar can anchor
+        // to its edges (a Column forbids top/bottom/fill anchors on its own
+        // children — the first placement sat inside the Column and QML
+        // refused it at runtime).
+        Item {
+            width: parent.width
+            height: matrixFlick.height + 10   // the bar's strip under the matrix
+
+            AppScrollBar {
+                id: matrixBar
+                flickable: matrixFlick
+                horizontal: true
+                anchors.left: parent.left; anchors.right: parent.right
+                anchors.leftMargin: 56
+                anchors.bottom: parent.bottom
+            }
+        }
+
         Text {
             visible: root.busList.length === 0
             width: parent.width

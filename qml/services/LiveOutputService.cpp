@@ -4,6 +4,7 @@
 #include "modules/presentation/LiveOutputController.hpp"
 #include "modules/presentation/PresentationEngine.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
+#include "modules/presentation/SceneBuilder.hpp"
 #include "modules/rendering/RenderOutputs.hpp"
 #include "modules/rendering/RenderEngine.hpp"
 
@@ -14,21 +15,95 @@ namespace pr = bps::rendering;
 
 namespace {
 
+// The slide's CONTENT text — what a bound "text" block shows. Mirrors
+// SceneBuilder's SlideContentText: slide.text first; when empty (content
+// tabs go live with the verse riding in their OWN template's blocks and
+// only the reference in `title`), the first text-bearing slide block's
+// text; else the title.
+std::string slideContentText(const pl::Slide *slide)
+{
+    if (!slide->text.empty())
+        return slide->text;
+    for (const pl::ContentBlock &b : slide->blocks)
+        if (b.kind == "text" && !b.text.empty() && b.text.front() != '{')
+            return b.text;
+    return slide->title;
+}
+
+// The slide's content family ("scripture" | "table" | …), as tagged by
+// ShowConverter in the slide's meta — mirrors SceneBuilder's
+// slideContentType. Empty = untagged (the style's template then applies).
+std::string slideContentType(const pl::Slide *slide)
+{
+    if (auto meta = bps::json::Parse(slide->metaJson); meta.ok())
+        if (const bps::json::Value *v = meta.value().Find("contentType"); v && v->type() == bps::json::Value::Type::String)
+            return std::string(v->asString());
+    return {};
+}
+
 // One slide as the QML preview shape: { valid, title, blocks, background } —
 // the same { blocks, background } maps DesignPreview draws everywhere else
 // (ShowConverter::blockToVariant is the single QML<->engine block mapping).
+//
+// STYLE COMPOSITION, mirrored from SceneBuilder::BuildSlideScene so the
+// monitor tile shows what the OUTPUT shows: when the active output's style
+// wears an engine template (baked blocks in the spec), the preview composes
+// THE STYLE'S template (slide content bound in, unfilled {scripture_*}
+// placeholders blanked) INSTEAD of the slide's own blocks, and the style's
+// background colour sits UNDER the slide's own (a slide background still
+// wins unless it is unset). A template-less style leaves the slide as-is
+// and the tile's own colour fallback handles the rest.
 QVariantMap slideToVariantMap(const pl::Slide *slide)
 {
     if (!slide)
         return {};
+
+    const pl::OutputStyleSpec style = pl::PresentationEngine::Instance().ActiveOutputStyle();
+    QString background = QString::fromStdString(slide->background);
     QVariantList blocks;
-    for (const pl::ContentBlock &b : slide->blocks)
-        blocks.append(ShowConverter::blockToVariant(b));
+
+    // Per-family rule, mirrored from SceneBuilder: the style's template only
+    // restyles its own contentType (a scripture-keyed style must not
+    // steamroll The Table's tab-template layout) — otherwise the slide's
+    // own blocks carry the look.
+    const std::string slideType = slideContentType(slide);
+    const bool styleTemplateApplies = !style.templateBlocks.empty()
+        && (style.contentType.empty() || slideType.empty() || slideType == style.contentType);
+
+    if (styleTemplateApplies) {
+        const QString styleBg = QString::fromStdString(style.backgroundColor);
+        if (!styleBg.isEmpty() && styleBg != QLatin1String("transparent")
+            && (background.isEmpty() || background == QLatin1String("transparent")
+                || !style.clearBackgroundOnText))
+            background = styleBg;
+        for (const pl::ContentBlock &b : style.templateBlocks) {
+            pl::ContentBlock bound = b;
+            if (b.kind == "text") {
+                if (!b.bind.empty()) {
+                    std::string value = pl::SlideResolver::BoundValue(*slide, b.bind);
+                    if (value.empty()) {
+                        if (b.bind == "text")
+                            value = slideContentText(slide);
+                        else if (b.bind == "ref")
+                            value = slide->title;
+                    }
+                    bound.text = std::move(value);
+                } else if (b.text.find('{') != std::string::npos) {
+                    bound.text.clear();
+                }
+            }
+            blocks.append(ShowConverter::blockToVariant(bound));
+        }
+    } else {
+        for (const pl::ContentBlock &b : slide->blocks)
+            blocks.append(ShowConverter::blockToVariant(b));
+    }
+
     return QVariantMap{
         { QStringLiteral("valid"), true },
         { QStringLiteral("title"), QString::fromStdString(slide->title) },
         { QStringLiteral("blocks"), blocks },
-        { QStringLiteral("background"), QString::fromStdString(slide->background) },
+        { QStringLiteral("background"), background },
     };
 }
 

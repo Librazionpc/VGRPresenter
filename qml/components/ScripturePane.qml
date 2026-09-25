@@ -81,6 +81,8 @@ ReferencePane {
 
     // GO LIVE: pane -> adapter -> live service.
     onGoLiveRequested: (name, slides) => pane.adapter.goLive(name, slides)
-
-    onTemplateEditRequested: (id) => pane.templateEditRequested(id)
+    // (templateEditRequested needs NO re-emit here: the host's handler on this
+    // pane instance receives the signal directly — a self-emit recursion
+    // ("Maximum call stack size exceeded") used to kill every pen click
+    // before the Edit screen ever opened.)
 }

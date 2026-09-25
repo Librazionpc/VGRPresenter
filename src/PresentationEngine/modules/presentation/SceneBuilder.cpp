@@ -1,6 +1,8 @@
 #include "modules/presentation/SceneBuilder.hpp"
 
 #include "core/logging/Logger.hpp"
+#include "core/config/Json.hpp"
+#include "modules/presentation/PresentationTemplates.hpp"
 #include "modules/rendering/RenderEngine.hpp"
 #include "modules/rendering/RenderObject.hpp"
 #include "modules/rendering/Scene.hpp"
@@ -9,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <cstdint>
 #include <fstream>
 #include <format>
 #include <map>
@@ -147,6 +150,154 @@ rendering::Rect CoverRect(int imgW, int imgH, const rendering::Size& stage) {
     return rendering::Rect((stage.width - w) / 2.0f, (stage.height - h) / 2.0f, w, h);
 }
 
+// ---- template-blocks fingerprint -----------------------------------------
+// A stable 64-bit FNV-1a over the spec's templateBlocks — geometry, kind,
+// bind, text, style and meta all feed it. Scene ids are strings, not numbers,
+// so this rides the id as hex: the ONLY requirement is that two different
+// block sets (an edited template landing mid-show) hash differently, which a
+// position-sensitive mix gives far more reliably than concatenating raw
+// geometry floats into the id.
+uint64_t HashBlocks(const std::vector<ContentBlock>& blocks) {
+    uint64_t h = 1469598103934665603ull;   // FNV offset basis
+    const auto mix = [&h](uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;             // FNV prime
+    };
+    const auto mixStr = [&h, &mix](std::string_view s) {
+        mix(s.size());
+        for (const char c : s) mix(static_cast<unsigned char>(c));
+    };
+    mix(blocks.size());
+    for (const ContentBlock& b : blocks) {
+        mixStr(b.id);
+        mixStr(b.kind);
+        mixStr(b.text);
+        mixStr(b.bind);
+        mixStr(b.metaJson);
+        // Geometry at millimetre resolution. Through int64_t — a signed cast
+        // is defined for the negative coordinates some shipped templates use
+        // (off-screen panels); straight to uint64_t would be UB.
+        const auto mixCoord = [&mix](double d) {
+            mix(static_cast<uint64_t>(static_cast<int64_t>(d * 1000.0)));
+        };
+        mixCoord(b.x);
+        mixCoord(b.y);
+        mixCoord(b.width);
+        mixCoord(b.height);
+        mixStr(b.style.backgroundColor);
+        mix(b.style.borderEnabled ? 1ull : 0ull);
+    }
+    return h;
+}
+
+// The slide's CONTENT text — what a bound "text" block shows. slide.text
+// first; when empty (content tabs go live with the verse riding in their
+// OWN template's blocks and only the reference in `title`), the first
+// text-bearing slide block's text; else the title.
+std::string SlideContentText(const Slide& slide) {
+    if (!slide.text.empty())
+        return slide.text;
+    for (const ContentBlock& b : slide.blocks)
+        if (b.kind == "text" && !b.text.empty() && b.text.find('{') != 0)
+            return b.text;
+    return slide.title;
+}
+
+// The content family the slide belongs to ("scripture", "table", …) — the
+// frontend tags it in the slide's meta (ShowConverter). Empty = untagged
+// (shows and other content): a style's template then applies, as before.
+std::string slideContentType(const Slide& slide) {
+    if (auto meta = json::Parse(slide.metaJson); meta.ok())
+        if (const json::Value* v = meta.value().Find("contentType"); v && v->type() == json::Value::Type::String)
+            return std::string(v->asString());
+    return {};
+}
+
+// Fills every bound text block of a baked template from `slide` — the same
+// contract SlideResolver uses for show templates, narrowed to the plain
+// slides this path serves: "text" takes the slide's CONTENT (see
+// SlideContentText — the verse, not the reference), "ref" takes the slide's
+// title (its reference), and anything else goes through
+// SlideResolver::BoundValue (meta field, "title", "notes"...). Unbound
+// blocks keep their literal text — a template's decorative labels render as
+// designed — UNLESS the literal is a leftover SCRIPTURE PLACEHOLDER
+// ({scripture_name}, {scripture_reference}, …): plain slides carry no such
+// values, so the raw placeholder would render as-is instead of an empty
+// line.
+std::vector<ContentBlock> BindTemplateBlocks(const std::vector<ContentBlock>& tmpl,
+                                             const Slide& slide) {
+    std::vector<ContentBlock> out = tmpl;
+    for (ContentBlock& b : out) {
+        if (b.kind != "text")
+            continue;
+        if (!b.bind.empty()) {
+            std::string value = SlideResolver::BoundValue(slide, b.bind);
+            if (value.empty()) {
+                if (b.bind == "text")
+                    value = SlideContentText(slide);
+                else if (b.bind == "ref")
+                    value = slide.title;
+            }
+            b.text = std::move(value);
+        } else if (b.text.find('{') != std::string::npos) {
+            b.text.clear();   // unfilled {scripture_*} on a plain slide → blank line
+        }
+    }
+    return out;
+}
+
+// Renders positioned stage blocks (the 754×428 Edit-stage grid template
+// designs and slides share) into the scene's text layer: text blocks become
+// styled TextObjects, box/shape blocks ShapeObjects; other kinds (clock,
+// timer, media...) are not part of this pass. `tag` prefixes object ids so a
+// slide-block render and a template-block render can never collide within a
+// scene. Returns the number of blocks seen (for the scene log line).
+int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
+                   const std::vector<ContentBlock>& blocks,
+                   const rendering::Size& size, std::string_view tag) {
+    constexpr double kBlockStageW = 754.0, kBlockStageH = 428.0;
+    int n = 0;
+    for (const ContentBlock& block : blocks) {
+        ++n;
+        const std::string objId = std::format("{}{}", tag, n);
+        if (block.kind == "text") {
+            auto text = std::make_shared<rendering::TextObject>(objId, objId, block.text);
+            text->SetBounds(rendering::Rect(
+                static_cast<float>(block.x / kBlockStageW * size.width),
+                static_cast<float>(block.y / kBlockStageH * size.height),
+                static_cast<float>(block.width / kBlockStageW * size.width),
+                static_cast<float>(block.height / kBlockStageH * size.height)));
+            auto styleComp = std::make_shared<rendering::TextStyleComponent>();
+            styleComp->style.size = static_cast<float>(
+                MetaNumber(block.metaJson, "fontSize", 24.0) * size.height / kBlockStageH);
+            styleComp->style.color = StyleBuilder::ParseColor(
+                MetaString(block.metaJson, "color").empty()
+                    ? "#ffffff" : MetaString(block.metaJson, "color"));
+            styleComp->style.align = ParseAlign(MetaString(block.metaJson, "align"));
+            styleComp->style.valign = ParseVAlign(MetaString(block.metaJson, "verticalAlign"));
+            styleComp->style.bold = MetaBool(block.metaJson, "bold");
+            styleComp->style.wrap = true;
+            styleComp->style.wrapWidth = text->Bounds().width;
+            text->AddComponent(styleComp);
+            text->SetLayer("text");
+            (void)engine.AddObject(sceneId, text, "text");
+        } else if (block.kind == "box" || block.kind == "shape" || block.kind == "rectangle") {
+            auto shape = std::make_shared<rendering::ShapeObject>(objId, objId);
+            shape->SetRectangle(StyleBuilder::ParseColor(
+                block.style.backgroundColor.empty() ? "#66000000"
+                                                    : block.style.backgroundColor));
+            shape->SetBounds(rendering::Rect(
+                static_cast<float>(block.x / kBlockStageW * size.width),
+                static_cast<float>(block.y / kBlockStageH * size.height),
+                static_cast<float>(block.width / kBlockStageW * size.width),
+                static_cast<float>(block.height / kBlockStageH * size.height)));
+            shape->SetLayer("text");
+            (void)engine.AddObject(sceneId, shape, "text");
+        }
+    }
+    return n;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -209,12 +360,15 @@ std::string SceneBuilder::StyledSceneIdFor(const Presentation& p, const Slide& s
     // The fingerprint changes whenever a styled field does, so the render
     // cache can't serve a scene built under the old style. Fields beyond the
     // layout/background/image/clear pair (name, contentType) are diagnostics
-    // only — not fingerprinted.
-    return SceneIdFor(p, s) + std::format("@s:{}_{}_{}_{}",
+    // only — not fingerprinted. The BAKED template blocks are: editing the
+    // template design re-pushes a spec whose blocks differ, and the hash is
+    // what turns that into a rebuild instead of a stale cache hit.
+    return SceneIdFor(p, s) + std::format("@s:{}_{}_{}_{}_{:016x}",
                                           style.backgroundColor,
                                           style.templateKey,
                                           style.clearBackgroundOnText ? 1 : 0,
-                                          style.backgroundImage);
+                                          style.backgroundImage,
+                                          HashBlocks(style.templateBlocks));
 }
 
 Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentation,
@@ -288,62 +442,48 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
     }
 
     // ---- Content blocks ---------------------------------------------------
-    // A slide with positioned blocks (the scripture/sermon/lyrics templates:
-    // verse box, reference chip, name line...) renders THE BLOCKS — that is
-    // the composition the preview shows and the only faithful on-air render.
-    // Block geometry is stage-fraction-like: it lives on the 754×428 Edit
-    // stage (DesignLibrary's kStageWidth/Height), scaled to the real stage.
-    // A slide without blocks falls back to the style preset's title/body
-    // layout (the plain text slides SceneBuilder has always rendered).
+    // The on-air layout when the style wears an ENGINE TEMPLATE: the baked
+    // templateBlocks render (with the slide's content bound in), UNDER the
+    // slide's own blocks so slide-specific extras still land on top. A style
+    // on the legacy presets keeps the old plain text layout below.
+    // ---- Content blocks ---------------------------------------------------
+    // The on-air layout when the style wears an ENGINE TEMPLATE: the baked
+    // templateBlocks render (with the slide's content bound in) and they OWN
+    // the composition — the slide's own blocks (carried in from the content
+    // tab's own template: verse boxes already laid out for a DIFFERENT
+    // design) would paint over the style's template. FreeShow's rule:
+    // output style > slide — but PER CONTENT FAMILY: a style's template is
+    // keyed for one contentType ("scripture", "table"…), so it only
+    // restyles ITS family. The Table going live with a scripture-keyed
+    // style keeps its own tab template's layout (the slide's own blocks
+    // carry it) — that was the "Table inherits the scripture template" bug.
+    // A template-less style keeps the old behaviour (slide blocks are then
+    // the layout). EITHER a rendered template layout or slide blocks
+    // short-circuits the legacy text layout below.
+    const bool styleTemplateApplies = !style.templateBlocks.empty()
+        && (style.contentType.empty() || slideContentType(slide).empty()
+            || slideContentType(slide) == style.contentType);
+    if (styleTemplateApplies) {
+        const int n = AddStageBlocks(engine, sceneId,
+                                     BindTemplateBlocks(style.templateBlocks, slide),
+                                     size, "tpl");
+        Logger::Instance().Debug(std::format("Scene built: {} (style '{}', template {} blocks)", sceneId, style.name, n),
+                                 "SceneBuilder");
+        return sceneId;
+    }
     if (!slide.blocks.empty()) {
-        constexpr double kBlockStageW = 754.0, kBlockStageH = 428.0;
-        int n = 0;
-        for (const ContentBlock& block : slide.blocks) {
-            ++n;
-            const std::string objId = std::format("blk{}", n);
-            if (block.kind == "text") {
-                auto text = std::make_shared<rendering::TextObject>(objId, objId, block.text);
-                text->SetBounds(rendering::Rect(
-                    static_cast<float>(block.x / kBlockStageW * size.width),
-                    static_cast<float>(block.y / kBlockStageH * size.height),
-                    static_cast<float>(block.width / kBlockStageW * size.width),
-                    static_cast<float>(block.height / kBlockStageH * size.height)));
-                auto styleComp = std::make_shared<rendering::TextStyleComponent>();
-                styleComp->style.size = static_cast<float>(
-                    MetaNumber(block.metaJson, "fontSize", 24.0) * size.height / kBlockStageH);
-                styleComp->style.color = StyleBuilder::ParseColor(
-                    MetaString(block.metaJson, "color").empty()
-                        ? "#ffffff" : MetaString(block.metaJson, "color"));
-                styleComp->style.align = ParseAlign(MetaString(block.metaJson, "align"));
-                styleComp->style.valign = ParseVAlign(MetaString(block.metaJson, "verticalAlign"));
-                styleComp->style.bold = MetaBool(block.metaJson, "bold");
-                styleComp->style.wrap = true;
-                styleComp->style.wrapWidth = text->Bounds().width;
-                text->AddComponent(styleComp);
-                text->SetLayer("text");
-                (void)engine.AddObject(sceneId, text, "text");
-            } else if (block.kind == "box" || block.kind == "shape" || block.kind == "rectangle") {
-                auto shape = std::make_shared<rendering::ShapeObject>(objId, objId);
-                shape->SetRectangle(StyleBuilder::ParseColor(
-                    block.style.backgroundColor.empty() ? "#66000000"
-                                                        : block.style.backgroundColor));
-                shape->SetBounds(rendering::Rect(
-                    static_cast<float>(block.x / kBlockStageW * size.width),
-                    static_cast<float>(block.y / kBlockStageH * size.height),
-                    static_cast<float>(block.width / kBlockStageW * size.width),
-                    static_cast<float>(block.height / kBlockStageH * size.height)));
-                shape->SetLayer("text");
-                (void)engine.AddObject(sceneId, shape, "text");
-            }
-            // Other block kinds (clock/timer/media...) render as the plain
-            // engine defaults for now — not part of this pass.
-        }
+        const int n = AddStageBlocks(engine, sceneId, slide.blocks, size, "blk");
         Logger::Instance().Debug(std::format("Scene built: {} (style '{}', {} blocks)", sceneId, style.name, n),
                                  "SceneBuilder");
         return sceneId;
     }
 
     // ---- Text layout -------------------------------------------------------
+    // The legacy path: plain text slides under the built-in layout presets
+    // (the five keys LayoutFor knows). A template-keyed style never reaches
+    // this with empty baked blocks — but a style whose templateKey names a
+    // design that no longer exists (deleted template) does; LayoutFor falls
+    // back to the safe default full layout for the unknown key.
     const StyleBuilder::Layout layout = StyleBuilder::LayoutFor(style.templateKey);
     const rendering::Rect titleRect = Scaled(layout.title, size);
     const rendering::Rect bodyRect = Scaled(layout.body, size);

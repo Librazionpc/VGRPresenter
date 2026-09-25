@@ -2866,6 +2866,18 @@ Rectangle {
     BackgroundColorModal {
         id: bgColorModal
         open: root.bgModalOpen
+        // Seeded from the CURRENT value each time it opens — the palette
+        // highlights the color being edited instead of the component's
+        // hardcoded defaults (seedWith is pure; assigning `open` here would
+        // break the binding above).
+        onOpenChanged: if (open) bgColorModal.seedWith(
+            root.bgModalTarget === "itemBackground" || root.bgModalTarget === "border"
+                ? (root.primarySelectedItemStyle ? (root.bgModalTarget === "border"
+                    ? root.primarySelectedItemStyle.borderColor
+                    : root.primarySelectedItemStyle.backgroundColor) : "")
+            : root.bgModalTarget === "textColor"
+                ? (root.primarySelectedItem ? String(root.primarySelectedItem.meta?.color ?? "") : "")
+                : slideStore.current.background)
         title: root.bgModalTarget === "border" ? qsTr("Border Color")
             : root.bgModalTarget === "textColor" ? qsTr("Text Color") : qsTr("Background Color")
         onApplied: (selection) => {

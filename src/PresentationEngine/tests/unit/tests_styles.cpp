@@ -619,3 +619,138 @@ void TestBlockScenes() {
 
     (void)engine.DestroyScene(built.value());
 }
+
+// ---------------------------------------------------------------------------
+// Engine-template styles — a style wearing a template design (templateKey
+// "tpl-…", blocks baked into the spec) renders THE TEMPLATE with the slide's
+// content bound in; the fingerprint hashes the blocks.
+// ---------------------------------------------------------------------------
+void TestTemplateStyleScenes() {
+    p::Presentation pres;
+    pres.id = "pres-tplstyle";
+
+    // The plain slide ShapeBuilder's legacy path serves (no blocks of its
+    // own): a verse + its reference as title/text.
+    p::Slide slide;
+    slide.id = "tplstyle-1";
+    slide.title = "John 3:16";
+    slide.text = "For God so loved the world...";
+
+    // A baked template: a full-stage bound text + a reference chip (the
+    // shipped "Scripture" design's shape, condensed).
+    p::ContentBlock verse;
+    verse.id = "t1";
+    verse.kind = "text";
+    verse.x = 55; verse.y = 45; verse.width = 644; verse.height = 338;
+    verse.bind = "text";
+    verse.text = "{scripture_number} {scripture_text}";
+    verse.metaJson = R"({"color":"#ffffff","fontSize":80,"align":"left","verticalAlign":"center"})";
+    p::ContentBlock chip;
+    chip.id = "t2";
+    chip.kind = "box";
+    chip.x = 30; chip.y = 330; chip.width = 694; chip.height = 68;
+    chip.style.backgroundColor = "#ff851b";
+    p::ContentBlock ref;
+    ref.id = "t3";
+    ref.kind = "text";
+    ref.x = 40; ref.y = 335; ref.width = 674; ref.height = 58;
+    ref.bind = "ref";
+    ref.text = "{scripture_reference}";
+    ref.metaJson = R"({"color":"#000000","fontSize":40,"align":"left","verticalAlign":"center"})";
+
+    p::SceneBuilder builder;
+    r::RenderEngine& engine = r::RenderEngine::Instance();
+    p::OutputStyleSpec style;
+    style.templateKey = "tpl-scripture";
+    style.backgroundColor = "#ff101020";
+    style.templateBlocks = {verse, chip, ref};
+
+    // 1. The template renders (scene id = the block-hashed fingerprint), the
+    //    slide's content lands in the bound blocks, and the legacy title/body
+    //    layout does NOT join.
+    auto built = builder.BuildSlideScene(pres, slide, style, engine);
+    CHECK(built.ok());
+    CHECK(built.ok() && built.value() == p::SceneBuilder::StyledSceneIdFor(pres, slide, style));
+    if (built.ok()) {
+        bool sawVerse = false, sawRef = false, sawChip = false, sawLegacy = false;
+        for (const r::RenderObject* obj : engine.CollectObjects(built.value())) {
+            if (const auto* t = dynamic_cast<const r::TextObject*>(obj)) {
+                if (t->Id() == "tpl1" && t->Text() == slide.text) sawVerse = true;
+                if (t->Id() == "tpl3" && t->Text() == slide.title) sawRef = true;
+                if (t->Id() == "title" || t->Id() == "body") sawLegacy = true;
+            } else if (obj->Id() == "tpl2") {
+                sawChip = true;
+            }
+        }
+        CHECK(sawVerse && sawRef && sawChip);
+        CHECK(!sawLegacy);
+    }
+
+    // 2. The style's template OWNS the composition: a slide that arrives
+    //    with its OWN blocks (the content tab's template already laid them
+    //    out for a different design) must NOT paint them over the style's
+    //    template — the output style wins (FreeShow: output style > slide).
+    p::Slide dressed = slide;
+    dressed.id = "tplstyle-dressed";
+    dressed.blocks = {chip};   // a stray box from the tab's own template
+    auto dressedScene = builder.BuildSlideScene(pres, dressed, style, engine);
+    CHECK(dressedScene.ok());
+    if (dressedScene.ok()) {
+        bool sawStray = false;
+        for (const r::RenderObject* obj : engine.CollectObjects(dressedScene.value()))
+            if (obj->Id() == "blk1") sawStray = true;   // the slide's own block
+        CHECK(!sawStray);
+        bool sawTemplateVerse = false;
+        for (const r::RenderObject* obj : engine.CollectObjects(dressedScene.value()))
+            if (const auto* t = dynamic_cast<const r::TextObject*>(obj); t && t->Id() == "tpl1")
+                sawTemplateVerse = t->Text() == dressed.text;
+        CHECK(sawTemplateVerse);
+    }
+
+    // 3. Leftover scripture placeholders on a PLAIN slide render as blank
+    //    lines, not raw "{scripture_name}" text.
+    p::OutputStyleSpec placeholderStyle = style;
+    p::ContentBlock name;
+    name.id = "t4";
+    name.kind = "text";
+    name.x = 40; name.y = 400; name.width = 674; name.height = 20;
+    name.text = "{scripture_name}";   // unbound: a decorative literal in the shipped design
+    placeholderStyle.templateBlocks.push_back(name);
+    auto withPlaceholder = builder.BuildSlideScene(pres, slide, placeholderStyle, engine);
+    CHECK(withPlaceholder.ok());
+    if (withPlaceholder.ok()) {
+        bool rawPlaceholder = false;
+        for (const r::RenderObject* obj : engine.CollectObjects(withPlaceholder.value()))
+            if (const auto* t = dynamic_cast<const r::TextObject*>(obj); t && t->Text() == "{scripture_name}")
+                rawPlaceholder = true;
+        CHECK(!rawPlaceholder);
+    }
+
+    // 4. Fingerprint: a block-only edit (moved/retyped text) changes the scene
+    //    id — an edited template re-pushes the same key and MUST rebuild, not
+    //    serve the cached scene.
+    p::OutputStyleSpec edited = style;
+    edited.templateBlocks[0].y = 65.0;
+    CHECK(p::SceneBuilder::StyledSceneIdFor(pres, slide, edited)
+          != p::SceneBuilder::StyledSceneIdFor(pres, slide, style));
+    p::OutputStyleSpec renamed = style;
+    renamed.name = "Renamed";   // diagnostics only — same fingerprint
+    CHECK(p::SceneBuilder::StyledSceneIdFor(pres, slide, renamed)
+          == p::SceneBuilder::StyledSceneIdFor(pres, slide, style));
+
+    // 5. Engine-level: pushing a spec whose ONLY delta is templateBlocks is a
+    //    real change (revision bumps) — the edited-template relay depends on
+    //    it; and the equal-blocks re-push stays a no-op.
+    auto& eng = p::PresentationEngine::Instance();
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.SetActiveOutputStyle(style).ok());
+    const uint64_t rev = eng.Runtime().StyleRevision();
+    CHECK(eng.SetActiveOutputStyle(style).ok());
+    CHECK(eng.Runtime().StyleRevision() == rev);
+    CHECK(eng.SetActiveOutputStyle(edited).ok());
+    CHECK(eng.Runtime().StyleRevision() == rev + 1);
+    CHECK(eng.ActiveOutputStyle().templateBlocks.size() == 3);
+    CHECK(eng.SetActiveOutputStyle(p::OutputStyleSpec{}).ok());   // leave unstyled
+
+    (void)engine.DestroyScene(built.value());
+}

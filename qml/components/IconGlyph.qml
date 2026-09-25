@@ -19,7 +19,7 @@ Item {
     // such as folder or search: their natural size is not a 24 grid.)
     property bool fit: false
     // The glyphs drawn on the Lucide 24-unit grid (the ones `fit` can scale). The others are hand-sized.
-    readonly property bool grid24: ["camera", "mic", "micOff", "volume2", "clock", "play", "bookOpen", "wrench", "music", "star", "info", "cash", "lock", "sliders", "zoomIn", "gridView", "listView", "textLines", "download", "pencil", "flag", "link", "typeCase", "blend", "ban", "copy", "trash", "alignLeft", "alignCenter", "alignRight", "alignJustify", "alignTop", "alignMiddle", "alignBottom", "listBullets"].indexOf(name) >= 0
+    readonly property bool grid24: ["camera", "mic", "micOff", "volume2", "clock", "play", "bookOpen", "wrench", "music", "star", "info", "cash", "lock", "sliders", "zoomIn", "gridView", "listView", "textLines", "download", "pencil", "flag", "link", "typeCase", "blend", "ban", "copy", "trash", "alignLeft", "alignCenter", "alignRight", "alignJustify", "alignTop", "alignMiddle", "alignBottom", "listBullets", "transition", "locked", "unlocked", "image", "overlays", "audio", "slide", "scripture", "timerFill"].indexOf(name) >= 0
     implicitWidth: 14
     implicitHeight: 14
 
@@ -31,6 +31,10 @@ Item {
             case "folder": return folderC
             case "plus": return plusC
             case "chevronRight": return chevronRightC
+            case "chevronLeft": return chevronLeftC
+            case "previous": return previousC
+            case "next": return nextC
+            case "clearIcon": return clearIconC
             case "chevronDown": return chevronDownC
             case "chevronUp": return chevronUpC
             case "check": return checkC
@@ -87,6 +91,15 @@ Item {
             case "alignMiddle": return alignMiddleC
             case "alignBottom": return alignBottomC
             case "listBullets": return listBulletsC
+            case "transition": return transitionC
+            case "locked": return lockedC
+            case "unlocked": return unlockedC
+            case "image": return imageC
+            case "overlays": return overlaysC
+            case "audio": return audioC
+            case "slide": return slideC
+            case "scripture": return scriptureC
+            case "timerFill": return timerFillC
             default: return dotC
             }
     }
@@ -395,6 +408,40 @@ Item {
         StrokeIcon {
             width: 3; height: 6
             svgPath: "M 0 0 L 3 3 L 0 6"
+        }
+    }
+
+    Component {
+        id: chevronLeftC
+        StrokeIcon {
+            width: 3; height: 6
+            svgPath: "M 3 0 L 0 3 L 3 6"
+        }
+    }
+
+    // FreeShow's own Material transport glyphs (src/frontend/values/icons.ts),
+    // pulled path-for-path like the align icons above: the preview toolbar's
+    // previous/next skip chevrons and the ClearButtons' clear X. Filled 24-grid
+    // Material shapes, scaled to the shared 14px box.
+    Component {
+        id: previousC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6 1.41-1.41z"
+        }
+    }
+    Component {
+        id: nextC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"
+        }
+    }
+    Component {
+        id: clearIconC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"
         }
     }
 
@@ -818,6 +865,82 @@ Item {
                 joinStyle: ShapePath.RoundJoin
                 PathSvg { path: "M 5 3 L 19 3 C 20.1 3 21 3.9 21 5 L 21 19 C 21 20.1 20.1 21 19 21 L 5 21 C 3.9 21 3 20.1 3 19 L 3 5 C 3 3.9 3.9 3 5 3 Z" }
             }
+        }
+    }
+
+    // ---- FreeShow's preview chrome glyphs (values/icons.ts, path-for-path) ----
+    // The preview toolbar's ShowActions + ClearButtons rows draw these exact
+    // Material shapes: transport (transition, lock), and the clear group's
+    // layers (image/slide/scripture/overlays/audio/timer).
+    // "transition": the two interlocking rings (FreeShow's popup.transition icon).
+    Component {
+        id: transitionC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M7.5,12c0-0.97,0.23-4.16,3.03-6.5C9.75,5.19,8.9,5,8,5c-3.86,0-7,3.14-7,7s3.14,7,7,7c0.9,0,1.75-0.19,2.53-0.5 C7.73,16.16,7.5,12.97,7.5,12z M16,5c-0.9,0-1.75,0.19-2.53,0.5c0.61,0.51,1.1,1.07,1.49,1.63C15.29,7.05,15.64,7,16,7c2.76,0,5,2.24,5,5s-2.24,5-5,5 c-0.36,0-0.71-0.05-1.04-0.13c-0.39,0.56-0.88,1.12-1.49,1.63C14.25,18.81,15.1,19,16,19c3.86,0,7-3.14,7-7S19.86,5,16,5z M12,6.26 C10.4,8.01,9.5,10.29,9.5,12s0.9,3.99,2.5,5.74c1.6-1.75,2.5-4.03,2.5-5.74S13.6,8.01,12,6.26z"
+        }
+    }
+    // "locked" / "unlocked": the padlock (the output lock — red while locked).
+    Component {
+        id: lockedC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"
+        }
+    }
+    Component {
+        id: unlockedC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M12 17c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6-9h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6h1.9c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm0 12H6V10h12v10z"
+        }
+    }
+    // "image": ClearButtons' clear.background (a picture frame with mountains).
+    Component {
+        id: imageC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"
+        }
+    }
+    // "overlays": ClearButtons' clear.overlays (two stacked layers).
+    Component {
+        id: overlaysC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M11.99 18.54l-7.37-5.73L3 14.07l9 7 9-7-1.63-1.27-7.38 5.74zM12 16l7.36-5.73L21 9l-9-7-9 7 1.63 1.27L12 16z"
+        }
+    }
+    // "audio": ClearButtons' clear.audio (a music book).
+    Component {
+        id: audioC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M20 2H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 5h-3v5.5c0 1.38-1.12 2.5-2.5 2.5S10 13.88 10 12.5s1.12-2.5 2.5-2.5c.57 0 1.08.19 1.5.51V5h4v2zM4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6z"
+        }
+    }
+    // "slide": ClearButtons' clear.slide (a slide card with text lines).
+    Component {
+        id: slideC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"
+        }
+    }
+    // "scripture": ClearButtons' clear.slide for scripture content (an open bible).
+    Component {
+        id: scriptureC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M21,5c-1.11-0.35-2.33-0.5-3.5-0.5c-1.95,0-4.05,0.4-5.5,1.5c-1.45-1.1-3.55-1.5-5.5-1.5S2.45,4.9,1,6v14.65 c0,0.25,0.25,0.5,0.5,0.5c0.1,0,0.15-0.05,0.25-0.05C3.1,20.45,5.05,20,6.5,20c1.95,0,4.05,0.4,5.5,1.5c1.35-0.85,3.8-1.5,5.5-1.5 c1.65,0,3.35,0.3,4.75,1.05c0.1,0.05,0.15,0.05,0.25,0.05c0.25,0,0.5-0.25,0.5-0.5V6C22.4,5.55,21.75,5.25,21,5z M21,18.5 c-1.1-0.35-2.3-0.5-3.5-0.5c-1.7,0-4.15,0.65-5.5,1.5V8c1.35-0.85,3.8-1.5,5.5-1.5c1.2,0,2.4,0.15,3.5,0.5V18.5z"
+        }
+    }
+    // "timer": ClearButtons' clear.nextTimer (stopwatch with top button).
+    Component {
+        id: timerFillC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M19.03,7.39l1.42-1.42c-0.43-0.51-0.9-0.99-1.41-1.41l-1.42,1.42C16.07,4.74,14.12,4,12,4c-4.97,0-9,4.03-9,9 c0,4.97,4.02,9,9,9s9-4.03,9-9C21,10.88,20.26,8.93,19.03,7.39z M13,14h-2V8h2V14z M9,1h6v2H9z"
         }
     }
 

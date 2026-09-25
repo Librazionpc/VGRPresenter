@@ -82,9 +82,13 @@ ApplicationWindow {
         onSearchRequested: quickSearch.openSearch()
         onImportRequested: importDialog.open = true
         // A card's Edit action in the Overlays / Templates tab: the Edit screen edits that overlay / template.
+        // Unknown id (a deleted design, a stale pick): say so — the silent no-op here once made a broken
+        // edit button look exactly like an unresponsive one.
         onDesignEditRequested: (kind, id) => {
             if (editScreen.openDesign(kind, id))
                 window.currentView = "edit"
+            else
+                EventBus.notify(qsTr("That %1 no longer exists.").arg(kind), "warning", qsTr("Edit"))
         }
         // The Scripture tab's "Convert to show": a new show with the slides the engine built for the passage, opened on the Edit screen.
         onScriptureShowRequested: (name, slides) => {

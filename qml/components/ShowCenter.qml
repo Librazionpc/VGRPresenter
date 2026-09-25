@@ -156,6 +156,13 @@ Item {
         contentHeight: (root.viewMode === "grid" ? gridFlow.height : (root.viewMode === "list" ? listCol.height : lyricsCol.height)) + 76   // room for the bar
         boundsBehavior: Flickable.StopAtBounds
 
+        // A 100-slide show overflowed wheel-only — a real draggable bar.
+        AppScrollBar {
+            flickable: grid
+            anchors.top: parent.top; anchors.bottom: parent.bottom
+            anchors.right: parent.right; anchors.rightMargin: 3
+        }
+
         // Ctrl + wheel zooms, like FreeShow.
         WheelHandler {
             acceptedModifiers: Qt.ControlModifier

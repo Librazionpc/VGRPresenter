@@ -481,12 +481,27 @@ Item {
     // into the void and the GUI never blocks on a big query ("the" in the
     // sermons scanned every paragraph synchronously here — visible lag).
     // Adapters without searchAsync keep the synchronous call.
+    // Word resolution is ALSO async now (wordsResolved): every misspelled
+    // token scans the whole vocabulary, and a garbled multi-token query ran
+    // that scan on the GUI thread per keystroke — the freeze behind typing
+    // "danile 1; b4 icoud and 1".
     property int searchToken: 0
+    property int resolveToken: 0
     function runSearch(text) {
         const t = text.trim()
-        root.resolvedWords = t === "" ? []
-            : (SearchService.resolveWords ? SearchService.resolveWords(text) : [])
-        if (t === "") { root.searchResults = []; return }
+        if (t === "") {
+            root.resolvedWords = []
+            root.searchResults = []
+            root.resolveToken++
+            root.searchToken++
+            return
+        }
+        if (SearchService.resolveWordsAsync) {
+            root.resolveToken++
+            SearchService.resolveWordsAsync(text, root.resolveToken)
+        } else {
+            root.resolvedWords = SearchService.resolveWords(text)
+        }
         if (root.adapter && root.adapter.searchAsync) {
             root.searchToken++
             root.adapter.searchAsync(text, root.sourceId, root.searchToken)
@@ -494,10 +509,22 @@ Item {
             root.searchResults = root.adapter.search(text, root.sourceId)
         }
     }
+    // The worker's answer — stale tokens dropped (a fast typist's older
+    // keystrokes resolve into the void, same as the search's).
+    function applyResolvedWords(token, rows) {
+        if (token !== root.resolveToken) return
+        root.resolvedWords = rows
+    }
     function applySearchResults(token, rows) {
         if (token !== root.searchToken) return   // a stale keystroke's answer
         root.searchResults = rows
     }
+    // Word-resolution worker answers (applyResolvedWords above).
+    Connections {
+        target: SearchService
+        function onWordsResolved(token, rows) { root.applyResolvedWords(token, rows) }
+    }
+
     // Words to highlight: what the engine actually searched for (resolved),
     // falling back to the raw typed words when nothing needed fixing.
     readonly property string highlightQuery: {
@@ -660,6 +687,7 @@ Item {
         }
 
         Flickable {
+            id: sourcesFlick
             x: 8; y: 42; width: parent.width - 16; height: parent.height - 42 - 48
             clip: true
             contentHeight: sourceList.height
@@ -707,6 +735,16 @@ Item {
                     font.family: Theme.fontFamily; font.pixelSize: 13
                 }
             }
+        }
+
+        // Many installed Bibles overflow the sidebar — a real (draggable,
+        // click-to-jump) scrollbar, not wheel-only.
+        AppScrollBar {
+            flickable: sourcesFlick
+            anchors.top: sourcesFlick.top
+            anchors.bottom: sourcesFlick.bottom
+            anchors.right: parent.right
+            anchors.rightMargin: 2
         }
 
         // The add actions: the tab's main "add one" plus an optional bulk
@@ -794,6 +832,7 @@ Item {
             clip: true
             contentHeight: booksList.height + 8
             boundsBehavior: Flickable.StopAtBounds
+            // Wheel-only before: no scrollbar on this column at all.
 
             Column {
                 id: booksList
@@ -822,6 +861,12 @@ Item {
                     }
                 }
             }
+        }
+        AppScrollBar {
+            flickable: booksFlick
+            anchors.top: parent.top; anchors.bottom: parent.bottom
+            anchors.topMargin: 2; anchors.bottomMargin: 2
+            anchors.right: parent.right; anchors.rightMargin: 3
         }
         Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: Theme.border }
         SplitHandle {
@@ -889,6 +934,12 @@ Item {
                     }
                 }
             }
+        }
+        AppScrollBar {
+            flickable: chaptersFlick
+            anchors.top: parent.top; anchors.bottom: parent.bottom
+            anchors.topMargin: 2; anchors.bottomMargin: 2
+            anchors.right: parent.right; anchors.rightMargin: 3
         }
         Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: Theme.border }
         SplitHandle {
@@ -1131,8 +1182,10 @@ Item {
                     font.family: Theme.fontFamily; font.pixelSize: 12
                 }
                 Flickable {
+                    id: peekFlick
                     anchors.fill: parent
                     anchors.topMargin: 26
+                    anchors.rightMargin: 10
                     clip: true
                     contentHeight: peekCol.height + 20
                     boundsBehavior: Flickable.StopAtBounds
@@ -1162,6 +1215,12 @@ Item {
                             }
                         }
                     }
+                    // A long sermon's peek overflowed with no way to drag it.
+                    AppScrollBar {
+                        flickable: peekFlick
+                        anchors.top: parent.top; anchors.bottom: parent.bottom
+                        anchors.right: parent.right; anchors.rightMargin: 2
+                    }
                 }
             }
         }
@@ -1173,6 +1232,16 @@ Item {
             text: root.adapter.loading() ? (root.adapter ? root.adapter.loadingText : qsTr("Loading…")) : (root.adapter ? root.adapter.emptyText : qsTr("Nothing here yet."))
             color: Theme.textMuted
             font.family: Theme.fontFamily; font.pixelSize: 15
+        }
+
+        // The verses (or search results / matches) column's scrollbar — the
+        // chapter can be 150 sermons or 176 verses; wheel-only was the only
+        // way to move it.
+        AppScrollBar {
+            flickable: versesFlick
+            anchors.top: parent.top; anchors.bottom: parent.bottom
+            anchors.topMargin: 2; anchors.bottomMargin: 44   // clear the floating chip/pill
+            anchors.right: parent.right; anchors.rightMargin: 4
         }
 
         Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: Theme.border }
@@ -1263,8 +1332,16 @@ Item {
                     }
                 }
 
+                // ONE step pair, FreeShow's own toolbar shape: ‹ › step the
+                // picked passage (and re-play it when this tab is on air —
+                // their arrows carry the isActiveInOutput refresh). The old
+                // SECOND pair (a verse-step ‹› AND a passage-step ‹› side by
+                // side) duplicated the same job and crowded the pill.
                 Repeater {
-                    model: root.searching ? [] : [ { glyph: "chevronUp", dir: -1, tip: "previous" }, { glyph: "chevronDown", dir: 1, tip: "next" } ]
+                    model: root.searching ? [] : [
+                        { glyph: "chevronLeft", dir: -1, tip: qsTr("Previous") },
+                        { glyph: "chevronRight", dir: 1, tip: qsTr("Next") }
+                    ]
                     delegate: Item {
                         id: stepBtn
                         required property var modelData
@@ -1277,36 +1354,11 @@ Item {
                             width: 12; height: 12
                         }
                         HoverHandler { id: stepHover; cursorShape: Qt.PointingHandCursor }
-                        TapHandler { onTapped: root.step(stepBtn.modelData.dir) }
+                        TapHandler { onTapped: root.stepAndPlay(stepBtn.modelData.dir) }
                     }
                 }
 
                 Rectangle { visible: !root.searching; width: 1; height: 16; color: Theme.border; anchors.verticalCenter: parent.verticalCenter }
-
-                // PREVIOUS / NEXT + PLAY (FreeShow's FloatingInputs toolbar: the
-                // verse arrows step the picked passage, the play button puts it on
-                // air / refreshes it). Play shows the live glyph once THIS tab's
-                // content is what's on air (FreeShow's isActiveInOutput refresh).
-                Repeater {
-                    model: (root.searching || !root.adapter) ? [] : [
-                        { glyph: "arrowLeft", dir: -1, tip: qsTr("Previous passage") },
-                        { glyph: "chevronRight", dir: 1, tip: qsTr("Next passage") }
-                    ]
-                    delegate: Item {
-                        id: passageStepBtn
-                        required property var modelData
-                        width: 28; height: 26
-                        Rectangle { anchors.fill: parent; radius: 13; color: stepPassageHover.hovered ? "#22242e" : "transparent" }
-                        IconGlyph {
-                            anchors.centerIn: parent
-                            name: passageStepBtn.modelData.glyph
-                            color: Theme.textPrimary
-                            width: 12; height: 12
-                        }
-                        HoverHandler { id: stepPassageHover; cursorShape: Qt.PointingHandCursor }
-                        TapHandler { onTapped: root.stepAndPlay(passageStepBtn.modelData.dir) }
-                    }
-                }
 
                 Item {
                     visible: !root.searching
@@ -1314,14 +1366,21 @@ Item {
                     readonly property bool isOurs: root.adapter && root.adapter.liveIsOurs
                                                    ? root.adapter.liveIsOurs(root.referenceText) : false
                     Rectangle { anchors.fill: parent; radius: 13; color: playPickedHover.hovered || parent.isOurs ? "#22242e" : "transparent" }
+                    // FreeShow's scripture play button: PLAY (outlined) when this
+                    // passage is not on air; when it IS, the green filled STOP
+                    // square — clicking takes it off air (their "stop" state),
+                    // NOT a refresh icon (which IconGlyph doesn't even have: the
+                    // unknown name fell through to the filled-dot fallback and
+                    // rendered as a green blob).
                     IconGlyph {
                         anchors.centerIn: parent
-                        name: parent.isOurs ? "refresh" : "play"
+                        name: parent.isOurs ? "stop" : "play"
                         color: parent.isOurs ? "#6dff85" : Theme.textPrimary
                         width: 13; height: 13
+                        fit: true
                     }
                     HoverHandler { id: playPickedHover; cursorShape: Qt.PointingHandCursor }
-                    TapHandler { onTapped: root.playPicked() }
+                    TapHandler { onTapped: parent.isOurs ? LiveOutputService.stop() : root.playPicked() }
                 }
 
                 Rectangle { visible: !root.searching; width: 1; height: 16; color: Theme.border; anchors.verticalCenter: parent.verticalCenter }

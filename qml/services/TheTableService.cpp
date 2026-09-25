@@ -515,7 +515,8 @@ QVariantList TheTableService::slides(const QString &bookId, int chapter, const Q
     if (!library_ || !EngineBridge::instance().booted() || verses.isEmpty() || !sourceFor(tableLibrary(library_), bookId, chapter, verses, source))
         return {};
     source.versionName = "The Table";
-    return SlideBuilder::slides(templateId(), source, SettingsService::instance().theTableSettings());
+    return SlideBuilder::slides(templateId(), source, SettingsService::instance().theTableSettings(),
+                                QStringLiteral("table"));
 }
 
 // The Table's template chrome (the shared pane's template card + picker):

@@ -75,7 +75,14 @@ public:
     // words split ("holyspirit" -> "holy spirit"). One { typed, resolved, weight }
     // entry per word that DIFFERS from its resolution, in order; empty when the
     // query is already well-spelled (the common case: zero UI, zero cost).
+    // SYNCHRONOUS (kept for callers that already sit on a worker); the GUI-facing
+    // path is resolveWordsAsync below — each misspelled token scans the whole
+    // ~91k-word vocabulary, a multi-token garble on the GUI thread was the
+    // search-freeze.
     Q_INVOKABLE QVariantList resolveWords(const QString &text) const;
+    // ASYNC resolveWords: answers as wordsResolved(token, rows); only the
+    // LATEST request's token is answered (same contract as searchAsync).
+    Q_INVOKABLE void resolveWordsAsync(const QString &text, int token);
 
     // One verse's FULL text (typesetting marks cleaned) — the Quick search dialog's
     // hover preview: a result row only carries a capped snippet, hovering fetches
@@ -108,10 +115,13 @@ signals:
     void bibleProgressChanged();
     // An async search (searchAsync) finished: the token matches the request.
     void resultsReady(int token, const QVariantList &rows);
+    // An async word resolution (resolveWordsAsync) finished: the token matches.
+    void wordsResolved(int token, const QVariantList &rows);
 
 private:
     explicit SearchService(QObject *parent = nullptr);
     static QStringList candidateBibleFiles();
+    int latestResolveToken_ = 0;   // resolveWordsAsync: newest request wins
 
     QPointer<QThread> loader_;
     std::atomic<int> latestToken_{0};   // searchAsync: only the newest request emits

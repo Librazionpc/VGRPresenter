@@ -151,6 +151,15 @@ std::vector<IndexStorage::TermTf> IndexStorage::LookupTf(std::string_view term) 
     return out;
 }
 
+// The doc frequency alone — map::size under a shared lock, zero copies (see
+// the header: LookupTf's full postings copy was the per-keystroke allocation
+// storm behind the search-path freeze).
+size_t IndexStorage::DfOf(std::string_view term) const {
+    std::shared_lock lock(mutex_);
+    auto it = index_.find(Lower(term));
+    return it == index_.end() ? 0 : it->second.size();
+}
+
 IndexStorage::CorpusStats IndexStorage::Corpus() const {
     std::shared_lock lock(mutex_);
     return {documents_.size(), totalTokens_};

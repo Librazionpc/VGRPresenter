@@ -1,6 +1,9 @@
 #include "OutputListModel.h"
 #include "StyleListModel.h"
+#include "services/DesignLibraryService.h"
+#include "services/EngineBridge.h"
 #include "services/SettingsService.h"
+#include "services/ShowConverter.h"
 #include "modules/presentation/PresentationTypes.hpp"
 
 #include <QGuiApplication>
@@ -56,16 +59,44 @@ OutputListModel::OutputListModel(QObject *parent)
     m_outputs.append(main);
 
     // A style edit renames/re-keys the theme every output's styleName shows —
-    // re-resolve the derived roles when the roster changes. (The engine spec
-    // is NOT pushed from here: the on-air style object itself carries the
-    // new values, so SetActiveOutputStyle already got them from the edit
-    // path; this connection only keeps the labels honest.)
+    // re-resolve the derived roles when the roster changes. The engine spec
+    // IS pushed here too (see the rosterChanged lambda): an edited style that
+    // is on air must restyle the live output immediately.
     //
-    // QML singleton construction order is undefined — StyleListModel may not
-    // exist yet when this constructor runs — so retry once the event loop
+    // QML singleton construction order is undefined — StyleListModel (and the
+    // TemplateLibraryService the spec's baked template blocks come from) may
+    // not exist yet when this constructor runs — so retry once the event loop
     // starts (by then the QML load has created every singleton).
     connectToStyleRoster();
-    QTimer::singleShot(0, this, [this]() { connectToStyleRoster(); });
+    connectToTemplateLibrary();
+    connectToEngineBoot();
+    QTimer::singleShot(0, this, [this]() {
+        connectToStyleRoster();
+        connectToTemplateLibrary();
+        connectToEngineBoot();
+    });
+}
+
+void OutputListModel::connectToEngineBoot()
+{
+    // THE BOOT GAP: the active output's saved style ("black bg + tpl-table")
+    // must be in the engine BEFORE the first go-live of a session. The spec
+    // is otherwise only pushed on roster edits / output re-selection — none
+    // of which fire between an app start and the user putting something on
+    // air, so the output rendered unstyled (default bg, no template) no
+    // matter what was saved. Two ordering traps: the engine may still be
+    // booting when the singleShot(0) runs (pushes are dropped pre-boot by
+    // SettingsService), and SettingsService::setActiveOutputStyle guards on
+    // booted() itself — so this retries on bootedChanged and pushes once.
+    if (engineBootConnected_)
+        return;
+    engineBootConnected_ = true;
+    connect(&EngineBridge::instance(), &EngineBridge::bootedChanged, this, [this]() {
+        if (EngineBridge::instance().booted())
+            pushActiveEngineStyle();
+    });
+    if (EngineBridge::instance().booted())
+        pushActiveEngineStyle();
 }
 
 void OutputListModel::connectToStyleRoster()
@@ -82,6 +113,14 @@ void OutputListModel::connectToStyleRoster()
         const QModelIndex first = index(0);
         const QModelIndex last = index(m_outputs.size() - 1);
         emit dataChanged(first, last, { StyleIdRole, StyleNameRole });
+        // Save Changes on a style that is ON AIR must reach the engine NOW
+        // (FreeShow's reactive output.style — the live render loop picks the
+        // new spec up within a frame). pushEngineStyle only ran on output
+        // selection/assignment before, so editing a live style did nothing
+        // until the output was re-selected — the edit looked disconnected
+        // from the engine. An empty activeStyleId pushes an empty spec,
+        // which is exactly "no style".
+        pushActiveEngineStyle();
         emit activeStyleChanged();
     });
 }
@@ -557,9 +596,61 @@ void OutputListModel::pushEngineStyle(const QString &styleId)
         spec.showScripture = style.value(QStringLiteral("showScripture")).toBool();
         spec.showTable = style.value(QStringLiteral("showTable")).toBool();
         spec.category = style.value(QStringLiteral("category")).toString().toStdString();
+        bakeTemplateBlocks(spec);
     }
     if (SettingsService *settings = SettingsService::instancePtr())
         settings->setActiveOutputStyle(spec);
+}
+
+void OutputListModel::bakeTemplateBlocks(bps::presentation::OutputStyleSpec &spec)
+{
+    // A legacy preset key ("lowerThird"...) rides StyleBuilder::LayoutFor —
+    // nothing to bake. Anything else is an ENGINE TEMPLATE DESIGN id
+    // ("tpl-…", picked from the Template library): copy that design's blocks
+    // into the spec so the engine renders the template as the style's layout.
+    // The engine never reads the library itself — the pushed spec is the
+    // whole truth — so this is also what makes a template edit reach the
+    // on-air output (this model re-pushes on TemplateLibraryService::changed).
+    const QString key = QString::fromStdString(spec.templateKey);
+    if (key.isEmpty() || key.startsWith(QLatin1String("tpl-")) == false)
+        return;
+    const QVariantMap design = TemplateLibraryService::instance().design(key);
+    const QVariantList blocks = design.value(QStringLiteral("blocks")).toList();
+    if (blocks.isEmpty())
+        return;   // unknown/deleted id: keep the plain-layout fallback
+    spec.templateBlocks.reserve(blocks.size());
+    for (const QVariant &b : blocks)
+        spec.templateBlocks.push_back(ShowConverter::blockFromVariant(b.toMap()));
+}
+
+// One push for the CURRENT active output's style — the single entry point
+// every "something about the on-air look changed" relay funnels into. No-op
+// when the style roster hasn't been adopted yet (see connectToStyleRoster).
+void OutputListModel::pushActiveEngineStyle()
+{
+    if (!styleRosterConnected_)
+        return;
+    pushEngineStyle(activeStyleId());
+}
+
+void OutputListModel::connectToTemplateLibrary()
+{
+    if (templateLibraryConnected_)
+        return;
+    // The template library is another QML singleton — same lazy-construction
+    // story as StyleListModel in the constructor — so this too may run before
+    // it exists and is retried from the same singleShot(0).
+    TemplateLibraryService *templates = &TemplateLibraryService::instance();
+    if (!templates)
+        return;
+    templateLibraryConnected_ = true;
+    // THE STYLE'S TEMPLATE WAS EDITED (Save Changes on a template the style
+    // wears): the roster fields are untouched, so only this relay gets the
+    // news. Re-bake + re-push; the engine sees a block-only spec change and
+    // rebuilds the scenes (fingerprint hash moves).
+    connect(templates, &DesignLibraryService::changed, this, [this]() {
+        pushActiveEngineStyle();
+    });
 }
 
 void OutputListModel::detachStyleEverywhere(const QString &styleId)

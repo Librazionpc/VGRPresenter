@@ -42,6 +42,23 @@ Item {
         return count
     }
 
+    // A style's templateKey as a NAME: engine-template ids ("tpl-…") resolve
+    // through the Template library (the picker's same catalog), legacy preset
+    // keys show their friendly names, anything else falls back to the raw
+    // key. Reads modelsRev so a catalog load / rename re-renders — a binding
+    // over an invokable alone wouldn't.
+    readonly property var templateCatalogRev: TemplateLibraryService.totalCount
+    function templateNameFor(key) {
+        void root.templateCatalogRev
+        if (typeof key !== "string" || key === "")
+            return qsTr("None")
+        if (key.indexOf("tpl-") === 0) {
+            const name = TemplateLibraryService.design(key).name
+            if (name) return name
+        }
+        return templatePicker.nameFor(key)
+    }
+
     // ---- Edit Style dialog ----
     // Editable copies loaded when the dialog opens — the model is only
     // written on Save, matching every other dialog's Cancel/Save contract
@@ -337,7 +354,7 @@ Item {
 
                                     Text {
                                         anchors.verticalCenter: parent.verticalCenter
-                                        text: templatePicker.nameFor(styleRow.templateKey)
+                                        text: root.templateNameFor(styleRow.templateKey)
                                         color: Theme.textSecondary
                                         font.family: Theme.fontFamily
                                         font.pixelSize: Theme.textXs
@@ -734,7 +751,7 @@ Item {
                 Text {
                     x: 14
                     anchors.verticalCenter: parent.verticalCenter
-                    text: templatePicker.nameFor(root.editStyleTemplateKey)
+                    text: root.templateNameFor(root.editStyleTemplateKey)
                     color: Theme.textPrimary
                     font.family: Theme.fontFamily
                     font.pixelSize: Theme.textSm
@@ -773,15 +790,21 @@ Item {
                                 "shows": qsTr("Shows"), "media": qsTr("Media"), "scripture": qsTr("Scripture"),
                                 "table": qsTr("The Table")
                             }[root.editStyleContentType] ?? qsTr("Shows")
-                            // The Table's templates live in the ENGINE catalog (the
-                            // same "table" category the tab's own picker lists), not
-                            // in this default list — hand them in, keyed by id, the
-                            // way ReferencePane does for its tabs.
-                            if (root.editStyleContentType === "table") {
-                                templatePicker.templates = TemplateLibraryService.designs("table").map((t) => ({
-                                    key: t.id, name: t.name, color: t.color
-                                }))
-                            }
+                            // The ENGINE's template catalog — the same Template library the
+                            // Templates tab edits — for EVERY content type (ReferencePane's
+                            // mapping, category filter included). The style saves the design's
+                            // id as its templateKey, and the engine renders that design as the
+                            // style's layout (baked into the pushed spec). Legacy preset keys
+                            // from older rosters still resolve through the picker's
+                            // legacyPresetNames until re-picked here.
+                            const categoryNames = {}
+                            for (const c of TemplateLibraryService.categories)
+                                categoryNames[c.id] = c.name
+                            templatePicker.templates = TemplateLibraryService.designs().map((t) => ({
+                                key: t.id, name: t.name, color: t.color,
+                                category: t.category,
+                                categoryName: t.category ? (categoryNames[t.category] ?? t.category) : qsTr("Unlabeled")
+                            }))
                             templatePicker.selectedKey = root.editStyleTemplateKey
                             templatePicker.open = true
                         }
@@ -857,7 +880,9 @@ Item {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: styleBgModal.open = true
+                        // Seeded with the style's CURRENT background — the
+                        // palette highlights it instead of a hardcoded default.
+                        onClicked: styleBgModal.openWith(root.editStyleBackgroundColor)
                     }
                 }
             }

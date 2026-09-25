@@ -1,5 +1,7 @@
 #include "services/SearchService.h"
 
+#include <QThread>
+
 #include "services/EngineBridge.h"
 #include "services/MediaLibraryService.h"
 #include "services/EventBus.h"
@@ -298,6 +300,23 @@ QVariantList SearchService::resolveWords(const QString &text) const
         out.append(m);
     }
     return out;
+}
+
+// ASYNC word resolution (see the header): each misspelled token scans the whole
+// vocabulary, so a garbled multi-token query runs OFF the GUI thread. Same
+// newest-token-wins contract as searchAsync.
+void SearchService::resolveWordsAsync(const QString &text, int token)
+{
+    auto *runner = QThread::create([this, text, token] {
+        const QVariantList rows = resolveWords(text);
+        QMetaObject::invokeMethod(this, [this, token, rows] {
+            if (token == latestResolveToken_)
+                emit wordsResolved(token, rows);
+        }, Qt::QueuedConnection);
+    });
+    connect(runner, &QThread::finished, runner, &QObject::deleteLater);
+    latestResolveToken_ = token;   // newest request wins
+    runner->start();
 }
 
 QVariantList SearchService::searchSettings(const QString &text, int limit) const

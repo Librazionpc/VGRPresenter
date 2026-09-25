@@ -76,7 +76,8 @@ QVariantMap preview(const QString &templateId, const pf::ScriptureSource &source
     return out;
 }
 
-QVariantList slides(const QString &templateId, const pf::ScriptureSource &source, const pf::ScriptureSettings &options)
+QVariantList slides(const QString &templateId, const pf::ScriptureSource &source, const pf::ScriptureSettings &options,
+                    const QString &contentType)
 {
     QVariantList out;
     if (source.verses.empty())
@@ -84,8 +85,12 @@ QVariantList slides(const QString &templateId, const pf::ScriptureSource &source
     QString background;
     const std::vector<pf::ContentBlock> tmpl = templateBlocks(templateId, &background);
     for (const pf::ScriptureSlide &s : pf::BuildScriptureSlides(tmpl, source, options))
+        // `contentType` rides along ("scripture" | "table"): the OUTPUT STYLE's
+        // own engine template must not steamroll a DIFFERENT tab's layout —
+        // the style's template only applies to its own content family.
         out.append(QVariantMap{ { QStringLiteral("title"), QString::fromStdString(s.title) }, { QStringLiteral("background"), background },
-                                { QStringLiteral("blocks"), blocksToVariants(s.blocks) } });
+                                { QStringLiteral("blocks"), blocksToVariants(s.blocks) },
+                                { QStringLiteral("contentType"), contentType } });
     return out;
 }
 

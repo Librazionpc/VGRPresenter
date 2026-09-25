@@ -30,16 +30,14 @@ Item {
     // doesn't need a separate description/tag pulling double duty saying
     // the same thing a different way. The preview pane (below) reads the
     // name generically too, not a per-key hardcoded layout.
-    // Settable (not readonly): a consumer with its own registry (Scripture / The Table's engine-backed design catalog, keyed by "id"
-    // rather than a fixed "key") hands its own list in here instead - same picker, its own templates. This default list is what
-    // StylesScreen, which has none of its own, still gets.
-    property var templates: [
-        { key: "lowerThird", name: qsTr("Lower Third") },
-        { key: "title", name: qsTr("Title") },
-        { key: "sidebar", name: qsTr("Sidebar") },
-        { key: "bottomBar", name: qsTr("Bottom Bar") },
-        { key: "fullscreen", name: qsTr("Fullscreen") }
-    ]
+    // Settable (not readonly): every consumer now hands the ENGINE's template
+    // catalog in (StylesScreen included — its old default was a hardcoded
+    // five-preset list that had nothing to do with the Template library the
+    // rest of the app edits, and the engine's LayoutFor still accepts those
+    // five keys as legacy presets). The list shape: { key, name, color?,
+    // category?, categoryName? } — the extra fields light the category
+    // dropdown + colour chip the catalog rows carry.
+    property var templates: []
 
     // Looks up a template's display name for a stored key — what
     // EditStyleModal calls to show "Template: <name>" without needing its
@@ -52,8 +50,28 @@ Item {
             if (root.templates[i].key === key)
                 return root.templates[i]
         }
-        return root.templates[0]
+        // Not in the handed-in list. Two honest fallbacks: a legacy preset
+        // key ("lowerThird"...) — the engine's built-in layouts, which are
+        // real choices even though no design carries them — displays as its
+        // own name; anything else resolves to an empty row, NEVER to
+        // templates[0] (that silently renamed every unknown key to the first
+        // template's name, and with the engine catalog handed in it also
+        // crashed on an empty list before the catalog loaded).
+        if (typeof key === "string" && key.length > 0)
+            return { key: key, name: legacyPresetNames[key] ?? key }
+        return { key: "", name: "" }
     }
+
+    // The engine's built-in layout presets (StyleBuilder::LayoutFor's five
+    // keys) — styles saved before the engine catalog was connected, and any
+    // "legacy preset" choice, still carry these keys.
+    readonly property var legacyPresetNames: ({
+        lowerThird: qsTr("Lower Third"),
+        title: qsTr("Title"),
+        sidebar: qsTr("Sidebar"),
+        bottomBar: qsTr("Bottom Bar"),
+        fullscreen: qsTr("Fullscreen")
+    })
 
     property var favoriteKeys: ["lowerThird", "sidebar"]
     function isFavorite(key) {
@@ -170,7 +188,9 @@ Item {
         MouseArea { anchors.fill: parent; onClicked: {} }
 
         Flickable {
+            id: pickerFlick
             anchors.fill: parent
+            anchors.rightMargin: 10
             contentWidth: width
             contentHeight: content.height + 40
             clip: true
@@ -612,6 +632,16 @@ Item {
                 }
             }
         }
+        }
+
+        // The catalog (now the WHOLE template library) overflows the modal on
+        // a short window — wheel-only before. Sits in the rightMargin strip
+        // the Flickable reserves.
+        AppScrollBar {
+            flickable: pickerFlick
+            anchors.top: parent.top; anchors.bottom: parent.bottom
+            anchors.topMargin: 8; anchors.bottomMargin: 8
+            anchors.right: parent.right; anchors.rightMargin: 2
         }
     }
 }

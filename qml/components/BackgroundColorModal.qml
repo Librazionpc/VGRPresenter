@@ -75,6 +75,43 @@ Item {
     // back to swatch-driven selection.
     property string liveKind: ""
 
+    // Seed the palette from the CURRENT value — the picker shows the color
+    // being edited, not this component's hardcoded defaults (the old open
+    // path always displayed #1B2440 etc. until the user picked). A hex
+    // selects/highlights its swatch (adding it first when custom, same
+    // create-on-commit rule as typing); "transparent" (or anything that
+    // isn't a color) selects the Transparent swatch. Pure: does NOT touch
+    // `open`, so a caller that binds `open` to its own state (EditScreen's
+    // shared picker) can call this when opening without breaking the binding.
+    function seedWith(color) {
+        root.selectedGradientIndex = 0
+        root.selectedColorIndex = -1
+        root.liveKind = ""
+        const hex = String(color ?? "")
+        if (root.isValidHex(hex)) {
+            root.customHex = hex
+            hexInput.text = hex   // (onTextChanged may set liveKind — cleared right after)
+            root.liveKind = ""
+            const at = root.colorSwatches.indexOf(hex)
+            if (at < 0) {
+                root.colorSwatches = root.colorSwatches.concat([hex])
+                root.selectedColorIndex = root.colorSwatches.length - 1
+            } else {
+                root.selectedColorIndex = at
+            }
+        } else {
+            root.selectedColorIndex = root.colorSwatches.indexOf(root.transparentValue)
+        }
+    }
+
+    // For callers that hand the picker its visibility (no `open` binding):
+    // seed from the current value and show. Bound callers: seedWith() + set
+    // their own open flag.
+    function openWith(color) {
+        root.seedWith(color)
+        root.open = true
+    }
+
     function isValidHex(h) {
         return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(h)   // 8 digits = #AARRGGBB
     }
@@ -236,70 +273,101 @@ Item {
         onDismissed: root.cancelled()
     }
 
+    // The card: pinned header (title + close X), scrollable palette middle,
+    // pinned Cancel/Apply footer — the same contract ModalCard gives every
+    // other dialog. The palette body is taller than a settings window; the
+    // old content-sized card centered itself with NO cap and clipped BOTH
+    // ends (close X off the top, Apply/Cancel off the bottom, nothing
+    // scrollable). Height now caps against the parent; the middle scrolls.
     Rectangle {
         id: card
         anchors.centerIn: parent
-        width: 460
-        height: content.height + 40
+        width: Math.min(460, root.width - 80)
+        // Height is decided HERE, in one place: the content plus the chrome,
+        // capped to the window. 62 = header (20 top margin + 28 close row + 14
+        // gap); footerRow.height + 34 = footer (34 buttons + 20 bottom margin
+        // + 14 of air between the scroll area and the buttons). The flick's
+        // height below derives from THIS, not the other way round — the old
+        // paired formulas met at exactly the footer's top edge, so scrolled to
+        // the bottom the last row's border sat under the Cancel/Apply buttons.
+        readonly property int chrome: 62 + footerRow.height + 34
+        height: Math.max(248, Math.min(root.height - 80, chrome + content.height))
         radius: 14
         color: "#15161d"
         border.color: "#232530"
         border.width: 1
+        clip: true
 
         // Swallows clicks so they don't fall through to the scrim behind it.
         MouseArea { anchors.fill: parent; onClicked: {} }
 
-        Column {
-            id: content
+        // ---- pinned header ----
+        Item {
+            id: headerItem
             x: 24
             y: 20
             width: parent.width - 48
-            spacing: 18
+            height: closeBtn.height
+
+            Text {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.title
+                color: "#eef0f6"
+                font.family: "Segoe UI"
+                font.pixelSize: 21
+                font.weight: Font.DemiBold
+            }
+
+            Rectangle {
+                id: closeBtn
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                width: 28
+                height: 28
+                radius: 7
+                color: closeArea.containsMouse ? "#20222c" : "transparent"
+                Behavior on color { ColorAnimation { duration: 100 } }
+
+                Text {
+                    anchors.centerIn: parent
+                    text: "✕"
+                    color: "#8a94a6"
+                    font.pixelSize: 14
+                }
+
+                MouseArea {
+                    id: closeArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.cancelled()
+                }
+            }
+        }
+
+        // ---- scrollable palette (the middle) ----
+        Flickable {
+            id: flick
+            x: 24
+            y: headerItem.y + headerItem.height + 14
+            width: parent.width - 48
+            // From the card's height (already capped): everything below the
+            // flick minus the 20px footer margin AND a 14px cushion, so at
+            // full scroll-down the last row never touches the buttons. The
+            // 120 floor keeps a degenerate-short window from collapsing the
+            // palette to nothing (the card may then clip — nothing to fix
+            // there, there is simply no room).
+            height: Math.max(120, card.height - y - footerRow.height - 34)
+            contentWidth: width
+            contentHeight: content.height
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
 
             Column {
-                width: parent.width
-                spacing: 4
-
-                Item {
-                    width: parent.width
-                    height: closeBtn.height
-
-                    Text {
-                        anchors.left: parent.left
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: root.title
-                        color: "#eef0f6"
-                        font.family: "Segoe UI"
-                        font.pixelSize: 21
-                        font.weight: Font.DemiBold
-                    }
-
-                    Rectangle {
-                        id: closeBtn
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: 28
-                        height: 28
-                        radius: 7
-                        color: closeArea.containsMouse ? "#20222c" : "transparent"
-                        Behavior on color { ColorAnimation { duration: 100 } }
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "✕"
-                            color: "#8a94a6"
-                            font.pixelSize: 14
-                        }
-
-                        MouseArea {
-                            id: closeArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.cancelled()
-                        }
-                    }
-                }
+                id: content
+                width: flick.width
+                spacing: 18
 
                 Text {
                     width: parent.width
@@ -309,7 +377,6 @@ Item {
                     font.pixelSize: 13
                     wrapMode: Text.Wrap
                 }
-            }
 
             // Current-selection preview.
             Rectangle {
@@ -698,61 +765,73 @@ Item {
                 }
             }
 
-            Rectangle { width: parent.width; height: 1; color: "#232530" }
+            }
+        }
 
-            Row {
-                anchors.right: parent.right
-                spacing: 10
+        AppScrollBar {
+            anchors.top: flick.top
+            anchors.bottom: flick.bottom
+            anchors.right: parent.right
+            anchors.rightMargin: 6
+            flickable: flick
+        }
 
-                Rectangle {
-                    width: 78
-                    height: 34
-                    radius: 8
-                    color: cancelArea.containsMouse ? "#20222c" : "#1a1c26"
-                    border.color: "#2a3140"
-                    border.width: 1
+        // ---- pinned footer: Cancel/Apply can never scroll out of view ----
+        Row {
+            id: footerRow
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.margins: 20
+            spacing: 10
 
-                    Text {
-                        anchors.centerIn: parent
-                        text: qsTr("Cancel")
-                        color: "#c9cedd"
-                        font.family: "Segoe UI"
-                        font.pixelSize: 14
-                        font.weight: Font.Medium
-                    }
+            Rectangle {
+                width: 78
+                height: 34
+                radius: 8
+                color: cancelArea.containsMouse ? "#20222c" : "#1a1c26"
+                border.color: "#2a3140"
+                border.width: 1
 
-                    MouseArea {
-                        id: cancelArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.cancelled()
-                    }
+                Text {
+                    anchors.centerIn: parent
+                    text: qsTr("Cancel")
+                    color: "#c9cedd"
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
+                    font.weight: Font.Medium
                 }
 
-                Rectangle {
-                    width: 78
-                    height: 34
-                    radius: 8
-                    color: applyArea.containsMouse ? "#5a4cd6" : "#6c5ce7"
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                MouseArea {
+                    id: cancelArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.cancelled()
+                }
+            }
 
-                    Text {
-                        anchors.centerIn: parent
-                        text: qsTr("Apply")
-                        color: "#ffffff"
-                        font.family: "Segoe UI"
-                        font.pixelSize: 14
-                        font.weight: Font.Medium
-                    }
+            Rectangle {
+                width: 78
+                height: 34
+                radius: 8
+                color: applyArea.containsMouse ? "#5a4cd6" : "#6c5ce7"
+                Behavior on color { ColorAnimation { duration: 100 } }
 
-                    MouseArea {
-                        id: applyArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.applied(root.withOpacity(root.selection))
-                    }
+                Text {
+                    anchors.centerIn: parent
+                    text: qsTr("Apply")
+                    color: "#ffffff"
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
+                    font.weight: Font.Medium
+                }
+
+                MouseArea {
+                    id: applyArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.applied(root.withOpacity(root.selection))
                 }
             }
         }

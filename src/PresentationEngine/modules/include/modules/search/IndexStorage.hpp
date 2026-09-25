@@ -74,6 +74,14 @@ public:
     struct TermTf { std::string docId; size_t tf = 0; };
     std::vector<TermTf> LookupTf(std::string_view term) const;
 
+    // JUST the doc frequency — no postings copies. LookupTf copies the whole
+    // postings map ("and" in a 209k-paragraph corpus: hundreds of thousands of
+    // string pairs, several MB) where callers only need the SIZE — fuzzy
+    // correction's emptiness checks and jam-splitting's df gates ran one of
+    // those copies per candidate split point per query word, per keystroke.
+    // 0 = the term is not in the vocabulary.
+    size_t DfOf(std::string_view term) const;
+
     // Corpus stats for BM25: N and the average document length (avgdl).
     struct CorpusStats { size_t documents = 0; size_t totalTokens = 0; };
     CorpusStats Corpus() const;

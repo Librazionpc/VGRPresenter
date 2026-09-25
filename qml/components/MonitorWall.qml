@@ -205,59 +205,171 @@ Item {
         }
     }
 
-    // ---- Transport toolbar (FreeShow's ShowActions + ClearButtons row) ------
+    // ---- Preview chrome (FreeShow's ShowActions + ClearButtons, rebuilt) ----
+    // Two sections under the preview, like FreeShow's Preview.svelte:
+    //   [ < > ▶ 🔒 ◐ ]   ShowActions — previous/next slide, play (go live /
+    //                     resume), the output LOCK, and the (informational)
+    //                     transition glyph
+    //   [ ✕ Clear all ]   ClearButtons' red full-width clear.all — everything
+    //                     off air
+    //   [🖼 📄 ⊙ 🎵 ⏱]   ClearButtons' group — clear background / slide /
+    //                     overlays / audio / timers, red-tinted while there
+    //                     is something of that layer on air to clear, dimmed
+    //                     when that layer is already empty
+    // The engine exposes stop() (all layers) and prev/next per slide; the
+    // per-layer buttons today do what the engine can honestly do — they
+    // light by whether there IS anything on air at all, and Clear all does
+    // the real work.
     Rectangle {
         id: toolbar
         visible: root.live
         anchors.horizontalCenter: parent.horizontalCenter
         y: wall.y + wall.height + (wall.pageCount > 1 ? 22 : 8)
         width: 376
-        height: 36
+        height: transportRow.height + 12
         radius: 8
         color: "#14151d"
         border.color: "#232530"
         border.width: 1
 
-        Row {
-            anchors.centerIn: parent
-            spacing: 2
+        readonly property bool atStart: LiveOutputService.onAirIndex <= 0
+        readonly property bool atEnd: LiveOutputService.onAirTotal > 0 && LiveOutputService.onAirIndex >= LiveOutputService.onAirTotal - 1
+        readonly property bool onAir: LiveOutputService.onAirTotal > 0
 
-            // Previous slide.
-            Item {
-                width: 40; height: 28
-                Rectangle { anchors.fill: parent; anchors.margins: 2; radius: 6; color: prevArea.containsMouse ? "#22242e" : "transparent" }
-                IconGlyph { anchors.centerIn: parent; name: "arrowLeft"; color: Theme.textPrimary; width: 14; height: 14 }
-                HoverHandler { id: prevArea; cursorShape: Qt.PointingHandCursor }
-                TapHandler { onTapped: LiveOutputService.previous() }
+        // A toolbar button — one glyph in a PILL (always-visible rounded
+        // chip, like FreeShow's MaterialButton tiles) that brightens on
+        // hover; danger buttons tint red. The pill NEVER dims: a disabled
+        // action (prev on the first slide, the inert lock/transition) dims
+        // its GLYPH only, so every slot keeps its chip and its hover.
+        component ToolButton: Item {
+            id: toolBtn
+            property string icon: ""
+            property bool enabled2: true
+            property bool danger: false
+            signal picked()
+            width: 36; height: 30
+            Rectangle {
+                anchors.fill: parent; radius: 8
+                color: {
+                    if (toolBtn.danger)
+                        return toolArea.containsMouse ? "#33ff4d3d" : "#26ff4d3d"
+                    return toolArea.containsMouse ? "#262a3a" : "#1c1e29"
+                }
+                border.color: {
+                    if (toolBtn.danger)
+                        return toolArea.containsMouse ? "#66ff4d3d" : "#33ff4d3d"
+                    return toolArea.containsMouse ? "#39405c" : "#262a3a"
+                }
+                border.width: 1
+                Behavior on color { ColorAnimation { duration: 100 } }
             }
-            // Next slide.
-            Item {
-                width: 40; height: 28
-                Rectangle { anchors.fill: parent; anchors.margins: 2; radius: 6; color: nextArea.containsMouse ? "#22242e" : "transparent" }
-                IconGlyph { anchors.centerIn: parent; name: "chevronRight"; color: Theme.textPrimary; width: 14; height: 14 }
-                HoverHandler { id: nextArea; cursorShape: Qt.PointingHandCursor }
-                TapHandler { onTapped: LiveOutputService.next() }
+            IconGlyph {
+                anchors.centerIn: parent
+                name: toolBtn.icon
+                color: toolBtn.danger ? "#ff6b61" : (toolBtn.enabled2 ? Theme.textPrimary : Theme.textMuted)
+                width: 15; height: 15; fit: true
+                Behavior on color { ColorAnimation { duration: 100 } }
+            }
+            HoverHandler { id: toolArea; cursorShape: toolBtn.enabled2 ? Qt.PointingHandCursor : Qt.ArrowCursor }
+            TapHandler { onTapped: if (toolBtn.enabled2) toolBtn.picked() }
+        }
+
+        Column {
+            id: transportRow
+            x: 10; y: 8
+            width: parent.width - 20
+            spacing: 6
+
+            // ShowActions: [previous next play lock transition] — spread
+            // across the full strip (FreeShow's buttons are flex-grow: 1, so
+            // every action owns an equal slot instead of huddling mid-bar).
+            Row {
+                width: parent.width
+
+                ToolButton {
+                    width: parent.width / 5; height: 30
+                    icon: "previous"
+                    enabled2: !toolbar.atStart
+                    onPicked: LiveOutputService.previous()
+                }
+                ToolButton {
+                    width: parent.width / 5; height: 30
+                    icon: "next"
+                    enabled2: !toolbar.atEnd
+                    onPicked: LiveOutputService.next()
+                }
+                // Play: when live, an end-of-list restart (the engine runs
+                // the show itself; there is no separate start).
+                ToolButton {
+                    width: parent.width / 5; height: 30
+                    icon: "play"
+                    enabled2: toolbar.atEnd || !toolbar.onAir
+                    onPicked: {
+                        if (!LiveOutputService.live) return
+                        LiveOutputService.jumpTo(0)
+                    }
+                }
+                // Lock: Ctrl+L in FreeShow — arms the "nothing can change the
+                // output" state; the engine has no output lock yet, so the
+                // button shows the unlocked state and is inert (glyph dimmed,
+                // pill + hover intact).
+                ToolButton {
+                    width: parent.width / 5; height: 30
+                    icon: "unlocked"
+                    enabled2: false
+                }
+                // Transition: FreeShow opens its transition popup; there is
+                // no engine transition editor yet, so the glyph is a marker.
+                ToolButton {
+                    width: parent.width / 5; height: 30
+                    icon: "transition"
+                    enabled2: false
+                }
             }
 
-            Rectangle { width: 1; height: 16; color: "#232530"; anchors.verticalCenter: parent.verticalCenter }
-
-            // Clear all — everything off air (FreeShow's Clear all).
+            // Clear all (ClearButtons' red full-width clear.all).
             Item {
-                width: 96; height: 28
+                width: parent.width; height: 28
                 Rectangle {
-                    anchors.fill: parent; anchors.margins: 2; radius: 6
-                    color: clearArea.containsMouse ? "#33ff4d3d" : "transparent"
-                    border.color: clearArea.containsMouse ? "#66ff4d3d" : "transparent"
+                    anchors.fill: parent; radius: 8
+                    color: clearAllArea.containsMouse ? "#2fff4d3d" : "#1cff4d3d"
+                    border.color: clearAllArea.containsMouse ? "#66ff4d3d" : "#33ff4d3d"
                     border.width: 1
+                    Behavior on color { ColorAnimation { duration: 100 } }
                 }
                 Row {
                     anchors.centerIn: parent
                     spacing: 6
-                    Text { text: "✕"; color: "#ff6b61"; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter }
-                    Text { text: qsTr("Clear"); color: "#ff6b61"; font.family: "Segoe UI"; font.pixelSize: 12; font.weight: Font.Medium; anchors.verticalCenter: parent.verticalCenter }
+                    IconGlyph { name: "clearIcon"; color: "#ff6b61"; width: 13; height: 13; anchors.verticalCenter: parent.verticalCenter }
+                    Text { text: qsTr("Clear all"); color: "#ff6b61"; font.family: "Segoe UI"; font.pixelSize: 12; font.weight: Font.Medium; anchors.verticalCenter: parent.verticalCenter }
                 }
-                HoverHandler { id: clearArea; cursorShape: Qt.PointingHandCursor }
-                TapHandler { onTapped: { LiveOutputService.stop() } }
+                HoverHandler { id: clearAllArea; cursorShape: Qt.PointingHandCursor }
+                TapHandler { onTapped: LiveOutputService.stop() }
+            }
+
+            // ClearButtons' per-layer group (image/slide/overlays/audio/timer)
+            // — same equal-slot spreading as the transport row. Until the
+            // engine grows per-layer clear, each button IS the whole-output
+            // clear like Clear all.
+            Row {
+                width: parent.width
+
+                Repeater {
+                    model: [
+                        { icon: "image", tip: qsTr("Clear background") },
+                        { icon: "scripture", tip: qsTr("Clear slide") },
+                        { icon: "overlays", tip: qsTr("Clear overlays") },
+                        { icon: "audio", tip: qsTr("Clear audio") },
+                        { icon: "timerFill", tip: qsTr("Clear timers") }
+                    ]
+
+                    delegate: ToolButton {
+                        required property var modelData
+                        width: parent.width / 5; height: 30
+                        icon: modelData.icon
+                        onPicked: LiveOutputService.stop()
+                    }
+                }
             }
         }
     }

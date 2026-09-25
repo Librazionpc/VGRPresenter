@@ -7,6 +7,10 @@
 #include <QVariantList>
 #include <qqml.h>
 
+namespace bps::presentation {
+struct OutputStyleSpec;
+}
+
 class SettingsService;
 
 // One content toggle in an output's edit dialog — which canvas item kinds
@@ -167,15 +171,34 @@ private:
     // Composes the engine spec for `styleId` and pushes it to the
     // PresentationEngine. styleId "" pushes an empty spec (unstyled).
     void pushEngineStyle(const QString &styleId);
+    // When the spec's templateKey names an ENGINE TEMPLATE design ("tpl-…"),
+    // copies that design's blocks into spec.templateBlocks — the engine
+    // renders the template as the style's layout. Legacy preset keys and
+    // unknown ids bake nothing (the engine keeps its plain-layout fallback).
+    void bakeTemplateBlocks(bps::presentation::OutputStyleSpec &spec);
+    // Re-pushes the ACTIVE output's style (the one entry point every "the
+    // on-air look changed" relay funnels into). No-op before the roster is
+    // adopted.
+    void pushActiveEngineStyle();
     // Id → row through StyleListModel::rowForId (-1 = unknown id).
     int styleRowForId(const QString &styleId) const;
 
     // Wires the rosterChanged relay (see the constructor comment for why it
     // can't just be done once in the constructor). Idempotent.
     void connectToStyleRoster();
+    // Wires TemplateLibraryService::changed — an edit to the template design
+    // a style wears must re-bake + re-push the spec. Same lazy-singleton
+    // retry story as connectToStyleRoster. Idempotent.
+    void connectToTemplateLibrary();
+    // Pushes the active output's saved style once the engine has booted —
+    // without this a session's first go-live rendered unstyled (the other
+    // push paths all predate boot). Idempotent.
+    void connectToEngineBoot();
 
     QList<OutputItem> m_outputs;
     bool styleRosterConnected_ = false;
+    bool templateLibraryConnected_ = false;
+    bool engineBootConnected_ = false;
 
     static QPointer<OutputListModel> s_instance;
     static QList<OutputContentToggle> defaultContent();

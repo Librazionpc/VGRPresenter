@@ -108,9 +108,11 @@ std::pair<std::string, std::string> SplitJam(const std::string& term,
     for (size_t cut = 3; cut + 3 <= term.size(); ++cut) {
         const std::string a = term.substr(0, cut);
         const std::string b = term.substr(cut);
-        const size_t dfA = storage.LookupTf(a).size();
+        // DfOf (size only) — LookupTf here copied BOTH halves' full postings
+        // per split point; a long jam word meant dozens of multi-MB copies.
+        const size_t dfA = storage.DfOf(a);
         if (dfA == 0) continue;
-        const size_t dfB = storage.LookupTf(b).size();
+        const size_t dfB = storage.DfOf(b);
         if (dfB == 0) continue;
         const size_t m = std::min(dfA, dfB);
         if (m > bestDf) { bestDf = m; best = {a, b}; }
@@ -133,13 +135,13 @@ struct ResolvedTerm { std::string word; double weight = 1.0; };
 ResolvedTerm ResolveTermInVocabulary(const std::string& term,
                                      const IndexStorage& storage) {
     ResolvedTerm out;
-    if (!storage.LookupTf(term).empty()) return out;   // spelled right: as typed
+    if (storage.DfOf(term) > 0) return out;   // spelled right: as typed (size only — no postings copy)
     // 1) Completion: the most frequent vocabulary word this term prefixes
     //    ("friend" -> "friends"). Frequency picks between friends/friend's/...
     size_t bestDf = 0;
     for (const auto& w : storage.TermsWithPrefix(term, 8)) {
-        const auto tfs = storage.LookupTf(w);
-        if (!tfs.empty() && tfs.size() > bestDf) { bestDf = tfs.size(); out.word = w; }
+        const size_t df = storage.DfOf(w);
+        if (df > bestDf) { bestDf = df; out.word = w; }
     }
     if (bestDf > 0) return out;   // a stem, not a typo: full weight
     // 2) Typo: closest vocabulary word by bounded edit distance.
@@ -459,7 +461,7 @@ Result<std::vector<SearchEngine::ResolvedQueryTerm>> SearchEngine::ResolveTerms(
 ResolvedTerm ResolveOne(const std::string& raw, const IndexStorage& storage) {
     ResolvedTerm r = ResolveTermInVocabulary(Lower(raw), storage);
     if (r.word.empty()) r.word = Lower(raw);
-    if (r.weight == 1.0 && r.word.size() >= 6 && storage.LookupTf(r.word).empty()) {
+    if (r.weight == 1.0 && r.word.size() >= 6 && storage.DfOf(r.word) == 0) {
         if (auto [a, b] = SplitJam(r.word, storage); !a.empty()) r.word = a + ' ' + b;
     }
     return r;
@@ -542,12 +544,31 @@ Result<std::vector<SearchResult>> SearchEngine::RawSearch(const SearchQuery& que
     // partial word credit (see the 40% branch below).
     std::vector<std::vector<std::string>> prefixAlts(terms.size());
     bool anyCandidateTerm = false;
+    // A near-universal word ("and", "could" — df approaching the corpus size)
+    // used to register EVERY document as a candidate: one map node per doc plus
+    // a per-term tf map of the same size, per keystroke. A stop word carries
+    // almost no ranking information anyway, so a term whose postings exceed a
+    // fraction of the corpus contributes candidates NO-OP (its own docs are
+    // effectively "all docs"); the query still ranks on its other terms, and
+    // an ONLY-stop-word query falls through to the bounded full scan below —
+    // honest, and capped.
+    size_t corpusDocs = N;
+    // BOTH gates must hold: a >60% share keeps common words from being
+    // registered, but only ABOVE an absolute df floor (4k postings) — with a
+    // one-document test corpus "grace" IS 100% of the corpus and must stay a
+    // normal term; the allocation storm only exists at hundred-thousand scale.
+    constexpr double kStopWordDfShare = 0.6;
+    constexpr size_t kStopWordDfFloor = 4096;
     {
         for (const auto& term : terms) {
             if (!CandidateWorthy(term)) continue;
-            const auto tfs = storage_.LookupTf(term);
-            if (tfs.empty()) continue;
+            const size_t df = storage_.DfOf(term);
+            if (df == 0) continue;
+            if (df > kStopWordDfFloor && corpusDocs > 0
+                && static_cast<double>(df) > kStopWordDfShare * static_cast<double>(corpusDocs))
+                continue;   // a stop word: contributes no candidates of its own
             anyCandidateTerm = true;
+            const auto tfs = storage_.LookupTf(term);   // (bounded df: a bounded copy)
             TermStats& ts = termStats[term];
             ts.df = tfs.size();
             for (const auto& [docId, tf] : tfs) {
@@ -575,7 +596,7 @@ Result<std::vector<SearchResult>> SearchEngine::RawSearch(const SearchQuery& que
             byDf.reserve(siblings.size());
             for (const auto& pt : siblings) {
                 if (pt == term) continue;
-                byDf.emplace_back(storage_.LookupTf(pt).size(), &pt);
+                byDf.emplace_back(storage_.DfOf(pt), &pt);   // size only — no postings copy per sibling
             }
             const size_t take = std::min<size_t>(byDf.size(), 12);
             std::partial_sort(byDf.begin(), byDf.begin() + static_cast<long>(take), byDf.end(),

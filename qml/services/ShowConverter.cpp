@@ -226,11 +226,16 @@ bp::Slide ShowConverter::slideFromVariant(const QVariantMap &s)
     slide.text = utf8(line2.isEmpty() ? line1 : line1 + QLatin1Char('\n') + line2);
     slide.background = utf8(s.value(QStringLiteral("background"), QStringLiteral("transparent")).toString());
     slide.categoryId = utf8(s.value(QStringLiteral("categoryId")).toString());
+    // The content family this slide belongs to ("scripture" | "table" | …)
+    // rides in the meta (the model has no dedicated field): the output
+    // style's own engine template only restyles ITS family, so a style keyed
+    // for scripture must not steamroll The Table's layouts.
     slide.metaJson = metaToJson(QVariantMap{
         { QStringLiteral("tagColor"), s.value(QStringLiteral("tagColor")) },
         { QStringLiteral("line1"), line1 },
         { QStringLiteral("line2"), line2 },
         { QStringLiteral("ref"), s.value(QStringLiteral("ref")) },
+        { QStringLiteral("contentType"), s.value(QStringLiteral("contentType")) },
     });
     slide.blocks = blocksFromVariant(s.value(QStringLiteral("blocks")));
     // Seconds the slide stays up before the show moves on by itself (0 = it waits for you).

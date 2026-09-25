@@ -397,7 +397,16 @@ Result<void> PresentationEngine::SetActiveOutputStyle(const OutputStyleSpec& sty
             || activeStyle_.templateKey != style.templateKey
             || activeStyle_.backgroundColor != style.backgroundColor
             || activeStyle_.backgroundImage != style.backgroundImage
-            || activeStyle_.clearBackgroundOnText != style.clearBackgroundOnText;
+            || activeStyle_.clearBackgroundOnText != style.clearBackgroundOnText
+            // The BAKED template blocks: an edit to the template design the
+            // style wears re-pushes the same key with different blocks — the
+            // comparison above alone would call that push a no-op and the
+            // output would keep rendering the old layout forever.
+            || activeStyle_.showShows != style.showShows
+            || activeStyle_.showMedia != style.showMedia
+            || activeStyle_.showScripture != style.showScripture
+            || activeStyle_.showTable != style.showTable
+            || activeStyle_.templateBlocks != style.templateBlocks;
         activeStyle_ = style;
     }
     if (!changed)

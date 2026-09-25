@@ -132,6 +132,11 @@ struct ContentStyle {
     double borderWidth = 2;
     std::string borderStyle = "line";
     std::string borderColor = "#ffffff";
+
+    // Defaulted so a pushed OutputStyleSpec's templateBlocks can be compared
+    // against the stored spec (a block-only template edit must read as a
+    // change, not a no-op push).
+    bool operator==(const ContentStyle&) const = default;
 };
 
 struct ContentBlock {
@@ -151,6 +156,8 @@ struct ContentBlock {
     // template is applied — "title", "text", "line1", "line2", "ref", "notes"
     // ("" = static content, shown as-is).
     std::string bind;
+
+    bool operator==(const ContentBlock&) const = default;
 };
 
 // --- Slide (docs/specs/19 §Slide system) --------------------------------------
@@ -281,6 +288,19 @@ struct OutputStyleSpec {
     bool showTable = true;
     // Shows-only category label (diagnostic display for now).
     std::string category;
+    // BAKED TEMPLATE LAYOUT (Settings · Styles ← the Template library): when
+    // templateKey names an ENGINE TEMPLATE DESIGN ("tpl-…", the picker's
+    // catalog) the UI copies that design's blocks here at push time. The
+    // engine never reaches back into the library — the spec is the whole
+    // truth — and a template edit re-pushes through the same path. Blocks
+    // are positioned on the 754×428 Edit stage exactly like slide blocks;
+    // SceneBuilder fills each block's `bind` ("text" ← slide text, "ref" ←
+    // slide title, "title"/"notes" … per SlideResolver::BoundValue) and
+    // renders them instead of the legacy title/body presets. TRANSIENT: not
+    // persisted (StyleStore keeps only templateKey; the roster is the
+    // durable copy), so an unknown id at boot degrades to the plain layout
+    // until the roster's next push.
+    std::vector<ContentBlock> templateBlocks;
 };
 
 // --- Validation issues (docs/specs/19 §Validator) -----------------------------

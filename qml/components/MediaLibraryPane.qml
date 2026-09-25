@@ -385,6 +385,7 @@ Item {
 
         // The selected roster's cards, three to a row.
         Flickable {
+            id: cardsFlick
             y: root.tabRowHeight
             width: parent.width
             height: parent.height - y
@@ -466,6 +467,13 @@ Item {
                     font.family: Theme.fontFamily; font.pixelSize: 14
                     wrapMode: Text.WordWrap
                 }
+            }
+
+            // A big video-input roster overflows — wheel-only before.
+            AppScrollBar {
+                flickable: cardsFlick
+                anchors.top: parent.top; anchors.bottom: parent.bottom
+                anchors.right: parent.right; anchors.rightMargin: 2
             }
         }
     }
