@@ -23,6 +23,7 @@
 #include "core/task_scheduler/TaskScheduler.hpp"
 #include "core/threading/ThreadPool.hpp"
 
+#include <cstdio>
 #include <cstring>
 
 struct Suite {
@@ -132,6 +133,7 @@ static const Suite kSuites[] = {
     {"presentation", "present", TestShowLibraryCrud},
     {"search", "search", TestSearchIndexing},
     {"search", "search", TestSearchRanking},
+    {"search", "search", TestSearchFuzzyResolution},
     {"media", "media", TestMediaEngine},
     {"media", "media-library", TestPngEncode},
     {"media", "media-library", TestMediaLibraryFolders},
@@ -203,6 +205,14 @@ static void TearDownPhaseFixture() {
 }
 
 int main(int argc, char** argv) {
+    // Unbuffered stdout: a suite that dies (the known pre-existing teardown
+    // segfault) must not take its own PASS/FAIL summary with it — buffered
+    // output vanished with the process and the results were unreadable.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    // Same for stderr — redirected to a file it is FULLY buffered, so the
+    // [phase]/[mark] progress lines (and any CHECK failure text) were lost
+    // with the crash instead of telling us where it happened.
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
     std::vector<std::string> filters;
     for (int i = 1; i < argc; ++i) filters.emplace_back(argv[i]);
     if (!filters.empty()) {

@@ -319,7 +319,7 @@ Item {
         const source = String(text ?? "")
         if (source === "")
             return ""
-        const words = root.activeQuery.trim().toLowerCase().split(/\s+/).filter((w) => w.length >= 2)
+        const words = root.highlightQuery.trim().toLowerCase().split(/\s+/).filter((w) => w.length >= 2)
         if (words.length === 0)
             return source
         const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -465,8 +465,24 @@ Item {
         return { rows: rows.slice(0, 8), complete: completion }
     }
 
+    // The engine's resolved words for the LIVE query ("thn freind" -> "then
+    // friend"): the pill's hint row AND the highlight both read this — the
+    // highlight must wrap the CORRECTED words, or a typo query lights nothing
+    // (the text says "friend", the raw query said "freind").
+    property var resolvedWords: []
     function runSearch(text) {
         root.searchResults = text.trim() === "" ? [] : root.adapter.search(text, root.sourceId)
+        root.resolvedWords = text.trim() === "" ? []
+            : (SearchService.resolveWords ? SearchService.resolveWords(text) : [])
+    }
+    // Words to highlight: what the engine actually searched for (resolved),
+    // falling back to the raw typed words when nothing needed fixing.
+    readonly property string highlightQuery: {
+        // (No Array.flat in the QML JS engine — plain loops keep it portable.)
+        const words = []
+        for (const w of root.resolvedWords)
+            for (const p of String(w.resolved).split(/\s+/)) words.push(p)
+        return words.length > 0 ? words.join(" ") : root.activeQuery
     }
 
     // ---- tab-search autocomplete ------------------------------------------------
@@ -913,6 +929,20 @@ Item {
                 id: searchList
                 visible: root.searching
                 x: 0; y: 4; width: parent.width - 8
+                // The engine's resolved-words hint ("thn → then   freind →
+                // friend"), gold like the match highlight. Tab in the pill box
+                // accepts it — the same behavior Quick search has.
+                Text {
+                    visible: root.resolvedWords.some((w) => w.changed === true)
+                    width: parent.width
+                    leftPadding: 10
+                    color: "#ffd54a"
+                    font.family: Theme.fontFamily; font.pixelSize: 13
+                    elide: Text.ElideRight
+                    text: root.resolvedWords.filter((w) => w.changed === true)
+                              .map((w) => w.typed + " \u2192 " + w.resolved).join("   ")
+                              + "   (Tab to accept)"
+                }
                 Repeater {
                     model: root.searchResults
                     delegate: Item {
@@ -1145,6 +1175,20 @@ Item {
                             pillDebounce.restart()
                         }
                         onAccepted: { pillDebounce.stop(); root.runSearch(text) }
+                        Keys.onTabPressed: {
+                            // Accept the engine's corrections: "thn freind" + Tab
+                            // -> "then friend", then re-run with the fixed words.
+                            if (!root.resolvedWords.some((w) => w.changed === true)) return
+                            let fixed = text
+                            for (const w of root.resolvedWords) {
+                                if (w.changed !== true) continue   // spelled right: leave it
+                                fixed = fixed.replace(new RegExp("\\b" + w.typed + "\\b", "i"),
+                                                      String(w.resolved).split(/\s+/).join(" "))
+                            }
+                            text = fixed
+                            pillDebounce.stop()
+                            root.runSearch(fixed)
+                        }
                         Keys.onEscapePressed: { root.searching = false }
                     }
                     Timer {

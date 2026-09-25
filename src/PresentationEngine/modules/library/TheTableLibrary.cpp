@@ -4,6 +4,7 @@
 #include "core/logging/Logger.hpp"
 #include "modules/content/AssetCompressor.hpp"
 #include "modules/search/SearchEngine.hpp"
+#include "modules/search/TextMatching.hpp"
 #include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <sstream>
 #include <unordered_map>
 #include <filesystem>
 #include <fstream>
@@ -24,6 +26,7 @@
 namespace bps::library {
 
 namespace {
+namespace textmatch = bps::search::textmatch;
 
 constexpr const char* kModule = "TheTableLibrary";
 constexpr ErrorCode kTableErr = 2650;   // the Library band's Table slot
@@ -38,11 +41,10 @@ std::string Trim(const std::string& s) {
     return s.substr(b, e - b + 1);
 }
 
-std::string Lower(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return s;
-}
+using textmatch::Lower;   // shared with the Search Engine (see TextMatching.hpp)
+using textmatch::ContainsWord;
+using textmatch::ContainsPhrase;
+using textmatch::StartsWord;
 
 std::string Collapse(const std::string& s) {
     std::string out;
@@ -1258,6 +1260,10 @@ bool ReadableText(const std::string& s) {
     return total > 0 && letters * 100 >= total * 55 && junk * 100 <= total * 2;
 }
 
+// (ContainsWord / ContainsPhrase live in modules/search/TextMatching.hpp —
+// shared with the Search Engine so both search surfaces can never disagree
+// again about what counts as a word or a phrase.)
+
 bool ChapterReadable(const TheTableChapter& ch) {
     std::string sample;
     for (const TheTableVerse& v : ch.verses) {
@@ -1333,6 +1339,7 @@ Result<void> TheTableLibrary::Persist(const std::vector<TheTableBook>& books) co
 Result<void> TheTableLibrary::Load() {
     std::lock_guard<std::mutex> lock(mutex_);
     books_.clear();
+    lowerParagraphs_.clear();
 
     auto& platform = platform::PlatformAccessor::Get();
     auto body = platform.Filesystem().ReadText(filePath_);
@@ -1436,6 +1443,8 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine() {
     }
 
     size_t indexed = 0;
+    // One cache invalidation for the whole batch, not one per sermon.
+    engine.SuspendCacheInvalidation();
     for (const TheTableBook& book : snapshot) {
         for (const TheTableChapter& ch : book.chapters) {
             search::SearchDocument doc;
@@ -1455,10 +1464,14 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine() {
             doc.metadata["reference"] = SermonCitation(book.name, ch.code.empty() ? CodeFromTitle(ch.title) : ch.code, ch.title, 0);
             doc.tags = {"sermon", "table"};
             auto r = engine.IndexDocument(doc);
-            if (!r.ok()) return r.error();
+            if (!r.ok()) {
+                engine.ResumeCacheInvalidation();   // (error path: end the batch scope)
+                return r.error();
+            }
             ++indexed;
         }
     }
+    engine.ResumeCacheInvalidation();
     return indexed;
 }
 
@@ -1552,42 +1565,121 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     if (terms.empty())
         return Error::Make(Err::InvalidArgument, kModule, "search needs a word");
     if (limit == 0) limit = 1;
+    // Deduplicated, keeping the USER'S word order — the verbatim-phrase test must
+    // honor what was typed ("then, friends" looks for then→friends, not a sorted
+    // friends→then). Bitmask positions below come from this same vector, so the
+    // dedupe keeps them collision-free.
+    {
+        std::vector<std::string> ordered;
+        for (const std::string& t : terms)
+            if (std::find(ordered.begin(), ordered.end(), t) == ordered.end()) ordered.push_back(t);
+        terms = std::move(ordered);
+    }
 
-    // Words shorter than 3 chars are below the platform index's own token floor:
-    // it cannot rank candidates for them, so those queries take the direct scan
-    // (engineQueried stays false) instead of a silently-empty index answer.
-    bool hasShortTerm = false;
-    for (const std::string& t : terms)
-        if (t.size() < 3) hasShortTerm = true;
-
-    // Candidate sermons come from the platform Search Engine's index (one document
-    // per sermon, built once in the background at boot). The old path here was the
-    // app-wide search's lag: it LOWER-CAST EVERY PARAGRAPH OF THE WHOLE LIBRARY
-    // under the library mutex on EVERY query (hundreds of sermons x full text =
-    // megabytes of fresh strings per keystroke, on the GUI thread). Now the engine's
-    // inverted index ranks the sermons and only those few candidates' paragraphs are
-    // scanned below — a handful of string searches instead of the whole library.
-    struct Cand { std::string bookId; int chapter; };
-    std::vector<Cand> cands;
-    bool engineQueried = false;
-    if (!hasShortTerm) {
-        search::SearchEngine& engine = search::SearchEngine::Instance();
-        search::SearchFilter filter;
-        filter.type = "table";
-        if (auto results = engine.Search(std::string(query), filter, size_t(limit) * 8 + 8); results.ok()) {
-            engineQueried = true;
-            for (const auto& r : results.value()) {
-                // "table:<bookId>:<chapter>" (TheTableDocId).
-                const size_t a = r.documentId.find(':');
-                const size_t b = a == std::string::npos ? std::string::npos : r.documentId.find(':', a + 1);
-                if (a == std::string::npos || b == std::string::npos) continue;
-                Cand c;
-                c.bookId = r.documentId.substr(a + 1, b - a - 1);
-                c.chapter = std::atoi(r.documentId.c_str() + b + 1);
-                if (c.chapter > 0) cands.push_back(std::move(c));
+    // The SAME word resolution every other search surface uses (the engine's
+    // ResolveTerms): incomplete words completed ("friend" -> "friends") and
+    // typos corrected ("thn" -> "then", "frend" -> "friend") against the
+    // sermon vocabulary. The RESOLVED words are what the paragraph scan below
+    // hunts (they are what actually exists in the text); each raw spelling that
+    // differs from its resolution rides along as an optional bonus word — a
+    // paragraph containing BOTH the correction and the raw misspelling (a
+    // verbatim quote of the typo) outranks one with the correction alone.
+    std::vector<std::string> bonusWords;
+    {
+        auto resolved = search::SearchEngine::Instance().ResolveTermsWithSplits(terms);
+        if (resolved.ok() && resolved.value().size() == terms.size()) {
+            std::vector<std::string> fixed;
+            fixed.reserve(terms.size() + 1);
+            for (size_t i = 0; i < terms.size(); ++i) {
+                const std::string& r = resolved.value()[i].term;
+                // A jam-split entry ("holy spirit") becomes two real terms so the
+                // paragraph bitmask can match them independently.
+                std::istringstream ins(r.empty() ? terms[i] : r);
+                std::string part;
+                while (ins >> part) fixed.push_back(part);
+                if (!r.empty() && r != terms[i] &&
+                    std::find(bonusWords.begin(), bonusWords.end(), terms[i]) == bonusWords.end())
+                    bonusWords.push_back(terms[i]);
             }
+            terms = std::move(fixed);
         }
     }
+
+    // WORD QUERIES SCAN EVERY SERMON (the b887811 behavior the user verified):
+    // paragraph gems are invisible at sermon granularity. Engine-side candidate
+    // picking — either Search()'s 48-doc fetch slice or a BM25 ranking of whole
+    // sermons — drops the long, word-rich sermon whose ¶7 opens with the verbatim
+    // query (47-0412 "Then, friends," went missing twice this way), and the
+    // paragraph scan's +500 phrase bonus can never rescue a sermon that was never
+    // scanned. The per-query lag that once forced candidate picking is gone: the
+    // lowered paragraphs are CACHED per sermon (lowerParagraphs_), so the expensive
+    // part (Lower() of ~100MB) happens once ever, not per query.
+
+    // A citation-CODE query ("47-", "47-0412", "63-0628e") is naming a SERMON,
+    // not searching paragraph words — the codes live in the chapter metadata and
+    // never in the paragraph text, so the word scan below can never answer them
+    // (Quick search's "47-1100X" showed only Bible rows). Strictly code-shaped
+    // queries (digits/dash/letters only, at least one digit) ALSO scan the codes
+    // themselves; anything with other punctuation ("revelation 1:1") is not.
+    const bool codeShaped = [&query] {
+        bool digits = false;
+        for (char c : query) {
+            if (std::isdigit(static_cast<unsigned char>(c))) digits = true;
+            else if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == ' '))
+                return false;
+        }
+        return digits;
+    }();
+    struct CodeCand { const TheTableBook* b; const TheTableChapter* ch; int score; };
+    std::vector<CodeCand> codeHits;
+    if (codeShaped) {
+        std::string norm;   // "47 - 0412" and "47-0412" are the same code
+        for (char c : Lower(std::string(query)))
+            if (c != ' ') norm.push_back(c);
+        // A bare "47" or "7" stays a verse/year query (Genesis 47, Luke 1:47);
+        // the CODE shape needs a dash ("47-") or a full date-code ("0412").
+        const bool dash = norm.find('-') != std::string::npos;
+        const size_t digitCount = std::count_if(norm.begin(), norm.end(),
+                                                [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
+        if (!norm.empty() && (dash || digitCount >= 3)) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const TheTableBook& book : books_)
+                for (const TheTableChapter& ch : book.chapters) {
+                    const std::string bare = Lower(ch.code.empty() ? CodeFromTitle(ch.title) : ch.code);
+                    // The typed form is the CITATION shape — "47-0412" (yy-code),
+                    // possibly with the spoken letter ("47-1100x"). A code may also
+                    // live only in the TITLE ("1100x Fellowship" — no file code),
+                    // so the leading code-like token of the title is a candidate
+                    // too. The needle is compared to every candidate form.
+                    std::string yy = book.name;
+                    if (yy.size() == 4 && yy.compare(0, 2, "19") == 0) yy = yy.substr(2);
+                    std::string head;   // leading [0-9]+[a-z]? of the stored title
+                    for (char c : ch.title) {
+                        if (std::isdigit(static_cast<unsigned char>(c))) { head.push_back(c); continue; }
+                        if ((std::isalpha(static_cast<unsigned char>(c)) && !head.empty()
+                             && std::all_of(head.begin(), head.end(),
+                                            [](char h) { return std::isdigit(static_cast<unsigned char>(h)); })))
+                            head.push_back(c);   // one trailing letter ("1100x")
+                        break;
+                    }
+                    const std::string cands[4] = { yy + "-" + bare, bare, yy + "-" + head, head };
+                    int score = 0;
+                    for (const std::string& cand : cands) {
+                        if (cand.empty()) continue;
+                        if (cand == norm)
+                            score = std::max(score, 2000);   // the exact sermon
+                        else if (cand.rfind(norm, 0) == 0 || norm.rfind(cand, 0) == 0)
+                            score = std::max(score, 1500);   // "47-" lists every 47-*; "47-1100x" = its "47-1100"
+                        else if (cand.find(norm) != std::string::npos ||
+                                 norm.find(cand) != std::string::npos)
+                            score = std::max(score, 1000);   // "0412" in "47-0412"
+                    }
+                    if (score != 0) codeHits.push_back({&book, &ch, score});
+                }
+        }
+    }
+
+    // One pass over EVERY sermon (reading order = the sermonRank tiebreak below).
 
     // One sermon's paragraphs against the terms. TWO match shapes (user call: the
     // words need not sit in ONE paragraph — "it can be in a paragraph or max two"):
@@ -1595,69 +1687,124 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     //   spanned   — every term across the paragraph and its NEXT one together
     //               (neither alone has all of them). The hit reports the FIRST of
     //               the pair, so picking it opens at where the passage starts.
-    struct Acc { const TheTableVerse* v; const TheTableBook* b; const TheTableChapter* ch; int matches; bool spanned; };
+    // Ranking (user calls: "words that fully match first before words that partly
+    // match"; the para-7 probe): within a shape, VERBATIM phrase presence adds a
+    // large bonus (the paragraph really says what was typed), then whole-word hits
+    // outrank partial ones. `sermonRank` keeps the engine's candidate order as the
+    // sermon-level tiebreak.
+    struct Acc { const TheTableVerse* v; const TheTableBook* b; const TheTableChapter* ch; int score; bool spanned; int sermonRank; };
     std::vector<Acc> hits;
-    auto scanChapter = [&](const TheTableBook& book, const TheTableChapter& ch) {
-        const size_t n = ch.verses.size();
-        std::vector<unsigned> bm(n, 0u);   // per-paragraph term-hit bitmask
-        for (size_t i = 0; i < n; ++i) {
-            const std::string hay = Lower(ch.verses[i].text);
-            unsigned m = 0;
-            for (size_t t = 0; t < terms.size(); ++t)
-                if (hay.find(terms[t]) != std::string::npos) m |= (1u << t);
-            bm[i] = m;
+    auto scanChapter = [&](const TheTableBook& book, const TheTableChapter& ch, int sermonRank) {
+        // The lowered paragraphs, computed once per sermon and kept (the fallback
+        // scan re-lowercast the whole library per query — the lag this module's
+        // rewrite removed, back for every short-word query without this cache).
+        const std::string key = book.id + ":" + std::to_string(ch.number);
+        auto cached = lowerParagraphs_.find(key);
+        if (cached == lowerParagraphs_.end()) {
+            std::vector<std::string> low;
+            low.reserve(ch.verses.size());
+            for (const TheTableVerse& v : ch.verses) low.push_back(Lower(v.text));
+            cached = lowerParagraphs_.emplace(std::move(key), std::move(low)).first;
         }
+        const std::vector<std::string>& hay = cached->second;
+        const size_t n = ch.verses.size();
+        std::vector<unsigned> bm(n, 0u);   // per-paragraph term-hit bitmask (substring)
+        std::vector<unsigned> wm(n, 0u);   // of those, whole-word hits
+        for (size_t i = 0; i < n; ++i) {
+            unsigned m = 0, w = 0;
+            for (size_t t = 0; t < terms.size(); ++t) {
+                if (hay[i].find(terms[t]) == std::string::npos) continue;
+                m |= (1u << t);
+                // Whole word AND word-start extension count FULL ("friend" in
+                // "friends" is the completion shape — the user's word plus an
+                // ending, exactly what they meant); only a mid-word substring
+                // ("friend" in "boyfriend") is the weak partial.
+                if (ContainsWord(hay[i], terms[t]) || StartsWord(hay[i], terms[t])) w |= (1u << t);
+            }
+            bm[i] = m;
+            wm[i] = w;
+        }
+        // Optional bonus words (the user's raw spellings when they differed from
+        // the resolution): a paragraph that verbatim-quotes the misspelling —
+        // the user was quoting something — outranks one that only has the fix.
+        std::vector<unsigned> bx(n, 0u);
+        for (size_t i = 0; i < n && !bonusWords.empty(); ++i) {
+            unsigned b = 0;
+            for (size_t t = 0; t < bonusWords.size() && t < 32; ++t)
+                if (ContainsWord(hay[i], bonusWords[t])) b |= (1u << t);
+            bx[i] = b;
+        }
+        auto bonusOf = [&](size_t i, size_t j) {
+            if (bonusWords.empty()) return 0;
+            unsigned m = (j < n ? bx[i] | bx[j] : bx[i]);
+            int c = 0;
+            for (; m; m &= m - 1) ++c;
+            return c;
+        };
+        auto quality = [&](unsigned m, unsigned w) {
+            int q = 0;
+            for (size_t t = 0; t < terms.size() && t < 32; ++t) {
+                if (m & (1u << t)) ++q;
+                if (w & (1u << t)) ++q;   // a whole word counts twice
+            }
+            return q;
+        };
         const unsigned all = terms.size() >= 32 ? 0xFFFFFFFFu : ((1u << terms.size()) - 1u);
         for (size_t i = 0; i < n; ++i)
             if (bm[i] == all)
-                hits.push_back({&ch.verses[i], &book, &ch, static_cast<int>(terms.size()), false});
+                hits.push_back({&ch.verses[i], &book, &ch,
+                                1000 + quality(bm[i], wm[i])
+                                    + (ContainsPhrase(hay[i], terms) ? 500 : 0)
+                                    + 20 * bonusOf(i, n),
+                                false, sermonRank});
         for (size_t i = 0; i + 1 < n; ++i) {
             const unsigned pair = bm[i] | bm[i + 1];
             // (a pair whose halves already qualify alone was pushed above — only
             // genuinely spread-out matches land here)
-            if (pair == all && bm[i] != all && bm[i + 1] != all)
+            if (pair == all && bm[i] != all && bm[i + 1] != all) {
+                const std::string joined = hay[i] + ' ' + hay[i + 1];
                 hits.push_back({&ch.verses[i], &book, &ch,
-                                terms.size() >= 32 ? 0 : __builtin_popcount(bm[i]), true});
-        }
-    };
-    bool fromEngine = false;
-    if (!cands.empty()) {
-        fromEngine = true;
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (const Cand& c : cands) {
-            const TheTableBook* book = nullptr;
-            for (const TheTableBook& b : books_)
-                if (b.id == c.bookId) { book = &b; break; }
-            if (!book) continue;
-            for (const TheTableChapter& ch : book->chapters) {
-                if (ch.number != c.chapter) continue;
-                scanChapter(*book, ch);
-                break;   // (chapters are unique within a book)
+                                quality(pair, wm[i] | wm[i + 1])
+                                    + (ContainsPhrase(joined, terms) ? 500 : 0)
+                                    + 20 * bonusOf(i, i + 1),
+                                true, sermonRank});
             }
         }
-    } else if (!engineQueried) {
-        // The index was skipped (short terms) or answered with an ERROR (engine not
-        // initialized): the direct scan keeps search working. An ok-but-empty index
-        // answer with only long terms is a genuine no-match — the boot path indexes
-        // every sermon, so post-boot emptiness means emptiness, and rescanning would
-        // reintroduce the lag this rewrite exists to remove.
+    };
+    {
         std::lock_guard<std::mutex> lock(mutex_);
+        int rank = 0;
         for (const TheTableBook& book : books_)
             for (const TheTableChapter& ch : book.chapters)
-                scanChapter(book, ch);
+                scanChapter(book, ch, rank++);
     }
-    if (fromEngine) {
-        // Keep the ENGINE's relevance order (candidates arrive best-first); within
-        // a sermon the paragraphs stay in reading order.
-    } else {
-        // Fallback order: single-paragraph matches before spanned ones, then more
-        // coverage, then book/chapter order.
-        std::sort(hits.begin(), hits.end(), [](const Acc& a, const Acc& b) {
-            if (a.spanned != b.spanned) return !a.spanned;
-            if (a.matches != b.matches) return a.matches > b.matches;
-            if (a.b != b.b) return a.b->order < b.b->order;
-            return a.ch->number < b.ch->number;
-        });
+    // ONE order for both paths: score first (verbatim-phrase bonus > scattered
+    // words), the engine's candidate order as the sermon-level tiebreak, then
+    // reading order. Then the per-sermon variety cap — a long sermon matching a
+    // common-word query hundreds of times must not flood the list and push other
+    // sermons' (often better) matches past the display limit (the para-7 probe).
+    std::stable_sort(hits.begin(), hits.end(), [](const Acc& a, const Acc& b) {
+        if (a.spanned != b.spanned) return !a.spanned;
+        if (a.score != b.score) return a.score > b.score;
+        if (a.sermonRank != b.sermonRank) return a.sermonRank < b.sermonRank;
+        return a.v->number < b.v->number;
+    });
+    {
+        constexpr size_t kPerSermonCap = 3;
+        // Code hits bypass the cap (one row per sermon — the sermon IS the answer;
+        // a "47-" listing must show every 47 sermon, not 3).
+        std::map<std::pair<const void*, int>, size_t> perSermon;
+        for (const CodeCand& c : codeHits) ++perSermon[{static_cast<const void*>(c.b), c.ch->number}];
+        std::vector<Acc> kept;
+        kept.reserve(std::min(hits.size(), limit * 4));
+        for (const Acc& h : hits) {
+            if (codeShaped && perSermon.count({static_cast<const void*>(h.b), h.ch->number})) continue;
+            size_t& n = perSermon[{static_cast<const void*>(h.b), h.ch->number}];
+            if (n >= kPerSermonCap) continue;
+            ++n;
+            kept.push_back(h);
+        }
+        hits = std::move(kept);
     }
     if (hits.size() > limit) hits.resize(limit);
 
@@ -1673,10 +1820,68 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         s.bookId = h.b->id;
         s.chapter = h.ch->number;
         s.verse = h.v->number;
-        s.snippet = h.v->text.substr(0, 220);
-        s.score = static_cast<double>(h.matches);
+        // THE GLOW RULE (The Table's side): the snippet is anchored where the
+        // words actually sit, not at the paragraph head — a 400-word paragraph
+        // whose match is at word 300 put the match past the visible two lines
+        // and the yellow highlight was swallowed. Anchor = the EARLIEST query
+        // word in the paragraph (the passage's start; a couple of bounded finds
+        // per SHOWN row, nothing per candidate).
+        {
+            const std::string low = Lower(h.v->text);
+            // THE GLOW RULE (The Table's side), phrase first: when the paragraph
+            // holds the query as a VERBATIM phrase ("Then, friends, isn't…"),
+            // anchor THERE — the earliest-word rule picked a lone "And then you
+            // watch It" 1,000 chars before the real match, so the row that the
+            // +500 phrase bonus ranked FIRST showed a snippet with a single
+            // glowable word while the very words that ranked it sat past the
+            // clip. Non-phrase hits keep the earliest-word anchor (the passage's
+            // start; a couple of bounded finds per SHOWN row, nothing per
+            // candidate).
+            size_t anchor = std::string::npos;
+            if (!(ContainsPhrase(low, terms, &anchor) && anchor != std::string::npos)) {
+                anchor = std::string::npos;
+                for (const auto& t : terms) {
+                    const size_t at = low.find(t);
+                    if (at != std::string::npos && at < anchor) anchor = at;
+                }
+            }
+            if (anchor == std::string::npos) anchor = 0;
+            const size_t start = anchor > 60 ? anchor - 60 : 0;
+            std::string snip = h.v->text.substr(start, 220);
+            if (start > 0) {   // trim a leading partial word
+                const size_t sp = snip.find(' ');
+                if (sp != std::string::npos && sp < 40) snip = snip.substr(sp + 1);
+            }
+            s.snippet = std::move(snip);
+        }
+        s.score = static_cast<double>(h.score);
         s.spanned = h.spanned;
         out.push_back(std::move(s));
+    }
+    // Code matches lead: a sermon-CODE query ("47-", "47-0412") is naming the
+    // sermon itself, so each matching sermon gets ONE sermon-level row (verse 0,
+    // "chapter 1" opening) ahead of any paragraph word-hits. Sermon order = the
+    // library's reading order; scores rank which rows lead within the code tiers.
+    if (!codeHits.empty()) {
+        std::stable_sort(codeHits.begin(), codeHits.end(),
+                         [](const CodeCand& a, const CodeCand& b) { return a.score > b.score; });
+        std::vector<TheTableSearchHit> leading;
+        leading.reserve(codeHits.size());
+        for (const CodeCand& c : codeHits) {
+            if (c.ch->verses.empty()) continue;
+            TheTableSearchHit s;
+            s.reference = SermonCitation(c.b->name,
+                                         c.ch->code.empty() ? CodeFromTitle(c.ch->title) : c.ch->code,
+                                         c.ch->title, 0);
+            s.bookId = c.b->id;
+            s.chapter = c.ch->number;
+            s.verse = 0;
+            s.snippet = c.ch->verses.front().text.substr(0, 220);
+            s.score = static_cast<double>(c.score);
+            s.spanned = false;
+            leading.push_back(std::move(s));
+        }
+        out.insert(out.begin(), leading.begin(), leading.end());
     }
     return out;
 }
@@ -1754,6 +1959,7 @@ Result<std::string> TheTableLibrary::AddCleanText(std::string_view fileName, con
         for (TheTableChapter& existing : book.chapters) {
             if (existing.title == title && !ChapterReadable(existing)) {
                 existing.verses = std::move(ch.verses);
+                lowerParagraphs_.erase(book.id + ":" + std::to_string(existing.number));
                 return book.name + " " + std::to_string(existing.number) + ":1";
             }
         }

@@ -65,6 +65,28 @@ void HandleAbort(int sig)
 
 void HandleTerminate()
 {
+#if defined(_WIN32)
+    // The exception's own stack: without it a terminate record names nothing
+    // ("signal=0") and the crash is unattributable. Same frame capture the
+    // SEH path uses — RIPs resolve to modules offline.
+    auto AppendTerminateStack = []() {
+        if (g_crashLogPath.empty())
+            return;
+        if (FILE *f = std::fopen(g_crashLogPath.c_str(), "a")) {
+            AppendLine(f, "  frames:");
+            void *frames[32];
+            USHORT count = CaptureStackBackTrace(0, 32, frames, nullptr);
+            char buf[64];
+            for (USHORT i = 0; i < count; ++i) {
+                std::snprintf(buf, sizeof(buf), "  #%u %p", i, frames[i]);
+                AppendLine(f, buf);
+            }
+            std::fclose(f);
+        }
+    };
+#else
+    auto AppendTerminateStack = []() {};
+#endif
     // An exception that escaped every handler (e.g. thrown from a slot or an
     // engine thread) — the default terminate handler would abort() with no
     // record at all.
@@ -74,11 +96,13 @@ void HandleTerminate()
             std::rethrow_exception(ex);
     } catch (const std::exception &e) {
         WriteAbortRecord("---- UNHANDLED EXCEPTION ----", e.what(), 0);
+        AppendTerminateStack();
         std::signal(SIGABRT, SIG_DFL);
         std::abort();
     } catch (...) {
     }
     WriteAbortRecord("---- UNHANDLED EXCEPTION ----", what, 0);
+    AppendTerminateStack();
     std::signal(SIGABRT, SIG_DFL);
     std::abort();
 }

@@ -6,7 +6,7 @@ project(VGRPresenterUI VERSION 0.1.0 LANGUAGES CXX)
 # instead of two files trying to agree with each other. CMAKE_CXX_STANDARD
 # here is inherited by every target below, Qt and engine alike; nothing else
 # needs to set it again.
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -321,6 +321,11 @@ bps_enable_warnings(engine_core)
 # ---- CLI demo app (apps/cli) ----
 add_executable(bps_cli ${BPS_ROOT}/apps/cli/main.cpp)
 target_link_libraries(bps_cli PRIVATE engine_core)
+# The msys2 GCC 15.2 MinGW libstdc++ DLL lacks the terminal exports std::print
+# needs (see the shim in the CLI's main) — force the shim on this toolchain.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
+    target_compile_definitions(bps_cli PRIVATE BPS_PRINT_TERMINAL_BROKEN=1)
+endif()
 bps_enable_warnings(bps_cli)
 
 # ---- Remote control app (apps/remote) — the "Remote App" frontend over the
@@ -480,6 +485,27 @@ target_link_libraries(appVGRPresenterUI
 if(VGR_ENABLE_SELFTEST)
     target_sources(appVGRPresenterUI PRIVATE src/SelfTestDriver.h src/SelfTestDriver.cpp)
     target_compile_definitions(appVGRPresenterUI PRIVATE VGR_ENABLE_SELFTEST)
+endif()
+
+# C++26 toolchain (GCC 15.2) + Qt 6.11's prebuilt MinGW bits: Qt's entry-point
+# shim (Qt6EntryPoint.a, built with GCC 13's mingw-w64) imports __imp___argc,
+# which the GCC 15 UCRT import lib no longer exports (it exposes __p___argc()
+# instead). One tiny compat object bridges the symbol — compiled INTO the
+# target (not a helper archive: an archive earlier on the link line than
+# libQt6EntryPoint.a gets discarded before its symbol is needed).
+if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
+    # (.cpp with extern "C": this project enables only CXX, so a .c source
+    # would be silently skipped; extern "C" keeps the symbol name unmangled.)
+    file(WRITE "${CMAKE_BINARY_DIR}/ep_compat.cpp" [[
+extern "C" {
+int *__p___argc(void);
+int *__imp___argc = 0;
+}
+__attribute__((constructor)) static void bps_ep_compat() {
+    __imp___argc = __p___argc();
+}
+]])
+    target_sources(appVGRPresenterUI PRIVATE "${CMAKE_BINARY_DIR}/ep_compat.cpp")
 endif()
 
 # Development builds find the KJV that ships in the source tree (SearchService).

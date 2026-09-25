@@ -1,6 +1,7 @@
 #include "modules/presentation/ShowLibrary.hpp"
 
 #include "modules/presentation/PresentationSerializer.hpp"
+#include "modules/search/TextMatching.hpp"
 #include "modules/vgr/VgrFile.hpp"
 #include "platform/PlatformAccessor.hpp"
 
@@ -13,6 +14,7 @@
 namespace bps::presentation {
 
 namespace {
+namespace textmatch = bps::search::textmatch;
 
 constexpr const char* kModule = "ShowLibrary";
 
@@ -167,12 +169,43 @@ std::vector<ShowEntry> ShowLibrary::ShowsIn(std::string_view category) const {
 
 std::vector<ShowEntry> ShowLibrary::Search(std::string_view text) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    const std::string needle = Lower(text);
     std::vector<ShowEntry> out;
-    for (const auto& e : entries_)
-        if (needle.empty() || Lower(e.name).find(needle) != std::string::npos ||
-            Lower(e.category).find(needle) != std::string::npos)
-            out.push_back(e);
+    const auto words = textmatch::TokenizeWords(text);
+    if (words.empty()) {
+        out = entries_;
+        return out;
+    }
+    // Show names + categories are the vocabulary: "victory_lifestream.show"
+    // carries "victory", "lifestream". Typos correct ("victoy" -> "victory")
+    // before matching — the shared rules of every other search surface. A raw
+    // word stays primary: an incomplete word ("vic") already substring-matches
+    // everything its completion would, so completions never NARROW results.
+    std::vector<std::string> vocabulary;
+    vocabulary.reserve(entries_.size() * 2);
+    for (const auto& e : entries_) {
+        for (std::string& w : textmatch::TokenizeWords(e.name)) vocabulary.push_back(std::move(w));
+        for (std::string& w : textmatch::TokenizeWords(e.category)) vocabulary.push_back(std::move(w));
+    }
+    std::vector<std::vector<std::string>> lookFor;   // per word: [raw, correction?]
+    lookFor.reserve(words.size());
+    for (const std::string& w : words) {
+        std::vector<std::string> alts{w};
+        const textmatch::ResolvedWord r = textmatch::ResolveWordInList(w, vocabulary);
+        if (!r.word.empty() && r.weight < 1.0) alts.push_back(r.word);
+        lookFor.push_back(std::move(alts));
+    }
+    for (const auto& e : entries_) {
+        const std::string name = Lower(e.name);
+        const std::string cat = Lower(e.category);
+        bool all = true;
+        for (const std::vector<std::string>& alts : lookFor) {
+            bool any = false;
+            for (const std::string& w : alts)
+                if (name.find(w) != std::string::npos || cat.find(w) != std::string::npos) { any = true; break; }
+            if (!any) { all = false; break; }
+        }
+        if (all) out.push_back(e);
+    }
     return out;
 }
 

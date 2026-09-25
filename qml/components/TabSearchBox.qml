@@ -34,9 +34,12 @@ Item {
 
     signal edited(string text)
 
-    // Hugs its own content (icon + placeholder/typed text), the same as every tab beside it - was a fixed 160, wider than "Search"
-    // ever needs, so the red underline (spanning the full box) stretched out past the visible text.
-    implicitWidth: Math.max(112, glass.x + glass.width + 12 + hint.implicitWidth + 26)
+    // Hugs its own content — placeholder OR the typed text, whichever is wider
+    // (was placeholder-only: a completed citation ("47-1102 - The Angel Of God
+    // 1 7") ran past the visible box and the user could not see what they had
+    // entered). LibraryTabBar still clamps it so it can't run into the tabs.
+    implicitWidth: Math.max(112, glass.x + glass.width + 12
+                            + Math.max(hint.implicitWidth, input.contentWidth) + 26)
     implicitHeight: 31
 
     // The popup lives at the WINDOW ROOT (via DropdownPanel's own reparenting) so the

@@ -10,6 +10,7 @@
 #include "modules/library/TheTableLibrary.hpp"
 #include "modules/search/SearchEngine.hpp"
 
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 
@@ -120,6 +121,12 @@ void TestTheTableLibrary() {
     // The reference is the citation line ("53-0218 - My Angel 1"): year minus
     // the "19", a dash, the sermon's own date-code, the title stripped to
     // alphanumerics, then the paragraph number.
+    // Search rides the Search Engine's index (one document per sermon — the
+    // boot path indexes every sermon, and the library's Search() ranks
+    // candidates through it). The test must mirror production: index what was
+    // imported, or the candidate stage answers empty and nothing is scanned.
+    CHECK(lib->IndexWithSearchEngine().ok());
+
     auto hits = reopened->Search("angel road");
     CHECK(hits.ok());
     CHECK(hits.value().size() == 1);
@@ -144,10 +151,47 @@ void TestTheTableLibrary() {
                                     "The second paragraph carries more words so it survives the length filter easily.");
     CHECK(rPunct.ok());
     CHECK(lib->Citation("Y1947", 1, 3) == "47-0412 - Faith Is The Substance 3");
+    // The later code-tier searches need the newer sermons indexed too (upsert,
+    // same as production's re-index after an import).
+    CHECK(lib->IndexWithSearchEngine().ok());
 
     auto miss = reopened->Search("angel unmountable");
     CHECK(miss.ok());
     CHECK(miss.value().empty());
+
+    // ---- code-tier: a citation-CODE query names the sermon itself ----
+    // (Quick search's "47-1100X" used to show only Bible rows: the tier compared
+    // the typed "47-0412" against the STORED bare date-code "0412" and never
+    // matched. The tier now tests every citation form: yy-code, bare code, and
+    // the title's leading code-token with its trailing letter.)
+    // (These run against `lib` — it holds the 47_0412 sermon; `reopened` was
+    // opened before that import and must not see it.)
+    auto exact = lib->Search("47-0412");
+    CHECK(exact.ok() && !exact.value().empty());
+    CHECK(exact.value()[0].reference == "47-0412 - Faith Is The Substance");   // sermon-level row (verse 0)
+    CHECK(exact.value()[0].verse == 0);
+    auto prefix = lib->Search("47-");
+    CHECK(prefix.ok() && prefix.value().size() >= 1);   // the year's sermon(s), one row each
+    bool found47 = false;
+    for (const auto& h : prefix.value())
+        found47 |= h.bookId == "Y1947" && h.verse == 0;
+    CHECK(found47);
+    auto lettered = lib->Search("53-0218a");   // typed letter ("x" shape) vs stored "0218"
+    CHECK(lettered.ok() && !lettered.value().empty());
+    CHECK(lettered.value()[0].bookId == "Y1953");
+    auto bare = lib->Search("0218");
+    CHECK(bare.ok() && !bare.value().empty());
+    CHECK(bare.value()[0].bookId == "Y1953");
+    // A bare "47" is NOT a code (Genesis 47, Luke 1:47): the tier stays out —
+    // the word scan answers (or nothing does), never a sermon listing.
+    auto bareYear = lib->Search("47");
+    CHECK(bareYear.ok());
+    for (const auto& h : bareYear.value())
+        CHECK(!(h.verse == 0 && h.bookId == "Y1947"));   // no sermon-level code row
+    // This test indexed its sermons into the SHARED Search Engine; the next
+    // suite owns "table:*" documents and asserts a clean slate — drop ours
+    // (production never shares one process across two libraries, tests do).
+    CHECK(lib->UnindexFromSearchEngine().ok());
 
     // ---- second year becomes a second book ----
     auto r4 = reopened->ImportSermon("downloads/1954/54_0101_New_Year.txt",

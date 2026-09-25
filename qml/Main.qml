@@ -28,6 +28,7 @@ ApplicationWindow {
     // "show" | "edit" | "stage" — Stage has no screen yet, so its tab click
     // is accepted but doesn't switch the view.
     property string currentView: "show"
+    property real selfTestT6: 0   // (self-test probe timing scratch)
     // The window-level layer that carries a drag between panes (DragSource / DropArea); see DragLayer.qml.
     readonly property var dragLayer: dragLayerItem
 
@@ -295,25 +296,20 @@ ApplicationWindow {
 
 
     // ---- UI self-test scenario (TEMPORARY diagnostic, env-gated) ----------
-    // Drives the REAL scripture search flow: click the box, type "est", grab
-    // (commit state), type " 1:4" (auto-colon + verse), grab the popup and the
-    // full window, then quit. The grabs land in the working dir as PNGs for
-    // offline pixel/property sampling.
+    // CRASH REPRO: the user typed "revel" in Quick search, picked the
+    // "Revelation 1:1" reference row, and the app died with an unhandled
+    // exception (crash.log signal=0 terminate). This scenario drives the
+    // exact flow — open dialog, type, log results, invoke the SAME choose()
+    // handler a row click runs — with a log line before and after each step,
+    // so the crashing step names itself in the output.
     Timer {
         id: selfTestStage1
         running: typeof SelfTest !== "undefined"
         interval: 1500
         onTriggered: {
-            console.log("[SELFTEST] stage 1: open The TABLE tab, focus the search input")
+            console.log("[SELFTEST] stage 1: open Quick search (Ctrl+K flow)")
             window.currentView = "show"
-            const bar = SelfTest.findItem("selfTestLibraryTabBar")
-            if (bar) {
-                // currentPane is read-only (derived) — the tab INDEX is the writable one.
-                const idx = bar.tabs.findIndex((t) => t.pane === "table")
-                if (idx >= 0) bar.currentTab = idx   // property write: no OS click can miss
-            }
-            if (SelfTest.findItem("selfTestLibraryTabBar") === null || SelfTest.findItem("selfTestLibraryTabBar").currentPane !== "table")
-                SelfTest.clickItem("selfTestTab_table")
+            quickSearch.openSearch()
             selfTestStage2.restart()
         }
     }
@@ -321,34 +317,34 @@ ApplicationWindow {
         id: selfTestStage2
         interval: 700
         onTriggered: {
-            if (!SelfTest.focusItem("selfTestSearchInput"))
-                SelfTest.clickItem("selfTestSearchBox")
+            console.log("[SELFTEST] stage 2: type 'revelation 1:1'")
+            SelfTest.type("revelation 1:1")
             selfTestStage3.restart()
         }
     }
     Timer {
         id: selfTestStage3
-        interval: 400
+        interval: 900
         onTriggered: {
-        console.log("[SELFTEST] stage 3: type '47-11' (5-char rule: multiple matches -> dropdown)")
-        SelfTest.type("47-11")
+            console.log("[SELFTEST] stage 3: results after debounce —", JSON.stringify(quickSearch.results))
+            SelfTest.grab("", "shot_quick_revel.png")
             selfTestStage4.restart()
         }
     }
     Timer {
         id: selfTestStage4
-        interval: 700
+        interval: 400
         onTriggered: {
-        console.log("[SELFTEST] stage 4: after '47-11' — popup should LIST the matches (1100X, 1102, 1123, ...)")
-        const box = SelfTest.findItem("selfTestSearchBox")
-        if (box) console.log("[SELFTEST] box text =", JSON.stringify(box.text))
-        const sug = SelfTest.findItem("selfTestSuggestPopup")
-        console.log("[SELFTEST] popup:", sug ? (sug.visible ? "VISIBLE (FAIL — Table matches live in the pane now)" : "hidden (ok)") : "never built (ok)")
-        const pane0 = SelfTest.findItem("selfTestTablePane")
-        if (pane0) console.log("[SELFTEST] in-pane matches =", pane0.citationMatches.length)
-        console.log("[SELFTEST] pane must NOT have jumped (multiple matches):",
-                    (function () { const p = SelfTest.findItem("selfTestTablePane"); return p ? (p.book ? p.book.name + " ch" + p.chapterNumber : "no book") : "no pane" })())
-        SelfTest.grab("", "shot_table_multimatch.png")
+            // The user's crash: picking the REFERENCE row (Revelation 1:1), which
+            // carries no bookId — openVerseAt resolves the title through the pane's
+            // adapter. Find that row (kind=bible, bookId empty/undefined).
+            let pick = quickSearch.results.find(
+                (r) => r.kind === "bible" && (r.bookId === undefined || r.bookId === ""))
+            if (!pick) pick = quickSearch.results[0]
+            console.log("[SELFTEST] stage 4: PICK", pick ? pick.kind + "/" + pick.title : "nothing",
+                        "(crash step)")
+            if (pick) quickSearch.choose(pick)
+            console.log("[SELFTEST] stage 4: choose() returned without crashing")
             selfTestStage4b.restart()
         }
     }
@@ -357,102 +353,131 @@ ApplicationWindow {
     // return to the open chapter when the cursor leaves the popup.
     Timer {
         id: selfTestStage4b
-        interval: 400
+        interval: 800
         onTriggered: {
-            console.log("[SELFTEST] stage 4b: hover popup row 1 — peek ON?")
-            // Hover the SECOND in-pane match row by position truth (what the
-            // catcher feeds on a real user move).
-            const row = SelfTest.findItem("selfTestMatchRow_1")
-            if (row) {
-                const c = row.mapToItem(null, row.width / 2, row.height / 2)
-                SelfTest.move(c.x, c.y)
-                AppCursor.setPointerPos(Qt.point(c.x, c.y))
-                console.log("[SELFTEST] hovering match row 1 at", JSON.stringify(c))
-            } else console.log("[SELFTEST] NO match rows to hover")
+            console.log("[SELFTEST] stage 4b: after the pick — view =", window.currentView,
+                        "scripture pane book =",
+                        (function () { const p = SelfTest.findItem("selfTestScripturePane");
+                                       return p ? (p.book ? p.book.name + " ch" + p.chapterNumber : "no book") : "no pane" })())
+            SelfTest.grab("", "shot_quick_picked.png")
             selfTestStage4c.restart()
         }
     }
     Timer {
         id: selfTestStage4c
-        interval: 500
+        interval: 400
         onTriggered: {
-            const pane = SelfTest.findItem("selfTestTablePane")
-            if (pane) console.log("[SELFTEST] peek index =", pane.peekIndex,
-                                  "peek verses =", pane.peekVerses.length,
-                                  "open verses =", pane.chapterVerses.length,
-                                  "content swapped =",
-                                  pane.peekVerses.length > 0 && pane.peekVerses[0].text !== pane.chapterVerses[0].text)
-            const row = SelfTest.findItem("selfTestMatchRow_1")
-            console.log("[SELFTEST] AppCursor point =", JSON.stringify(AppCursor._point),
-                        "point-in-row =", row ? AppCursor.hovered(row) : false)
-            SelfTest.grab("", "shot_table_hoverpeek.png")
-            SelfTest.move(600, 500)   // off the rows, over the verses area
-            AppCursor.setPointerPos(Qt.point(600, 500))
-            selfTestStage4d.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage4d
-        interval: 500
-        onTriggered: {
-            const pane = SelfTest.findItem("selfTestTablePane")
-            if (pane) console.log("[SELFTEST] after leave — peek index =", pane.peekIndex, "(must be -1)")
+            console.log("[SELFTEST] stage 4c: pick survived — now the code-query check")
+            quickSearch.openSearch()
             selfTestStage5.restart()
         }
     }
+    // A repeating heartbeat through the SAME event loop the app runs on: if the
+    // loop is alive these tick; the last tick before a terminate/hang names the
+    // window where it died. (Stage 2's log vanished while the process stayed
+    // alive — this distinguishes "event loop dead" from "stage never fired".)
+    Timer {
+        id: selfTestHeartbeat
+        running: typeof SelfTest !== "undefined"
+        interval: 500
+        repeat: true
+        // (If this fires after quit() — into the dying window — it kills the
+        // teardown with an exception; the visible-guard keeps it inert there.)
+        onTriggered: if (window.visible) console.log("[SELFTEST] heartbeat")
+    }
     Timer {
         id: selfTestStage5
-        interval: 500
+        interval: 1200   // (async search: request + worker round-trip needs a beat)
         onTriggered: {
-            console.log("[SELFTEST] stage 5: type '02' — '47-1102' is UNIQUE: inline fill + jump, popup closes")
-            SelfTest.type("02")
+            console.log("[SELFTEST] stage 5: type '47-'")
+            SelfTest.type("47-")
             selfTestStage6.restart()
         }
     }
     Timer {
         id: selfTestStage6
-        interval: 700
+        interval: 1600   // (type '47-' + debounce 140ms + async worker round-trip)
         onTriggered: {
-            console.log("[SELFTEST] stage 6: after '47-1102'")
-            const box = SelfTest.findItem("selfTestSearchBox")
-            if (box) console.log("[SELFTEST] box text =", JSON.stringify(box.text), "(should carry the filled citation)")
-            const sug = SelfTest.findItem("selfTestSuggestPopup")
-            console.log("[SELFTEST] popup:", sug ? (sug.visible ? "VISIBLE (FAIL)" : "hidden (ok)") : "never built (ok)")
-            const pane = SelfTest.findItem("selfTestTablePane")
-            if (pane) console.log("[SELFTEST] pane jumped to:", pane.book ? pane.book.name + " sermon " + pane.chapterNumber : "none (FAIL)")
-            SelfTest.grab("", "shot_table_faith.png")
+            const kinds = {}
+            for (const r of quickSearch.results)
+                kinds[r.kind] = (kinds[r.kind] || 0) + 1
+            console.log("[SELFTEST] stage 6: '47-' results —", JSON.stringify(kinds),
+                        "first:", quickSearch.results.length ? quickSearch.results[0].kind + "/" + quickSearch.results[0].title : "none")
+            // GLOW + LAG probe, async-shaped: request, WAIT for the rows to
+            // arrive (stage 6b), then verify — the old probe read the dialog
+            // synchronously and measured the PREVIOUS query's stale rows.
+            window.selfTestT6 = Date.now()
+            quickSearch.query = "then friend"
+            quickSearch.refresh()
+            selfTestStage6b.restart()
+        }
+    }
+    Timer {
+        id: selfTestStage6b
+        interval: 1500
+        onTriggered: {
+            // GROUP AUDIT: user call — "friend shows only Bible, not sermon".
+            // Log the full kind breakdown + each row's first 60 chars so the
+            // missing group is identifiable from the log alone.
+            {
+                const kinds = {}
+                for (const r of quickSearch.results)
+                    kinds[r.kind] = (kinds[r.kind] || 0) + 1
+                console.log("[SELFTEST] stage 6b-groups:", JSON.stringify(kinds))
+                for (const r of quickSearch.results)
+                    console.log("[SELFTEST]   row:", r.kind, "|", String(r.title).slice(0, 60))
+            }
+            // THE NO-HOVER TEST: the yellow glow must land inside the VISIBLE
+            // snippet of EVERY row. The engine anchors snippets so the resolved
+            // words sit within the 120-char cap; a row whose match words are all
+            // past the cap is the "swallowed highlight" bug.
+            const words = String(quickSearch.highlightSource || "then friends")
+                              .toLowerCase().split(/\s+/).filter((w) => w.length >= 2)
+            let glowOk = 0, glowBad = [], detail = []
+            for (const r of quickSearch.results) {
+                if (r.kind !== "table" && r.kind !== "bible") continue
+                const low = String(r.text || "").toLowerCase()
+                const at = words.map((w) => low.indexOf(w)).filter((p) => p >= 0)
+                if (at.length > 0) {
+                    glowOk++
+                    detail.push(r.title.split(" · ")[0] + "@" + Math.min.apply(null, at))
+                } else {
+                    glowBad.push(r.title)
+                }
+            }
+            console.log("[SELFTEST] stage 6b: 'then friend' arrived in",
+                        (Date.now() - window.selfTestT6) + "ms", "rows:", quickSearch.results.length,
+                        "— GLOW (no hover)", glowOk + "/" + (glowOk + glowBad.length), "visible",
+                        glowBad.length ? "SWALLOWED: " + glowBad.slice(0, 3).join(" | ")
+                                       : "(word positions: " + detail.slice(0, 4).join(", ") + ")")
+            SelfTest.grab("", "shot_glow_then_friends.png")
             selfTestStage7.restart()
         }
     }
     Timer {
         id: selfTestStage7
-        interval: 500
+        interval: 9000
         onTriggered: {
-            console.log("[SELFTEST] stage 7: backspace sweep (the filled citation is ~32 chars)")
-            SelfTest.type("\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b")
-            selfTestStage8.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage8
-        interval: 700
-        onTriggered: {
-            console.log("[SELFTEST] stage 8: after sweep — box must be empty")
-            const box = SelfTest.findItem("selfTestSearchBox")
-            if (box) console.log("[SELFTEST] box text =", JSON.stringify(box.text), "(empty = PASS)")
-            SelfTest.grab("", "shot_table_cleared.png")
-            selfTestStage9.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage9
-        interval: 600
-        onTriggered: {
-            console.log("[SELFTEST] done")
+            quickSearch.query = "god"
+            const s0 = Date.now()
+            quickSearch.refresh()
+            const s1 = Date.now()
+            quickSearch.query = "then friend"
+            quickSearch.refresh()
+            const s2 = Date.now()
+            quickSearch.query = "the"
+            quickSearch.refresh()
+            const s3 = Date.now()
+            console.log("[SELFTEST] stage 7 STEADY (GUI-thread dispatch — what typing feels): 'god' =", (s1 - s0) + "ms",
+                        "'then friend' =", (s2 - s1) + "ms", "'the' =", (s3 - s2) + "ms")
+            selfTestHeartbeat.running = false   // nothing fires into teardown
             SelfTest.quit()
         }
+    }    Timer {
+        id: selfTestStage4d
+        running: false
+        interval: 9999999
     }
-
 
 
 

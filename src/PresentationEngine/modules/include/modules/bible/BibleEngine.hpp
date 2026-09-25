@@ -23,6 +23,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace bps::bible {
@@ -150,6 +151,10 @@ private:
     std::vector<BibleBook> BooksFor(std::string_view bibleId) const;
 
     mutable std::mutex mutex_;
+    // Store-restore re-index runs off the boot path — but JOINED in Shutdown(),
+    // never detached: a detached indexer outlives Kernel::Shutdown() and dies in
+    // torn-down statics (the exit-time 0xc0000005 after picking a search result).
+    std::thread reindexThread_;
     std::vector<std::shared_ptr<IBibleProvider>> providers_;
     std::map<std::string, BibleVersion, std::less<>> bibles_;
     // Where imported bibles persist ("" = persistence off — unit tests). Set

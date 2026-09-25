@@ -290,6 +290,10 @@ QVariantList TheTableService::search(const QString &text, int limit) const
         // Words spread across this paragraph and its next: the preview must fetch
         // BOTH (paragraphPair) — a single-paragraph hit previews alone.
         row.insert(QStringLiteral("spanned"), h.spanned);
+        // The engine's ranking score: Quick search's pick-float uses it so a
+        // previously-picked row stops burying a strictly better match (the
+        // verbatim "Then, friends" paragraph outranking the picked ¶29).
+        row.insert(QStringLiteral("score"), h.score);
         out.append(row);
     }
     return out;
@@ -408,6 +412,14 @@ QVariantMap TheTableService::resolveCitation(const QString &text) const
     if (needle.size() < citationSearchMinChars(needle) || !library_
         || !EngineBridge::instance().booted())
         return {};
+    // A TRAILING " N" after the citation names the PARAGRAPH: the box
+    // auto-completes the full citation line ("47-1102 - The Angel Of God 1"),
+    // so "…God 1 7" is the user asking for ¶7 of that sermon — and since the
+    // needle is no longer a substring of the citation, the search as typed
+    // finds nothing. Citation lines can END in a part digit ("…Of God 1"), so
+    // the number is stripped ONLY when the needle as typed matched nothing —
+    // a real part-numbered title ("…The Way Of A Prophet 2" typed whole)
+    // still wins on its own match first.
     const QString lower = needle.toLower();
     QVariantMap best;
     int matches = 0;
@@ -429,7 +441,41 @@ QVariantMap TheTableService::resolveCitation(const QString &text) const
                      { QStringLiteral("verseEnd"), 0 } };
         }
     }
-    return matches == 1 ? best : QVariantMap{};
+    if (matches != 0)
+        return matches == 1 ? best : QVariantMap{};
+    // Zero matches as typed: strip one trailing " N" and re-search; a unique
+    // sermon there jumps straight to its paragraph N.
+    static const QRegularExpression trailingPara(QStringLiteral("^(.*\\S)\\s+(\\d{1,4})$"));
+    const auto m = trailingPara.match(needle);
+    if (!m.hasMatch())
+        return {};
+    const QString base = m.captured(1).trimmed();
+    bool ok = false;
+    const int para = m.captured(2).toInt(&ok);
+    if (!ok || para <= 0 || base.size() < citationSearchMinChars(base))
+        return {};
+    const QString lowerBase = base.toLower();
+    QVariantMap paraBest;
+    int paraMatches = 0;
+    for (const auto &b : tableLibrary(library_)->BookIndex()) {
+        if (b.chapters.empty())
+            continue;
+        const QString bookId = qstr(b.id);
+        for (const auto &ch : b.chapters) {
+            const QString cite = qstr(tableLibrary(library_)->Citation(bookId.toStdString(), ch.number, 0));
+            if (cite.isEmpty())
+                continue;
+            if (cite.indexOf(lowerBase, 0, Qt::CaseInsensitive) < 0)
+                continue;
+            if (++paraMatches > 1)
+                return {};   // ambiguous even without the number: the dropdown handles it
+            paraBest = { { QStringLiteral("bookId"), bookId },
+                         { QStringLiteral("chapter"), ch.number },
+                         { QStringLiteral("verseStart"), para },
+                         { QStringLiteral("verseEnd"), para } };
+        }
+    }
+    return paraMatches == 1 ? paraBest : QVariantMap{};
 }
 
 QVariantMap TheTableService::preview(const QString &bookId, int chapter, const QVariantList &verses) const

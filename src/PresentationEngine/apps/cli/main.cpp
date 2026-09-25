@@ -28,7 +28,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <format>
-#if defined(__cpp_lib_print)
+// GCC 14+ ships <print>, but the msys2 GCC 15.2 (Rev8) MinGW package's
+// libstdc++ DLL lacks the std::__open_terminal/__write_to_terminal exports
+// its std::println needs (the vprint_unicode terminal path) — the link dies
+// with undefined references. The <format>+cstdio shim below is the same
+// surface; the real std::print comes back when the package is fixed.
+#if defined(__cpp_lib_print) && !defined(BPS_PRINT_TERMINAL_BROKEN)
 #include <print>
 #else
 #include <string_view>

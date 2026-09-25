@@ -22,6 +22,18 @@ ModalCard {
     property string query: ""
     property var results: []
     property int current: 0
+    // What the engine actually searched for ("frend" -> "friend"): the highlight
+    // must wrap the CORRECTED words or a typo query lights nothing (the snippet
+    // says "friend", the raw query said "frend"). Falls back to the live query.
+    property string highlightSource: query
+    // Snippets are engine-anchored on the first query-word occurrence, so the
+    // highlighted words are inside the visible text — not past the 2-line cap
+    // where they only appear on hover.
+    readonly property bool canHighlight: {
+        const words = root.highlightSource.trim().toLowerCase().split(/\s+/)
+            .filter((w) => w.length >= 2)
+        return words.length > 0
+    }
 
     readonly property var kindInfo: ({
         "bible":    { group: qsTr("Bible"),      badge: qsTr("BIBLE"),    color: "#e0b04a" },
@@ -37,10 +49,17 @@ ModalCard {
     })
 
     function openSearch() {
+        // Every open starts FRESH (user call, after the restore-on-reopen try:
+        // "the search should close since im using the other search" — picking a
+        // result hands over to The Table/Scripture, and a reopening dialog that
+        // still shows the old query gets in the way. Tried restore+select-all
+        // 2026-09-24; user rejected it the same day — do not reintroduce).
         root.query = ""
         queryInput.text = ""
         root.results = []
         root.current = 0
+        root.highlightSource = ""
+        hint.text = ""
         root.loadPicks()               // what was picked before, ready to float
         ShowService.refreshLibrary()   // pick up files added since the last look
         root.open()
@@ -71,35 +90,76 @@ ModalCard {
             return
         const key = pickKeyOf(result)
         const next = root.picks.filter((p) => p.key !== key)
-        next.unshift({ key: key, title: result.title, kind: result.kind })
+        next.unshift({ key: key })
         root.picks = next.slice(0, 40)
+        // Key-only entries: the ranking below reads nothing else, and the settings
+        // store refuses Text values past 4096 chars — slim keeps 40 picks far clear.
         SettingsService.setValue(picksKey, JSON.stringify(root.picks))
     }
     function rankByPicks(results) {
         if (root.picks.length === 0 || results.length < 2)
             return results
-        // Within each kind group, a previously-picked result goes first (the most
-        // recent pick wins); everything else keeps the engine's rank order.
+        // QML's Array.sort is NOT stable: a comparator returning 0 for
+        // different kinds let equal-key swaps SCRAMBLE the groups (sermons
+        // ranked above the Bible reference row). The engine's group order
+        // (first appearance) is authoritative — compare group index first,
+        // pick rank second, so picks float WITHIN their group only.
+        const groupOf = {}
+        for (const r of results)
+            if (groupOf[r.kind] === undefined) groupOf[r.kind] = Object.keys(groupOf).length
+        // Within each kind group the ENGINE SCORE ranks the rows when the
+        // service provides one (table rows do); a previously-picked row floats
+        // only within a score tie, then the engine's own order stands. The old
+        // pick-over-everything rule let one stale click bury the verbatim
+        // "Then, friends" paragraph under ¶s the engine scored far lower —
+        // the user saw the wrong passage lead and called the scoring faulty.
+        // Rows without a score (bible etc.) keep pick-then-engine order.
+        const MISSING = -1
+        const scoreOf = (r) => (typeof r.score === "number" ? r.score : null)
         const rankOf = (r) => {
             const key = pickKeyOf(r)
             const i = root.picks.findIndex((p) => p.key === key)
-            return i < 0 ? 1 << 30 : i   // unpicked = after every pick
+            return i < 0 ? MISSING : i   // unpicked = after every pick
         }
         return results.slice().sort((a, b) => {
-            if (a.kind !== b.kind)
-                return 0                                  // leave GROUP order to the engine (stable sort keeps it)
+            const ga = groupOf[a.kind], gb = groupOf[b.kind]
+            if (ga !== gb) return ga - gb
+            const sa = scoreOf(a), sb = scoreOf(b)
+            if (sa !== null && sb !== null && sa !== sb) return sb - sa   // engine first
             const ra = rankOf(a), rb = rankOf(b)
-            return ra === rb ? 0 : (ra < rb ? -1 : 1)
+            if (ra !== rb) return ra === MISSING ? 1 : (rb === MISSING ? -1 : ra - rb)
+            return 0                                   // stable sort: engine order
         })
     }
 
+    // The request counter for the async search: only the latest token's rows
+    // are applied (SearchService drops stale ones too — belt and braces).
+    property int searchToken: 0
     function refresh() {
-        root.results = root.rankByPicks(SearchService.search(root.query, 4))
+        // OFF the GUI thread: a big query ("the", ~1,200 candidates) blocked
+        // typing for hundreds of ms synchronously. Rows come back via
+        // resultsReady; the empty query path clears inline as before.
+        if (root.query.trim() === "") { root.results = []; root.current = 0 }
+        else { root.searchToken++; SearchService.searchAsync(root.query, 4, root.searchToken) }
         flick.contentY = 0
         root.current = 0
+        // The engine's own word resolution surfaced: incomplete words completed,
+        // typos corrected, typed-together words split ("thn frend" shows "then
+        // friends"). Shown as a hint under the box; Tab accepts it. The highlight
+        // uses the SAME resolved words, so corrected words glow in the snippets.
+        // resolveWords returns EVERY word (changed: true only on the fixed
+        // ones): the hint lists the corrections, the highlight wraps ALL the
+        // resolved words — "then frend" glows both "then" and "friend".
+        const words = SearchService.resolveWords(root.query)
+        hint.text = words.filter((w) => w.changed === true).length === 0 ? ""
+            : words.filter((w) => w.changed === true)
+                   .map((w) => w.typed + " \u2192 " + w.resolved).join("   ")
+        root.highlightSource = words.length === 0 ? root.query
+            : words.reduce((acc, w) => acc.concat(String(w.resolved).split(/\s+/)), []).join(" ")
     }
 
     function choose(result) {
+        console.log("[QS] choose:", result.kind, result.title)
         root.rememberPick(result)
         root.close()
         root.resultChosen(result)
@@ -121,7 +181,7 @@ ModalCard {
         const source = String(text ?? "")
         if (source === "")
             return ""
-        const words = root.query.trim().toLowerCase().split(/\s+/).filter((w) => w.length >= 2)
+        const words = root.highlightSource.trim().toLowerCase().split(/\s+/).filter((w) => w.length >= 2)
         if (words.length === 0)
             return source
         const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -133,8 +193,6 @@ ModalCard {
         // the dark card reads as the yellow highlight.
         return esc(source).replace(re, '<b><font color="#ffd54a">$1</font></b>')
     }
-    readonly property bool canHighlight: root.query.trim().length >= 2
-
     function move(delta) {
         if (root.results.length === 0) return
         root.current = (root.current + delta + root.results.length) % root.results.length
@@ -163,6 +221,12 @@ ModalCard {
     Connections {
         target: SearchService
         function onBibleChanged() { if (root.shown && root.query !== "") root.refresh() }
+        // The async search's rows: applied only when this request is still the
+        // latest (a fast typist's older keystrokes answer into the void).
+        function onResultsReady(token, rows) {
+            if (token !== root.searchToken || !root.shown) return
+            root.results = root.rankByPicks(rows)
+        }
     }
 
     // ---- the search box ----
@@ -207,6 +271,23 @@ ModalCard {
             Keys.onReturnPressed: root.activate()
             Keys.onEnterPressed: root.activate()
             Keys.onEscapePressed: root.close()
+            Keys.onTabPressed: {
+                // Accept the engine's resolved words: "thn frend" + Tab -> "then
+                // friends". Only when a hint is showing (a well-spelled query has
+                // nothing to fix, and Tab keeps its normal focus behavior).
+                if (hint.text === "") return
+                const words = SearchService.resolveWords(root.query)
+                if (words.length === 0) return
+                let fixed = root.query.trim()
+                for (const w of words) {
+                    if (w.changed !== true) continue   // spelled right: leave it
+                    const parts = String(w.resolved).split(/\s+/)
+                    fixed = fixed.replace(new RegExp("\\b" + w.typed + "\\b", "i"), parts.join(" "))
+                }
+                queryInput.text = fixed
+                root.query = fixed
+                root.refresh()
+            }
 
             Text {
                 visible: queryInput.text.length === 0
@@ -216,6 +297,22 @@ ModalCard {
                 font: queryInput.font
             }
         }
+    }
+
+    // The engine's resolved-words hint: "thn frend → then friends", gold like the
+    // match highlight. Only exists when a word needed fixing; Tab accepts it.
+    // (No height binding — a Column skips invisible items, and height-from-
+    // implicitHeight here was the binding loop Qt reported.)
+    Text {
+        id: hint
+        width: parent.width
+        visible: text !== ""
+        leftPadding: 4
+        topPadding: 2
+        color: "#ffd54a"
+        font.family: Theme.fontFamily
+        font.pixelSize: Theme.textSm
+        elide: Text.ElideRight
     }
 
     // ---- results, grouped by kind (they scroll once they outgrow the window) ----

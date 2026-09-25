@@ -24,6 +24,7 @@
 
 #include <functional>
 #include <map>
+#include <unordered_map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -167,6 +168,10 @@ private:
     std::string filePath_;
     std::vector<TheTableBook> books_;
     uint32_t importSeq_ = 0;   // disambiguates same-named sermons
+    // Lowered paragraph text per sermon ("bookId:number"), built lazily by
+    // Search()'s scan and kept — the fallback scan must not re-lowercast the
+    // library per query. Cleared whenever sermons change (Load/imports).
+    mutable std::unordered_map<std::string, std::vector<std::string>> lowerParagraphs_;
 };
 
 } // namespace bps::library

@@ -97,6 +97,7 @@ void TestDocumentEdit();
 void TestShowLibraryCrud();
 void TestSearchIndexing();
 void TestSearchRanking();
+void TestSearchFuzzyResolution();
 void TestMediaEngine();
 void TestPngEncode();
 void TestMediaLibraryFolders();

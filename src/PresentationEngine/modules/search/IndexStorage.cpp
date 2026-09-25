@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <numeric>
 #include <sstream>
 
 namespace bps::search {
@@ -47,16 +48,24 @@ std::vector<std::string> AllFields(const SearchDocument& doc) {
     return fields;
 }
 
+std::string Lower(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s)
+        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    return out;
+}
+
 } // namespace
 
 Result<void> IndexStorage::Initialize() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock lock(mutex_);
     initialized_ = true;
     return Ok();
 }
 
 Result<void> IndexStorage::Shutdown() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock lock(mutex_);
     index_.clear();
     documents_.clear();
     initialized_ = false;
@@ -64,45 +73,53 @@ Result<void> IndexStorage::Shutdown() {
 }
 
 size_t IndexStorage::Upsert(const SearchDocument& doc) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock lock(mutex_);
     // Remove old postings for this doc first (incremental re-index).
     if (documents_.count(doc.id)) {
         for (auto& [term, postings] : index_) postings.erase(doc.id);
+        totalTokens_ -= documents_.at(doc.id).tokenCount;
     }
-    documents_[doc.id] = doc;
+    // Precompute the query-time views ONCE (was: every candidate lowercased its
+    // whole content on every query — the megabytes-per-keystroke churn).
+    DocRecord rec;
+    rec.doc = doc;
+    rec.lowerTitle = Lower(doc.title);
+    rec.lowerContent = Lower(doc.content);
 
     std::map<std::string, size_t, std::less<>> freqs;
-    size_t positions = 0;
     for (const auto& field : AllFields(doc)) {
         for (auto& tok : Tokenize(field)) {
             ++freqs[tok];
-            ++positions;
         }
     }
+    rec.tokenCount = freqs.empty() ? 0
+        : std::accumulate(freqs.begin(), freqs.end(), size_t{0},
+                          [](size_t a, const auto& kv) { return a + kv.second; });
+    totalTokens_ += rec.tokenCount;
+    documents_[doc.id] = std::move(rec);
     for (const auto& [term, freq] : freqs) {
         Posting p;
         p.docId = doc.id;
         p.frequency = freq;
-        p.positions = positions;
         index_[term][doc.id] = p;
     }
     return freqs.size();
 }
 
 Result<void> IndexStorage::Remove(std::string_view docId) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock lock(mutex_);
     if (!documents_.count(std::string(docId)))
         return Error::Make(Err::Search_DocumentNotFound, "IndexStorage",
                            "document '" + std::string(docId) + "' not found");
     for (auto& [term, postings] : index_) postings.erase(std::string(docId));
+    totalTokens_ -= documents_.at(std::string(docId)).tokenCount;
     documents_.erase(std::string(docId));
     return Ok();
 }
 
 std::vector<Posting> IndexStorage::Lookup(std::string_view term) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::string key;
-    for (char c : term) key.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    std::shared_lock lock(mutex_);
+    std::string key = Lower(term);
     auto it = index_.find(key);
     if (it == index_.end()) return {};
     std::vector<Posting> out;
@@ -111,12 +128,67 @@ std::vector<Posting> IndexStorage::Lookup(std::string_view term) const {
     return out;
 }
 
-std::vector<std::string> IndexStorage::TermsWithPrefix(std::string_view prefix, size_t limit) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+std::vector<std::string> IndexStorage::LookupDocIds(std::string_view term) const {
+    std::shared_lock lock(mutex_);
+    std::string key = Lower(term);
+    auto it = index_.find(key);
+    if (it == index_.end()) return {};
     std::vector<std::string> out;
-    std::string key;
-    for (char c : prefix)
-        key.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    out.reserve(it->second.size());
+    for (const auto& [_, p] : it->second) out.push_back(p.docId);
+    return out;
+}
+
+// BM25: a term's per-document term frequencies (and its doc frequency = size).
+std::vector<IndexStorage::TermTf> IndexStorage::LookupTf(std::string_view term) const {
+    std::shared_lock lock(mutex_);
+    std::string key = Lower(term);
+    auto it = index_.find(key);
+    if (it == index_.end()) return {};
+    std::vector<TermTf> out;
+    out.reserve(it->second.size());
+    for (const auto& [_, p] : it->second) out.push_back({p.docId, p.frequency});
+    return out;
+}
+
+IndexStorage::CorpusStats IndexStorage::Corpus() const {
+    std::shared_lock lock(mutex_);
+    return {documents_.size(), totalTokens_};
+}
+
+std::vector<DocRecord> IndexStorage::DocumentsById(const std::vector<std::string>& ids) const {
+    std::shared_lock lock(mutex_);
+    std::vector<DocRecord> out;
+    out.reserve(ids.size());
+    for (const auto& id : ids) {
+        auto it = documents_.find(id);
+        if (it != documents_.end())
+            out.push_back(it->second);   // one copy per doc per query (doc + precomputed views)
+    }
+    return out;
+}
+
+// Metadata-only lookup — no text copies. The pre-score ranks candidates by
+// their indexed tf/idf evidence (length-normalized) and drops docs the filter
+// would reject anyway; full records (the two text copies) are fetched for the
+// few rows that will actually display.
+std::unordered_map<std::string, IndexStorage::DocMeta> IndexStorage::DocMetas(
+    const std::vector<std::string>& ids) const {
+    std::shared_lock lock(mutex_);
+    std::unordered_map<std::string, DocMeta> out;
+    out.reserve(ids.size() * 2);
+    for (const auto& id : ids) {
+        auto it = documents_.find(id);
+        if (it != documents_.end())
+            out.emplace(id, DocMeta{it->second.tokenCount, it->second.doc.type});
+    }
+    return out;
+}
+
+std::vector<std::string> IndexStorage::TermsWithPrefix(std::string_view prefix, size_t limit) const {
+    std::shared_lock lock(mutex_);
+    std::vector<std::string> out;
+    std::string key = Lower(prefix);
     auto it = index_.lower_bound(key);
     while (it != index_.end() && out.size() < limit) {
         if (it->first.rfind(key, 0) != 0) break;
@@ -126,17 +198,29 @@ std::vector<std::string> IndexStorage::TermsWithPrefix(std::string_view prefix, 
     return out;
 }
 
-Result<SearchDocument> IndexStorage::GetDocument(std::string_view docId) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+void IndexStorage::ForEachTermWithDf(
+    const std::function<bool(const std::string&, size_t)>& visit) const {
+    std::shared_lock lock(mutex_);
+    for (const auto& [term, postings] : index_)
+        if (!visit(term, postings.size())) return;   // callback returns false: stop
+}
+
+const DocRecord* IndexStorage::FindRecordLocked(std::string_view docId) const {
     auto it = documents_.find(std::string(docId));
-    if (it == documents_.end())
+    return it == documents_.end() ? nullptr : &it->second;
+}
+
+Result<SearchDocument> IndexStorage::GetDocument(std::string_view docId) const {
+    std::shared_lock lock(mutex_);
+    const DocRecord* rec = FindRecordLocked(docId);
+    if (!rec)
         return Error::Make(Err::Search_DocumentNotFound, "IndexStorage",
                            "document '" + std::string(docId) + "' not found");
-    return it->second;
+    return rec->doc;
 }
 
 std::vector<std::string> IndexStorage::DocumentIds() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock lock(mutex_);
     std::vector<std::string> ids;
     ids.reserve(documents_.size());
     for (const auto& [id, _] : documents_) ids.push_back(id);
@@ -144,26 +228,27 @@ std::vector<std::string> IndexStorage::DocumentIds() const {
 }
 
 size_t IndexStorage::DocumentCount() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock lock(mutex_);
     return documents_.size();
 }
 
 size_t IndexStorage::TermCount() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock lock(mutex_);
     return index_.size();
 }
 
 size_t IndexStorage::TotalPostings() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock lock(mutex_);
     size_t n = 0;
     for (const auto& [_, postings] : index_) n += postings.size();
     return n;
 }
 
 std::string IndexStorage::Snapshot() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock lock(mutex_);
     json::Value::Array docs;
-    for (const auto& [_, doc] : documents_) {
+    for (const auto& [_, rec] : documents_) {
+        const SearchDocument& doc = rec.doc;
         json::Value::Object d;
         d["id"] = json::Value::String(doc.id);
         d["type"] = json::Value::String(doc.type);
@@ -203,7 +288,7 @@ Result<size_t> IndexStorage::Restore(std::string_view json) {
     const auto* arr = root.Find("documents") ? root.Find("documents")->asArray() : nullptr;
     if (!arr) return Error::Make(Err::Search_CorruptIndex, "IndexStorage",
                                  "snapshot missing documents array");
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock lock(mutex_);
     index_.clear();
     documents_.clear();
     size_t terms = 0;
@@ -230,11 +315,19 @@ Result<size_t> IndexStorage::Restore(std::string_view json) {
             for (const auto& [k, val] : *meta)
                 doc.metadata[std::string(k)] = std::string(val.asString());
         if (doc.id.empty()) continue;
-        documents_[doc.id] = doc;
+        DocRecord rec;
+        rec.doc = doc;
+        rec.lowerTitle = Lower(doc.title);
+        rec.lowerContent = Lower(doc.content);
         std::map<std::string, size_t, std::less<>> freqs;
         for (const auto& field : AllFields(doc)) {
             for (auto& tok : Tokenize(field)) ++freqs[tok];
         }
+        rec.tokenCount = std::accumulate(
+            freqs.begin(), freqs.end(), size_t{0},
+            [](size_t a, const auto& kv) { return a + kv.second; });
+        totalTokens_ += rec.tokenCount;
+        documents_[doc.id] = std::move(rec);
         for (const auto& [term, freq] : freqs) {
             Posting p;
             p.docId = doc.id;

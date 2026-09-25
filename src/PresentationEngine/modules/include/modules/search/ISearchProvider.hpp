@@ -30,6 +30,10 @@ public:
     virtual ~IRankingStrategy() = default;
     // Scores a candidate document for a query. Higher is better.
     virtual double Score(const SearchDocument& doc, const SearchQuery& query) const = 0;
+    // True for the engine's built-in ranker: RawSearch then takes its fast path
+    // (ranking recomputed inline from the index's precomputed lowercase views).
+    // A custom strategy returns false and keeps the classic per-candidate call.
+    virtual bool IsDefault() const { return false; }
 };
 
 // Future search providers (vector, embedding, semantic, local/cloud AI).

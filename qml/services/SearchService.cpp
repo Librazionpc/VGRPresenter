@@ -7,12 +7,15 @@
 
 #include "modules/bible/BibleEngine.hpp"
 #include "modules/library/TheTableLibrary.hpp"
+#include "modules/search/SearchEngine.hpp"
+#include "modules/search/TextMatching.hpp"
 #include "modules/songs/SongEngine.hpp"
 #include "services/TheTableService.h"
 
 #include <QDebug>
 #include <QDir>
 #include <QFile>
+#include <QRegularExpression>
 #include <QFileInfo>
 #include <QJSEngine>
 #include <QQmlEngine>
@@ -32,7 +35,9 @@
 
 namespace bb = bps::bible;
 namespace bl = bps::library;
+namespace bs = bps::search;
 namespace sg = bps::song;
+namespace ts = bps::search::textmatch;
 
 namespace {
 
@@ -53,17 +58,62 @@ QVariantMap makeResult(const QString &kind, const QString &title, const QString 
     };
 }
 
-// Names that start with the query beat names that merely contain it; a match
-// on any of `fields` counts, the best one wins. -1 = no match.
+// The query's words, lower-cased (word = letter/digit run).
+QStringList splitWords(const QString &s)
+{
+    QStringList out;
+    QString cur;
+    for (const QChar &c : s) {
+        if (c.isLetterOrNumber()) cur += c.toLower();
+        else if (!cur.isEmpty()) { out << cur; cur.clear(); }
+    }
+    if (!cur.isEmpty()) out << cur;
+    return out;
+}
+
+// Word-level matching for the Quick search's local surfaces (slides, settings,
+// show names) — the same semantics the engine gives songs/Bible/The Table:
+// EVERY query word must land in a field, words may sit anywhere in it, and a
+// MISSPELLED word is corrected against the field's own words (bounded edit
+// distance, first letter kept). "setings" finds "Settings", "outpt colr"
+// finds "Outputs". Quality: name starts with the query word 0 < word start 1
+// < inside a word 2 < typo-corrected 3; -1 = no match.
 int matchScore(const QString &needle, std::initializer_list<QString> fields)
 {
+    const QStringList words = splitWords(needle);
+    if (words.isEmpty()) return needle.trimmed().isEmpty() ? 0 : -1;
     int best = -1;
     for (const QString &f : fields) {
         if (f.isEmpty()) continue;
-        const int at = f.indexOf(needle, 0, Qt::CaseInsensitive);
-        if (at < 0) continue;
-        const int score = at == 0 ? 0 : (f.at(at - 1).isSpace() ? 1 : 2);
-        if (best < 0 || score < best) best = score;
+        // Exact pass: every word present.
+        bool all = true;
+        int worst = 0;
+        for (const QString &w : words) {
+            const int at = f.indexOf(w, 0, Qt::CaseInsensitive);
+            if (at < 0) { all = false; break; }
+            const int ws = at == 0 ? 0 : (!f.at(at - 1).isLetterOrNumber() ? 1 : 2);
+            worst = qMax(worst, ws);
+        }
+        if (all) {
+            if (best < 0 || worst < best) best = worst;
+            continue;
+        }
+        // Fuzzy pass: each missing word must correct to a word of this field.
+        std::vector<std::string> vocab;
+        for (const QString &w : splitWords(f))
+            vocab.push_back(w.toStdString());
+        all = true;
+        for (const QString &w : words) {
+            if (f.indexOf(w, 0, Qt::CaseInsensitive) >= 0) continue;
+            const std::string q = w.toLower().toStdString();
+            const size_t maxDist = q.size() <= 4 ? size_t(1) : size_t(2);
+            bool fixed = false;
+            for (const std::string &v : vocab)
+                if (!v.empty() && v[0] == q[0]
+                    && bs::textmatch::EditDistanceBounded(q, v, maxDist) <= maxDist) { fixed = true; break; }
+            if (!fixed) { all = false; break; }
+        }
+        if (all && (best < 0 || 3 < best)) best = 3;
     }
     return best;
 }
@@ -222,6 +272,31 @@ QStringList SearchService::bibles() const
         return out;
     for (const std::string &id : bb::BibleEngine::Instance().BibleIds())
         out << qstr(id);
+    return out;
+}
+
+QVariantList SearchService::resolveWords(const QString &text) const
+{
+    QVariantList out;
+    const auto words = bs::textmatch::TokenizeWords(text.toStdString());
+    if (words.empty()) return out;
+    auto resolved = bs::SearchEngine::Instance().ResolveTermsWithSplits(words);
+    if (!resolved.ok()) return out;
+    // EVERY word comes back, spelled right or not (`changed` says which were
+    // fixed). Callers build the yellow highlight from ALL the resolved words —
+    // returning only the corrections dropped the words the user spelled
+    // correctly ("then frend" highlighted "friend" and lost "then").
+    for (size_t i = 0; i < resolved.value().size() && i < words.size(); ++i) {
+        const std::string &r = resolved.value()[i].term;
+        const std::string &typed = words[i];
+        if (r.empty()) continue;
+        QVariantMap m;
+        m.insert(QStringLiteral("typed"), QString::fromStdString(typed));
+        m.insert(QStringLiteral("resolved"), QString::fromStdString(r));
+        m.insert(QStringLiteral("weight"), resolved.value()[i].weight);
+        m.insert(QStringLiteral("changed"), r != typed);
+        out.append(m);
+    }
     return out;
 }
 
@@ -423,8 +498,33 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
     // ---- Sermon paragraphs (The Table's library) -------------------------------------
     // (2 chars on: the library's own Search() takes two-char words — "my" —
     // and matches terms spread across up to two consecutive paragraphs.)
+    // A code-shaped query ("47-", "47-0412", "63-0628e") is naming a SERMON:
+    // the library now answers with sermon-level rows, and THE TABLE leads the
+    // list (user call: "when i type 47- the filter should have known to filter
+    // from the table" — Bible verses that merely contain 47 are noise here).
+    // STRICT code shape: every token digits-with-optional-letter-suffix
+    // ("47", "0412", "1100x") AND a dash or 3+ digits. A bare "47" stays a
+    // verse/year query, and a word beside a number ("genesis 47") is NOT a
+    // code — it must not steal the query from the Bible rows.
+    bool codeShaped = false;
+    {
+        const QStringList tokens = text.split(QRegularExpression("[^A-Za-z0-9]+"), Qt::SkipEmptyParts);
+        QRegularExpression codeTok(QStringLiteral("^\\d+[a-z]*$"));
+        bool digits = false, allCode = !tokens.isEmpty();
+        int digitCount = 0;
+        for (const QString &t : tokens) {
+            if (!t.contains(codeTok)) { allCode = false; break; }
+            for (const QChar &c : t) if (c.isDigit()) { digits = true; ++digitCount; }
+        }
+        codeShaped = allCode && digits
+                         && (text.contains(QLatin1Char('-')) || digitCount >= 3);
+    }
+    QVariantList tableRows;
     if (text.size() >= 2) {
-        const QVariantList hits = TheTableService::instance().search(text, qMax(limit, 4));
+        // A code listing IS The Table's answer ("47-" = every 1947 sermon): the
+        // per-kind cap (4) would truncate the sermon list to a few rows.
+        const int tableLimit = codeShaped ? qMax(limit, 30) : qMax(limit, 4);
+        const QVariantList hits = TheTableService::instance().search(text, tableLimit);
         for (const QVariant &v : hits) {
             const QVariantMap h = v.toMap();
             // Title = the sermon's citation line minus the paragraph — the same
@@ -436,9 +536,13 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
             const QString title = cite.isEmpty()
                                       ? h.value(QStringLiteral("reference")).toString()
                                       : cite.mid(cite.indexOf(QStringLiteral(" - ")) + 3);
+            // Sermon-level rows (a code match: verse 0) are the sermon itself —
+            // no paragraph marker.
+            const int verseNo = h.value(QStringLiteral("verse")).toInt();
             QVariantMap r = makeResult(QStringLiteral("table"),
-                                       QStringLiteral("%1 · ¶%2").arg(title,
-                                           h.value(QStringLiteral("verse")).toString()),
+                                       verseNo > 0
+                                           ? QStringLiteral("%1 · ¶%2").arg(title).arg(verseNo)
+                                           : title,
                                        cite.isEmpty() ? tr("The Table") : cite,
                                        h.value(QStringLiteral("bookId")).toString(),
                                        QString(), h.value(QStringLiteral("snippet")).toString());
@@ -446,11 +550,36 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
             r.insert(QStringLiteral("chapter"), h.value(QStringLiteral("chapter")));
             r.insert(QStringLiteral("verse"), h.value(QStringLiteral("verse")));
             r.insert(QStringLiteral("spanned"), h.value(QStringLiteral("spanned")));
+            // The library's ranking score rides along: the dialog's pick-float
+            // lets a previously-picked row keep its boost only over rows it
+            // actually outscores (a picked ¶ must not bury the verbatim match).
+            if (h.contains(QStringLiteral("score")))
+                r.insert(QStringLiteral("score"), h.value(QStringLiteral("score")));
             out.append(r);
+            tableRows.append(r);
         }
     }
-
+    if (codeShaped && !tableRows.isEmpty())
+        return tableRows;   // a sermon-code query names a SERMON: The Table only —
+                            // Bible verses that merely contain "47" are noise here
     return out;
+}
+
+// The same aggregation off the GUI thread. The dialog passes a token (its
+// request counter): stale responses (an older keystroke finishing late) are
+// dropped here, so the UI only ever sees the LATEST query's rows.
+void SearchService::searchAsync(const QString &text, int perKind, int token)
+{
+    auto *runner = QThread::create([this, text, perKind, token] {
+        const QVariantList rows = search(text, perKind);
+        QMetaObject::invokeMethod(this, [this, token, rows] {
+            if (token == latestToken_)
+                emit resultsReady(token, rows);
+        }, Qt::QueuedConnection);
+    });
+    connect(runner, &QThread::finished, runner, &QObject::deleteLater);
+    latestToken_ = token;   // newest request wins
+    runner->start();
 }
 
 // ===========================================================================

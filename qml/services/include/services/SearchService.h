@@ -3,6 +3,7 @@
 #include <QList>
 #include <QObject>
 #include <QPointer>
+#include <atomic>
 #include <QString>
 #include <QStringList>
 #include <QVariantList>
@@ -61,6 +62,20 @@ public:
     // Searches everything. At most `perKind` results per kind, best first; results
     // are grouped by kind in a fixed order. Empty/blank text -> {}.
     Q_INVOKABLE QVariantList search(const QString &text, int perKind = 5) const;
+    // ASYNC search: the same aggregation on a worker thread (the GUI never
+    // blocks on a big query — "the" has ~1,200 candidates and a synchronous
+    // call froze typing for hundreds of ms). `token` is the caller's identity:
+    // only the LATEST request's results are emitted (a fast typist's older
+    // keystrokes answer into the void), delivered as resultsReady(token, rows).
+    Q_INVOKABLE void searchAsync(const QString &text, int perKind, int token);
+
+    // What the engine's word resolution would change about `text` — the same
+    // resolution every search applies internally: incomplete words completed
+    // ("friend" -> "friends"), typos corrected ("thn" -> "then"), typed-together
+    // words split ("holyspirit" -> "holy spirit"). One { typed, resolved, weight }
+    // entry per word that DIFFERS from its resolution, in order; empty when the
+    // query is already well-spelled (the common case: zero UI, zero cost).
+    Q_INVOKABLE QVariantList resolveWords(const QString &text) const;
 
     // One verse's FULL text (typesetting marks cleaned) — the Quick search dialog's
     // hover preview: a result row only carries a capped snippet, hovering fetches
@@ -91,12 +106,15 @@ signals:
     void bibleChanged();
     void bibleImportingChanged();
     void bibleProgressChanged();
+    // An async search (searchAsync) finished: the token matches the request.
+    void resultsReady(int token, const QVariantList &rows);
 
 private:
     explicit SearchService(QObject *parent = nullptr);
     static QStringList candidateBibleFiles();
 
     QPointer<QThread> loader_;
+    std::atomic<int> latestToken_{0};   // searchAsync: only the newest request emits
     bool loading_ = false;
     bool loadStarted_ = false;
     bool importing_ = false;

@@ -51,6 +51,12 @@ public:
     // Rebuilds the whole index from a set of documents (called on a pool
     // worker in production; synchronous here so tests are deterministic).
     Result<size_t> Rebuild(const std::vector<SearchDocument>& docs);
+    // Batch scope for bulk indexing (a boot-time library index): while suspended,
+    // per-document cache wipes are skipped and the OUTERMOST resume clears once —
+    // a 1200-sermon index invalidates the query cache once, not 1200 times.
+    // Nestable (a depth counter); Rebuild uses this internally.
+    void SuspendCacheInvalidation();
+    void ResumeCacheInvalidation();
     size_t DocumentCount() const;
     size_t TermCount() const;
 
@@ -68,6 +74,30 @@ public:
     Result<void> SetRankingStrategy(std::shared_ptr<IRankingStrategy> strategy);
     Result<std::vector<SearchResult>> RawSearch(const SearchQuery& query,
                                                 const SearchFilter& filter = {}) const;
+
+    // --- Fuzzy resolution -------------------------------------------------------
+    // Vocabulary resolution of query words: typos corrected ("thn" -> "then",
+    // weight 0.7 so exact spellings outrank corrections) and incomplete words
+    // completed ("friend" -> "friends", weight 1.0 — a stem, not an error).
+    // Words already in the vocabulary come back as typed. One term in, one out,
+    // IN ORDER — exposed so callers that run their own text scan (The Table's
+    // paragraph search) look for the SAME corrected words the index ranking
+    // uses, instead of literally hunting the user's misspelling.
+    struct ResolvedQueryTerm {
+        std::string term;      // the word to search for (the input when unresolved)
+        double weight = 1.0;   // its BM25 contribution weight
+    };
+    Result<std::vector<ResolvedQueryTerm>> ResolveTerms(
+        const std::vector<std::string>& terms) const;
+
+    // ResolveTerms PLUS jam-splitting: a long word the vocabulary does not know
+    // may be two words typed without the space ("holyspirit" -> "holy spirit",
+    // "holyghost" -> "holy ghost") — the pair of real words that reassembles it
+    // wins. A split arrives as ONE entry containing a space ("holy spirit") so
+    // the 1:1 term mapping holds; callers split on the space if they need the
+    // words separately.
+    Result<std::vector<ResolvedQueryTerm>> ResolveTermsWithSplits(
+        const std::vector<std::string>& terms) const;
 
     // --- Sessions (restorable query state) ---------------------------------------
     struct SessionState {
@@ -118,6 +148,8 @@ private:
     };
     std::deque<CacheEntry> cache_;
     size_t cacheMax_ = 128;
+    size_t scanBudget_ = 4000;   // cap on the no-index fallback full scan (short/1-char queries)
+    int cacheSuspend_ = 0;   // >0 while inside a SuspendCacheInvalidation batch scope
     std::map<uint64_t, SessionState, std::less<>> sessions_;
     std::deque<std::string> history_;
     size_t historyMax_ = 50;

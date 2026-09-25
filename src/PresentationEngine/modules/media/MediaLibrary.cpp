@@ -1,6 +1,7 @@
 #include "modules/media/MediaLibrary.hpp"
 
 #include "core/config/Json.hpp"
+#include "modules/search/TextMatching.hpp"
 #include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
@@ -11,6 +12,7 @@
 namespace bps::media {
 
 namespace {
+namespace textmatch = bps::search::textmatch;
 
 constexpr const char* kModule = "MediaLibrary";
 
@@ -408,30 +410,43 @@ std::vector<LibraryItem> MediaLibrary::Items(std::string_view folder) const {
 }
 
 std::vector<LibraryItem> MediaLibrary::Search(std::string_view text, std::string_view folder) const {
-    std::vector<std::string> words;
-    {
-        std::string word;
-        for (char ch : Lower(text)) {
-            if (std::isspace(static_cast<unsigned char>(ch))) {
-                if (!word.empty()) words.push_back(std::move(word)), word.clear();
-            } else {
-                word.push_back(ch);
-            }
-        }
-        if (!word.empty()) words.push_back(std::move(word));
-    }
+    std::vector<std::string> words = textmatch::TokenizeWords(text);
     std::vector<LibraryItem> pool = Items(folder);
     if (words.empty()) return pool;
+
+    // Every item name is a vocabulary word: "gideons_battle.mp4" carries
+    // "gideons", "battle". Typos correct ("batle" -> "battle") against it —
+    // the same rules The Table, songs and Bible search get from the shared
+    // engine. A raw word stays primary: an incomplete word ("gide") already
+    // substring-matches everything its completion would, so completions never
+    // NARROW results.
+    std::vector<std::string> vocabulary;
+    vocabulary.reserve(pool.size() * 2);
+    for (const LibraryItem& it : pool)
+        for (std::string& w : textmatch::TokenizeWords(it.name))
+            vocabulary.push_back(std::move(w));
+    std::vector<std::vector<std::string>> lookFor;   // per word: [raw, correction?]
+    lookFor.reserve(words.size());
+    for (const std::string& w : words) {
+        std::vector<std::string> alts{w};
+        const textmatch::ResolvedWord r = textmatch::ResolveWordInList(w, vocabulary);
+        if (!r.word.empty() && r.weight < 1.0) alts.push_back(r.word);
+        lookFor.push_back(std::move(alts));
+    }
 
     struct Hit { int rank; size_t order; LibraryItem item; };
     std::vector<Hit> hits;
     for (size_t i = 0; i < pool.size(); ++i) {
         const std::string name = Lower(pool[i].name);
         bool all = true;
-        for (const std::string& w : words)
-            if (name.find(w) == std::string::npos) { all = false; break; }
+        for (const std::vector<std::string>& alts : lookFor) {
+            bool any = false;
+            for (const std::string& w : alts)
+                if (name.find(w) != std::string::npos) { any = true; break; }
+            if (!any) { all = false; break; }
+        }
         if (!all) continue;
-        const size_t at = name.find(words.front());
+        const size_t at = name.find(lookFor.front().front());
         const int rank = at == 0 ? 0 : (name[at - 1] == ' ' || name[at - 1] == '_' || name[at - 1] == '-' ? 1 : 2);
         hits.push_back({rank, i, std::move(pool[i])});
     }

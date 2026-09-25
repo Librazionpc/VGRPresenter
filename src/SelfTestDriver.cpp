@@ -95,8 +95,13 @@ void SelfTestDriver::type(const QString &text)
         // '\b' = a real backspace (Qt::Key_Backspace, no text) — the erase path
         // must be drivable, a Space here would poison the scenario.
         const bool isBackspace = ch == QLatin1Char('\b');
+        // Non-alphanumerics map to their REAL character (key + text): the old
+        // "everything else = Space" made SelfTest.type("47-") type "47 " — and
+        // a bare-47 query is deliberately NOT a code, so the code-query probe
+        // always saw zero rows. Only control chars fall back to Space.
         const int key = isBackspace ? Qt::Key_Backspace
-                                    : (ch.isLetterOrNumber() ? ch.toUpper().unicode() : Qt::Key_Space);
+                                    : (ch.isLetterOrNumber() ? ch.toUpper().unicode()
+                                                             : (ch.isPrint() ? ch.unicode() : Qt::Key_Space));
         QEvent::Type t = QEvent::KeyPress;
         QKeyEvent press(t, key, Qt::NoModifier, isBackspace ? QString() : s);
         QKeyEvent release(QEvent::KeyRelease, key, Qt::NoModifier, isBackspace ? QString() : s);

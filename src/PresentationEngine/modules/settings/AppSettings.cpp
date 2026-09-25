@@ -154,6 +154,9 @@ std::vector<SettingDef> BuildDefinitions() {
     d.push_back(Text("session.lastProject", "session", "Last project"));
     d.push_back(Text("session.lastShowPath", "session", "Last show"));
     d.push_back(Text("session.lastView", "session", "Last screen"));
+    // Quick search's pick memory: the results the user chose before, as a JSON
+    // array — a picked result floats to the top of its group on the next search.
+    d.push_back(Text("session.quickSearchPicks", "session", "Quick search picks"));
     // The slide grid on the Show screen's centre page (FreeShow's slidesOptions): slides across, and how they are laid out.
     d.push_back(IntRange("session.slideColumns", "session", "Slides across", 4, 2, 10));
     d.push_back(Choice("session.slideView", "session", "Slide view", "grid", {

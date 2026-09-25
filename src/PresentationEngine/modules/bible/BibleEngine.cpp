@@ -104,7 +104,8 @@ Result<void> BibleEngine::Initialize() {
         // brought back, off the boot path (the The Table library's precedent).
         std::vector<BibleVersion> reindex;
         for (const auto& [id, b] : bibles_) reindex.push_back(b);
-        std::thread([bibles = std::move(reindex)] {
+        if (reindexThread_.joinable()) reindexThread_.join();   // a prior restore's re-index
+        reindexThread_ = std::thread([bibles = std::move(reindex)] {
             for (const BibleVersion& b : bibles) {
                 auto indexed = BibleEngine::Instance().IndexBible(b);
                 if (indexed.ok())
@@ -117,7 +118,7 @@ Result<void> BibleEngine::Initialize() {
             }
             Logger::Instance().Info("BibleEngine: restored bibles re-indexed for search",
                                     "BibleEngine");
-        }).detach();
+        });
         Logger::Instance().Info(std::format("BibleEngine: restored {} bible(s) from store",
                                             bibles_.size()), "BibleEngine");
     }
@@ -136,6 +137,9 @@ Result<void> BibleEngine::Stop() {
 
 Result<void> BibleEngine::Shutdown() {
     if (!initialized_.load()) return Ok();
+    // The restore re-index must FINISH before systems go down under it (joined,
+    // never orphaned — see the member comment).
+    if (reindexThread_.joinable()) reindexThread_.join();
     UnwireEvents();
     {
         std::lock_guard<std::mutex> lock(mutex_);
