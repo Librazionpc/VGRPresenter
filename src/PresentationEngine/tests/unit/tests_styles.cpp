@@ -3,10 +3,21 @@
 // Split so a single phase can run alone:
 //   ./bps_unit_tests styles
 #include "TestHarness.hpp"
+#include "modules/presentation/LiveOutputController.hpp"
+#include "modules/presentation/PresentationEngine.hpp"
+#include "modules/presentation/PresentationRuntime.hpp"
 #include "modules/presentation/SceneBuilder.hpp"
 #include "modules/project/StyleStore.hpp"
+#include "modules/rendering/PngCodec.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <thread>
+
+namespace l = bps::live;
 
 // ---------------------------------------------------------------------------
 // StyleStore — the roster document in the kernel's DatabaseManager
@@ -329,4 +340,282 @@ void TestSetActiveOutputStyle() {
 
     CHECK(eng.Delete(id).ok());
     CHECK(eng.SetActiveOutputStyle(p::OutputStyleSpec{}).ok());   // leave unstyled
+}
+
+// ---------------------------------------------------------------------------
+// Go-live paths — the ORIGINAL BUG: StartFromOpenShow opened the working show
+// by a registry id it was never registered under, so goLive failed with
+// "presentation not found" and nothing ever rendered.
+// ---------------------------------------------------------------------------
+void TestGoLivePaths() {
+    auto& eng = p::PresentationEngine::Instance();
+    CHECK(eng.Initialize().ok());
+    // The loop renders REAL frames: the render backend must be live (the
+    // rendering phase boots it in its own suites; this phase may run alone).
+    // The config default is "null" unless a config file says otherwise —
+    // force software for this phase.
+    (void)bps::ConfigurationManager::Instance().Set(
+        "render.backend", bps::json::Value::String("software"));
+    auto& render = r::RenderEngine::Instance();
+    CHECK(render.Initialize().ok());
+    CHECK(render.Start().ok());
+    CHECK(render.SetBackend("software").ok());
+    auto& live = l::LiveOutputController::Instance();
+    CHECK(live.Initialize().ok());
+    CHECK(live.Start().ok());
+
+    // 1. The working-show path THROUGH THE CONTROLLER: the document gets a
+    //    show, StartFromOpenShow runs the whole pipeline, frames flow.
+    {
+        p::Presentation pres;
+        pres.id = "pres-golive-doc";
+        pres.name = "GoLive Doc";
+        p::Slide s;
+        s.id = "gl-1";
+        s.title = "On Air";
+        s.text = "hello live world";
+        pres.slides.push_back(s);
+
+        auto doc = eng.Document();
+        CHECK(doc != nullptr);
+        if (doc) {
+            doc->Replace(std::move(pres));
+            CHECK(doc->HasDocument());
+            CHECK(live.StartFromOpenShow().ok());
+            CHECK(live.IsLive());
+            CHECK(eng.State() == p::PresentationState::Live);
+            CHECK(eng.Runtime().Compiled().slides.size() == 1);
+            CHECK(!eng.Runtime().Compiled().slides[0].sceneId.empty());
+            // The loop thread renders at 60Hz — give it a moment and require
+            // REAL frames (the whole point: something shows on the monitor).
+            bool sawFrame = false;
+            for (int i = 0; i < 100 && !sawFrame; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                sawFrame = live.FramesSent() >= 1;
+            }
+            CHECK(sawFrame);
+
+            // LIVE REPLACE through the controller: new slides, still live.
+            p::Presentation second;
+            second.id = "pres-golive-doc";
+            second.name = "GoLive Doc";
+            p::Slide s2;
+            s2.id = "gl-2";
+            s2.title = "Replaced";
+            second.slides.push_back(s2);
+            CHECK(live.StartFromSlides("GoLive Doc", second.slides).ok());
+            CHECK(live.IsLive());
+            CHECK(eng.State() == p::PresentationState::Live);
+            CHECK(eng.Runtime().ActivePresentation() != nullptr);
+            if (eng.Runtime().ActivePresentation())
+                CHECK(eng.Runtime().ActivePresentation()->slides.size() == 1);
+
+            CHECK(live.StopLive().ok());
+            CHECK(!live.IsLive());
+        }
+
+        // PresentLive direct (the engine-side contract StartFromOpenShow wraps).
+        p::Presentation again;
+        again.id = "pres-golive-again";
+        again.name = "Again";
+        again.slides.push_back(s);
+        CHECK(eng.PresentLive(again).ok());
+        CHECK(eng.State() == p::PresentationState::Live);
+        CHECK(eng.Runtime().Compiled().slides.size() == 1);
+        CHECK(!eng.Runtime().Compiled().slides[0].sceneId.empty());
+        CHECK(eng.StopPlayback().ok());
+        CHECK(eng.Runtime().Close().ok());
+
+        // REGISTRY HYGIENE: StartFromOpenShow/StartFromSlides mirror their
+        // content into the engine registry (PutPresentation); PresentLive does
+        // NOT (the caller owns its copy). Delete what was mirrored — a later
+        // phase counts presentations.
+        CHECK(eng.Delete("pres-golive-doc").ok());
+        // (The live-replace swap does NOT re-put — "pres-golive-again" was
+        // never mirrored either, PresentLive leaves the registry alone. The
+        // "temp:..." mirror is made by section 3's StartFromSlides below and
+        // is deleted there.)
+    }
+
+    // 2. Empty content is refused, not crashed on.
+    {
+        p::Presentation empty;
+        empty.id = "pres-empty";
+        CHECK(!eng.PresentLive(empty).ok());
+    }
+
+    // 3. Controller StartFromSlides: content ownership + empty refusal.
+    {
+        std::vector<p::Slide> slides;
+        p::Slide s;
+        s.title = "John 3:16";
+        s.text = "For God so loved the world...";
+        slides.push_back(s);
+        CHECK(live.StartFromSlides("John 3:16", slides).ok());
+        CHECK(live.IsLive());
+        // The runtime's active presentation IS the temp content now.
+        CHECK(eng.Runtime().ActivePresentation() != nullptr);
+        CHECK(eng.Runtime().ActivePresentation()->name == "John 3:16");
+        CHECK(live.RenderOnce().ok());
+        CHECK(live.StopLive().ok());
+        CHECK(!live.IsLive());
+        // REGISTRY HYGIENE: StartFromSlides mirrored "temp:John 3:16" into the
+        // engine registry — delete it here (not before it exists), or the
+        // later presentation phase sees a phantom: TestPresentationEngine
+        // asserts a fresh-engine presentation count.
+        CHECK(eng.Delete("temp:John 3:16").ok());
+
+        std::vector<p::Slide> none;
+        CHECK(!live.StartFromSlides("nothing", none).ok());
+    }
+
+    CHECK(live.Stop().ok());
+
+    // REGISTRY HYGIENE (render): going live registers the controller's preview
+    // feed output with the shared RenderEngine and the design KEEPS it across
+    // stop/start cycles. This test booted the render engine for the phase, so
+    // it removes the feed again — the rendering phase's TestRenderEngine
+    // asserts exact OutputCount() around its own add/remove.
+    (void)render.RemoveOutput(l::LiveOutputController::kPreviewName);
+}
+
+// ---------------------------------------------------------------------------
+// Style background images — fingerprint + render object placement
+// ---------------------------------------------------------------------------
+void TestStyleBackgroundImage() {
+    // A real 3x2 PNG on disk (EncodePngRgba8 writes one; no hand-rolled bytes).
+    const std::filesystem::path img = std::filesystem::temp_directory_path() / "bps_style_bg_test.png";
+    {
+        r::RgbaImage px;
+        px.width = 3;
+        px.height = 2;
+        px.pixels = {0xFF0000FF, 0xFF00FF00, 0xFFFF0000,
+                     0xFFFFFFFF, 0xFF808080, 0xFF000000};
+        auto encoded = r::EncodePngRgba8(reinterpret_cast<const uint8_t*>(px.pixels.data()),
+                                         px.width, px.height);
+        CHECK(encoded.ok());
+        std::ofstream file(img, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(encoded.value().data()),
+                   static_cast<std::streamsize>(encoded.value().size()));
+        CHECK(file.good());
+    }
+
+    p::Presentation pres;
+    pres.id = "pres-bgimg";
+    p::Slide slide;
+    slide.id = "bgimg-1";
+    slide.text = "styled image";
+
+    p::SceneBuilder builder;
+    r::RenderEngine& engine = r::RenderEngine::Instance();
+
+    // The image path fingerprints the scene id: a new image always rebuilds.
+    p::OutputStyleSpec withImage;
+    withImage.templateKey = "fullscreen";
+    withImage.backgroundColor = "#ff000000";
+    withImage.backgroundImage = img.string();
+    auto built = builder.BuildSlideScene(pres, slide, withImage, engine);
+    CHECK(built.ok());
+    CHECK(built.ok() && built.value() == p::SceneBuilder::StyledSceneIdFor(pres, slide, withImage));
+
+    p::OutputStyleSpec otherImage = withImage;
+    otherImage.backgroundImage = (std::filesystem::temp_directory_path() / "other.png").string();
+    CHECK(p::SceneBuilder::StyledSceneIdFor(pres, slide, otherImage)
+          != p::SceneBuilder::StyledSceneIdFor(pres, slide, withImage));
+    p::OutputStyleSpec noImage = withImage;
+    noImage.backgroundImage.clear();
+    CHECK(p::SceneBuilder::StyledSceneIdFor(pres, slide, noImage)
+          != p::SceneBuilder::StyledSceneIdFor(pres, slide, withImage));
+
+    // The scene carries the image object, cover-fit over the whole stage.
+    if (built.ok()) {
+        const r::RenderObject* found = nullptr;
+        for (const r::RenderObject* obj : engine.CollectObjects(built.value()))
+            if (obj->Id() == "stylebg") found = obj;
+        CHECK(found != nullptr);
+        if (found) {
+            const r::Rect& b = found->Bounds();
+            CHECK(b.x <= 0.5f && b.y <= 0.5f);                       // centered
+            CHECK(b.x + b.width >= 1919.5f && b.y + b.height >= 1079.5f);   // covers
+        }
+        (void)engine.DestroyScene(built.value());
+    }
+
+    std::error_code ec;
+    (void)std::filesystem::remove(img, ec);
+}
+
+// ---------------------------------------------------------------------------
+// Block-aware scenes — positioned template blocks render as objects
+// ---------------------------------------------------------------------------
+void TestBlockScenes() {
+    p::Presentation pres;
+    pres.id = "pres-blocks";
+    p::Slide slide;
+    slide.id = "blk-1";
+    slide.title = "ignored when blocks exist";
+
+    // The scripture template's shape: a translucent box + verse text +
+    // reference line (DesignCatalogs geometry, 754x428 stage fractions).
+    p::ContentBlock box;
+    box.id = "b1";
+    box.kind = "box";
+    box.x = 30; box.y = 30; box.width = 694; box.height = 368;
+    box.style.backgroundColor = "#66000000";
+    p::ContentBlock verse;
+    verse.id = "b2";
+    verse.kind = "text";
+    verse.x = 55; verse.y = 45; verse.width = 644; verse.height = 338;
+    verse.text = "For God so loved the world";
+    verse.metaJson = R"({"color":"#ffffff","fontSize":80,"bold":true,"align":"left","verticalAlign":"center"})";
+    p::ContentBlock ref;
+    ref.id = "b3";
+    ref.kind = "text";
+    ref.x = 30; ref.y = 900 / 2.52; ref.width = 694; ref.height = 40;
+    ref.text = "John 3:16";
+    ref.metaJson = R"({"color":"#cccccc","fontSize":55,"align":"left"})";
+    slide.blocks = {box, verse, ref};
+
+    p::SceneBuilder builder;
+    r::RenderEngine& engine = r::RenderEngine::Instance();
+    p::OutputStyleSpec style;
+    style.templateKey = "fullscreen";
+    style.backgroundColor = "#ff101020";
+
+    auto built = builder.BuildSlideScene(pres, slide, style, engine);
+    CHECK(built.ok());
+    if (!built.ok())
+        return;
+
+    // Two texts + one box shape, in block order, at block geometry.
+    int texts = 0, shapes = 0;
+    bool verseFound = false, refFound = false, boxFound = false;
+    for (const r::RenderObject* obj : engine.CollectObjects(built.value())) {
+        if (const auto* t = dynamic_cast<const r::TextObject*>(obj)) {
+            if (t->Id() == "blk1" || t->Id() == "blk2" || t->Id() == "blk3") {
+                texts++;
+                if (t->Text() == "For God so loved the world") {
+                    verseFound = true;
+                    // x=55/754 of 1920, y=45/428 of 1080.
+                    CHECK(std::abs(t->Bounds().x - 55.0 / 754.0 * 1920.0) < 2.0f);
+                    CHECK(std::abs(t->Bounds().y - 45.0 / 428.0 * 1080.0) < 2.0f);
+                }
+                if (t->Text() == "John 3:16") refFound = true;
+            }
+        } else if (dynamic_cast<const r::ShapeObject*>(obj) != nullptr) {
+            if (obj->Id() == "blk1") { shapes++; boxFound = true; }
+        }
+    }
+    CHECK(texts == 2);
+    CHECK(shapes == 1);
+    CHECK(verseFound && refFound && boxFound);
+
+    // The slide's TITLE does not join the render when blocks own the slide.
+    bool titleLeaked = false;
+    for (const r::RenderObject* obj : engine.CollectObjects(built.value()))
+        if (const auto* t = dynamic_cast<const r::TextObject*>(obj); t && t->Text() == slide.title)
+            titleLeaked = true;
+    CHECK(!titleLeaked);
+
+    (void)engine.DestroyScene(built.value());
 }

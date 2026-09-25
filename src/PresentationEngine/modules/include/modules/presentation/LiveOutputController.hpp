@@ -18,6 +18,7 @@
 
 #include "core/common/Common.hpp"
 #include "core/services/ServiceManager.hpp"
+#include "modules/presentation/PresentationTypes.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -25,9 +26,11 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace bps::presentation {
 class PresentationEngine;
+class Presentation;   // full type comes from PresentationTypes.hpp above
 }
 namespace bps::rendering {
 class FrameBufferOutput;
@@ -58,6 +61,14 @@ public:
     // through the real pipeline and starts the render loop. Fails with a
     // clear message when the show has no slides.
     Result<void> StartFromOpenShow();
+    // Any-content go-live (FreeShow's setOutput("slide", { id: "temp", ... })):
+    // the caller hands over finished slides (scripture verses, a sermon, media
+    // items) with a NAME for the on-air title; they become a temporary
+    // presentation ("temp:<name>") put through the same pipeline. If a show is
+    // already live its slides are REPLACED in place (no state-machine bounce —
+    // the loop just re-points at the new compiled set on its next sync).
+    Result<void> StartFromSlides(std::string_view name,
+                                 const std::vector<presentation::Slide>& slides);
     Result<void> StopLive();
 
     bool IsLive() const noexcept { return running_.load(); }
@@ -78,7 +89,10 @@ private:
     void Loop();
     // Re-sync the runtime with the open show's document (1Hz): rebind if the
     // presentation id changed, rebuild scenes if the compiled set changed.
+    // Skipped entirely while temp content is on air (StartFromSlides).
     Result<void> SyncWithDocument();
+    // The runtime's state machine is in Live? (guards the swap-vs-open choice.)
+    bool smIsLive() const;
     // Scene id of the runtime's current slide (empty when none).
     std::string CurrentSceneId() const;
 
@@ -87,12 +101,21 @@ private:
     std::atomic<uint64_t> frames_{0};
     std::thread worker_;
     std::mutex control_;   // start/stop vs. the loop's document sync
+    // Change-driven rendering: the loop only rasterizes when the on-air scene
+    // actually changed (slide/style move). A static verse re-rendered at
+    // 60Hz burned a whole core and dragged the whole app down with it.
+    std::string lastRenderedScene_;
+    uint64_t lastStyleRevision_ = 0;
 
     // The engine (fetched at Start, held by pointer — it is a Kernel
     // singleton that outlives this controller's worker thread).
     presentation::PresentationEngine* pres_ = nullptr;
     std::string boundPresentationId_;
     size_t lastCompiledCount_ = 0;
+    // The on-air content the controller OWNS when StartFromSlides put it there
+    // (the runtime binds a raw pointer — this member keeps it alive). Empty
+    // while the working show is on air (StartFromOpenShow).
+    presentation::Presentation liveContent_;
     std::shared_ptr<rendering::FrameBufferOutput> preview_;   // the QML feed
 };
 

@@ -25,6 +25,9 @@ ReferencePane {
         // The Table's options live under the "table." settings prefix (its own
         // sliders — paragraph numbers, splitting, per-slide counts).
         readonly property string optionsPrefix: "table"
+        // GO-LIVE identity (same contract as ScripturePane's adapter).
+        readonly property string contentType: "table"
+        readonly property string tabLabel: qsTr("The Table")
 
         readonly property var sources: () => TheTableService.sources()
         readonly property var loading: () => TheTableService.loading
@@ -46,6 +49,11 @@ ReferencePane {
         readonly property var preview: (src, bookId, ch, nums) => TheTableService.preview(bookId, ch, nums)
         // The picked paragraphs as show slides, template-split by the tab's options.
         readonly property var slides: (src, bookId, ch, nums) => TheTableService.slides(bookId, ch, nums)
+        // GO LIVE (FreeShow's playScripture): the picked sermon on air, gated on
+        // the style's table pill. Title match = ours (the play glyph turns green).
+        readonly property var goLive: (name, slides) => LiveOutputService.goLiveWithSlides(name, slides)
+        readonly property var liveIsOurs: (refText) => LiveOutputService.live
+                                             && refText !== "" && LiveOutputService.onAirTitle === refText
         readonly property var importNew: () => TheTableService.newSermon()
         // The bulk action: pick the sermons root once, every .pdf/.txt under
         // it lands in the library (worker thread, live progress, dedup on).
@@ -65,4 +73,7 @@ ReferencePane {
         // the pane — applySearchResults drops stale tokens).
         function onSearchResultsReady(token, rows) { pane.applySearchResults(token, rows) }
     }
+
+    // GO LIVE: pane -> adapter -> live service (same path Scripture uses).
+    onGoLiveRequested: (name, slides) => pane.adapter.goLive(name, slides)
 }

@@ -1,7 +1,9 @@
 #include "services/LiveOutputService.h"
 
+#include "services/ShowConverter.h"
 #include "modules/presentation/LiveOutputController.hpp"
 #include "modules/presentation/PresentationEngine.hpp"
+#include "modules/presentation/PresentationTypes.hpp"
 #include "modules/rendering/RenderOutputs.hpp"
 #include "modules/rendering/RenderEngine.hpp"
 
@@ -9,6 +11,28 @@
 
 namespace pl = bps::presentation;
 namespace pr = bps::rendering;
+
+namespace {
+
+// One slide as the QML preview shape: { valid, title, blocks, background } —
+// the same { blocks, background } maps DesignPreview draws everywhere else
+// (ShowConverter::blockToVariant is the single QML<->engine block mapping).
+QVariantMap slideToVariantMap(const pl::Slide *slide)
+{
+    if (!slide)
+        return {};
+    QVariantList blocks;
+    for (const pl::ContentBlock &b : slide->blocks)
+        blocks.append(ShowConverter::blockToVariant(b));
+    return QVariantMap{
+        { QStringLiteral("valid"), true },
+        { QStringLiteral("title"), QString::fromStdString(slide->title) },
+        { QStringLiteral("blocks"), blocks },
+        { QStringLiteral("background"), QString::fromStdString(slide->background) },
+    };
+}
+
+} // namespace
 
 LiveOutputService *LiveOutputService::s_instance = nullptr;
 
@@ -51,12 +75,51 @@ void LiveOutputService::goLive()
     if (!live_) {
         live_ = true;
         emit liveChanged();
+        refreshOnAirSlide();
         emit onAirChanged();
         if (!poll_) {
             poll_ = new QTimer(this);
-            poll_->setInterval(250);   // 4Hz — enough for slide-title changes
+            poll_->setInterval(100);   // 10Hz — slide titles AND a live-looking preview
             connect(poll_, &QTimer::timeout, this, &LiveOutputService::pollTick);
         }
+        poll_->start();
+        pollTick();
+    }
+}
+
+// Any-content go-live: convert the QML slide maps to engine Slides and hand
+// them to the controller. A failed start surfaces through the same qWarning +
+// onAirChanged path as goLive (the UI toasts off the failure reason).
+void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList &slides)
+{
+    bps::presentation::Presentation content;
+    content.name = name.toStdString();
+    for (const QVariant &v : slides)
+        content.slides.push_back(ShowConverter::slideFromVariant(v.toMap()));
+    if (content.slides.empty()) {
+        qWarning("LiveOutputService: goLiveWithSlides: no slides in '%s'", name.toUtf8().constData());
+        emit onAirChanged();
+        return;
+    }
+    auto r = bps::live::LiveOutputController::Instance().StartFromSlides(name.toStdString(),
+                                                                         content.slides);
+    if (!r.ok()) {
+        qWarning("LiveOutputService: goLiveWithSlides failed: %s", r.error().message.c_str());
+        emit onAirChanged();
+        return;
+    }
+    if (!live_) {
+        live_ = true;
+        emit liveChanged();
+    }
+    refreshOnAirSlide();
+    emit onAirChanged();
+    if (!poll_) {
+        poll_ = new QTimer(this);
+        poll_->setInterval(100);
+        connect(poll_, &QTimer::timeout, this, &LiveOutputService::pollTick);
+    }
+    if (!poll_->isActive()) {
         poll_->start();
         pollTick();
     }
@@ -68,8 +131,10 @@ void LiveOutputService::stop()
     if (live_) {
         live_ = false;
         emit liveChanged();
-        emit onAirChanged();
     }
+    // Off air: the slide preview goes with it (also on a failed start).
+    onAirSlide_ = QVariantMap{};
+    emit onAirChanged();
     if (poll_)
         poll_->stop();
 }
@@ -83,6 +148,7 @@ bool LiveOutputService::next()
         return false;
     auto r = pl::PresentationEngine::Instance().Next();
     if (r.ok()) {
+        refreshOnAirSlide();
         emit onAirChanged();
         return true;
     }
@@ -95,6 +161,7 @@ bool LiveOutputService::previous()
         return false;
     auto r = pl::PresentationEngine::Instance().Previous();
     if (r.ok()) {
+        refreshOnAirSlide();
         emit onAirChanged();
         return true;
     }
@@ -107,10 +174,42 @@ bool LiveOutputService::jumpTo(int index)
         return false;
     auto r = pl::PresentationEngine::Instance().JumpTo(size_t(index));
     if (r.ok()) {
+        refreshOnAirSlide();
         emit onAirChanged();
         return true;
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// The on-air slide as design blocks (the QML preview feed)
+// ---------------------------------------------------------------------------
+void LiveOutputService::refreshOnAirSlide()
+{
+    onAirSlide_ = live_ ? slideToVariantMap(pl::PresentationEngine::Instance().CurrentSlide())
+                        : QVariantMap{};
+}
+
+QVariantMap LiveOutputService::onAirSlideAt(int index) const
+{
+    if (!live_ || index < 0)
+        return {};
+    auto &pres = pl::PresentationEngine::Instance();
+    const pl::Presentation *active = pres.Runtime().ActivePresentation();
+    if (!active || active->slides.empty())
+        return {};
+    // The index is a VISIBLE index (CurrentIndex() skips hidden slides, and
+    // that is what onAirIndex carries) — walk the slides skipping hidden ones
+    // so a thumbnail strip's indices line up with the on-air ones.
+    int visible = -1;
+    for (const pl::Slide &s : active->slides) {
+        if (s.hidden)
+            continue;
+        ++visible;
+        if (visible == index)
+            return slideToVariantMap(&s);
+    }
+    return {};
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +224,11 @@ void LiveOutputService::pollTick()
     const qulonglong sent = ctrl.FramesSent();
     if (sent != framesSent_) {
         framesSent_ = sent;
+        // Bump the cache-buster too — without this frameRev stayed 0 forever,
+        // hasFrame was never true, and every monitor tile showed the
+        // checkerboard while LIVE (the emit alone changes nothing: QML
+        // re-evaluates the URL and gets the identical string).
+        ++frameRev_;
         emit frameRevChanged();
     }
 
@@ -140,7 +244,18 @@ void LiveOutputService::pollTick()
         onAirTitle_ = title;
         onAirIndex_ = idx;
         onAirTotal_ = total;
+        refreshOnAirSlide();
         emit onAirChanged();
+    } else {
+        // Same title/index/total, but the slide's BLOCKS can still have moved
+        // (a document edit re-synced while live, a style rebuild) — the poll
+        // re-reads them so the QML preview stays honest. Cheap when unchanged:
+        // a property write with no matching QML binding change is free.
+        const QVariantMap next = slideToVariantMap(slide);
+        if (next != onAirSlide_) {
+            onAirSlide_ = next;
+            emit onAirChanged();
+        }
     }
 }
 
@@ -163,11 +278,12 @@ QImage LivePreviewProvider::requestImage(const QString &id, QSize *size,
             if (!frame.empty()) {
                 QImage ref(reinterpret_cast<const uchar *>(frame.pixels.data()),
                            frame.width, frame.height,
-                           frame.width * 4, QImage::Format_ARGB32);
-                // Pack order is 0xAABBGGRR (little-endian BGRA in memory) —
-                // ARGB32 on a little-endian host reads exactly that byte
-                // order, so a straight wrap is correct. Copy: the frame's
-                // pixels die with the lock inside LastFrame().
+                           frame.width * 4, QImage::Format_RGBA8888);
+                // The engine packs colors 0xAABBGGRR (Color::Pack — R in the
+                // LOW byte). Format_RGBA8888 reads bytes R,G,B,A — exactly
+                // that layout on little-endian. (ARGB32 was WRONG here: it
+                // reads BGRA in memory and swapped red/blue.) Copy: the
+                // frame's pixels die with the lock inside LastFrame().
                 out = ref.copy();
             }
         }

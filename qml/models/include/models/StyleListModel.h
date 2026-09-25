@@ -33,9 +33,21 @@ struct StyleItem
     // Same "transparent" convention as BackgroundColorModal's
     // transparentValue / CanvasItemStyle.backgroundColor.
     QString backgroundColor = QStringLiteral("transparent");
+    // The style's background IMAGE (absolute file path, "" = none) — painted
+    // cover-fit on air behind all content, FreeShow's backgroundImage.
+    QString backgroundImage;
     // FreeShow's clearStyleBackgroundOnText: when the slide itself carries a
     // background colour, the style's background steps aside for it.
     bool clearBackgroundOnText = false;
+    // Per-content-type templates (FreeShow: a style carries one template PER
+    // content type). A tab toggled OFF greys out — its content is not meant
+    // for the output wearing this style.
+    bool showShows = true;
+    bool showMedia = true;
+    bool showScripture = true;
+    bool showTable = true;
+    // Shows-only category label (free text).
+    QString category;
 };
 
 // QML singleton backing the Settings · Outputs "Styles" card. Singleton so a
@@ -61,7 +73,13 @@ public:
         ContentTypeRole,
         TemplateKeyRole,
         BackgroundColorRole,
+        BackgroundImageRole,
         ClearBackgroundOnTextRole,
+        ShowShowsRole,
+        ShowMediaRole,
+        ShowScriptureRole,
+        ShowTableRole,
+        CategoryRole,
     };
     Q_ENUM(Role)
 
@@ -87,7 +105,15 @@ public:
     Q_INVOKABLE void setContentType(int index, const QString &contentType);
     Q_INVOKABLE void setTemplateKey(int index, const QString &templateKey);
     Q_INVOKABLE void setBackgroundColor(int index, const QString &color);
+    Q_INVOKABLE void setBackgroundImage(int index, const QString &path);
     Q_INVOKABLE void setClearBackgroundOnText(int index, bool on);
+    Q_INVOKABLE void setShowTemplate(int index, const QString &contentType, bool on);
+    Q_INVOKABLE void setCategory(int index, const QString &category);
+
+    // Native image-file picker (png/jpg/webp/...) for the style background
+    // image; "" when cancelled. Lives here (not QML) so the engine's dialog
+    // service is used, same as every other file picker in the app.
+    Q_INVOKABLE QString pickImageFile() const;
 
     // Snapshot for the Edit Style dialog — one QVariantMap with the same
     // keys as the role names, so QML doesn't keep parallel state (same

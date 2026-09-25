@@ -44,6 +44,64 @@ Rectangle {
     // The search button at the left end of the tab row.
     signal searchClicked()
 
+    // GO LIVE sits directly beside Settings (user call). Reads the shared
+    // live service; no signal needed — it calls it directly.
+    readonly property bool live: LiveOutputService.live
+
+    // The one on-air switch: red pill, GO LIVE / STOP (the transport arrows
+    // and Clear stay on the monitor wall — this is the global switch).
+    Rectangle {
+        id: goLiveButton
+        anchors.right: settingsButton.left
+        anchors.rightMargin: 18
+        anchors.verticalCenter: settingsButton.verticalCenter
+        width: goLiveRow.implicitWidth + 28
+        height: 30
+        radius: 8
+        color: goLiveArea.containsMouse ? Qt.lighter(goLiveButton.baseColor(), 1.15)
+                                        : goLiveButton.baseColor()
+        Behavior on color { ColorAnimation { duration: 120 } }
+
+        function baseColor() {
+            return root.live ? "#7a2a24" : "#b03630"
+        }
+
+        Row {
+            id: goLiveRow
+            anchors.centerIn: parent
+            spacing: 7
+
+            Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                width: 8; height: 8; radius: 4
+                color: root.live ? "#ff6b61" : "#ffffff"
+                // On air: the dot pulses (a quiet "this is live" tell).
+                SequentialAnimation on opacity {
+                    running: root.live
+                    loops: Animation.Infinite
+                    NumberAnimation { to: 0.25; duration: 700 }
+                    NumberAnimation { to: 1.0; duration: 700 }
+                }
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.live ? qsTr("STOP") : qsTr("GO LIVE")
+                color: "#ffffff"
+                font.family: "Segoe UI"
+                font.pixelSize: 13
+                font.weight: Font.DemiBold
+                font.letterSpacing: 0.5
+            }
+        }
+
+        PositionHoverArea {
+            id: goLiveArea
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.live ? LiveOutputService.stop() : LiveOutputService.goLive()
+        }
+    }
+
     // Window drag / maximize by the strip itself. Declared FIRST so every control above
     // it (menu labels, tabs, gear, window buttons) takes its own clicks before this sees
     // them.

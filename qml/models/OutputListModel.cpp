@@ -490,6 +490,19 @@ int OutputListModel::styleRowForId(const QString &styleId) const
     return styles->rowForId(styleId);
 }
 
+bool OutputListModel::activeStyleAllows(const QString &contentType) const
+{
+    const int row = styleRowForId(activeStyleId());
+    if (row < 0)
+        return true;   // no style on the active output: everything is allowed
+    const QVariantMap style = StyleListModel::instance()->getStyle(row);
+    const QString key = QStringLiteral("show") + contentType.left(1).toUpper()
+                        + contentType.mid(1);
+    if (!style.contains(key))
+        return true;   // unknown content type: not gated
+    return style.value(key).toBool();
+}
+
 QString OutputListModel::styleIdAt(int row) const
 {
     const StyleListModel *styles = StyleListModel::instance();
@@ -514,6 +527,14 @@ QString OutputListModel::activeStyleId() const
     return QString();
 }
 
+int OutputListModel::activeIndex() const
+{
+    for (int i = 0; i < m_outputs.size(); ++i)
+        if (m_outputs.at(i).active)
+            return i;
+    return -1;
+}
+
 void OutputListModel::pushEngineStyle(const QString &styleId)
 {
     // Compose the engine's view of the style (PresentationTypes.hpp's
@@ -528,8 +549,14 @@ void OutputListModel::pushEngineStyle(const QString &styleId)
         spec.contentType = style.value(QStringLiteral("contentType")).toString().toStdString();
         spec.templateKey = style.value(QStringLiteral("templateKey")).toString().toStdString();
         spec.backgroundColor = style.value(QStringLiteral("backgroundColor")).toString().toStdString();
+        spec.backgroundImage = style.value(QStringLiteral("backgroundImage")).toString().toStdString();
         spec.clearBackgroundOnText =
             style.value(QStringLiteral("clearBackgroundOnText")).toBool();
+        spec.showShows = style.value(QStringLiteral("showShows")).toBool();
+        spec.showMedia = style.value(QStringLiteral("showMedia")).toBool();
+        spec.showScripture = style.value(QStringLiteral("showScripture")).toBool();
+        spec.showTable = style.value(QStringLiteral("showTable")).toBool();
+        spec.category = style.value(QStringLiteral("category")).toString().toStdString();
     }
     if (SettingsService *settings = SettingsService::instancePtr())
         settings->setActiveOutputStyle(spec);

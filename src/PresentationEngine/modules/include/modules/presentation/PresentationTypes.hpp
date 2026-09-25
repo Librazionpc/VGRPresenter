@@ -265,9 +265,22 @@ struct OutputStyleSpec {
     // "#aarrggbb" / "#rrggbb" / "transparent" — the on-air background. Empty
     // string = the spec carries no background (leave the slide's own).
     std::string backgroundColor;
+    // The style's background IMAGE (absolute file path, png/jpg/webp/...) —
+    // painted cover-fit over the colour, under all content (FreeShow's
+    // styles[...].backgroundImage). Empty = no image.
+    std::string backgroundImage;
     // FreeShow's clearStyleBackgroundOnText: when the slide itself carries a
     // background colour, the style's background steps aside for it.
     bool clearBackgroundOnText = false;
+    // Per-content-type gates (the Edit dialog's four pills): a tab toggled OFF
+    // greys out — go-live REFUSES that tab's content for this style. Fingerprint
+    // fields below ride the spec so any pill flip re-keys the scenes.
+    bool showShows = true;
+    bool showMedia = true;
+    bool showScripture = true;
+    bool showTable = true;
+    // Shows-only category label (diagnostic display for now).
+    std::string category;
 };
 
 // --- Validation issues (docs/specs/19 §Validator) -----------------------------

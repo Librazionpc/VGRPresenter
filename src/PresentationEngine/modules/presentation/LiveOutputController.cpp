@@ -9,6 +9,7 @@
 #include "modules/rendering/RenderTypes.hpp"
 
 #include <chrono>
+#include <utility>
 
 namespace bps::live {
 
@@ -91,6 +92,11 @@ Result<void> LiveOutputController::StartFromOpenShow() {
     boundPresentationId_.clear();
     lastCompiledCount_ = 0;
 
+    // THE RUNTIME BINDS A COPY WE OWN: `snapshot` dies at scope end, and the
+    // registry mirror churns (every sync PutPresentation refreshes it) — so the
+    // runtime must point at the controller's own member, never at either.
+    liveContent_ = snapshot;
+
     // The preview feed: a FrameBufferOutput registered once with the render
     // engine. Every distributed frame lands here (scaled to its target) and
     // the frontend's image provider reads it back for the Show screen tile.
@@ -106,21 +112,15 @@ Result<void> LiveOutputController::StartFromOpenShow() {
     }
     preview_->SetEnabled(true);
 
-    // Bind + run the real pipeline: registry copy -> compile -> prepare -> live.
-    auto open = pres.Open(snapshot.id);
-    if (!open.ok())
-        return open.error();
-    auto compile = pres.Compile(snapshot.id);
-    if (!compile.ok())
-        return compile.error();
-    auto prepare = pres.Prepare(snapshot.id);
-    if (!prepare.ok())
-        return prepare.error();
-    auto live = pres.GoLive();
+    // Bind + run the real pipeline: our copy -> compile -> prepare -> live.
+    // (PutPresentation mirrors the content into the registry for diagnostics;
+    // PresentLive binds the RUNTIME to the controller's copy.)
+    (void)pres.PutPresentation(liveContent_);
+    auto live = pres.PresentLive(liveContent_);
     if (!live.ok())
         return live.error();
-    boundPresentationId_ = snapshot.id;
-    lastCompiledCount_ = snapshot.slides.size();
+    boundPresentationId_ = liveContent_.id;
+    lastCompiledCount_ = liveContent_.slides.size();
 
     // Render loop — one worker thread at the frame target. Detached cleanly:
     // Stop() joins, Kernel shutdown calls Stop().
@@ -128,8 +128,104 @@ Result<void> LiveOutputController::StartFromOpenShow() {
     worker_ = std::thread([this]() { Loop(); });
 
     Logger::Instance().Info(
-        std::format("live output started: show '{}' ({} slides)", snapshot.name,
-                    snapshot.slides.size()),
+        std::format("live output started: show '{}' ({} slides)", liveContent_.name,
+                    liveContent_.slides.size()),
+        "LiveOutputController");
+    return Ok();
+}
+
+// ---------------------------------------------------------------------------
+// Any-content start (scripture verses, sermons, media items -> on air)
+// ---------------------------------------------------------------------------
+Result<void> LiveOutputController::StartFromSlides(std::string_view name,
+                                                   const std::vector<presentation::Slide>& slides) {
+    if (slides.empty())
+        return Error::Make(Err::InvalidState, "LiveOutputController",
+                           "nothing selected to put on air");
+
+    // THE CONTROLLER OWNS THE ON-AIR CONTENT: the runtime binds a raw pointer,
+    // so the copy must outlive the run. A stable member keyed by content name;
+    // each call REPLACES it (old slides die with the swap, and the runtime is
+    // rebound in the same critical section, so no window where the pointer
+    // dangles).
+    presentation::Presentation content;
+    content.id = std::string("temp:") + std::string(name);
+    content.name = std::string(name);
+    content.slides = slides;
+    for (size_t i = 0; i < content.slides.size(); ++i) {
+        // Slide ids stable per position: a re-pick of the same passage re-uses
+        // the same scene ids, so the scene cache stays warm.
+        content.slides[i].id = std::format("{}-{}", content.id, i + 1);
+    }
+    content.createdAt = content.modifiedAt = std::chrono::system_clock::now();
+
+    presentation::PresentationEngine& pres = presentation::PresentationEngine::Instance();
+
+    if (!running_.load()) {
+        std::lock_guard<std::mutex> lock(control_);
+        pres_ = &pres;
+
+        // The preview feed (same registration as StartFromOpenShow).
+        if (!preview_) {
+            auto existing = rendering::RenderEngine::Instance().GetOutput(kPreviewName);
+            if (existing.ok())
+                preview_ = std::static_pointer_cast<rendering::FrameBufferOutput>(existing.value());
+            else
+                preview_ = std::make_shared<rendering::FrameBufferOutput>(
+                    rendering::OutputKind::Preview, kPreviewName,
+                    rendering::Size(960, 540));
+            (void)rendering::RenderEngine::Instance().AddOutput(preview_);
+        }
+        preview_->SetEnabled(true);
+
+        // OWN THE CONTENT BEFORE BINDING: the runtime takes a raw pointer, so
+        // it must point at the member that outlives the run — never at this
+        // function's local (moving or returning would leave it dangling).
+        liveContent_ = std::move(content);
+        (void)pres.PutPresentation(liveContent_);
+        auto live = pres.PresentLive(liveContent_);
+        if (!live.ok()) {
+            liveContent_ = presentation::Presentation{};
+            return live.error();
+        }
+
+        boundPresentationId_.clear();   // not the document show; the sync stays out
+        lastCompiledCount_ = liveContent_.slides.size();
+        // Fresh content: force the loop's next RenderOnce to actually rasterize
+        // (scene ids are reused across picks — temp:<name>-1 every time — so
+        // id equality alone can't tell new content from the old frame).
+        lastRenderedScene_.clear();
+        lastStyleRevision_ = 0;
+
+        running_.store(true);
+        worker_ = std::thread([this]() { Loop(); });
+        Logger::Instance().Info(
+            std::format("live output started from content: '{}' ({} slides)", liveContent_.name,
+                        liveContent_.slides.size()),
+            "LiveOutputController");
+        return Ok();
+    }
+
+    // LIVE REPLACE: swap the runtime's content in place (state stays Live) and
+    // rebuild scenes; the loop picks the new compiled set up the very next
+    // frame. Same ownership rule as the first start: the member is assigned
+    // BEFORE the runtime rebinds, so the raw pointer lands on stable storage.
+    std::lock_guard<std::mutex> lock(control_);
+    liveContent_ = std::move(content);
+    auto swap = pres.SwapLiveContent(liveContent_);
+    if (!swap.ok()) {
+        liveContent_ = presentation::Presentation{};
+        return swap.error();
+    }
+    lastCompiledCount_ = liveContent_.slides.size();
+    // LIVE REPLACE: the picked paragraph changed under the SAME scene id
+    // ("temp:<sermon>-1") — without this force the output would freeze on the
+    // previous verse's last frame.
+    lastRenderedScene_.clear();
+    lastStyleRevision_ = 0;
+    Logger::Instance().Info(
+        std::format("live output replaced with content: '{}' ({} slides)", liveContent_.name,
+                    liveContent_.slides.size()),
         "LiveOutputController");
     return Ok();
 }
@@ -143,11 +239,20 @@ Result<void> LiveOutputController::StopLive() {
     }
     std::lock_guard<std::mutex> lock(control_);
     if (pres_) {
-        (void)pres_->StopPlayback();
+        // StopPlayback only transitions Live/Paused -> Stopped; the runtime
+        // stays BOUND to the (now stale) presentation, so every later Open —
+        // even for a perfectly good show — failed with AlreadyOpen. Close()
+        // is the real unbind: null-safe, idempotent, and it clears the stale
+        // compiled set. Without it the next go-live died at "already open"
+        // and the UI kept rendering the previous content's last frame.
+        (void)pres_->Close();
         pres_ = nullptr;
     }
     boundPresentationId_.clear();
     lastCompiledCount_ = 0;
+    liveContent_ = presentation::Presentation{};   // the runtime no longer points here
+    lastRenderedScene_.clear();
+    lastStyleRevision_ = 0;
     return Ok();
 }
 
@@ -197,32 +302,64 @@ Result<void> LiveOutputController::SyncWithDocument() {
     std::lock_guard<std::mutex> lock(control_);
     if (!pres_ || !running_.load()) return Ok();
 
-    auto doc = pres_->Document();
-    if (!doc || !doc->HasDocument()) return Ok();   // show closed; keep last state
+    // ON-AIR TEMP CONTENT (StartFromSlides): the runtime binds the controller's
+    // own copy, not the working show. Any document sync here would YANK the
+    // output back to the document — exactly what a scripture pick must not do
+    // one second after it goes on air. Temp content only rebuilds when the
+    // controller itself swaps it (SwapLiveContent).
+    if (!boundPresentationId_.empty()) {
+        auto doc = pres_->Document();
+        if (!doc || !doc->HasDocument()) return Ok();   // show closed; keep last state
 
-    const presentation::Presentation snapshot = doc->Snapshot();
-    const bool rebound = snapshot.id != boundPresentationId_;
-    bool rebuilt = snapshot.slides.size() != lastCompiledCount_;
+        const presentation::Presentation snapshot = doc->Snapshot();
+        const bool rebound = snapshot.id != boundPresentationId_;
+        bool rebuilt = snapshot.slides.size() != lastCompiledCount_;
 
-    if (rebound) {
-        auto open = pres_->Open(snapshot.id);
-        if (!open.ok()) return open.error();
-        boundPresentationId_ = snapshot.id;
-        lastCompiledCount_ = snapshot.slides.size();
-        rebuilt = true;
-    }
-    if (rebuilt) {
-        // Slides were added/removed while live: rebuild compiled scenes. The
-        // SceneBuilder caches by scene id; the count change is the cheap
-        // trigger (per-slide re-render of text still needs a scene destroy —
-        // handled by JumpById below re-preparing).
-        auto compile = pres_->Compile(snapshot.id);
-        if (!compile.ok()) return compile.error();
-        auto prepare = pres_->Prepare(snapshot.id);
-        if (!prepare.ok()) return prepare.error();
-        lastCompiledCount_ = snapshot.slides.size();
+        if (rebound) {
+            // A DIFFERENT show took the document while we were live: adopt it.
+            // Put first (the registry copy may predate this document), then the
+            // full rebind — Open is refused while live, so the swap path runs.
+            auto put = pres_->PutPresentation(snapshot);
+            if (!put.ok()) return put.error();
+            if (smIsLive()) {
+                auto swap = pres_->SwapLiveContent(snapshot);
+                if (!swap.ok()) return swap.error();
+            } else {
+                auto open = pres_->Open(snapshot.id);
+                if (!open.ok()) return open.error();
+                auto compile = pres_->Compile(snapshot.id);
+                if (!compile.ok()) return compile.error();
+                auto prepare = pres_->Prepare(snapshot.id);
+                if (!prepare.ok()) return prepare.error();
+            }
+            boundPresentationId_ = snapshot.id;
+            lastCompiledCount_ = snapshot.slides.size();
+            rebuilt = false;
+            lastRenderedScene_.clear();   // new binding: force a re-raster
+        }
+        if (rebuilt) {
+            // Slides were added/removed while live: refresh the registry copy
+            // and swap the runtime's content in place (no state transitions).
+            auto put = pres_->PutPresentation(snapshot);
+            if (!put.ok()) return put.error();
+            if (smIsLive()) {
+                auto swap = pres_->SwapLiveContent(snapshot);
+                if (!swap.ok()) return swap.error();
+            } else {
+                auto compile = pres_->Compile(snapshot.id);
+                if (!compile.ok()) return compile.error();
+                auto prepare = pres_->Prepare(snapshot.id);
+                if (!prepare.ok()) return prepare.error();
+            }
+            lastCompiledCount_ = snapshot.slides.size();
+            lastRenderedScene_.clear();   // content swapped in place: re-raster
+        }
     }
     return Ok();
+}
+
+bool LiveOutputController::smIsLive() const {
+    return pres_ && pres_->State() == presentation::PresentationState::Live;
 }
 
 std::string LiveOutputController::CurrentSceneId() const {
@@ -256,11 +393,24 @@ Result<void> LiveOutputController::RenderOnce() {
     if (idx >= pres_->Runtime().Compiled().slides.size()) return Ok();
     const std::string sceneId = pres_->Runtime().Compiled().slides[idx].sceneId;
 
+    // CHANGE-DRIVEN: skip the frame when nothing visibly moved (same scene
+    // and no style rebuild since the last raster). The frame in the preview
+    // buffer stays exactly as it was — re-drawing an unchanged verse at the
+    // frame cadence just starved the GUI thread (the app-wide lag report)
+    // for zero visual gain. Playback animations would tick via the style
+    // revision/clock below; cues that mutate the scene bump the revision.
+    const uint64_t styleRev = pres_->Runtime().StyleRevision();
+    if (sceneId == lastRenderedScene_ && styleRev == lastStyleRevision_)
+        return Ok();
+
     rendering::RenderOptions opts;
     opts.distribute = true;   // -> every enabled output -> Telemetry output meter
     auto frame = rendering::RenderEngine::Instance().Render(sceneId, opts);
-    if (frame.ok())
+    if (frame.ok()) {
         frames_.fetch_add(1);
+        lastRenderedScene_ = sceneId;
+        lastStyleRevision_ = styleRev;
+    }
     return Ok();
 }
 

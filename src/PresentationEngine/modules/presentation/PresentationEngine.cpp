@@ -122,6 +122,23 @@ Result<std::string> PresentationEngine::CreatePresentation(std::string_view name
     return pres->id;
 }
 
+Result<std::string> PresentationEngine::PutPresentation(const Presentation& presentation) {
+    WireDependencies();
+    auto copy = std::make_shared<Presentation>(presentation);
+    if (copy->id.empty())
+        return Error::Make(Err::Presentation_InvalidState, "PresentationEngine",
+                           "presentation has no id");
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        registry_[copy->id] = copy;   // insert OR refresh in place
+    }
+    Logger::Instance().Debug(
+        std::format("presentation put: '{}' ({}, {} slides)", copy->name, copy->id,
+                    copy->slides.size()),
+        "PresentationEngine");
+    return copy->id;
+}
+
 Result<void> PresentationEngine::Open(std::string_view id) {
     std::shared_ptr<Presentation> pres;
     {
@@ -312,6 +329,63 @@ Result<void> PresentationEngine::Prepare(std::string_view id) {
 }
 
 // ---------------------------------------------------------------------------
+// Live binding
+// ---------------------------------------------------------------------------
+Result<void> PresentationEngine::PresentLive(const Presentation& content) {
+    if (content.slides.empty())
+        return Error::Make(Err::Presentation_NoSlides, "PresentationEngine",
+                           "nothing to put on air");
+
+    OutputStyleSpec style;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        style = activeStyle_;
+    }
+
+    // The runtime holds a RAW pointer — the caller's copy must outlive the run
+    // (the controller keeps its own; the registry mirror below is refreshed
+    // independently and never pointed at). A previous binding (any state — a
+    // prepared show, a finished run) is closed first: Open refuses while
+    // anything is bound.
+    (void)runtime_.Close();
+    auto open = runtime_.Open(content);
+    if (!open.ok()) return open.error();
+    activeId_ = content.id;
+    // Validate first: Compile checks lastIssues_ (this content's, not a stale
+    // set from whatever ran before). Only hard errors abort go-live.
+    auto issues = runtime_.Validate(validator_);
+    if (!issues.ok()) return issues.error();
+    if (PresentationValidator::HasErrors(issues.value()))
+        return Error::Make(Err::Presentation_ValidationFailed, "PresentationEngine",
+                           "content has validation errors; cannot go live");
+    auto compiled = runtime_.Compile(*compiler_);
+    if (!compiled.ok()) return compiled.error();
+    auto prepared = runtime_.Prepare(*builder_, rendering::RenderEngine::Instance(), style);
+    if (!prepared.ok()) return prepared.error();
+    auto live = runtime_.GoLive();
+    if (!live.ok()) return live.error();
+    return Ok();
+}
+
+Result<void> PresentationEngine::SwapLiveContent(const Presentation& content) {
+    if (content.slides.empty())
+        return Error::Make(Err::Presentation_NoSlides, "PresentationEngine",
+                           "nothing to put on air");
+
+    OutputStyleSpec style;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        style = activeStyle_;
+    }
+    // Live -> Live replace: rebind raw pointer + navigator + recompile, then
+    // rebuild every scene — the state machine never leaves Live.
+    auto swapped = runtime_.SwapLive(content, *compiler_);
+    if (!swapped.ok()) return swapped.error();
+    activeId_ = content.id;
+    return runtime_.RebuildScenes(*builder_, rendering::RenderEngine::Instance(), style);
+}
+
+// ---------------------------------------------------------------------------
 // Output style (Settings · Styles applied to the on-air output)
 // ---------------------------------------------------------------------------
 Result<void> PresentationEngine::SetActiveOutputStyle(const OutputStyleSpec& style) {
@@ -322,6 +396,7 @@ Result<void> PresentationEngine::SetActiveOutputStyle(const OutputStyleSpec& sty
             || activeStyle_.contentType != style.contentType
             || activeStyle_.templateKey != style.templateKey
             || activeStyle_.backgroundColor != style.backgroundColor
+            || activeStyle_.backgroundImage != style.backgroundImage
             || activeStyle_.clearBackgroundOnText != style.clearBackgroundOnText;
         activeStyle_ = style;
     }

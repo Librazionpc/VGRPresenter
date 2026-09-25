@@ -19,6 +19,7 @@
 #include <QObject>
 #include <QQmlEngine>
 #include <QtQml/qqmlregistration.h>
+#include <QVariantMap>
 #include <memory>
 
 class LivePreviewProvider;
@@ -41,6 +42,12 @@ class LiveOutputService : public QObject {
     Q_PROPERTY(int onAirIndex READ onAirIndex NOTIFY onAirChanged)
     // Total slides in the live show.
     Q_PROPERTY(int onAirTotal READ onAirTotal NOTIFY onAirChanged)
+    // The on-air slide AS DESIGN BLOCKS — the same { blocks, background }
+    // shape the preview pane renders: { valid, title, blocks, background }.
+    // Empty map when not live. Lets QML previews (the monitor wall's tiles)
+    // draw the on-air content with DesignPreview — the same renderer as the
+    // ReferencePane preview — instead of re-guessing content from a title.
+    Q_PROPERTY(QVariantMap onAirSlide READ onAirSlide NOTIFY onAirChanged)
 
 public:
     static LiveOutputService *create(QQmlEngine *engine, QJSEngine *jsEngine);
@@ -52,13 +59,25 @@ public:
     QString onAirTitle() const { return onAirTitle_; }
     int onAirIndex() const { return onAirIndex_; }
     int onAirTotal() const { return onAirTotal_; }
+    QVariantMap onAirSlide() const { return onAirSlide_; }
 
     Q_INVOKABLE void goLive();
+    // ANY-CONTENT go-live (scripture verses, a sermon, media items): the
+    // caller hands finished slides + the on-air name; the controller runs them
+    // through the same pipeline. Answers via liveChanged either way — callers
+    // can read live() to see whether it took.
+    Q_INVOKABLE void goLiveWithSlides(const QString &name, const QVariantList &slides);
     Q_INVOKABLE void stop();
     // The runtime's Next()/Previous() while live.
     Q_INVOKABLE bool next();
     Q_INVOKABLE bool previous();
     Q_INVOKABLE bool jumpTo(int index);
+
+    // Any slide of the live set as design blocks (same shape as onAirSlide):
+    // a thumbnail strip renders the whole presentation from this. Empty map
+    // when not live or the index is out of range (hidden slides are skipped,
+    // so the index is a VISIBLE index, matching onAirIndex).
+    Q_INVOKABLE QVariantMap onAirSlideAt(int index) const;
 
     // The last preview frame for the image provider (scaled to the request).
     QImage previewFrame(const QSize &requested);
@@ -74,6 +93,11 @@ private:
     static LiveOutputService *s_instance;
 
     void pollTick();   // refresh onAir* + framesSent from the engine
+    // Re-reads the runtime's current slide into onAirSlide_ (onAirChanged
+    // piggybacks the emit). The slide's blocks change without the title or
+    // index moving (a document edit re-synced while live), so the 10Hz poll
+    // keeps the QML preview honest rather than keying on title/index only.
+    void refreshOnAirSlide();
 
     bool live_ = false;
     qulonglong frameRev_ = 0;
@@ -81,7 +105,8 @@ private:
     QString onAirTitle_;
     int onAirIndex_ = -1;
     int onAirTotal_ = 0;
-    QTimer *poll_ = nullptr;   // while live: onAir/frames refresh at 4Hz
+    QVariantMap onAirSlide_;
+    QTimer *poll_ = nullptr;   // while live: onAir/frames refresh at 10Hz
     std::unique_ptr<LivePreviewProvider> provider_;
 };
 

@@ -61,6 +61,14 @@ public:
     Result<void> RebuildScenes(SceneBuilder& builder, rendering::RenderEngine& engine,
                                const OutputStyleSpec& style);
 
+    // LIVE REPLACE (FreeShow's setOutput("slide", { id: "temp", ... })): rebinds
+    // the runtime to new content WHILE LIVE — raw pointer + navigator + clock
+    // reset, recompile, all with the state machine staying in Live (Compile's
+    // own Compiled transition is illegal from Live). `content` must outlive the
+    // run (the runtime stores a raw pointer). Call RebuildScenes afterwards to
+    // build the new content's scenes.
+    Result<void> SwapLive(const Presentation& content, const PresentationCompiler& compiler);
+
     // Style-change epoch: PresentationEngine::SetActiveOutputStyle advances
     // it; the live loop compares it per frame (one relaxed atomic read) and
     // rebuilds scenes when it moves — a style pushed mid-show lands within

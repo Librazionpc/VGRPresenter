@@ -124,6 +124,8 @@ public:
     // Snapshot for edit dialogs — one QVariantMap per output with the same
     // keys as the role names, so QML editors don't keep parallel state.
     Q_INVOKABLE QVariantMap getOutput(int index) const;
+    // Row of the on-air (active) output; -1 when none is active.
+    Q_INVOKABLE int activeIndex() const;
 
     // ---- Physical displays (FreeShow's Screens.svelte: real displays, not
     // a mock map) ----
@@ -147,6 +149,13 @@ public:
     // The ACTIVE output's style, re-resolved (by id) from the current
     // roster. Empty string = the on-air output has no style.
     QString activeStyleId() const;
+
+    // The ACTIVE output's style admits `contentType`? (the Edit dialog's four
+    // pills — a tab toggled OFF greys out, and go-live refuses its content:
+    // FreeShow's "this output is not meant for that content" contract.) No
+    // style on the active output = everything is allowed. PUBLIC: QML calls
+    // this before going live (a private Q_INVOKABLE is invisible to QML).
+    Q_INVOKABLE bool activeStyleAllows(const QString &contentType) const;
 
 signals:
     void activeStyleChanged();

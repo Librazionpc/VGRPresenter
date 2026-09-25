@@ -1,10 +1,13 @@
 #include "StyleListModel.h"
 
 #include "OutputListModel.h"
+#include "services/EngineBridge.h"
 #include "modules/project/StyleStore.hpp"
+#include "platform/PlatformAccessor.hpp"
 
 #include <QGuiApplication>
 #include <QScreen>
+#include <QDir>
 #include <algorithm>
 
 QPointer<StyleListModel> StyleListModel::s_instance = nullptr;
@@ -39,7 +42,13 @@ StyleListModel::StyleListModel(QObject *parent)
         item.contentType = QString::fromStdString(s.contentType);
         item.templateKey = QString::fromStdString(s.templateKey);
         item.backgroundColor = QString::fromStdString(s.backgroundColor);
+        item.backgroundImage = QString::fromStdString(s.backgroundImage);
         item.clearBackgroundOnText = s.clearBackgroundOnText;
+        item.showShows = s.showTemplates[0];
+        item.showMedia = s.showTemplates[1];
+        item.showScripture = s.showTemplates[2];
+        item.showTable = s.showTemplates[3];
+        item.category = QString::fromStdString(s.category);
         m_styles.append(item);
     }
 }
@@ -70,7 +79,13 @@ QVariant StyleListModel::data(const QModelIndex &index, int role) const
     case ContentTypeRole: return item.contentType;
     case TemplateKeyRole: return item.templateKey;
     case BackgroundColorRole: return item.backgroundColor;
+    case BackgroundImageRole: return item.backgroundImage;
     case ClearBackgroundOnTextRole: return item.clearBackgroundOnText;
+    case ShowShowsRole: return item.showShows;
+    case ShowMediaRole: return item.showMedia;
+    case ShowScriptureRole: return item.showScripture;
+    case ShowTableRole: return item.showTable;
+    case CategoryRole: return item.category;
     default: return {};
     }
 }
@@ -84,7 +99,13 @@ QHash<int, QByteArray> StyleListModel::roleNames() const
         { ContentTypeRole, "contentType" },
         { TemplateKeyRole, "templateKey" },
         { BackgroundColorRole, "backgroundColor" },
+        { BackgroundImageRole, "backgroundImage" },
         { ClearBackgroundOnTextRole, "clearBackgroundOnText" },
+        { ShowShowsRole, "showShows" },
+        { ShowMediaRole, "showMedia" },
+        { ShowScriptureRole, "showScripture" },
+        { ShowTableRole, "showTable" },
+        { CategoryRole, "category" },
     };
 }
 
@@ -117,7 +138,13 @@ void StyleListModel::save()
         s.contentType = item.contentType.toStdString();
         s.templateKey = item.templateKey.toStdString();
         s.backgroundColor = item.backgroundColor.toStdString();
+        s.backgroundImage = item.backgroundImage.toStdString();
         s.clearBackgroundOnText = item.clearBackgroundOnText;
+        s.showTemplates[0] = item.showShows;
+        s.showTemplates[1] = item.showMedia;
+        s.showTemplates[2] = item.showScripture;
+        s.showTemplates[3] = item.showTable;
+        s.category = item.category.toStdString();
         stored.append(s);
     }
     // The kernel's store owns the vector-based API here; a failed flush (disk
@@ -255,6 +282,52 @@ void StyleListModel::setClearBackgroundOnText(int index, bool on)
     save();
 }
 
+void StyleListModel::setBackgroundImage(int index, const QString &path)
+{
+    if (index < 0 || index >= m_styles.size())
+        return;
+    const QString normalized = QDir::fromNativeSeparators(path);
+    if (m_styles[index].backgroundImage == normalized)
+        return;
+
+    m_styles[index].backgroundImage = normalized;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { BackgroundImageRole });
+    save();
+}
+
+void StyleListModel::setShowTemplate(int index, const QString &contentType, bool on)
+{
+    if (index < 0 || index >= m_styles.size())
+        return;
+    bool *field = contentType == QLatin1String("shows") ? &m_styles[index].showShows
+                : contentType == QLatin1String("media") ? &m_styles[index].showMedia
+                : contentType == QLatin1String("scripture") ? &m_styles[index].showScripture
+                : contentType == QLatin1String("table") ? &m_styles[index].showTable
+                : nullptr;
+    if (!field || *field == on)
+        return;
+
+    *field = on;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { ShowShowsRole, ShowMediaRole, ShowScriptureRole, ShowTableRole });
+    save();
+}
+
+void StyleListModel::setCategory(int index, const QString &category)
+{
+    if (index < 0 || index >= m_styles.size())
+        return;
+    const QString trimmed = category.trimmed();
+    if (m_styles[index].category == trimmed)
+        return;
+
+    m_styles[index].category = trimmed;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { CategoryRole });
+    save();
+}
+
 QVariantMap StyleListModel::getStyle(int index) const
 {
     if (index < 0 || index >= m_styles.size())
@@ -268,7 +341,13 @@ QVariantMap StyleListModel::getStyle(int index) const
         { "contentType", item.contentType },
         { "templateKey", item.templateKey },
         { "backgroundColor", item.backgroundColor },
+        { "backgroundImage", item.backgroundImage },
         { "clearBackgroundOnText", item.clearBackgroundOnText },
+        { "showShows", item.showShows },
+        { "showMedia", item.showMedia },
+        { "showScripture", item.showScripture },
+        { "showTable", item.showTable },
+        { "category", item.category },
     };
 }
 
@@ -278,4 +357,14 @@ int StyleListModel::rowForId(const QString &id) const
         if (m_styles.at(i).id == id)
             return i;
     return -1;
+}
+
+QString StyleListModel::pickImageFile() const
+{
+    if (!EngineBridge::instance().booted())
+        return {};
+    auto r = bps::platform::PlatformAccessor::Get().Dialogs().OpenFileDialog(
+        "Pick a background image",
+        { "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)", "All files (*.*)" });
+    return r.ok() && r.value() ? QString::fromStdString(*r.value()) : QString();
 }

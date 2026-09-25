@@ -46,6 +46,11 @@ Item {
     signal templateEditRequested(string templateId)
     // "Convert to show": the show's name and its slides ([{ title, background, blocks }]), from the engine.
     signal convertToShowRequested(string name, var slides)
+    // GO LIVE: the passage's slides go on air NOW (FreeShow's playScripture):
+    // name + the same slide shape convertToShowRequested carries. Fired by a
+    // verse double-click and the floating play button; the host (or the live
+    // service directly) decides where the slides render.
+    signal goLiveRequested(string name, var slides)
     // A suggestion row from the tab search box was accepted — carried up so the host can
     // route it back into the pane that offered it (see applySuggestion).
     signal suggestionChosen(var ref)
@@ -592,12 +597,46 @@ Item {
     }
 
     // "Convert to show": the whole passage becomes a show, one slide per screenful of verses.
+    function buildSlides() {
+        if (root.selected.length === 0 || !root.book)
+            return []
+        return root.adapter.slides(root.sourceId, root.book.id, root.chapterNumber, root.selected)
+    }
+
     function convertToShow() {
-        if (root.selected.length === 0)
-            return
-        const slides = root.adapter.slides(root.sourceId, root.book.id, root.chapterNumber, root.selected)
+        const slides = root.buildSlides()
         if (slides.length > 0)
             root.convertToShowRequested(root.referenceText, slides)
+    }
+
+    // THE ON-AIR PICK (FreeShow's verse dblclick -> playScripture): the picked
+    // verses' slides go straight to the live output. The adapter (or the host)
+    // decides how — ScripturePane/TheTablePane hand it to LiveOutputService,
+    // which checks the output style's content pills first.
+    function playPicked() {
+        if (!root.book || root.selected.length === 0)
+            return
+        // The style gate: the active output's style must admit this tab's
+        // content type (the Edit dialog's pills). Greyed pill = not meant for
+        // that output — say so instead of silently showing nothing.
+        const kind = root.adapter.contentType
+        if (kind !== "" && !OutputListModel.activeStyleAllows(kind)) {
+            EventBus.notify(qsTr("%1 is switched off in this output's style.").arg(root.adapter.tabLabel),
+                            "warning", qsTr("On air"), "live.style.gate")
+            return
+        }
+        const slides = root.buildSlides()
+        if (slides.length > 0)
+            root.goLiveRequested(root.referenceText, slides)
+    }
+
+    // Floating pill buttons: previous / next picked passage (FreeShow's
+    // _moveSelection), play what's picked. Wired by the wrappers to the live
+    // service when their content is on air; plain navigation otherwise.
+    function stepAndPlay(direction) {
+        root.step(direction)
+        if (root.adapter && root.adapter.liveIsOurs && root.adapter.liveIsOurs())
+            root.playPicked()
     }
 
     // ---- Bibles ----------------------------------------------------------------------------------------------------
@@ -923,7 +962,9 @@ Item {
                             textFormat: root.canHighlight ? Text.StyledText : Text.PlainText
                             font.family: Theme.fontFamily; font.pixelSize: 16
                         }
-                        // Click selects (Ctrl / Shift add); drag carries the selection into a project; double-click adds it to the open one.
+                        // Click selects (Ctrl / Shift add); drag carries the selection into a project; DOUBLE-CLICK GOES ON AIR
+                        // (FreeShow's verse dblclick -> playScripture — the original report: "double click on the scripture
+                        // doesn't display on the monitor").
                         DragSource {
                             id: verseSource
                             anchors.fill: parent
@@ -935,8 +976,7 @@ Item {
                             }
                             onOpened: {
                                 root.selectVerse(verseRow.modelData.number, false, false)
-                                const p = root.dragPayload(root.selected)
-                                if (p) ProjectService.dropOnProject(p.kind, p.items)
+                                root.playPicked()
                             }
                         }
                     }
@@ -1239,6 +1279,49 @@ Item {
                         HoverHandler { id: stepHover; cursorShape: Qt.PointingHandCursor }
                         TapHandler { onTapped: root.step(stepBtn.modelData.dir) }
                     }
+                }
+
+                Rectangle { visible: !root.searching; width: 1; height: 16; color: Theme.border; anchors.verticalCenter: parent.verticalCenter }
+
+                // PREVIOUS / NEXT + PLAY (FreeShow's FloatingInputs toolbar: the
+                // verse arrows step the picked passage, the play button puts it on
+                // air / refreshes it). Play shows the live glyph once THIS tab's
+                // content is what's on air (FreeShow's isActiveInOutput refresh).
+                Repeater {
+                    model: (root.searching || !root.adapter) ? [] : [
+                        { glyph: "arrowLeft", dir: -1, tip: qsTr("Previous passage") },
+                        { glyph: "chevronRight", dir: 1, tip: qsTr("Next passage") }
+                    ]
+                    delegate: Item {
+                        id: passageStepBtn
+                        required property var modelData
+                        width: 28; height: 26
+                        Rectangle { anchors.fill: parent; radius: 13; color: stepPassageHover.hovered ? "#22242e" : "transparent" }
+                        IconGlyph {
+                            anchors.centerIn: parent
+                            name: passageStepBtn.modelData.glyph
+                            color: Theme.textPrimary
+                            width: 12; height: 12
+                        }
+                        HoverHandler { id: stepPassageHover; cursorShape: Qt.PointingHandCursor }
+                        TapHandler { onTapped: root.stepAndPlay(passageStepBtn.modelData.dir) }
+                    }
+                }
+
+                Item {
+                    visible: !root.searching
+                    width: 28; height: 26
+                    readonly property bool isOurs: root.adapter && root.adapter.liveIsOurs
+                                                   ? root.adapter.liveIsOurs(root.referenceText) : false
+                    Rectangle { anchors.fill: parent; radius: 13; color: playPickedHover.hovered || parent.isOurs ? "#22242e" : "transparent" }
+                    IconGlyph {
+                        anchors.centerIn: parent
+                        name: parent.isOurs ? "refresh" : "play"
+                        color: parent.isOurs ? "#6dff85" : Theme.textPrimary
+                        width: 13; height: 13
+                    }
+                    HoverHandler { id: playPickedHover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: root.playPicked() }
                 }
 
                 Rectangle { visible: !root.searching; width: 1; height: 16; color: Theme.border; anchors.verticalCenter: parent.verticalCenter }

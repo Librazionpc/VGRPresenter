@@ -277,26 +277,58 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
             result.lines.push_back(std::move(ll));
             continue;
         }
-        // Word wrap.
+        // Word wrap: break BETWEEN words at spaces, never mid-word. The old
+        // loop wrapped per character, so a verse that didn't fit read as
+        // scrambled text ("com / e back", "mayb / e"). A single word wider
+        // than the wrap width is hard-broken per character as a last resort.
+        const auto widthOf = [&advance, &style](const std::string& s) {
+            return static_cast<float>(s.size()) * advance +
+                   static_cast<float>(s.size() > 0 ? s.size() - 1 : 0) * style.letterSpacing;
+        };
+        const float spaceWidth = advance + style.letterSpacing;   // " x" join cost
         std::string current;
         float currentWidth = 0.0f;
-        for (char ch : rawLine) {
-            const float chWidth = advance;
-            if (currentWidth + chWidth > style.wrapWidth && !current.empty()) {
-                result.totalWidth = std::max(result.totalWidth, currentWidth);
-                result.totalHeight += lineHeight;
-                result.lines.push_back({current, currentWidth});
-                current.clear();
-                currentWidth = 0.0f;
-            }
-            current.push_back(ch);
-            currentWidth += chWidth;
-        }
-        if (!current.empty()) {
-            result.totalWidth = std::max(result.totalWidth, currentWidth);
+        auto flush = [&](const std::string& line, float width) {
+            result.totalWidth = std::max(result.totalWidth, width);
             result.totalHeight += lineHeight;
-            result.lines.push_back({current, currentWidth});
+            result.lines.push_back({line, width});
+        };
+        size_t i = 0;
+        while (i < rawLine.size()) {
+            // One word = a run of non-space characters.
+            size_t j = i;
+            while (j < rawLine.size() && rawLine[j] != ' ') ++j;
+            const std::string word = rawLine.substr(i, j - i);
+            const float wordWidth = widthOf(word);
+            if (!current.empty()) {
+                if (currentWidth + spaceWidth + wordWidth > style.wrapWidth) {
+                    flush(current, currentWidth);
+                    current = word;
+                    currentWidth = wordWidth;
+                } else {
+                    currentWidth += spaceWidth + wordWidth;
+                    current += ' ';
+                    current += word;
+                }
+            } else if (wordWidth > style.wrapWidth) {
+                // Monster word alone on the line: hard-break per character.
+                for (char ch : word) {
+                    if (currentWidth + advance > style.wrapWidth && !current.empty()) {
+                        flush(current, currentWidth);
+                        current.clear();
+                        currentWidth = 0.0f;
+                    }
+                    current.push_back(ch);
+                    currentWidth += advance;
+                }
+            } else {
+                current = word;
+                currentWidth = wordWidth;
+            }
+            i = (j < rawLine.size()) ? j + 1 : j;   // skip the breaking space
         }
+        if (!current.empty())
+            flush(current, currentWidth);
     }
     return result;
 }

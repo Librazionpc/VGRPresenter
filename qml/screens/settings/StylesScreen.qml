@@ -51,7 +51,16 @@ Item {
     property string editStyleContentType: "shows"
     property string editStyleTemplateKey: "lowerThird"
     property string editStyleBackgroundColor: "transparent"
+    property string editStyleBackgroundImage: ""
     property bool editStyleClearOnText: false
+    // The four content pills (shows/media/scripture/table) — grey = that
+    // tab's content is NOT meant for an output wearing this style.
+    property bool editShowShows: true
+    property bool editShowMedia: true
+    property bool editShowScripture: true
+    property bool editShowTable: true
+    // Shows-only category (free text).
+    property string editStyleCategory: ""
 
     function openEditStyle(index) {
         const data = StyleListModel.getStyle(index)
@@ -60,7 +69,13 @@ Item {
         root.editStyleContentType = data.contentType
         root.editStyleTemplateKey = data.templateKey
         root.editStyleBackgroundColor = data.backgroundColor
+        root.editStyleBackgroundImage = data.backgroundImage
         root.editStyleClearOnText = data.clearBackgroundOnText
+        root.editShowShows = data.showShows
+        root.editShowMedia = data.showMedia
+        root.editShowScripture = data.showScripture
+        root.editShowTable = data.showTable
+        root.editStyleCategory = data.category
     }
 
     function saveEditStyle() {
@@ -70,8 +85,24 @@ Item {
         StyleListModel.setContentType(root.editStyleIndex, root.editStyleContentType)
         StyleListModel.setTemplateKey(root.editStyleIndex, root.editStyleTemplateKey)
         StyleListModel.setBackgroundColor(root.editStyleIndex, root.editStyleBackgroundColor)
+        StyleListModel.setBackgroundImage(root.editStyleIndex, root.editStyleBackgroundImage)
         StyleListModel.setClearBackgroundOnText(root.editStyleIndex, root.editStyleClearOnText)
+        StyleListModel.setShowTemplate(root.editStyleIndex, "shows", root.editShowShows)
+        StyleListModel.setShowTemplate(root.editStyleIndex, "media", root.editShowMedia)
+        StyleListModel.setShowTemplate(root.editStyleIndex, "scripture", root.editShowScripture)
+        StyleListModel.setShowTemplate(root.editStyleIndex, "table", root.editShowTable)
+        StyleListModel.setCategory(root.editStyleIndex, root.editStyleCategory)
         root.editStyleIndex = -1
+    }
+
+    // Native file picker for the style background image (same engine dialogs
+    // ShowService/ScriptureService use). Non-image files simply fail to
+    // decode later and the colour shows instead — a second dialog would be
+    // kinder but this keeps the flow one click.
+    function pickBackgroundImage() {
+        const path = StyleListModel.pickImageFile()
+        if (path !== "")
+            root.editStyleBackgroundImage = path
     }
 
     Flickable {
@@ -183,6 +214,12 @@ Item {
                             required property string contentType
                             required property string templateKey
                             required property string backgroundColor
+                            required property string backgroundImage
+                            required property bool showShows
+                            required property bool showMedia
+                            required property bool showScripture
+                            required property bool showTable
+                            required property string category
                             // backgroundColor is a model STRING role (Qt
                             // role values arrive as strings, not color) — the
                             // string comparison is correct here.
@@ -198,16 +235,25 @@ Item {
                                 scripture: { label: qsTr("Scripture"), color: "#fbbf24", bg: "#2ef39c12" },
                                 table: { label: qsTr("The Table"), color: "#4ae0b0", bg: "#2e4ae0b0" }
                             }[styleRow.contentType] ?? { label: styleRow.contentType, color: Theme.textMuted, bg: Theme.chip })
+                            // The four template pills (greyed = off) + image chip,
+                            // right on the row — the Edit dialog state at a glance.
+                            readonly property bool rowShowShows: showShows
+                            readonly property bool rowShowMedia: showMedia
+                            readonly property bool rowShowScripture: showScripture
+                            readonly property bool rowShowTable: showTable
+                            readonly property string rowImage: backgroundImage
+                            readonly property string rowCategory: category
 
                             width: stylesCol.width
                             height: Math.max(64, rowCol.implicitHeight + 16)
                             radius: Theme.radiusMd
                             color: Theme.inset
 
-                            // Background preview swatch — a checkerboard
-                            // shows through "transparent" (same convention
-                            // as BackgroundColorModal's own swatches), a
-                            // real picked color renders solid otherwise.
+                            // Background preview swatch — the style's IMAGE
+                            // when it has one (cover-cropped), else a checkerboard
+                            // behind "transparent" (same convention as
+                            // BackgroundColorModal's own swatches), a real picked
+                            // color renders solid otherwise.
                             Rectangle {
                                 id: swatch
                                 x: 12
@@ -221,7 +267,7 @@ Item {
                                 border.width: 1
 
                                 Grid {
-                                    visible: styleRow.isTransparent
+                                    visible: styleRow.isTransparent && styleRow.rowImage === ""
                                     anchors.fill: parent
                                     columns: 4
                                     rows: 4
@@ -234,6 +280,14 @@ Item {
                                             color: (Math.floor(index / 4) + (index % 4)) % 2 === 0 ? "#242633" : "#15161d"
                                         }
                                     }
+                                }
+
+                                Image {
+                                    visible: styleRow.rowImage !== ""
+                                    anchors.fill: parent
+                                    source: styleRow.rowImage === "" ? "" : "file:///" + styleRow.rowImage
+                                    fillMode: Image.PreserveAspectCrop
+                                    asynchronous: true
                                 }
                             }
 
@@ -286,6 +340,53 @@ Item {
                                         text: templatePicker.nameFor(styleRow.templateKey)
                                         color: Theme.textSecondary
                                         font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.textXs
+                                    }
+
+                                    // Mini content pills — grey = that tab is
+                                    // switched off for this style.
+                                    Row {
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        spacing: 4
+
+                                        Repeater {
+                                            model: [
+                                                { key: "shows", label: qsTr("Sh"), on: styleRow.rowShowShows },
+                                                { key: "media", label: qsTr("Me"), on: styleRow.rowShowMedia },
+                                                { key: "scripture", label: qsTr("Sc"), on: styleRow.rowShowScripture },
+                                                { key: "table", label: qsTr("Ta"), on: styleRow.rowShowTable }
+                                            ]
+                                            delegate: Rectangle {
+                                                required property var modelData
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                width: miniLabel.implicitWidth + 8
+                                                height: 15
+                                                radius: 7
+                                                color: modelData.on ? "#2e34404d" : "transparent"
+                                                border.color: modelData.on ? "#4a5064" : "#2a2c38"
+                                                border.width: 1
+                                                opacity: modelData.on ? 1 : 0.4
+
+                                                Text {
+                                                    id: miniLabel
+                                                    anchors.centerIn: parent
+                                                    text: parent.modelData.label
+                                                    color: parent.modelData.on ? Theme.textSecondary : Theme.textMuted
+                                                    font.family: Theme.fontFamily
+                                                    font.pixelSize: 9
+                                                    font.bold: parent.modelData.on
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        visible: styleRow.rowCategory !== ""
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: "·  " + styleRow.rowCategory
+                                        color: Theme.textMuted
+                                        font.family: Theme.fontFamily
+                                        font.italic: true
                                         font.pixelSize: Theme.textXs
                                     }
                                 }
@@ -492,6 +593,127 @@ Item {
             }
         }
 
+        // TEMPLATES PER CONTENT TYPE (FreeShow: one style carries a template
+        // for Shows, Media, Scripture and Table). A pill OFF greys out — that
+        // tab's content is NOT meant for an output wearing this style; go-live
+        // refuses it with a toast instead of showing nothing.
+        Column {
+            width: parent.width
+            spacing: Theme.space2
+
+            Text {
+                text: qsTr("Templates for")
+                color: Theme.textSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
+            }
+
+            Row {
+                spacing: Theme.space2
+
+                Repeater {
+                    model: [
+                        { key: "shows", label: qsTr("Shows") },
+                        { key: "media", label: qsTr("Media") },
+                        { key: "scripture", label: qsTr("Scripture") },
+                        { key: "table", label: qsTr("The Table") }
+                    ]
+                    delegate: Rectangle {
+                        id: tmplPill
+                        required property var modelData
+                        readonly property bool on: {
+                            if (modelData.key === "shows") return root.editShowShows
+                            if (modelData.key === "media") return root.editShowMedia
+                            if (modelData.key === "scripture") return root.editShowScripture
+                            return root.editShowTable
+                        }
+                        width: tmplPillLabel.implicitWidth + 22
+                        height: 26
+                        radius: 13
+                        border.color: tmplPill.on ? Theme.accent : Theme.border
+                        border.width: 1
+                        color: tmplPill.on ? "#2e6c5ce7" : "transparent"
+                        opacity: tmplPill.on ? 1.0 : 0.45
+                        Behavior on opacity { NumberAnimation { duration: 120 } }
+
+                        Text {
+                            id: tmplPillLabel
+                            anchors.centerIn: parent
+                            text: tmplPill.modelData.label
+                            color: tmplPill.on ? Theme.textPrimary : Theme.textMuted
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.textXs
+                            font.weight: tmplPill.on ? Font.DemiBold : Font.Normal
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (tmplPill.modelData.key === "shows") root.editShowShows = !root.editShowShows
+                                else if (tmplPill.modelData.key === "media") root.editShowMedia = !root.editShowMedia
+                                else if (tmplPill.modelData.key === "scripture") root.editShowScripture = !root.editShowScripture
+                                else root.editShowTable = !root.editShowTable
+                            }
+                        }
+                    }
+                }
+            }
+
+            Text {
+                width: parent.width
+                text: qsTr("A greyed tab is not meant for this output — its content is refused on air.")
+                color: Theme.textMuted
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
+                wrapMode: Text.WordWrap
+            }
+        }
+
+        // SHOWS-ONLY CATEGORY (free text label — filed under in the shows
+        // library; only meaningful when the Shows pill is on).
+        Column {
+            width: parent.width
+            spacing: Theme.space2
+            visible: root.editShowShows
+
+            Text {
+                text: qsTr("Category (Shows only)")
+                color: Theme.textSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
+            }
+
+            Rectangle {
+                width: parent.width
+                height: 40
+                radius: Theme.radiusMd
+                color: Theme.inset
+
+                TextInput {
+                    anchors.fill: parent
+                    anchors.margins: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.editStyleCategory
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.textSm
+                    selectByMouse: true
+                    clip: true
+                    onTextEdited: (t) => root.editStyleCategory = t
+                }
+                Text {
+                    visible: root.editStyleCategory === ""
+                    x: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("e.g. Worship")
+                    color: Theme.textMuted
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.textSm
+                }
+            }
+        }
+
         Column {
             width: parent.width
             spacing: Theme.space2
@@ -636,6 +858,122 @@ Item {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: styleBgModal.open = true
+                    }
+                }
+            }
+
+            // Background IMAGE (absolute path, "" = none) — painted cover-fit
+            // on air BEHIND all content, over the colour (FreeShow's
+            // style backgroundImage). The preview shows the file name.
+            Column {
+                width: parent.width
+                spacing: Theme.space2
+
+                Text {
+                    text: qsTr("Background image")
+                    color: Theme.textSecondary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.textXs
+                }
+
+                Rectangle {
+                    width: parent.width
+                    height: 46
+                    radius: Theme.radiusMd
+                    color: Theme.inset
+
+                    Row {
+                        x: 14
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 10
+                        width: parent.width - 110
+
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 22
+                            height: 22
+                            radius: 6
+                            clip: true
+                            color: root.editStyleBackgroundImage === "" ? Theme.inset : "#22242e"
+                            border.color: Theme.borderSubtle
+                            border.width: 1
+
+                            Image {
+                                visible: root.editStyleBackgroundImage !== ""
+                                anchors.fill: parent
+                                source: root.editStyleBackgroundImage === "" ? "" : "file:///" + root.editStyleBackgroundImage
+                                fillMode: Image.PreserveAspectCrop
+                                asynchronous: true
+                            }
+                        }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width - 32
+                            text: root.editStyleBackgroundImage === ""
+                                  ? qsTr("None")
+                                  : root.editStyleBackgroundImage.split("/").pop()
+                            color: Theme.textSecondary
+                            elide: Text.ElideRight
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.textSm
+                        }
+                    }
+
+                    Rectangle {
+                        anchors.right: parent.right
+                        anchors.rightMargin: 12
+                        anchors.verticalCenter: parent.verticalCenter
+                        height: 26
+                        width: pickImgLabel.implicitWidth + 22
+                        radius: 13
+                        color: pickImgArea.containsMouse ? Theme.chip : "transparent"
+                        border.color: Theme.border
+                        border.width: 1
+                        Behavior on color { ColorAnimation { duration: 100 } }
+
+                        Text {
+                            id: pickImgLabel
+                            anchors.centerIn: parent
+                            text: root.editStyleBackgroundImage === "" ? qsTr("Pick") : qsTr("Change")
+                            color: Theme.accentLight
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.textXs
+                            font.weight: Font.Medium
+                        }
+
+                        MouseArea {
+                            id: pickImgArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.pickBackgroundImage()
+                        }
+                    }
+                }
+
+                Rectangle {
+                    visible: root.editStyleBackgroundImage !== ""
+                    anchors.right: parent.right
+                    width: removeImgLabel.implicitWidth + 18
+                    height: 22
+                    radius: 11
+                    color: "transparent"
+                    border.color: Theme.border
+                    border.width: 1
+
+                    Text {
+                        id: removeImgLabel
+                        anchors.centerIn: parent
+                        text: qsTr("Remove image")
+                        color: Theme.textMuted
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.textXs
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.editStyleBackgroundImage = ""
                     }
                 }
             }

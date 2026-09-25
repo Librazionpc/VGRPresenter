@@ -48,6 +48,14 @@ public:
 
     // --- Manager ---------------------------------------------------------------
     Result<std::string> CreatePresentation(std::string_view name);
+    // Registers (or refreshes) a full presentation copy under its own id and
+    // returns that id. The WORKING SHOW path: ShowService edits the
+    // PresentationDocument, and the live loop needs the same content in the
+    // registry — without this, StartFromOpenShow's Open(id) failed with
+    // "presentation not found" and nothing ever went on air. Idempotent: an
+    // id that is already registered is overwritten in place (same id, fresh
+    // content), so live re-syncs see edits.
+    Result<std::string> PutPresentation(const Presentation& presentation);
     Result<void> Open(std::string_view id);
     Result<void> Close();
     Result<void> Save();                        // session snapshot
@@ -66,6 +74,18 @@ public:
     Result<std::vector<ValidationIssue>> Validate(std::string_view id);
     Result<void> Compile(std::string_view id);
     Result<void> Prepare(std::string_view id);   // builds scenes via SceneBuilder
+
+    // --- Live binding (any content on air) ---------------------------------------
+    // Binds the RUNTIME to the caller's copy (the caller keeps it alive for the
+    // whole live run — the registry mirror churns, so the runtime must never
+    // point into it), runs compile -> prepare (under the active output style)
+    // -> GoLive. This is the honest fix for go-live: the working show used to
+    // be opened by registry id it was never registered under.
+    Result<void> PresentLive(const Presentation& content);
+    // Swaps the live content in place — no state-machine transitions, legal
+    // while LIVE. Rebinds, recompiles and rebuilds every scene under the
+    // active output style; playback restarts at the first slide.
+    Result<void> SwapLiveContent(const Presentation& content);
 
     // --- Output style (Settings · Styles applied to the on-air output) -----------
     // The ONE spec the live render loop composes with (empty = unstyled). The

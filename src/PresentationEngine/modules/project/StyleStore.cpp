@@ -58,7 +58,15 @@ json::Value StyleStore::StyleToJson(const StoredStyle& s) {
     o["contentType"] = json::Value::String(s.contentType);
     o["templateKey"] = json::Value::String(s.templateKey);
     o["backgroundColor"] = json::Value::String(s.backgroundColor);
+    o["backgroundImage"] = json::Value::String(s.backgroundImage);
     o["clearBackgroundOnText"] = json::Value::Bool(s.clearBackgroundOnText);
+    json::Value::Object tmpl;
+    tmpl["shows"] = json::Value::Bool(s.showTemplates[0]);
+    tmpl["media"] = json::Value::Bool(s.showTemplates[1]);
+    tmpl["scripture"] = json::Value::Bool(s.showTemplates[2]);
+    tmpl["table"] = json::Value::Bool(s.showTemplates[3]);
+    o["showTemplates"] = json::Value(std::move(tmpl));
+    o["category"] = json::Value::String(s.category);
     return json::Value(std::move(o));
 }
 
@@ -67,14 +75,42 @@ Result<StoredStyle> StyleStore::StyleFromJson(const json::Value& v) {
     if (!o)
         return Error::Make(Err::InvalidArgument, "StyleStore", "style entry is not an object");
 
+    // GUARDED READS: Find() returns nullptr for a missing key — every read of
+    // a field an OLDER saved roster may not carry (backgroundImage,
+    // showTemplates, category) must go through str()/flag(), or hydrating a
+    // pre-existing roster null-derefs and takes the Styles screen down.
+    const auto str = [&v](std::string_view key, std::string_view dflt = {}) {
+        if (const json::Value* f = v.Find(key))
+            return std::string(f->asString(dflt));
+        return std::string(dflt);
+    };
+    const auto flag = [&v](std::string_view key, bool dflt) {
+        if (const json::Value* f = v.Find(key))
+            return f->asBool(dflt);
+        return dflt;
+    };
+
     StoredStyle s;
-    s.id = std::string(v.Find("id")->asString());
-    s.name = std::string(v.Find("name")->asString());
-    s.res = std::string(v.Find("res")->asString());
-    s.contentType = std::string(v.Find("contentType")->asString("shows"));
-    s.templateKey = std::string(v.Find("templateKey")->asString("lowerThird"));
-    s.backgroundColor = std::string(v.Find("backgroundColor")->asString("transparent"));
-    s.clearBackgroundOnText = v.Find("clearBackgroundOnText")->asBool(false);
+    s.id = str("id");
+    s.name = str("name");
+    s.res = str("res");
+    s.contentType = str("contentType", "shows");
+    s.templateKey = str("templateKey", "lowerThird");
+    s.backgroundColor = str("backgroundColor", "transparent");
+    s.backgroundImage = str("backgroundImage");
+    s.clearBackgroundOnText = flag("clearBackgroundOnText", false);
+    if (const json::Value* tmpl = v.Find("showTemplates"); tmpl && tmpl->asObject()) {
+        const auto tflag = [tmpl](std::string_view key, bool dflt) {
+            if (const json::Value* f = tmpl->Find(key))
+                return f->asBool(dflt);
+            return dflt;
+        };
+        s.showTemplates[0] = tflag("shows", true);
+        s.showTemplates[1] = tflag("media", true);
+        s.showTemplates[2] = tflag("scripture", true);
+        s.showTemplates[3] = tflag("table", true);
+    }
+    s.category = str("category");
     // An entry without an id (hand-edited file, partial write) is skipped by
     // the caller — ids are the stable identity everything else keys on.
     if (s.id.empty())

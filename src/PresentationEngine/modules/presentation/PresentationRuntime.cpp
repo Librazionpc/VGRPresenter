@@ -121,6 +121,26 @@ Result<void> PresentationRuntime::RebuildScenes(SceneBuilder& builder,
     return Ok();
 }
 
+Result<void> PresentationRuntime::SwapLive(const Presentation& content,
+                                           const PresentationCompiler& compiler) {
+    if (sm_.State() != PresentationState::Live)
+        return Error::Make(Err::Presentation_InvalidState, "PresentationRuntime",
+                           "SwapLive is only legal while live");
+    // Rebind the raw pointer + navigator, reset the clock, recompile — with the
+    // state machine never leaving Live. Content is owned by the caller and must
+    // outlive the run (same contract as Open).
+    pres_ = &content;
+    nav_.Open(content);
+    clockSec_.store(0.0);
+    autoAdvanceAccum_ = 0.0;
+    timeline_.Clear();
+    compiled_ = compiler.Compile(content, lastIssues_);
+    if (!compiled_.ok)
+        return Error::Make(Err::Presentation_CompileFailed, "PresentationRuntime",
+                           "live swap compile failed");
+    return Ok();
+}
+
 Result<void> PresentationRuntime::GoLive() {
     if (!pres_) return Error::Make(Err::Presentation_NotOpen, "PresentationRuntime",
                                    "no presentation open");

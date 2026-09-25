@@ -358,12 +358,17 @@ void SoftwareGraphicsBackend::Execute(const DrawCommand& cmd) {
             auto it = textures_.find(cmd.texture.id);
             if (it == textures_.end()) break;
             const RgbaImage& src = it->second;
-            // Glyph textures are 1:1 (no src scaling needed beyond the dest rect).
+            // Glyphs live in a SHARED ATLAS: the pipeline emits the glyph's
+            // cell in cmd.srcRect. Blitting the whole texture (the old
+            // behavior) squashed the entire glyph sheet into every character
+            // cell — on-air text rendered as dense noise.
+            const Rect cell = (cmd.srcRect.width > 0.0f && cmd.srcRect.height > 0.0f)
+                                  ? cmd.srcRect
+                                  : Rect(0, 0, static_cast<float>(src.width),
+                                         static_cast<float>(src.height));
             Blit(static_cast<int>(cmd.rect.x), static_cast<int>(cmd.rect.y),
                  static_cast<int>(cmd.rect.width), static_cast<int>(cmd.rect.height),
-                 src, Rect(0, 0, static_cast<float>(src.width),
-                           static_cast<float>(src.height)),
-                 cmd.color, static_cast<BlendMode>(cmd.blend));
+                 src, cell, cmd.color, static_cast<BlendMode>(cmd.blend));
             break;
         }
         case DrawCommand::Type::DrawShape:
@@ -406,17 +411,31 @@ void SoftwareGraphicsBackend::Blit(int x, int y, int w, int h, const RgbaImage& 
     const float sh = std::max(1.0f, srcRect.height);
     const int x0 = std::max(0, x), y0 = std::max(0, y);
     const int x1 = std::min(fbWidth_, x + w), y1 = std::min(fbHeight_, y + h);
+    // Full tint (RGB * alpha), not just alpha: the glyph atlas is WHITE — a
+    // text's color arrives as this tint (DrawGlyph -> cmd.color). Scaling
+    // alpha only painted every on-air text white and dropped styled colors
+    // (the Table template's amber reference line among them).
+    const bool tinted = tint.r < 1.0f || tint.g < 1.0f || tint.b < 1.0f || tint.a < 1.0f;
+    const int tr = static_cast<int>(tint.r * 255.0f + 0.5f);
+    const int tg = static_cast<int>(tint.g * 255.0f + 0.5f);
+    const int tb = static_cast<int>(tint.b * 255.0f + 0.5f);
+    const int ta = static_cast<int>(tint.a * 255.0f + 0.5f);
     for (int yy = y0; yy < y1; ++yy)
         for (int xx = x0; xx < x1; ++xx) {
             const int sx = static_cast<int>(sx0 + (xx - x) * (sw / static_cast<float>(w)));
             const int sy = static_cast<int>(sy0 + (yy - y) * (sh / static_cast<float>(h)));
             if (sx < 0 || sx >= src.width || sy < 0 || sy >= src.height) continue;
             uint32_t sp = src.pixels[static_cast<size_t>(sy) * src.width + sx];
-            // Apply tint (usually white = identity, or alpha scale).
-            if (tint.a < 1.0f) {
-                const uint32_t a = static_cast<uint32_t>(
-                    static_cast<float>((sp >> 24) & 0xFF) * tint.a);
-                sp = (sp & 0x00FFFFFFu) | (a << 24);
+            if (tinted) {
+                // Pack is 0xAABBGGRR — R in the low byte.
+                const int cr = static_cast<int>((sp >> 0) & 0xFF);
+                const int cg = static_cast<int>((sp >> 8) & 0xFF);
+                const int cb = static_cast<int>((sp >> 16) & 0xFF);
+                const int ca = static_cast<int>((sp >> 24) & 0xFF);
+                sp = (static_cast<uint32_t>(ca * ta / 255) << 24)
+                   | (static_cast<uint32_t>(cb * tb / 255) << 16)
+                   | (static_cast<uint32_t>(cg * tg / 255) << 8)
+                   | static_cast<uint32_t>(cr * tr / 255);
             }
             uint32_t& dst = fb_.pixels[static_cast<size_t>(yy) * fbWidth_ + xx];
             dst = BlendPixel(dst, sp, mode);

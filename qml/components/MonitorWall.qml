@@ -1,33 +1,35 @@
 import QtQuick
 import VGRPresenterUI
 
-// The output monitor wall — ONE component, TWO hosts: the Show screen's
-// right column and the Edit screen's ITEMS tab. Both used to host the
-// shared OutputMonitorTile themselves, but the HOSTING diverged: the Show
-// side grew hero/paged/swipe behavior (lone output = full-width hero,
-// 2×2 pages with snap + dots) while the Edit side kept a plain two-column
-// Grid — so "the same tiles" rendered as visibly different monitors per
-// surface. The wall logic now lives here once; hosts differ only in
-// position/size.
+// The output monitor wall — ONE component, TWO hosts (Show screen right
+// column, Edit screen ITEMS tab). FreeShow's preview chrome, adapted:
 //
-// Geometry contract (kept byte-compatible with the old Show-side wall so
-// downstream offsets didn't move): `height` is the WALL's height (the page
-// dots, when visible, draw below it OUTSIDE bounds — hosts that space
-// content under the wall keep their original +22/+11 style constants).
-// Hosts set x/y/width; the component does the rest from OutputListModel.
+//   [• Main Output] [• Stage]        <- output tabs (click = that output
+//   [  GO LIVE  ]                     becomes the on-air one)
+//   [ live frame | live frame ]      <- REAL frames from the engine preview
+//   [ < >  ▶  ⌫ Clear ]              <- transport: prev/next slide, clear
+//
+// The old tile's fake "LIVE 1" badge and play glyph are GONE — a tile either
+// shows the actual distributed frame (its output is active) or the
+// checkerboard empty state. Geometry contract kept: `height` is the WALL's
+// height; hosts keep their +22/+11 spacing constants.
 Item {
     id: root
 
-    // Roster-change revision: rowCount() isn't notifyable from QML, so bump
-    // a counter on roster changes — every tile's width binding reads it and
-    // re-evaluates when outputs come and go (same pattern as ScreenForm's
-    // displayRev).
+    // Roster-change revision: rowCount() isn't notifyable from QML.
     property int _wallRev: 0
     Connections {
         target: OutputListModel
         function onRowsInserted() { root._wallRev++ }
         function onRowsRemoved() { root._wallRev++ }
+        function onDataChanged() { root._wallRev++ }
     }
+
+    // Frame cadence: the preview provider's cache-buster — bumped by the live
+    // service's frameRev while live, by a slow idle timer otherwise (cheap; a
+    // static image request is skipped entirely while the frame hash is null).
+    readonly property int frameRev: LiveOutputService.frameRev
+    readonly property bool live: LiveOutputService.live
 
     // External contract: hosts position content under the wall and drive
     // the page dots from these.
@@ -35,24 +37,81 @@ Item {
     readonly property alias currentPage: wall.currentPage
     function goTo(page) { wall.goTo(page) }
 
-    height: wall.height
+    height: tabs.height + wall.height + (toolbar.visible ? toolbar.height : 0)
 
-    // Paged wall — max 4 tiles (2×2) per page; output 5+ lands on the next
-    // page and the wall SWIPES to it (snap-one-item Flickable), with dot
-    // indicators below. One output still gets the full-width hero tile;
-    // 2–4 share a 2×2 page. Slots are computed positions (page =
-    // index/capacity) so a single Repeater feeds every page.
+    // ---- Output tabs (FreeShow's PreviewOutputs tab strip) -----------------
+    // GO LIVE lives in the app header now (user call) — the wall keeps only
+    // the per-output tabs.
+    Row {
+        id: tabs
+        x: 0; y: 0
+        width: parent.width
+        height: 26
+        spacing: 4
+
+        Repeater {
+            model: root._wallRev >= 0 ? OutputListModel.rowCount() : 0
+
+            delegate: Rectangle {
+                id: tab
+                required property int index
+                readonly property var out: OutputListModel.getOutput(index)
+                readonly property bool isCurrent: OutputListModel.activeIndex() === index
+
+                width: Math.max(64, (tabs.width - (OutputListModel.rowCount() - 1) * 4) / OutputListModel.rowCount())
+                height: parent.height
+                radius: 5
+                color: isCurrent ? "#1e1f28" : (tabArea.containsMouse ? "#181922" : "#14151d")
+                border.color: isCurrent ? "#34384a" : "#232530"
+                border.width: 1
+
+                Row {
+                    anchors.centerIn: parent
+                    spacing: 6
+
+                    // State dot: green = enabled, grey = disabled (FreeShow's
+                    // indicator; red is reserved for the LIVE border on tiles).
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 7; height: 7; radius: 3.5
+                        color: tab.out.isEnabled ? "#6dff85" : "#5a5f72"
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Math.min(implicitWidth, tab.width - 30)
+                        text: tab.out.name
+                        color: tab.isCurrent ? "#e2e8f0" : "#9aa0b5"
+                        elide: Text.ElideRight
+                        font.family: "Segoe UI"
+                        font.pixelSize: 11
+                        font.bold: tab.isCurrent
+                    }
+                }
+
+                // Disabled screens can't take air — the click is inert.
+                MouseArea {
+                    id: tabArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: tab.out.isEnabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor
+                    onClicked: if (tab.out.isEnabled) OutputListModel.setActive(tab.index)
+                }
+            }
+        }
+    }
+
+    // ---- Paged tile wall -----------------------------------------------------
     Flickable {
         id: wall
 
         anchors.horizontalCenter: parent.horizontalCenter
-        y: 0
+        y: tabs.height + 6
 
         readonly property int count: root._wallRev >= 0 ? OutputListModel.rowCount() : 0
         // Page capacity: a lone output gets a hero page of its own.
         readonly property int perPage: count === 1 ? 1 : 4
         readonly property int pageCount: Math.max(1, Math.ceil(count / perPage))
-        readonly property real pageW: count === 1 ? 376 : 376
+        readonly property real pageW: 376
         readonly property real slotW: count === 1 ? 376 : 182
         readonly property real slotH: count === 1
                                      ? 6 + (slotW - 12) * 9 / 16 + 6 + 16 + 6
@@ -119,11 +178,10 @@ Item {
     }
 
     // Page dots — one per page, current page lit; click to swipe. Drawn
-    // BELOW wall.height (outside bounds; root doesn't clip) so host
-    // spacing constants under the wall keep their original values.
+    // BELOW wall.height (outside bounds; root doesn't clip).
     Row {
         anchors.horizontalCenter: parent.horizontalCenter
-        y: wall.height + 6
+        y: wall.y + wall.height + 6
         visible: wall.pageCount > 1
         spacing: 6
 
@@ -146,4 +204,65 @@ Item {
             }
         }
     }
+
+    // ---- Transport toolbar (FreeShow's ShowActions + ClearButtons row) ------
+    Rectangle {
+        id: toolbar
+        visible: root.live
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: wall.y + wall.height + (wall.pageCount > 1 ? 22 : 8)
+        width: 376
+        height: 36
+        radius: 8
+        color: "#14151d"
+        border.color: "#232530"
+        border.width: 1
+
+        Row {
+            anchors.centerIn: parent
+            spacing: 2
+
+            // Previous slide.
+            Item {
+                width: 40; height: 28
+                Rectangle { anchors.fill: parent; anchors.margins: 2; radius: 6; color: prevArea.containsMouse ? "#22242e" : "transparent" }
+                IconGlyph { anchors.centerIn: parent; name: "arrowLeft"; color: Theme.textPrimary; width: 14; height: 14 }
+                HoverHandler { id: prevArea; cursorShape: Qt.PointingHandCursor }
+                TapHandler { onTapped: LiveOutputService.previous() }
+            }
+            // Next slide.
+            Item {
+                width: 40; height: 28
+                Rectangle { anchors.fill: parent; anchors.margins: 2; radius: 6; color: nextArea.containsMouse ? "#22242e" : "transparent" }
+                IconGlyph { anchors.centerIn: parent; name: "chevronRight"; color: Theme.textPrimary; width: 14; height: 14 }
+                HoverHandler { id: nextArea; cursorShape: Qt.PointingHandCursor }
+                TapHandler { onTapped: LiveOutputService.next() }
+            }
+
+            Rectangle { width: 1; height: 16; color: "#232530"; anchors.verticalCenter: parent.verticalCenter }
+
+            // Clear all — everything off air (FreeShow's Clear all).
+            Item {
+                width: 96; height: 28
+                Rectangle {
+                    anchors.fill: parent; anchors.margins: 2; radius: 6
+                    color: clearArea.containsMouse ? "#33ff4d3d" : "transparent"
+                    border.color: clearArea.containsMouse ? "#66ff4d3d" : "transparent"
+                    border.width: 1
+                }
+                Row {
+                    anchors.centerIn: parent
+                    spacing: 6
+                    Text { text: "✕"; color: "#ff6b61"; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter }
+                    Text { text: qsTr("Clear"); color: "#ff6b61"; font.family: "Segoe UI"; font.pixelSize: 12; font.weight: Font.Medium; anchors.verticalCenter: parent.verticalCenter }
+                }
+                HoverHandler { id: clearArea; cursorShape: Qt.PointingHandCursor }
+                TapHandler { onTapped: { LiveOutputService.stop() } }
+            }
+        }
+    }
+
+    // The wall's total height must account for the dots row's visual space
+    // even when the toolbar is hidden (hosts hang content +22 below).
+    onVisibleChanged: if (visible) root.height = tabs.height + wall.height + (toolbar.visible ? toolbar.height : 0)
 }

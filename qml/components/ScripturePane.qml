@@ -20,6 +20,10 @@ ReferencePane {
         readonly property string searchPlaceholder: qsTr("Search in this Bible")
         // Scripture's options live under the "scripture." settings prefix.
         readonly property string optionsPrefix: "scripture"
+        // GO-LIVE identity: the content kind this tab produces (checked against
+        // the active output's style pills) and its display name for toasts.
+        readonly property string contentType: "scripture"
+        readonly property string tabLabel: qsTr("Scripture")
         // REGISTERED settings key remembering the last-opened Bible across
         // sessions (the old code wrote "session.referenceSource", which was
         // never declared — every open toasted "there is no setting …").
@@ -38,6 +42,14 @@ ReferencePane {
         readonly property var searchAsync: (text, srcId, token) => ScriptureService.searchAsync(text, srcId, 60, token)
         readonly property var preview: (src, bookId, ch, nums) => ScriptureService.preview(src, bookId, ch, nums)
         readonly property var slides: (src, bookId, ch, nums) => ScriptureService.slides(src, bookId, ch, nums)
+        // GO LIVE (FreeShow's playScripture -> setOutput): the picked passage's
+        // slides to the live output, gated on the style's scripture pill.
+        readonly property var goLive: (name, slides) => LiveOutputService.goLiveWithSlides(name, slides)
+        // Is THIS tab's content what's on air right now? (the play button's
+        // refresh glyph — FreeShow's isActiveInOutput.) The on-air title of a
+        // scripture pick IS the reference text, so a title match reads "ours".
+        readonly property var liveIsOurs: (refText) => LiveOutputService.live
+                                             && refText !== "" && LiveOutputService.onAirTitle === refText
         readonly property var importNew: () => ScriptureService.importBible()
         // No bulk folder action on Scripture — Bibles install one JSON at a time.
         readonly property string addFolderLabel: ""
@@ -66,6 +78,9 @@ ReferencePane {
         // the pane — applySearchResults drops stale tokens).
         function onSearchResultsReady(token, rows) { pane.applySearchResults(token, rows) }
     }
+
+    // GO LIVE: pane -> adapter -> live service.
+    onGoLiveRequested: (name, slides) => pane.adapter.goLive(name, slides)
 
     onTemplateEditRequested: (id) => pane.templateEditRequested(id)
 }
