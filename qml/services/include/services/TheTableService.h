@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 // The UI's window onto the ENGINE's sermon library (bps::library::TheTableLibrary)
 // behind "The Table" tab. The same reference architecture as scripture —
 // books (years) -> chapters (sermons) -> verses (paragraphs) — but a SEPARATE
@@ -48,6 +50,11 @@ public:
     Q_INVOKABLE QString paragraphPair(const QString &bookId, int chapter, int verse, int count = 2) const;
     // Whole-library search: [{ reference, bookId, chapter, verse, snippet }]
     Q_INVOKABLE QVariantList search(const QString &text, int limit = 60) const;
+    // ASYNC search (the Quick-search pattern): the same rows on a worker thread
+    // — the pill search pane runs this per keystroke and the GUI never blocks
+    // on a big query. `token` = newest request wins; answers arrive as
+    // searchResultsReady(token, rows) (stale tokens are dropped).
+    Q_INVOKABLE void searchAsync(const QString &text, int limit, int token);
 
     // ---- the shared reference-pane adapter (the same calls ScriptureService
     // answers, so ONE pane UI serves both tabs) ----
@@ -103,8 +110,12 @@ signals:
     void importingChanged();
     void progressChanged();
     void changed();
+    // searchAsync's answer: token matches the request, rows are the hits
+    // (search()'s shape). Stale tokens never emit.
+    void searchResultsReady(int token, const QVariantList &rows);
 
 private:
+    std::atomic<int> latestSearchToken_{0};   // searchAsync: only the newest emits
     explicit TheTableService(QObject *parent = nullptr);
 
     void loadLibrary();

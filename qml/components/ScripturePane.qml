@@ -33,6 +33,9 @@ ReferencePane {
         readonly property var reference: (book, ch, nums) => ScriptureService.reference(book, ch, nums)
         readonly property var resolve: (text, srcId) => ScriptureService.resolve(text, srcId)
         readonly property var search: (text, srcId) => ScriptureService.search(text, srcId)
+        // ASYNC pill search: the pane prefers this when present (token-guarded,
+        // answers via ScriptureService.searchResultsReady -> the pane's Connections).
+        readonly property var searchAsync: (text, srcId, token) => ScriptureService.searchAsync(text, srcId, 60, token)
         readonly property var preview: (src, bookId, ch, nums) => ScriptureService.preview(src, bookId, ch, nums)
         readonly property var slides: (src, bookId, ch, nums) => ScriptureService.slides(src, bookId, ch, nums)
         readonly property var importNew: () => ScriptureService.importBible()
@@ -59,6 +62,9 @@ ReferencePane {
     Connections {
         target: ScriptureService
         function onChanged() { pane.adapter.changed() }
+        // The async pill search's answer (searchAsync's token guard lives in
+        // the pane — applySearchResults drops stale tokens).
+        function onSearchResultsReady(token, rows) { pane.applySearchResults(token, rows) }
     }
 
     onTemplateEditRequested: (id) => pane.templateEditRequested(id)

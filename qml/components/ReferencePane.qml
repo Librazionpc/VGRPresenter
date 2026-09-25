@@ -470,10 +470,28 @@ Item {
     // highlight must wrap the CORRECTED words, or a typo query lights nothing
     // (the text says "friend", the raw query said "freind").
     property var resolvedWords: []
+    // ASYNC pill search (the Quick-search pattern): the adapter's searchAsync
+    // runs the query on a worker thread and answers on searchResultsReady; the
+    // newest request's token wins, so a fast typist's older keystrokes answer
+    // into the void and the GUI never blocks on a big query ("the" in the
+    // sermons scanned every paragraph synchronously here — visible lag).
+    // Adapters without searchAsync keep the synchronous call.
+    property int searchToken: 0
     function runSearch(text) {
-        root.searchResults = text.trim() === "" ? [] : root.adapter.search(text, root.sourceId)
-        root.resolvedWords = text.trim() === "" ? []
+        const t = text.trim()
+        root.resolvedWords = t === "" ? []
             : (SearchService.resolveWords ? SearchService.resolveWords(text) : [])
+        if (t === "") { root.searchResults = []; return }
+        if (root.adapter && root.adapter.searchAsync) {
+            root.searchToken++
+            root.adapter.searchAsync(text, root.sourceId, root.searchToken)
+        } else {
+            root.searchResults = root.adapter.search(text, root.sourceId)
+        }
+    }
+    function applySearchResults(token, rows) {
+        if (token !== root.searchToken) return   // a stale keystroke's answer
+        root.searchResults = rows
     }
     // Words to highlight: what the engine actually searched for (resolved),
     // falling back to the raw typed words when nothing needed fixing.

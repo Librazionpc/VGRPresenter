@@ -58,7 +58,11 @@ Item {
     property string editPattern: "smpte"
     property string editScreenName: ""
     property bool editLocked: false
-    property int editStyleIndex: 0
+    // Style assignment by the style's STABLE id ("" = None). Outputs
+    // reference styles by id — surviving restarts and roster edits — never
+    // by row index (deleting a style would re-point every later output at
+    // the wrong theme).
+    property string editStyleId: ""
 
     function openEdit(index) {
         const data = OutputListModel.getOutput(index)
@@ -70,7 +74,7 @@ Item {
         root.editPattern = data.testPattern !== "none" ? data.testPattern : "smpte"
         root.editScreenName = data.screenName
         root.editLocked = data.boundsLocked
-        root.editStyleIndex = data.styleIndex
+        root.editStyleId = data.styleId
     }
 
     function saveEdit() {
@@ -83,7 +87,7 @@ Item {
         OutputListModel.setTestPattern(root.editIndex, root.editPattern)
         OutputListModel.setScreenName(root.editIndex, root.editScreenName)
         OutputListModel.setBoundsLocked(root.editIndex, root.editLocked)
-        OutputListModel.setStyle(root.editIndex, root.editStyleIndex)
+        OutputListModel.setStyle(root.editIndex, root.editStyleId)
         root.editIndex = -1
     }
 
@@ -458,10 +462,13 @@ Item {
                     text: {
                         const rows = StyleListModel.rowCount()
                         if (rows === 0)
-                            return qsTr("No styles yet")
-                        if (root.editStyleIndex < 0 || root.editStyleIndex >= rows)
+                            return root.editStyleId === "" ? qsTr("None") : qsTr("Missing style")
+                        if (root.editStyleId === "")
                             return qsTr("None")
-                        return StyleListModel.data(StyleListModel.index(root.editStyleIndex, 0), StyleListModel.NameRole)
+                        const row = StyleListModel.rowForId(root.editStyleId)
+                        if (row < 0)
+                            return qsTr("Missing style")
+                        return StyleListModel.data(StyleListModel.index(row, 0), StyleListModel.NameRole)
                     }
                     color: Theme.textPrimary
                     font.family: Theme.fontFamily
@@ -496,7 +503,9 @@ Item {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
-                            stylePicker.selectedIndex = root.editStyleIndex
+                            // The picker's currency is the style's stable id
+                            // (row -1 = the None card); mapped on both sides.
+                            stylePicker.selectedId = root.editStyleId
                             stylePicker.open = true
                         }
                     }
@@ -508,8 +517,8 @@ Item {
 
     StylePickerModal {
         id: stylePicker
-        onApplied: (index) => {
-            root.editStyleIndex = index
+        onApplied: (styleId) => {
+            root.editStyleId = styleId
             stylePicker.open = false
         }
         onCancelled: stylePicker.open = false

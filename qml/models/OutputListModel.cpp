@@ -1,8 +1,11 @@
 #include "OutputListModel.h"
 #include "StyleListModel.h"
+#include "services/SettingsService.h"
+#include "modules/presentation/PresentationTypes.hpp"
 
 #include <QGuiApplication>
 #include <QScreen>
+#include <QTimer>
 #include <algorithm>
 
 namespace {
@@ -12,10 +15,14 @@ namespace {
 constexpr auto kMainOutputName = "Main Output";
 }
 
+QPointer<OutputListModel> OutputListModel::s_instance = nullptr;
+
 
 OutputListModel::OutputListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
+    s_instance = this;
+
     const QList<OutputContentToggle> content = defaultContent();
 
     // The ONE mandatory output: the primary display — every show needs a
@@ -44,9 +51,39 @@ OutputListModel::OutputListModel(QObject *parent)
         main.refresh = QStringLiteral("60 Hz");
     }
     main.active = true;
-    main.styleIndex = 0;
+    main.styleId = QStringLiteral();
     main.content = content;
     m_outputs.append(main);
+
+    // A style edit renames/re-keys the theme every output's styleName shows —
+    // re-resolve the derived roles when the roster changes. (The engine spec
+    // is NOT pushed from here: the on-air style object itself carries the
+    // new values, so SetActiveOutputStyle already got them from the edit
+    // path; this connection only keeps the labels honest.)
+    //
+    // QML singleton construction order is undefined — StyleListModel may not
+    // exist yet when this constructor runs — so retry once the event loop
+    // starts (by then the QML load has created every singleton).
+    connectToStyleRoster();
+    QTimer::singleShot(0, this, [this]() { connectToStyleRoster(); });
+}
+
+void OutputListModel::connectToStyleRoster()
+{
+    if (styleRosterConnected_)
+        return;
+    StyleListModel *styles = StyleListModel::instance();
+    if (!styles)
+        return;
+    styleRosterConnected_ = true;
+    connect(styles, &StyleListModel::rosterChanged, this, [this]() {
+        if (m_outputs.isEmpty())
+            return;
+        const QModelIndex first = index(0);
+        const QModelIndex last = index(m_outputs.size() - 1);
+        emit dataChanged(first, last, { StyleIdRole, StyleNameRole });
+        emit activeStyleChanged();
+    });
 }
 
 QList<OutputContentToggle> OutputListModel::defaultContent()
@@ -86,16 +123,14 @@ QVariant OutputListModel::data(const QModelIndex &index, int role) const
     case BoundsLockedRole: return item.boundsLocked;
     case ActiveRole: return item.active;
     case EnabledRole: return item.isEnabled;
-    case StyleIndexRole: return item.styleIndex;
+    case StyleIdRole: return item.styleId;
     case StyleNameRole: {
-        // StyleListModel is a lazily-created QML singleton — it can
-        // legitimately not exist yet when a screen/binding that shows a
-        // style name builds first. A missing roster renders as "None",
-        // never a null deref.
-        const StyleListModel *styles = StyleListModel::instance();
-        if (!styles || item.styleIndex < 0 || item.styleIndex >= styles->rowCount())
+        // Resolved through StyleListModel by id; "" / unknown ids render as
+        // "None" (a style removed under us reads as None, never a stale name).
+        const int row = styleRowForId(item.styleId);
+        if (row < 0)
             return QStringLiteral("None");
-        return styles->data(styles->index(item.styleIndex), StyleListModel::NameRole).toString();
+        return styleNameAt(row);
     }
     case ContentRole: {
         QVariantList list;
@@ -120,7 +155,7 @@ QHash<int, QByteArray> OutputListModel::roleNames() const
         { BoundsLockedRole, "boundsLocked" },
         { ActiveRole, "active" },
         { EnabledRole, "isEnabled" },
-        { StyleIndexRole, "styleIndex" },
+        { StyleIdRole, "styleId" },
         { StyleNameRole, "styleName" },
         { ContentRole, "content" },
     };
@@ -147,7 +182,7 @@ void OutputListModel::addScreen(const QString &name, const QString &type,
     item.badge = QStringLiteral("%1 %2").arg(prefix).arg(m_outputs.size() + 1);
     item.active = false;
     item.isEnabled = true;
-    item.styleIndex = 0;
+    item.styleId = QStringLiteral();
     item.content = defaultContent();
     m_outputs.append(item);
     endInsertRows();
@@ -184,9 +219,19 @@ void OutputListModel::removeOutput(int index)
     if (m_outputs.at(index).name == QLatin1String(kMainOutputName))
         return;
 
+    // If the removed output was the on-air one, the engine must drop its
+    // style with it (the next setActive pushes the new output's own).
+    const bool wasActive = m_outputs.at(index).active;
+    const QString wasStyleId = m_outputs.at(index).styleId;
+
     beginRemoveRows(QModelIndex(), index, index);
     m_outputs.removeAt(index);
     endRemoveRows();
+
+    if (wasActive)
+        pushEngineStyle(QString());
+    else
+        (void)wasStyleId;
 }
 
 bool OutputListModel::isMainOutput(int index) const
@@ -211,6 +256,11 @@ void OutputListModel::setActive(int index)
             emit dataChanged(changed, changed, { ActiveRole });
         }
     }
+    // FreeShow's output.style: the on-air output's style drives the
+    // composition. Going live with a different output swaps the engine's
+    // spec to that output's own (or clears it when the new output has none).
+    pushEngineStyle(m_outputs[index].styleId);
+    emit activeStyleChanged();
 }
 
 void OutputListModel::setEnabled(int index, bool on)
@@ -227,6 +277,8 @@ void OutputListModel::setEnabled(int index, bool on)
         m_outputs[index].active = false;
         const QModelIndex changed = this->index(index);
         emit dataChanged(changed, changed, { EnabledRole, ActiveRole });
+        pushEngineStyle(QString());
+        emit activeStyleChanged();
     } else {
         const QModelIndex changed = this->index(index);
         emit dataChanged(changed, changed, { EnabledRole });
@@ -295,17 +347,28 @@ void OutputListModel::setTestPattern(int index, const QString &pattern)
     emit dataChanged(changed, changed, { TestPatternRole });
 }
 
-void OutputListModel::setStyle(int index, int styleIndex)
+void OutputListModel::setStyle(int index, const QString &styleId)
 {
     if (index < 0 || index >= m_outputs.size())
         return;
-    if (m_outputs[index].styleIndex == styleIndex)
+    const QString normalized = styleId.trimmed();
+    // Unknown ids are refused — a typo'd id would render as "None" in the
+    // UI while carrying a dangling reference (the row lookup is the truth).
+    if (!normalized.isEmpty() && styleRowForId(normalized) < 0)
+        return;
+    if (m_outputs[index].styleId == normalized)
         return;
 
-    m_outputs[index].styleIndex = styleIndex;
+    m_outputs[index].styleId = normalized;
     const QModelIndex changed = this->index(index);
-    // StyleNameRole derives from StyleListModel, so repaint both.
-    emit dataChanged(changed, changed, { StyleIndexRole, StyleNameRole });
+    emit dataChanged(changed, changed, { StyleIdRole, StyleNameRole });
+
+    // Restyling the output that is on air takes effect immediately —
+    // FreeShow's output.style swap (the new style lands on the next frame).
+    if (m_outputs[index].active) {
+        pushEngineStyle(normalized);
+        emit activeStyleChanged();
+    }
 }
 
 void OutputListModel::toggleContent(int index, const QString &key)
@@ -415,6 +478,81 @@ void OutputListModel::setBoundsLocked(int index, bool locked)
     emit dataChanged(changed, changed, { BoundsLockedRole });
 }
 
+// ---------------------------------------------------------------------------
+// Style plumbing
+// ---------------------------------------------------------------------------
+
+int OutputListModel::styleRowForId(const QString &styleId) const
+{
+    const StyleListModel *styles = StyleListModel::instance();
+    if (!styles || styleId.isEmpty())
+        return -1;
+    return styles->rowForId(styleId);
+}
+
+QString OutputListModel::styleIdAt(int row) const
+{
+    const StyleListModel *styles = StyleListModel::instance();
+    if (!styles || row < 0 || row >= styles->rowCount())
+        return QString();
+    return styles->data(styles->index(row, 0), StyleListModel::IdRole).toString();
+}
+
+QString OutputListModel::styleNameAt(int row) const
+{
+    const StyleListModel *styles = StyleListModel::instance();
+    if (!styles || row < 0 || row >= styles->rowCount())
+        return QStringLiteral("None");
+    return styles->data(styles->index(row, 0), StyleListModel::NameRole).toString();
+}
+
+QString OutputListModel::activeStyleId() const
+{
+    for (const OutputItem &item : m_outputs)
+        if (item.active)
+            return item.styleId;
+    return QString();
+}
+
+void OutputListModel::pushEngineStyle(const QString &styleId)
+{
+    // Compose the engine's view of the style (PresentationTypes.hpp's
+    // OutputStyleSpec): background + layout preset + the clear-on-text flag.
+    // An empty styleId pushes an empty spec — the engine renders unstyled.
+    bps::presentation::OutputStyleSpec spec;
+    const int row = styleRowForId(styleId);
+    if (row >= 0) {
+        const StyleListModel *styles = StyleListModel::instance();
+        const QVariantMap style = styles->getStyle(row);
+        spec.name = style.value(QStringLiteral("name")).toString().toStdString();
+        spec.contentType = style.value(QStringLiteral("contentType")).toString().toStdString();
+        spec.templateKey = style.value(QStringLiteral("templateKey")).toString().toStdString();
+        spec.backgroundColor = style.value(QStringLiteral("backgroundColor")).toString().toStdString();
+        spec.clearBackgroundOnText =
+            style.value(QStringLiteral("clearBackgroundOnText")).toBool();
+    }
+    if (SettingsService *settings = SettingsService::instancePtr())
+        settings->setActiveOutputStyle(spec);
+}
+
+void OutputListModel::detachStyleEverywhere(const QString &styleId)
+{
+    if (styleId.isEmpty())
+        return;
+    bool touched = false;
+    for (int i = 0; i < m_outputs.size(); ++i) {
+        if (m_outputs[i].styleId != styleId)
+            continue;
+        m_outputs[i].styleId = QString();
+        const QModelIndex changed = index(i);
+        emit dataChanged(changed, changed, { StyleIdRole, StyleNameRole });
+        touched = true;
+    }
+    // If the on-air output wore the removed style, the engine drops it now.
+    if (touched && activeStyleId().isEmpty())
+        pushEngineStyle(QString());
+}
+
 QVariantMap OutputListModel::getOutput(int index) const
 {
     if (index < 0 || index >= m_outputs.size())
@@ -427,10 +565,10 @@ QVariantMap OutputListModel::getOutput(int index) const
                                     { "label", toggle.label },
                                     { "enabled", toggle.enabled } });
 
-    const StyleListModel *styles = StyleListModel::instance();
+    const int row = styleRowForId(item.styleId);
     QString styleName = QStringLiteral("None");
-    if (styles && item.styleIndex >= 0 && item.styleIndex < styles->rowCount())
-        styleName = styles->data(styles->index(item.styleIndex), StyleListModel::NameRole).toString();
+    if (row >= 0)
+        styleName = styleNameAt(row);
 
     return {
         { "name", item.name },
@@ -443,7 +581,7 @@ QVariantMap OutputListModel::getOutput(int index) const
         { "boundsLocked", item.boundsLocked },
         { "active", item.active },
         { "isEnabled", item.isEnabled },
-        { "styleIndex", item.styleIndex },
+        { "styleId", item.styleId },
         { "styleName", styleName },
         { "content", content },
     };

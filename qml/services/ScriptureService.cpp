@@ -10,6 +10,8 @@
 #include "services/SlideBuilder.h"
 #include "services/ShowConverter.h"
 
+#include <QThread>
+
 #include <QJSEngine>
 #include <QQmlEngine>
 
@@ -182,6 +184,24 @@ QVariantList ScriptureService::search(const QString &text, const QString &bibleI
 QString ScriptureService::reference(const QString &book, int chapter, const QVariantList &verses) const
 {
     return qstr(pf::ScriptureReference(book.toStdString(), chapter, numbersOf(verses)));
+}
+
+// ASYNC search (the Quick-search pattern): the pill pane runs this per keystroke;
+// the GUI-thread cost drops to a token check. Stale tokens are dropped on
+// delivery — a fast typist's older keystrokes answer into the void.
+void ScriptureService::searchAsync(const QString &text, const QString &bibleId,
+                                   int limit, int token)
+{
+    auto *runner = QThread::create([this, text, bibleId, limit, token] {
+        const QVariantList rows = search(text, bibleId, limit);
+        QMetaObject::invokeMethod(this, [this, token, rows] {
+            if (token == latestSearchToken_)
+                emit searchResultsReady(token, rows);
+        }, Qt::QueuedConnection);
+    });
+    connect(runner, &QThread::finished, runner, &QObject::deleteLater);
+    latestSearchToken_ = token;   // newest request wins
+    runner->start();
 }
 
 // ---------------------------------------------------------------------------

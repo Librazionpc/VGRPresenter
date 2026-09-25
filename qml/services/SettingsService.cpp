@@ -4,6 +4,8 @@
 #include "modules/settings/AppSettings.hpp"
 #include "modules/settings/DataProtection.hpp"
 #include "modules/settings/SmartConfig.hpp"
+#include "modules/presentation/PresentationEngine.hpp"
+#include "modules/presentation/PresentationTypes.hpp"
 #include "platform/PlatformAccessor.hpp"
 #include "services/EngineBridge.h"
 #include "services/EventBus.h"
@@ -74,6 +76,8 @@ QVariantMap choiceMap(const bs::SettingChoice &c, bs::SettingKind kind)
 
 } // namespace
 
+SettingsService *SettingsService::s_instance = nullptr;
+
 SettingsService &SettingsService::instance()
 {
     static SettingsService s;
@@ -90,6 +94,8 @@ SettingsService *SettingsService::create(QQmlEngine *engine, QJSEngine *jsEngine
 
 SettingsService::SettingsService(QObject *parent) : QObject(parent)
 {
+    s_instance = this;
+
     // Until the engine's store is open the screens see the engine's own defaults.
     for (const bs::SettingDef &d : bs::AppSettings::Definitions())
         values_.insert(qstr(d.key), toVariant(d.dflt));
@@ -378,4 +384,16 @@ bps::presentation::ScriptureSettings SettingsService::scriptureSettings() const
 bps::presentation::ScriptureSettings SettingsService::theTableSettings() const
 {
     return settings_ ? settings_->TheTable() : bps::presentation::ScriptureSettings{};
+}
+
+// ---------------------------------------------------------------------------
+// Output style (Settings · Styles applied to the on-air output)
+// ---------------------------------------------------------------------------
+
+void SettingsService::setActiveOutputStyle(const bps::presentation::OutputStyleSpec &spec)
+{
+    // A not-yet-running engine has nothing to push to; after boot the spec
+    // lands immediately and every following frame composes with it.
+    if (EngineBridge::instance().booted())
+        (void)bps::presentation::PresentationEngine::Instance().SetActiveOutputStyle(spec);
 }

@@ -202,6 +202,7 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/project/ProjectRegistry.cpp
     ${BPS_ROOT}/modules/project/ProjectManager.cpp
     ${BPS_ROOT}/modules/project/WorkspaceManager.cpp
+    ${BPS_ROOT}/modules/project/StyleStore.cpp
     ${BPS_ROOT}/modules/project/DocumentManager.cpp
     ${BPS_ROOT}/modules/project/UndoRedoManager.cpp
     ${BPS_ROOT}/modules/project/HistoryManager.cpp
@@ -347,6 +348,7 @@ set(BPS_UNIT_TEST_SOURCES
     ${BPS_ROOT}/tests/unit/tests_modules.cpp
     ${BPS_ROOT}/tests/unit/tests_notify.cpp
     ${BPS_ROOT}/tests/unit/tests_project.cpp
+    ${BPS_ROOT}/tests/unit/tests_styles.cpp
     ${BPS_ROOT}/tests/unit/tests_adaptive.cpp
     ${BPS_ROOT}/tests/unit/tests_rendering.cpp
     ${BPS_ROOT}/tests/unit/tests_display.cpp
@@ -373,7 +375,7 @@ target_link_libraries(bps_unit_tests PRIVATE engine_core)
 bps_enable_warnings(bps_unit_tests)
 add_test(NAME unit COMMAND bps_unit_tests)
 foreach(phase core cams modules notify project adaptive rendering display
-              presentation search media library settings import vgr scene bible song flow production recording broadcast)
+              presentation search media library settings import vgr scene bible song flow production recording broadcast styles)
     add_test(NAME unit_${phase} COMMAND bps_unit_tests ${phase})
 endforeach()
 

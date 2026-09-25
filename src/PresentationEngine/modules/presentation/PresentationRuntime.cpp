@@ -78,21 +78,47 @@ Result<void> PresentationRuntime::Compile(
     return Ok();
 }
 
-Result<void> PresentationRuntime::Prepare(SceneBuilder& builder, rendering::RenderEngine& engine) {
+Result<void> PresentationRuntime::Prepare(SceneBuilder& builder, rendering::RenderEngine& engine,
+                                          const OutputStyleSpec& style) {
     if (!pres_) return Error::Make(Err::Presentation_NotOpen, "PresentationRuntime",
                                    "no presentation open");
     auto r = sm_.TransitionTo(PresentationState::Prepared);
     if (!r.ok()) return r;
-    // Pre-build every compiled slide's scene (cache).
+    // Pre-build every compiled slide's scene (cache). Styled builds key on a
+    // fingerprint of `style` (StyledSceneIdFor), so a style change lands as
+    // new scene ids — nothing stale is served and nothing needs purging.
     for (auto& cs : compiled_.slides) {
         auto it = std::find_if(pres_->slides.begin(), pres_->slides.end(),
                                [&](const Slide& s) { return s.id == cs.slideId; });
         if (it != pres_->slides.end()) {
-            auto scene = builder.BuildSlideScene(*pres_, *it, engine);
+            auto scene = builder.BuildSlideScene(*pres_, *it, style, engine);
             if (scene.ok()) cs.sceneId = scene.value();
         }
     }
     return sm_.TransitionTo(PresentationState::Ready);
+}
+
+Result<void> PresentationRuntime::RebuildScenes(SceneBuilder& builder,
+                                                rendering::RenderEngine& engine,
+                                                const OutputStyleSpec& style) {
+    if (!pres_) return Error::Make(Err::Presentation_NotOpen, "PresentationRuntime",
+                                   "no presentation open");
+    if (compiled_.slides.empty()) return Ok();
+
+    // Same build loop as Prepare, but NO state transitions — legal while the
+    // presentation is LIVE (the state machine forbids Live → Prepared, and a
+    // style change must never bounce the show off air). cs.sceneId moves to
+    // the new style's fingerprinted id; RenderOnce reads it through Compiled()
+    // so the very next frame carries the new look.
+    for (auto& cs : compiled_.slides) {
+        auto it = std::find_if(pres_->slides.begin(), pres_->slides.end(),
+                               [&](const Slide& s) { return s.id == cs.slideId; });
+        if (it != pres_->slides.end()) {
+            auto scene = builder.BuildSlideScene(*pres_, *it, style, engine);
+            if (scene.ok()) cs.sceneId = scene.value();
+        }
+    }
+    return Ok();
 }
 
 Result<void> PresentationRuntime::GoLive() {

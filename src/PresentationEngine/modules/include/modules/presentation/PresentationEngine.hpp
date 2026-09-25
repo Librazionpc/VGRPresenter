@@ -67,6 +67,18 @@ public:
     Result<void> Compile(std::string_view id);
     Result<void> Prepare(std::string_view id);   // builds scenes via SceneBuilder
 
+    // --- Output style (Settings · Styles applied to the on-air output) -----------
+    // The ONE spec the live render loop composes with (empty = unstyled). The
+    // UI pushes a style change the moment it's edited; the next frame's 1s
+    // re-Prepare rebuilds the affected scenes under the new spec (SceneBuilder
+    // keys styled scenes by a fingerprint of the spec, so nothing stale can be
+    // served). Thread-safe: the live loop runs on its own thread.
+    Result<void> SetActiveOutputStyle(const OutputStyleSpec& style);
+    OutputStyleSpec ActiveOutputStyle() const;
+    // The scene builder, for the live loop's style rebuilds (RebuildScenes
+    // runs on the loop thread; the builder itself is stateless per call).
+    SceneBuilder& Builder() const { return *builder_; }
+
     // --- Controller (active presentation) -----------------------------------------
     Result<void> GoLive();
     Result<void> Pause();
@@ -119,6 +131,9 @@ private:
     PresentationRuntime runtime_;
     PresentationSession session_;
     PresentationValidator validator_;
+    // The on-air output's style (Set/Active below). Guarded by mutex_, read
+    // every frame by PresentationEngine::Prepare's builder call path.
+    OutputStyleSpec activeStyle_;
     std::shared_ptr<PresentationCompiler> compiler_;
     std::shared_ptr<SceneBuilder> builder_;
     // The "presentation" document handler (open/save the working show as .vgr),

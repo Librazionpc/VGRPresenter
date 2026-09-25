@@ -7,6 +7,8 @@
 #include "services/SlideBuilder.h"
 #include "services/ShowConverter.h"
 
+#include <QThread>
+
 #include "modules/library/TheTableLibrary.hpp"
 #include "modules/presentation/ScriptureSlides.hpp"
 #include "platform/PlatformAccessor.hpp"
@@ -297,6 +299,24 @@ QVariantList TheTableService::search(const QString &text, int limit) const
         out.append(row);
     }
     return out;
+}
+
+// ASYNC search (the Quick-search pattern): the pill pane runs this per keystroke;
+// the GUI-thread cost drops to a token check. The library's mutex makes the
+// worker's Search() safe against the GUI's reads; stale tokens are dropped on
+// delivery so a fast typist's older keystrokes answer into the void.
+void TheTableService::searchAsync(const QString &text, int limit, int token)
+{
+    auto *runner = QThread::create([this, text, limit, token] {
+        const QVariantList rows = search(text, limit);
+        QMetaObject::invokeMethod(this, [this, token, rows] {
+            if (token == latestSearchToken_)
+                emit searchResultsReady(token, rows);
+        }, Qt::QueuedConnection);
+    });
+    connect(runner, &QThread::finished, runner, &QObject::deleteLater);
+    latestSearchToken_ = token;   // newest request wins
+    runner->start();
 }
 
 // ---------------------------------------------------------------------------

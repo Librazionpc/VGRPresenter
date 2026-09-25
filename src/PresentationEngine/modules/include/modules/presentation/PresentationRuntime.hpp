@@ -46,7 +46,27 @@ public:
     Result<void> Compile(const PresentationCompiler& compiler,
                          const std::map<std::string, std::string, std::less<>>* sceneIds = nullptr);
     // Prepares scenes through the SceneBuilder for every compiled slide.
-    Result<void> Prepare(SceneBuilder& builder, rendering::RenderEngine& engine);
+    // `style` is the on-air output's OutputStyleSpec (empty = unstyled) —
+    // passed through to every scene build so a style change made while live
+    // is picked up on the next re-Prepare (styled scene ids fingerprint the
+    // spec, so no invalidation pass is needed).
+    Result<void> Prepare(SceneBuilder& builder, rendering::RenderEngine& engine,
+                         const OutputStyleSpec& style = OutputStyleSpec{});
+
+    // Rebuilds every compiled slide's scene under `style` WITHOUT touching the
+    // state machine — legal while LIVE (Prepare's Prepared/Ready transitions
+    // are not, and the live loop must never bounce through them). The live
+    // controller calls this when the on-air style changes (FreeShow's
+    // reactive output.style).
+    Result<void> RebuildScenes(SceneBuilder& builder, rendering::RenderEngine& engine,
+                               const OutputStyleSpec& style);
+
+    // Style-change epoch: PresentationEngine::SetActiveOutputStyle advances
+    // it; the live loop compares it per frame (one relaxed atomic read) and
+    // rebuilds scenes when it moves — a style pushed mid-show lands within
+    // one frame.
+    void AdvanceStyleRevision() noexcept { styleRevision_.fetch_add(1, std::memory_order_relaxed); }
+    uint64_t StyleRevision() const noexcept { return styleRevision_.load(std::memory_order_relaxed); }
     Result<void> GoLive();
     Result<void> Pause();
     Result<void> Resume();
@@ -101,6 +121,8 @@ private:
     PresentationTimeline timeline_;
     CompiledPresentation compiled_;
     std::vector<ValidationIssue> lastIssues_;
+    // Style-change epoch (AdvanceStyleRevision/StyleRevision).
+    std::atomic<uint64_t> styleRevision_{0};
     std::atomic<double> clockSec_{0.0};
     double autoAdvanceAccum_ = 0.0;
     std::vector<Subscription> subscriptions_;

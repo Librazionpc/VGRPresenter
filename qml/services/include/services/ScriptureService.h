@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -42,6 +44,10 @@ public:
     Q_INVOKABLE QVariantMap resolve(const QString &text, const QString &bibleId) const;
     // Searches the verse text: [{ reference, bookId, book, chapter, verse, snippet }], best first.
     Q_INVOKABLE QVariantList search(const QString &text, const QString &bibleId, int limit = 60) const;
+    // ASYNC search (the Quick-search pattern): the same rows on a worker thread
+    // — the pill search pane runs this per keystroke and the GUI never blocks.
+    // `token` = newest request wins; answers arrive as searchResultsReady(token, rows).
+    Q_INVOKABLE void searchAsync(const QString &text, const QString &bibleId, int limit, int token);
     // "Genesis 1:1-3, 5" (the engine's way of writing it). No verses = the whole chapter.
     Q_INVOKABLE QString reference(const QString &book, int chapter, const QVariantList &verses) const;
 
@@ -69,7 +75,11 @@ public:
 
 signals:
     void changed();
+    // searchAsync's answer: token matches the request, rows are the hits
+    // (search()'s shape). Stale tokens never emit.
+    void searchResultsReady(int token, const QVariantList &rows);
 
 private:
+    std::atomic<int> latestSearchToken_{0};   // searchAsync: only the newest emits
     explicit ScriptureService(QObject *parent = nullptr);
 };

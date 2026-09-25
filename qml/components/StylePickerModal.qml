@@ -6,19 +6,18 @@ import VGRPresenterUI
 // same scrim + centered card + preview-grid convention as
 // CameraSourceModal.qml/MediaSourceModal.qml/ShapeSourceModal.qml.
 //
-// StyleListModel (qml/models/StyleListModel.cpp) only carries `name` + `res`
-// today — no color/theme/thumbnail data exists yet for a style to actually
-// preview. Each card's preview is a simple mock "slide" swatch, colored
-// deterministically from the style's own index so different styles at
-// least read as visually distinct at a glance — same simplified-preview
-// status as this app's other placeholder visuals (ShapeSourceModal's
-// glyphs, MediaSourceModal's plain cards) until real per-style theming
-// (background/accent color, font) exists to genuinely preview.
+// Cards preview the style's ACTUAL background colour now that the model
+// carries one ("transparent" falls back to the deterministic swatch cycle).
+// A "None" card leads the grid: an output with no style renders unstyled
+// (the engine's default composition) — the same "style: optional" contract
+// FreeShow's picker has.
 Item {
     id: root
 
     property bool open: false
-    property int selectedIndex: -1
+    // Selection by the style's STABLE id ("" = the None card). Ids survive
+    // roster edits between the dialog opening and the pick landing; an id
+    // that no longer exists reads as None.
 
     // A handful of distinguishable swatch colors, cycled by index — not
     // meant to represent any real per-style color (none exists yet).
@@ -27,9 +26,14 @@ Item {
         "#e74c3c", "#8b5cf6", "#2ecc71", "#e84393"
     ]
 
-    // Fired when "Select" is clicked, carrying the picked style's index
-    // into StyleListModel.
-    signal applied(int index)
+    // Selection by the style's STABLE id ("" = the None card). Ids survive
+    // roster edits between the dialog opening and the pick landing; an id
+    // that no longer exists reads as None.
+    property string selectedId: ""
+
+    // Fired when "Select" is clicked, carrying the picked style's id
+    // ("" = None) into the caller (OutputsScreen maps it to the output).
+    signal applied(string styleId)
     signal cancelled()
 
     anchors.fill: parent
@@ -135,15 +139,84 @@ Item {
                 columnSpacing: 14
                 rowSpacing: 14
 
+                // "None" — no style. selectedId "" both means "None is picked
+                // here" and is what applied() carries for it, matching
+                // OutputListModel's "" styleId through OutputsScreen's mapping.
+                Rectangle {
+                    readonly property bool selected: root.selectedId === ""
+                    width: (parent.width - 28) / 3
+                    height: 140
+                    radius: 10
+                    color: "#0d0f16"
+                    border.width: selected ? 1.5 : 1
+                    border.color: selected ? "#6c5ce7" : "#262a38"
+                    Behavior on border.color { ColorAnimation { duration: 100 } }
+
+                    Rectangle {
+                        x: 10
+                        y: 10
+                        width: parent.width - 20
+                        height: 80
+                        radius: 6
+                        color: "#0a0b10"
+                        border.color: "#262a38"
+                        border.width: 1
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: qsTr("—")
+                            color: "#5c6475"
+                            font.family: "Segoe UI"
+                            font.pixelSize: 25
+                            font.weight: Font.DemiBold
+                        }
+                    }
+
+                    Column {
+                        anchors.bottom: parent.bottom
+                        anchors.bottomMargin: 10
+                        width: parent.width
+                        spacing: 2
+
+                        Text {
+                            width: parent.width
+                            horizontalAlignment: Text.AlignHCenter
+                            text: qsTr("None")
+                            color: "#eef1f8"
+                            font.family: "Segoe UI"
+                            font.pixelSize: 14
+                            font.weight: Font.Medium
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            width: parent.width
+                            horizontalAlignment: Text.AlignHCenter
+                            text: qsTr("No style")
+                            color: "#5c6475"
+                            font.family: "Segoe UI"
+                            font.pixelSize: 12
+                        }
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.selectedId = ""
+                    }
+                }
+
                 Repeater {
                     model: StyleListModel
 
                     delegate: Rectangle {
                         id: styleCard
                         required property int index
+                        required property string styleId
                         required property string name
                         required property string res
-                        readonly property bool selected: root.selectedIndex === styleCard.index
+                        required property string backgroundColor
+                        readonly property bool selected: root.selectedId === styleCard.styleId
+                        readonly property bool transparentBg: styleCard.backgroundColor === "transparent"
 
                         width: (parent.width - 28) / 3
                         height: 140
@@ -153,14 +226,18 @@ Item {
                         border.color: styleCard.selected ? "#6c5ce7" : "#262a38"
                         Behavior on border.color { ColorAnimation { duration: 100 } }
 
-                        // Mock preview "slide" — see header comment.
+                        // Preview "slide" — the style's real background when it
+                        // has one; the deterministic swatch cycle only covers
+                        // "transparent" (no colour to show).
                         Rectangle {
                             x: 10
                             y: 10
                             width: parent.width - 20
                             height: 80
                             radius: 6
-                            color: root.swatchColors[styleCard.index % root.swatchColors.length]
+                            color: styleCard.transparentBg
+                                   ? root.swatchColors[styleCard.index % root.swatchColors.length]
+                                   : styleCard.backgroundColor
                             opacity: 0.85
 
                             Text {
@@ -202,7 +279,7 @@ Item {
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: root.selectedIndex = styleCard.index
+                            onClicked: root.selectedId = styleCard.styleId
                         }
                     }
                 }
@@ -245,8 +322,6 @@ Item {
                     width: 90
                     height: 34
                     radius: 9
-                    enabled: root.selectedIndex >= 0
-                    opacity: root.selectedIndex >= 0 ? 1 : 0.4
                     color: selectArea.containsMouse ? "#5a4cd6" : "#6c5ce7"
                     Behavior on color { ColorAnimation { duration: 100 } }
 
@@ -262,9 +337,9 @@ Item {
                     MouseArea {
                         id: selectArea
                         anchors.fill: parent
-                        hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.applied(root.selectedIndex)
+                        // -1 = the None card — a valid pick, not "nothing picked".
+                        onClicked: root.applied(root.selectedId)
                     }
                 }
             }

@@ -299,7 +299,49 @@ Result<void> PresentationEngine::Prepare(std::string_view id) {
         auto r = Open(id);
         if (!r.ok()) return r.error();
     }
-    return runtime_.Prepare(*builder_, rendering::RenderEngine::Instance());
+    // The on-air output's style rides into every scene build — SceneBuilder
+    // keys styled scenes by a fingerprint of the spec, so a style change made
+    // while live is picked up by this 1s re-Prepare without any invalidation
+    // pass (stale styled scenes simply stop being asked for).
+    OutputStyleSpec style;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        style = activeStyle_;
+    }
+    return runtime_.Prepare(*builder_, rendering::RenderEngine::Instance(), style);
+}
+
+// ---------------------------------------------------------------------------
+// Output style (Settings · Styles applied to the on-air output)
+// ---------------------------------------------------------------------------
+Result<void> PresentationEngine::SetActiveOutputStyle(const OutputStyleSpec& style) {
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        changed = activeStyle_.name != style.name
+            || activeStyle_.contentType != style.contentType
+            || activeStyle_.templateKey != style.templateKey
+            || activeStyle_.backgroundColor != style.backgroundColor
+            || activeStyle_.clearBackgroundOnText != style.clearBackgroundOnText;
+        activeStyle_ = style;
+    }
+    if (!changed)
+        return Ok();   // a no-op push must not thrash the live scenes
+
+    // Wake the live loop: the revision bump is its signal to rebuild every
+    // compiled slide's scene under the new spec (RebuildScenes runs from the
+    // loop thread, legal while LIVE — no state bounce).
+    runtime_.AdvanceStyleRevision();
+    Logger::Instance().Info(
+        std::format("output style set: '{}' (bg '{}', layout '{}')",
+                    style.name, style.backgroundColor, style.templateKey),
+        "PresentationEngine");
+    return Ok();
+}
+
+OutputStyleSpec PresentationEngine::ActiveOutputStyle() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return activeStyle_;
 }
 
 // ---------------------------------------------------------------------------

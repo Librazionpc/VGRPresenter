@@ -40,6 +40,9 @@ ReferencePane {
         readonly property var reference: (book, ch, nums) => TheTableService.reference(book, ch, nums)
         readonly property var resolve: (text, srcId) => TheTableService.resolve(text)
         readonly property var search: (text, srcId) => TheTableService.search(text)
+        // ASYNC pill search: the pane prefers this when present (token-guarded,
+        // answers via TheTableService.searchResultsReady -> the pane's Connections).
+        readonly property var searchAsync: (text, srcId, token) => TheTableService.searchAsync(text, 60, token)
         readonly property var preview: (src, bookId, ch, nums) => TheTableService.preview(bookId, ch, nums)
         // The picked paragraphs as show slides, template-split by the tab's options.
         readonly property var slides: (src, bookId, ch, nums) => TheTableService.slides(bookId, ch, nums)
@@ -58,5 +61,8 @@ ReferencePane {
     Connections {
         target: TheTableService
         function onChanged() { pane.adapter.changed() }
+        // The async pill search's answer (searchAsync's token guard lives in
+        // the pane — applySearchResults drops stale tokens).
+        function onSearchResultsReady(token, rows) { pane.applySearchResults(token, rows) }
     }
 }

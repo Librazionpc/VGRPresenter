@@ -30,11 +30,13 @@ Item {
         function onRowsRemoved() { root.modelsRev++ }
     }
 
-    function styleUsage(styleIdx) {
+    // How many outputs wear the style — by the style's STABLE id (outputs
+    // reference styles by id; the old index reference died with reordering).
+    function styleUsage(styleId) {
         let count = 0
         const rows = OutputListModel.rowCount()
         for (let i = 0; i < rows; ++i) {
-            if (OutputListModel.getOutput(i).styleIndex === styleIdx)
+            if (OutputListModel.getOutput(i).styleId === styleId)
                 count++
         }
         return count
@@ -49,6 +51,7 @@ Item {
     property string editStyleContentType: "shows"
     property string editStyleTemplateKey: "lowerThird"
     property string editStyleBackgroundColor: "transparent"
+    property bool editStyleClearOnText: false
 
     function openEditStyle(index) {
         const data = StyleListModel.getStyle(index)
@@ -57,6 +60,7 @@ Item {
         root.editStyleContentType = data.contentType
         root.editStyleTemplateKey = data.templateKey
         root.editStyleBackgroundColor = data.backgroundColor
+        root.editStyleClearOnText = data.clearBackgroundOnText
     }
 
     function saveEditStyle() {
@@ -66,6 +70,7 @@ Item {
         StyleListModel.setContentType(root.editStyleIndex, root.editStyleContentType)
         StyleListModel.setTemplateKey(root.editStyleIndex, root.editStyleTemplateKey)
         StyleListModel.setBackgroundColor(root.editStyleIndex, root.editStyleBackgroundColor)
+        StyleListModel.setClearBackgroundOnText(root.editStyleIndex, root.editStyleClearOnText)
         root.editStyleIndex = -1
     }
 
@@ -172,6 +177,7 @@ Item {
                         delegate: Rectangle {
                             id: styleRow
                             required property int index
+                            required property string styleId
                             required property string name
                             required property string res
                             required property string contentType
@@ -189,7 +195,8 @@ Item {
                             readonly property var contentTypeInfo: ({
                                 shows: { label: qsTr("Shows"), color: "#9b8ff5", bg: "#2e6c5ce7" },
                                 media: { label: qsTr("Media"), color: "#5eead4", bg: "#2e14b8a6" },
-                                scripture: { label: qsTr("Scripture"), color: "#fbbf24", bg: "#2ef39c12" }
+                                scripture: { label: qsTr("Scripture"), color: "#fbbf24", bg: "#2ef39c12" },
+                                table: { label: qsTr("The Table"), color: "#4ae0b0", bg: "#2e4ae0b0" }
                             }[styleRow.contentType] ?? { label: styleRow.contentType, color: Theme.textMuted, bg: Theme.chip })
 
                             width: stylesCol.width
@@ -301,7 +308,7 @@ Item {
                                         // binding keeps this count honest.
                                         text: {
                                             root.modelsRev
-                                            const u = root.styleUsage(styleRow.index)
+                                            const u = root.styleUsage(styleRow.styleId)
                                             return "·  applied by " + u + (u === 1 ? " output" : " outputs")
                                         }
                                         color: Theme.textMuted
@@ -313,8 +320,8 @@ Item {
 
                             Rectangle {
                                 id: editStyleBtn
-                                anchors.right: parent.right
-                                anchors.rightMargin: 12
+                                anchors.right: duplicateStyleBtn.left
+                                anchors.rightMargin: 6
                                 anchors.verticalCenter: parent.verticalCenter
                                 height: 26
                                 width: editStyleLabel.implicitWidth + 18
@@ -340,6 +347,77 @@ Item {
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: root.openEditStyle(styleRow.index)
+                                }
+                            }
+
+                            // Duplicate — copies the theme (new stable id, "(copy)"
+                            // name); the fastest way to spin a variant off one.
+                            Rectangle {
+                                id: duplicateStyleBtn
+                                anchors.right: deleteStyleBtn.visible ? deleteStyleBtn.left : deleteStyleBtn.right
+                                anchors.rightMargin: 6
+                                anchors.verticalCenter: parent.verticalCenter
+                                height: 26
+                                width: duplicateStyleLabel.implicitWidth + 18
+                                radius: 13
+                                color: duplicateStyleArea.containsMouse ? Theme.chip : "transparent"
+                                border.color: Theme.border
+                                border.width: 1
+                                Behavior on color { ColorAnimation { duration: 100 } }
+
+                                Text {
+                                    id: duplicateStyleLabel
+                                    anchors.centerIn: parent
+                                    text: qsTr("Duplicate")
+                                    color: Theme.textSecondary
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.textXs
+                                    font.weight: Font.Medium
+                                }
+
+                                MouseArea {
+                                    id: duplicateStyleArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: StyleListModel.duplicateStyle(styleRow.index)
+                                }
+                            }
+
+                            // Delete — hidden while any output still points at the
+                            // style (the usage count above says the same thing): a
+                            // style an output wears can't go away silently. After
+                            // the last output is re-pointed to None, the row goes.
+                            Rectangle {
+                                id: deleteStyleBtn
+                                anchors.right: parent.right
+                                anchors.rightMargin: 12
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: root.styleUsage(styleRow.styleId) === 0
+                                height: 26
+                                width: deleteStyleLabel.implicitWidth + 18
+                                radius: 13
+                                color: deleteStyleArea.containsMouse ? Theme.chip : "transparent"
+                                border.color: Theme.border
+                                border.width: 1
+                                Behavior on color { ColorAnimation { duration: 100 } }
+
+                                Text {
+                                    id: deleteStyleLabel
+                                    anchors.centerIn: parent
+                                    text: qsTr("Delete")
+                                    color: Theme.dangerLight
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.textXs
+                                    font.weight: Font.Medium
+                                }
+
+                                MouseArea {
+                                    id: deleteStyleArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: StyleListModel.removeStyle(styleRow.index)
                                 }
                             }
                         }
@@ -401,7 +479,8 @@ Item {
                     model: [
                         { key: "shows", label: qsTr("Shows") },
                         { key: "media", label: qsTr("Media") },
-                        { key: "scripture", label: qsTr("Scripture") }
+                        { key: "scripture", label: qsTr("Scripture") },
+                        { key: "table", label: qsTr("The Table") }
                     ]
                     delegate: SelectableChip {
                         required property var modelData
@@ -469,8 +548,18 @@ Item {
                         onClicked: {
                             templatePicker.contentType = root.editStyleContentType
                             templatePicker.contentTypeLabel = {
-                                "shows": qsTr("Shows"), "media": qsTr("Media"), "scripture": qsTr("Scripture")
+                                "shows": qsTr("Shows"), "media": qsTr("Media"), "scripture": qsTr("Scripture"),
+                                "table": qsTr("The Table")
                             }[root.editStyleContentType] ?? qsTr("Shows")
+                            // The Table's templates live in the ENGINE catalog (the
+                            // same "table" category the tab's own picker lists), not
+                            // in this default list — hand them in, keyed by id, the
+                            // way ReferencePane does for its tabs.
+                            if (root.editStyleContentType === "table") {
+                                templatePicker.templates = TemplateLibraryService.designs("table").map((t) => ({
+                                    key: t.id, name: t.name, color: t.color
+                                }))
+                            }
                             templatePicker.selectedKey = root.editStyleTemplateKey
                             templatePicker.open = true
                         }
@@ -548,6 +637,41 @@ Item {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: styleBgModal.open = true
                     }
+                }
+            }
+
+            // FreeShow's clearStyleBackgroundOnText: slides that carry their own
+            // background keep it when this style is on air; plain text slides
+            // get the style's background. SettingsToggle is the pill only —
+            // label/description are built here like GeneralScreen's rows
+            // (controlled component: the dialog owns the state, the pill reports).
+            Row {
+                width: parent.width
+                spacing: Theme.space2
+
+                Column {
+                    width: parent.width - clearOnTextToggle.width - parent.spacing
+                    spacing: 1
+
+                    Text {
+                        text: qsTr("Let slides keep their own background")
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.textSm
+                    }
+                    Text {
+                        text: qsTr("Slides with their own background colour keep it; others get this style's.")
+                        color: Theme.textMuted
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.textXs
+                    }
+                }
+
+                SettingsToggle {
+                    id: clearOnTextToggle
+                    anchors.verticalCenter: parent.verticalCenter
+                    checked: root.editStyleClearOnText
+                    onToggled: root.editStyleClearOnText = !root.editStyleClearOnText
                 }
             }
         }

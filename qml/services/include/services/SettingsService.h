@@ -15,6 +15,10 @@
 class QQmlEngine;
 class QJSEngine;
 
+namespace bps::presentation {
+struct OutputStyleSpec;
+}
+
 // The UI's window onto the ENGINE's settings (bps::settings::AppSettings - Settings > General and Smart Config), its hardware
 // report, and its backups / crash-recovery store. The engine owns everything that matters: what can be set, the defaults, the
 // allowed values, the checks, the file, and what a setting means for the rest of the engine. This class hands that to QML and
@@ -47,6 +51,9 @@ class SettingsService : public QObject
 
 public:
     static SettingsService &instance();
+    // The instance() reference is the QML singleton; the output models boot
+    // before QML constructs it, so they use this null-safe pointer form.
+    static SettingsService *instancePtr() { return s_instance; }
     static SettingsService *create(QQmlEngine *engine, QJSEngine *jsEngine);
 
     bool ready() const { return settings_ != nullptr; }
@@ -80,6 +87,12 @@ public:
     // The Table's slide-builder options (the "table." keys).
     bps::presentation::ScriptureSettings theTableSettings() const;
 
+    // ---- Output style (Settings · Styles applied to the on-air output) ----
+    // Bridges OutputListModel's UI state into the engine's live render loop
+    // (PresentationEngine::SetActiveOutputStyle). Safe to call before boot —
+    // a not-yet-running engine simply has nothing to push to.
+    void setActiveOutputStyle(const bps::presentation::OutputStyleSpec &spec);
+
     // Whether a file is there (the last show may have been moved or deleted since the app was closed).
     Q_INVOKABLE bool fileExists(const QString &path) const;
 
@@ -106,6 +119,7 @@ signals:
 
 private:
     explicit SettingsService(QObject *parent = nullptr);
+    static SettingsService *s_instance;
     void load();
     void refreshValues();
     void applyLaunchAtLogin();

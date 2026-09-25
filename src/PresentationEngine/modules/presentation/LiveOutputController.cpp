@@ -157,10 +157,22 @@ Result<void> LiveOutputController::StopLive() {
 void LiveOutputController::Loop() {
     auto last = std::chrono::steady_clock::now();
     double syncAccum = 0.0;
+    uint64_t styleRevision = pres_ ? pres_->Runtime().StyleRevision() : 0;
     while (running_.load()) {
         const auto now = std::chrono::steady_clock::now();
         double dt = std::chrono::duration<double>(now - last).count();
         last = now;
+
+        // Style changes land within one frame (FreeShow's reactive
+        // output.style): the UI pushes a spec, PresentationEngine bumps the
+        // runtime's revision, and the rebuild happens here on the loop
+        // thread — legal while LIVE (no state-machine bounce).
+        if (pres_ && pres_->Runtime().StyleRevision() != styleRevision) {
+            styleRevision = pres_->Runtime().StyleRevision();
+            (void)pres_->Runtime().RebuildScenes(pres_->Builder(),
+                                                 rendering::RenderEngine::Instance(),
+                                                 pres_->ActiveOutputStyle());
+        }
 
         syncAccum += dt;
         if (syncAccum >= kSyncSeconds) {
@@ -216,9 +228,15 @@ Result<void> LiveOutputController::SyncWithDocument() {
 std::string LiveOutputController::CurrentSceneId() const {
     if (!pres_) return {};
     const presentation::Slide* slide = pres_->CurrentSlide();
-    const presentation::Presentation* active = pres_->Runtime().ActivePresentation();
-    if (!slide || !active) return {};
-    return presentation::SceneBuilder::SceneIdFor(*active, *slide);
+    if (!slide) return {};
+    // The COMPILED slide's sceneId — the one Prepare/RebuildScenes wrote
+    // (it carries the output-style fingerprint). Deriving the plain id here
+    // instead would ignore the style entirely (and, since styled scenes are
+    // fingerprinted, point at a scene that was never built).
+    for (const auto& cs : pres_->Runtime().Compiled().slides)
+        if (cs.slideId == slide->id)
+            return cs.sceneId;
+    return {};
 }
 
 Result<void> LiveOutputController::RenderOnce() {
@@ -228,14 +246,15 @@ Result<void> LiveOutputController::RenderOnce() {
     // Advance playback (cues, auto-advance) by the real frame time.
     (void)pres_->Runtime().Tick(kFrameSeconds);
 
-    // Render the current slide's scene. Scenes were prepared per compiled
-    // slide; the runtime knows both the active presentation and the index.
+    // Render the current slide's scene. The compiled set maps the current
+    // slide to its PREPARED scene id (style fingerprint included); a slide
+    // missing from the compiled set (hidden, or edited in mid-show before the
+    // next sync) simply renders nothing this frame — same as before.
     const presentation::Presentation* active = pres_->Runtime().ActivePresentation();
     if (!active) return Ok();
     const size_t idx = pres_->CurrentIndex();
-    if (idx >= active->slides.size()) return Ok();
-    const std::string sceneId =
-        presentation::SceneBuilder::SceneIdFor(*active, active->slides[idx]);
+    if (idx >= pres_->Runtime().Compiled().slides.size()) return Ok();
+    const std::string sceneId = pres_->Runtime().Compiled().slides[idx].sceneId;
 
     rendering::RenderOptions opts;
     opts.distribute = true;   // -> every enabled output -> Telemetry output meter

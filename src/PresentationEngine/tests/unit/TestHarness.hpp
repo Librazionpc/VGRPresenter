@@ -168,3 +168,4 @@ namespace sc = bps::scene;
 namespace bb = bps::bible;
 namespace sn = bps::song;
 namespace fa = bps::automation;
+namespace proj = bps::project;

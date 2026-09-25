@@ -246,6 +246,30 @@ struct Presentation {
     std::chrono::system_clock::time_point modifiedAt;
 };
 
+// --- Output style (Settings · Styles applied to the on-air output) -------------
+// FreeShow's Styles (src/types/Settings.ts): a named "theme" an OUTPUT renders
+// with — a background colour and a forced text layout that override whatever the
+// slide alone would do. The UI owns the roster (StyleListModel, persisted
+// through the kernel's StyleStore); the engine only ever sees the ONE spec for
+// the output that is on air, so live-editing a style restyles every frame the
+// moment the UI pushes it (PresentationEngine::SetActiveOutputStyle).
+struct OutputStyleSpec {
+    std::string name;                        // diagnostics only
+    // "shows" | "media" | "scripture" | "table" — which content the style is
+    // meant for (informational; layout follows templateKey).
+    std::string contentType;
+    // Layout preset key — StyleBuilder::LayoutFor knows these ("lowerThird",
+    // "title", "sidebar", "bottomBar", "fullscreen", or an engine design id;
+    // unknown keys fall back to the builder's default full layout).
+    std::string templateKey;
+    // "#aarrggbb" / "#rrggbb" / "transparent" — the on-air background. Empty
+    // string = the spec carries no background (leave the slide's own).
+    std::string backgroundColor;
+    // FreeShow's clearStyleBackgroundOnText: when the slide itself carries a
+    // background colour, the style's background steps aside for it.
+    bool clearBackgroundOnText = false;
+};
+
 // --- Validation issues (docs/specs/19 §Validator) -----------------------------
 struct ValidationIssue {
     std::string slideId;

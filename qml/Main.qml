@@ -29,6 +29,7 @@ ApplicationWindow {
     // is accepted but doesn't switch the view.
     property string currentView: "show"
     property real selfTestT6: 0   // (self-test probe timing scratch)
+    property real selfTestPillT: 0   // (stage 6c pill-search timing scratch)
     // The window-level layer that carries a drag between panes (DragSource / DropArea); see DragLayer.qml.
     readonly property var dragLayer: dragLayerItem
 
@@ -451,6 +452,37 @@ ApplicationWindow {
                         glowBad.length ? "SWALLOWED: " + glowBad.slice(0, 3).join(" | ")
                                        : "(word positions: " + detail.slice(0, 4).join(", ") + ")")
             SelfTest.grab("", "shot_glow_then_friends.png")
+            selfTestStage6c.restart()
+        }
+    }
+    // Stage 6c: The Table PILL search, now ASYNC (the Quick-search pattern).
+    // runSearch must return in ~0 GUI time (the heavy scan is on a worker
+    // thread) and the rows must arrive via the token-guarded signal.
+    Timer {
+        id: selfTestStage6c
+        interval: 1800
+        onTriggered: {
+            console.log("[SELFTEST] stage 6c: The Table pill search (async) — 'then friend'")
+            const pane = SelfTest.findItem("selfTestTablePane")
+            if (!pane) { console.log("[SELFTEST] stage 6c: pane NOT FOUND"); selfTestStage7.restart(); return }
+            window.selfTestPillT = Date.now()
+            const disp0 = Date.now()
+            pane.runSearch("then friend")
+            console.log("[SELFTEST] stage 6c: runSearch dispatched in", (Date.now() - disp0) + "ms (GUI thread — must be ~0)")
+            selfTestPillCheck.restart()
+        }
+    }
+    Timer {
+        id: selfTestPillCheck
+        interval: 1500
+        onTriggered: {
+            const pane = SelfTest.findItem("selfTestTablePane")
+            if (!pane) { selfTestStage7.restart(); return }
+            const n = pane.searchResults ? pane.searchResults.length : -1
+            const first = n > 0 ? pane.searchResults[0].reference : "none"
+            console.log("[SELFTEST] stage 6c-results:", n, "rows, first:", first,
+                        "— arrived", (Date.now() - window.selfTestPillT) + "ms after dispatch",
+                        n > 0 && String(pane.searchResults[0].snippet || "").indexOf("Then, friends") >= 0 ? "(verbatim lead)" : "")
             selfTestStage7.restart()
         }
     }
