@@ -2,6 +2,7 @@
 
 #include <QAbstractListModel>
 #include <QList>
+#include <QTimer>
 #include <QVariantMap>
 #include <qqml.h>
 
@@ -33,8 +34,8 @@ struct AudioInputItem
     // Stable identity — survives row removals (rows after it shift; this
     // doesn't). BusListModel routes key graph edges on it, and the routing
     // matrix stores bus numbers against it, so neither follows row order.
-    // Assigned at add/duplicate time; never persisted (rosters are
-    // session-owned) and never shown.
+    // Assigned at add/duplicate time; PERSISTED with the roster (so a
+    // restored row keeps its graph routes) but never shown.
     QString id;
     QString name;
     // "device" | "media" — a real sound device (mic, line in, system/output
@@ -56,10 +57,16 @@ struct AudioInputItem
     // stepper). 0..1000, step 10 in the UI.
     int delayMs = 0;
     // Channel count — defaults to 2 (the reference's two channel rows);
-    // drives the dialogs' Channels block rows and the signal monitor's
-    // strip count (1 = mono, 2 = L/R stereo). Not user-adjustable in the
-    // dialogs — a device's real channel count belongs to the engine.
+    // drives the dialogs' Channels block rows. A live meter tap's layout
+    // (mono/stereo/N) overrides it for DISPLAY while metering; this stored
+    // count is the fallback for non-device rows and when nothing meters.
     int channels = 2;
+    // Per-channel gain faders (0..1, index = channel row; default 1 = unity
+    // for every channel the roster knows about) — the green knobs in the
+    // dialogs' channel rows. Display-side gain today (scaled into the
+    // channel meters, see ProAudioForm); the engine applies it as real DSP
+    // once per-channel gain lands in the graph.
+    QList<qreal> channelGains;
     // Routing matrix (the Routing… modal): per-input-channel lists of BUS
     // NUMBERS (BusItem::id — stable) that channel feeds, NOT row indices —
     // rows shift on removal, bus numbers don't. QML still passes/receives
@@ -107,6 +114,7 @@ public:
         ModeRole,
         DelayMsRole,
         ChannelsRole,
+        ChannelGainsRole,
         RoutingAutoRole,
         RoutingRole,
         EffectsRole,
@@ -141,6 +149,9 @@ public:
     Q_INVOKABLE void setMode(int index, int mode);
     Q_INVOKABLE void setDelayMs(int index, int delayMs);
     Q_INVOKABLE void setChannels(int index, int channels);
+    // Per-channel gain fader (0..1, clamped) — the channel row's knob.
+    Q_INVOKABLE void setChannelGain(int index, int channel, qreal gain);
+    Q_INVOKABLE qreal channelGain(int index, int channel) const;
 
     // Routing matrix — the Routing… modal's data. getRouting returns
     // { auto, channels, buses, routes } in one read (buses are BusListModel
@@ -166,9 +177,24 @@ public:
     // OutputListModel::getOutput / StyleListModel::getStyle.
     Q_INVOKABLE QVariantMap getInput(int index) const;
 
+    // ---- Roster persistence ---------------------------------------------
+    // The whole roster (rows + their settings + stable ids) as a JSON string
+    // for the settings store (session.audioRoster), and restore from it.
+    // saveRoster is debounced (a dragging fader fires dozens of writes); the
+    // destructor flushes any pending save. Restore is idempotent and returns
+    // the number of rows rehydrated; ids are preserved so restored rows keep
+    // their graph routes (asrc:<id> edges survive because BusListModel's
+    // restore re-links by the same ids).
+    Q_INVOKABLE void saveRoster();
+    Q_INVOKABLE int restoreRoster();
+
 private:
     static inline AudioInputListModel *s_instance = nullptr;
 
     QList<AudioInputItem> m_inputs;
-    int m_nextId = 1;   // stable-id counter ("a<n>"): unique for the whole session; restarts each launch (rosters aren't persisted)
+    int m_nextId = 1;   // stable-id counter ("a<n>"); seeded past the restored roster's highest id
+    QTimer *saveTimer_ = nullptr;   // debounce for saveRoster()
+    void scheduleSave();            // bump the debounce (every mutation calls this)
+    QString serializeRoster() const;
+    void queueRosterWrite();        // one line through the settings store
 };

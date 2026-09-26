@@ -832,9 +832,12 @@ void TestRenderStress() {
 #include <zlib.h>
 #endif
 
+#ifdef BPS_HAVE_ZLIB
 // Builds a minimal valid PNG (RGBA8, no interlace, unfiltered scanlines) from
 // raw pixels using zlib's deflate, then decodes it with PngCodec to prove the
-// full encode -> decode round trip.
+// full encode -> decode round trip. (Whole definition guarded: it is the only
+// user of zlib here, and a bare definition in a zlib-less build failed to
+// compile — crc32/uLongf undeclared.)
 static std::vector<uint8_t> MakeTestPng(int w, int h,
                                         const std::vector<uint32_t>& rgba) {
     std::vector<uint8_t> out = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
@@ -882,6 +885,7 @@ static std::vector<uint8_t> MakeTestPng(int w, int h,
     chunk("IEND", nullptr, 0);
     return out;
 }
+#endif   // BPS_HAVE_ZLIB
 
 void TestPngCodec() {
     namespace r = bps::rendering;

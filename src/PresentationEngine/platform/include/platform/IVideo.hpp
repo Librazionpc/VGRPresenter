@@ -4,12 +4,17 @@
 // capture cards) and their REAL capabilities — per-mode frame sizes and the
 // frame rates each mode actually runs at, plus the device-wide max frame
 // rate the UI gates its pickers against (anything faster is offered greyed
-// out / rejected). Mode *selection* and streaming belong to the future
-// capture feature module; this interface is discovery-only, same scope as
-// IAudio (enumerate + defaults/fingerprint, no I/O).
+// out / rejected).
+//
+// Preview taps (added 2026-09-26): a per-device SOURCE READER tap delivers
+// small JPEG frames at ~15 fps for the dialogs' preview panes — real video
+// I/O, deliberately scoped: no mode negotiation beyond the reader's native
+// type, no rendering pipeline, frames die at the JPEG. Backends without
+// capture support keep the discovery surface and return Unsupported.
 
 #include "core/common/Common.hpp"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -43,6 +48,40 @@ public:
     // Stable summary of the current device set (ids) — the Kernel's platform
     // watcher compares successive values for capture hot-plug events.
     virtual std::string Fingerprint() const = 0;
+
+    // ---- Preview taps ---------------------------------------------------
+    // deviceId is the device's own id (VideoDeviceInfo::id — the symbolic
+    // link string on Windows, NOT a positional index: cameras hot-plug).
+
+    // Begin previewing the named capture device. Real MF Source Reader on
+    // Windows: the device's native media type, ~15 fps drain, frames
+    // converted to JPEG (downscaled where the driver allows). Idempotent:
+    // a second Start on a running tap is a no-op. NotFound when the device
+    // doesn't exist, Unsupported on platforms without capture support.
+    virtual Result<void> StartPreview(const std::string &deviceId)
+    {
+        (void)deviceId;
+        return Error::Make(Err::Unsupported, "Video",
+                           "video preview is not implemented on this platform");
+    }
+    // Stop capturing and release the tap. Idempotent; stopping an unknown
+    // device is Ok (nothing to do).
+    virtual Result<void> StopPreview(const std::string &deviceId)
+    {
+        (void)deviceId;
+        return Error::Make(Err::Unsupported, "Video",
+                           "video preview is not implemented on this platform");
+    }
+    // The newest preview frame as JPEG bytes (already downscaled for a
+    // dialog pane, ~480px wide). Empty vector = no tap or no frame yet (the
+    // UI keeps showing the placeholder glyph).
+    virtual std::vector<uint8_t> PreviewFrame(const std::string &deviceId)
+    {
+        (void)deviceId;
+        return {};
+    }
+    // Devices with a live preview tap (drives any future frame pump).
+    virtual std::vector<std::string> ActivePreviews() const { return {}; }
 };
 
 } // namespace bps::platform

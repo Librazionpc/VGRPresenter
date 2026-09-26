@@ -50,7 +50,7 @@
 | `IProcess` | `IProcess.hpp` | Start/Wait/ExitCode/Kill/Terminate/IsRunning, `Restart`, `CurrentProcessId`, environment get/set |
 | `ILibrary` | `ILibrary.hpp` | Load/Unload/Reload/Symbol, `IsLoaded`, `LastError` (dlopen / `LoadLibraryW` errors) |
 | `IMonitor` | `IMonitor.hpp` | Enumerate monitors (id, name, resolution, refresh, DPI, orientation, HDR, primary, connected), `Primary`, `DefaultMonitorId` |
-| `IAudio` | `IAudio.hpp` | Enumerate devices (id, name, input/output, default, sample rate, channels), `DefaultOutput`, `DefaultInput`, `Fingerprint` (hot-plug) |
+| `IAudio` | `IAudio.hpp` | Enumerate devices (id, name, input/output, default, sample rate, channels), `DefaultOutput`, `DefaultInput`, `Fingerprint` (hot-plug), input metering: `StartInputMeter`/`StopInputMeter`/`InputLevels`/`ActiveInputMeters` — a real WASAPI capture tap per metered input (shared-mode mix format, ~50 ms peak/RMS windows, per-channel, mono/stereo/multi layout) |
 | `INetwork` | `INetwork.hpp` | Hostname, adapters (name/MAC/IPv4/IPv6/up/loopback), `IpAddress`, `Gateway`, `DnsServers`, `Proxy`, `InternetAvailable` |
 | `IPower` | `IPower.hpp` | `Current()` — battery percent, on-battery, charging |
 | `IClipboard` | `IClipboard.hpp` | `ReadText`/`WriteText`, `GetFiles`/`SetFiles` (file lists: `text/uri-list`, `CF_HDROP`) |

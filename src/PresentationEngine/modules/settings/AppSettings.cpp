@@ -157,6 +157,11 @@ std::vector<SettingDef> BuildDefinitions() {
     // Quick search's pick memory: the results the user chose before, as a JSON
     // array — a picked result floats to the top of its group on the next search.
     d.push_back(Text("session.quickSearchPicks", "session", "Quick search picks"));
+    // The audio board's roster (Settings · Audio & Video): every input row
+    // with its device/name/level/mute/mode/delay/channel count/gains, as a
+    // JSON array written by AudioInputListModel (debounced) so the board
+    // comes back between runs instead of starting empty every launch.
+    d.push_back(Text("session.audioRoster", "session", "Audio roster"));
     // The slide grid on the Show screen's centre page (FreeShow's slidesOptions): slides across, and how they are laid out.
     d.push_back(IntRange("session.slideColumns", "session", "Slides across", 4, 2, 10));
     d.push_back(Choice("session.slideView", "session", "Slide view", "grid", {

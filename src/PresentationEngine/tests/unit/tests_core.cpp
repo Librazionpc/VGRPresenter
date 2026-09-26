@@ -3,6 +3,10 @@
 //   ./bps_unit_tests core
 #include "TestHarness.hpp"
 
+#include <chrono>
+#include <string_view>
+#include <thread>
+
 void TestResult() {
     Result<int> ok(42);
     CHECK(ok.ok());
@@ -837,6 +841,72 @@ void TestPal() {
     auto defIn = audio.DefaultInput();
     CHECK(defIn.ok() || defIn.error().code == Err::NotFound);
     CHECK(!audio.Fingerprint().empty() || (!sawInput && !sawOutput));   // fingerprint or no devices
+
+    // --- Input metering (IAudio capture tap; see the metering section of
+    // IAudio.hpp) — contract holds on every backend: unknown ids fail with
+    // NotFound (Windows) or Unsupported (no tap), levels for untapped
+    // devices are the all-zero "no signal" snapshot, and start/stop cycle
+    // cleanly without leaking threads. On a machine WITH input devices this
+    // also runs the real WASAPI tap briefly and accepts silence (a muted or
+    // unplugged mic is still a working meter). The 'none' device id can't be
+    // expressed as wavein:<n>, so the Windows path rejects it with NotFound.
+    {
+        auto& a = audio;
+        const auto none = a.InputLevels(12345);
+        CHECK(none.channelCount == 0 && none.framesCaptured == 0);
+        auto stopStray = a.StopInputMeter(12345);
+        CHECK(stopStray.ok());   // stopping an untapped id is a no-op
+        // Layout classification (pure, host-independent).
+        using IL = p::IAudio::InputMeterLevels;
+        using CL = p::IAudio::ChannelLayout;   // enum lives on IAudio itself
+        CHECK(IL::LayoutFor(0) == CL::None);
+        CHECK(IL::LayoutFor(1) == CL::Mono);
+        CHECK(IL::LayoutFor(2) == CL::Stereo);
+        CHECK(IL::LayoutFor(8) == CL::Multi);
+        CHECK(std::string_view(IL::ToString(CL::Mono)) == "mono");
+        CHECK(std::string_view(IL::ToString(CL::Stereo)) == "stereo");
+        // With no devices there is nothing more to exercise; with devices,
+        // the first input id must round-trip through start/stop (and may
+        // fail with Unsupported on backends without a tap).
+        if (sawInput) {
+            std::string firstIn;
+            for (const auto& d : a.Enumerate())
+                if (d.isInput) { firstIn = d.id; break; }
+            const uint32_t devNo = std::stoul(firstIn.substr(firstIn.find(':') + 1));
+            const auto started = a.StartInputMeter(devNo);
+            CHECK(started.ok() || started.error().code == Err::Unsupported
+                  || started.error().code == Err::NotFound);
+            if (started.ok()) {
+                // The tap must resolve its endpoint + start the client before
+                // the first analysis window publishes; poll briefly instead of
+                // assuming a fixed delay. A machine with no ACTIVE capture
+                // endpoint (legacy-only WinMM rosters, disabled mic) never
+                // produces data — an honest "no signal", not a failure.
+                p::IAudio::InputMeterLevels lv;
+                for (int ms = 0; ms < 1000; ms += 25) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                    lv = a.InputLevels(devNo);
+                    if (lv.framesCaptured > 0)
+                        break;
+                }
+                if (lv.framesCaptured > 0) {
+                    // Data IS flowing: every snapshot invariant must hold.
+                    CHECK(lv.channelCount >= 1
+                          && lv.channelCount <= p::IAudio::kMaxInputMeterChannels);
+                    CHECK(lv.layout != p::IAudio::ChannelLayout::None);
+                    for (int c = 0; c < lv.channelCount; ++c) {
+                        CHECK(lv.peaks[c] >= 0.f && lv.peaks[c] <= 1.f);
+                        CHECK(lv.rms[c] >= 0.f && lv.rms[c] <= lv.peaks[c] + 1e-4f);
+                    }
+                } else {
+                    CHECK(lv.channelCount == 0);   // the honest "no signal" shape
+                }
+                CHECK(a.StopInputMeter(devNo).ok());
+                CHECK(a.InputLevels(devNo).channelCount == 0);   // tap released
+            }
+            (void)firstIn;
+        }
+    }
 
     // --- Input devices (DoD §11) ---
     auto& input = plat.Input();

@@ -1,6 +1,12 @@
 #include "AudioInputListModel.h"
 
 #include "BusListModel.h"
+#include "services/EngineBridge.h"
+#include "services/SettingsService.h"
+
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 
 #include <algorithm>
 
@@ -57,12 +63,33 @@ AudioInputListModel::AudioInputListModel(QObject *parent)
     // Routes key on each row's STABLE id (asrc:<id> graph nodes), never its row.
     // BusListModel does CACHE routes as roster rows for QML, so a removal
     // (which shifts rows) ends with BusListModel::refreshRoutes() — see
-    // removeInput. Ids restart at a1 every launch: BusListModel prunes the
-    // previous session's asrc:/vsrc: nodes at startup so they can't be inherited.
+    // removeInput. The roster (rows + settings + matrix) persists via
+    // session.audioRoster; board routing is still re-pruned at startup
+    // (BusListModel prunes every asrc:/vsrc: node — unchanged by design).
+    //
+    // Restore must wait for the OTHER QML singletons: singleton construction
+    // order follows QML import order, so SettingsService may not exist when
+    // this model is built — restoreRoster would no-op and the board would
+    // start empty for the whole session. Retry on the event loop (0ms, then
+    // every 100ms up to ~2s) until the store is reachable; every attempt is
+    // a no-op once the roster is non-empty, so a late retry can never
+    // clobber rows the user already added.
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        QTimer::singleShot(attempt == 0 ? 0 : 100, this, [this]() {
+            if (m_inputs.isEmpty())
+                restoreRoster();
+        });
+    }
 }
 
 AudioInputListModel::~AudioInputListModel()
 {
+    // Flush any debounced save before dying — the last fader move must not
+    // be lost to the 400 ms window (writes are cheap; losing them isn't).
+    if (saveTimer_ && saveTimer_->isActive()) {
+        saveTimer_->stop();
+        queueRosterWrite();
+    }
     if (s_instance == this)
         s_instance = nullptr;
 }
@@ -106,6 +133,11 @@ QVariant AudioInputListModel::data(const QModelIndex &index, int role) const
     case ModeRole: return item.mode;
     case DelayMsRole: return item.delayMs;
     case ChannelsRole: return item.channels;
+    case ChannelGainsRole: {
+        QVariantList gains;
+        for (qreal g : item.channelGains) gains.append(g);
+        return gains;
+    }
     case RoutingAutoRole: return item.routingAuto;
     case RoutingRole: {
         QVariantList perChannel;
@@ -137,6 +169,7 @@ QHash<int, QByteArray> AudioInputListModel::roleNames() const
         { ModeRole, "mode" },
         { DelayMsRole, "delayMs" },
         { ChannelsRole, "channels" },
+        { ChannelGainsRole, "channelGains" },
         { RoutingAutoRole, "routingAuto" },
         { RoutingRole, "routing" },
         { EffectsRole, "effects" },
@@ -153,6 +186,7 @@ void AudioInputListModel::addInput()
     added.effects = defaultEffects();
     m_inputs.append(added);
     endInsertRows();
+    scheduleSave();
 }
 
 void AudioInputListModel::removeInput(int index)
@@ -170,6 +204,7 @@ void AudioInputListModel::removeInput(int index)
     beginRemoveRows(QModelIndex(), index, index);
     m_inputs.removeAt(index);
     endRemoveRows();
+    scheduleSave();
 
     // Rows after `index` just shifted up; the buses cache routes as ROWS, so
     // re-derive them (the graph edges themselves are untouched).
@@ -195,6 +230,7 @@ int AudioInputListModel::duplicateInput(int index)
     copy.channelRoutes.clear();
     m_inputs.append(copy);
     endInsertRows();
+    scheduleSave();
     return row;
 }
 
@@ -209,6 +245,7 @@ void AudioInputListModel::renameInput(int index, const QString &name)
     m_inputs[index].name = trimmed;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { NameRole });
+    scheduleSave();
 }
 
 void AudioInputListModel::setKind(int index, const QString &kind)
@@ -221,6 +258,7 @@ void AudioInputListModel::setKind(int index, const QString &kind)
     m_inputs[index].kind = kind;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { KindRole });
+    scheduleSave();
 }
 
 void AudioInputListModel::setSublabel(int index, const QString &sublabel)
@@ -233,6 +271,7 @@ void AudioInputListModel::setSublabel(int index, const QString &sublabel)
     m_inputs[index].sublabel = sublabel;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { SublabelRole });
+    scheduleSave();
 }
 
 void AudioInputListModel::setLevel(int index, qreal level)
@@ -246,6 +285,7 @@ void AudioInputListModel::setLevel(int index, qreal level)
     m_inputs[index].level = clamped;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { LevelRole });
+    scheduleSave();
 }
 
 void AudioInputListModel::setMuted(int index, bool muted)
@@ -258,6 +298,7 @@ void AudioInputListModel::setMuted(int index, bool muted)
     m_inputs[index].muted = muted;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { MutedRole });
+    scheduleSave();
 }
 
 void AudioInputListModel::setMode(int index, int mode)
@@ -271,6 +312,7 @@ void AudioInputListModel::setMode(int index, int mode)
     m_inputs[index].mode = clamped;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { ModeRole });
+    scheduleSave();
 }
 
 void AudioInputListModel::setDelayMs(int index, int delayMs)
@@ -284,6 +326,7 @@ void AudioInputListModel::setDelayMs(int index, int delayMs)
     m_inputs[index].delayMs = clamped;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { DelayMsRole });
+    scheduleSave();
 }
 
 void AudioInputListModel::setChannels(int index, int channels)
@@ -297,6 +340,164 @@ void AudioInputListModel::setChannels(int index, int channels)
     m_inputs[index].channels = clamped;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { ChannelsRole });
+    scheduleSave();
+}
+
+void AudioInputListModel::setChannelGain(int index, int channel, qreal gain)
+{
+    if (index < 0 || index >= m_inputs.size() || channel < 0 || channel >= 8)
+        return;
+    const qreal clamped = std::clamp(gain, 0.0, 1.0);
+    QList<qreal> &gains = m_inputs[index].channelGains;
+    while (gains.size() <= channel)
+        gains.append(1.0);   // absent = unity
+    if (qFuzzyCompare(gains[channel], clamped))
+        return;
+    gains[channel] = clamped;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { ChannelGainsRole });
+    scheduleSave();   // debounced — a dragged knob coalesces into one write
+}
+
+qreal AudioInputListModel::channelGain(int index, int channel) const
+{
+    if (index < 0 || index >= m_inputs.size() || channel < 0)
+        return 1.0;
+    const QList<qreal> &gains = m_inputs[index].channelGains;
+    return channel < gains.size() ? gains.at(channel) : 1.0;
+}
+
+// ---- Roster persistence (session.audioRoster via the settings store) ------
+
+void AudioInputListModel::scheduleSave()
+{
+    if (!saveTimer_) {
+        saveTimer_ = new QTimer(this);
+        saveTimer_->setSingleShot(true);
+        saveTimer_->setInterval(400);
+        connect(saveTimer_, &QTimer::timeout, this, [this]() { queueRosterWrite(); });
+    }
+    saveTimer_->start();
+}
+
+QString AudioInputListModel::serializeRoster() const
+{
+    QJsonArray rows;
+    for (const AudioInputItem &it : m_inputs) {
+        QJsonArray gains;
+        for (qreal g : it.channelGains) gains.append(g);
+        QJsonArray routes;
+        for (const QList<int> &cell : it.channelRoutes) {
+            QJsonArray buses;
+            for (int b : cell) buses.append(b);
+            routes.append(buses);
+        }
+        QJsonArray effects;
+        for (const AudioEffect &e : it.effects) {
+            effects.append(QJsonObject{
+                { "key", e.key }, { "enabled", e.enabled }, { "value", e.value },
+            });
+        }
+        rows.append(QJsonObject{
+            { "id", it.id },
+            { "name", it.name },
+            { "kind", it.kind },
+            { "sublabel", it.sublabel },
+            { "level", it.level },
+            { "muted", it.muted },
+            { "mode", it.mode },
+            { "delayMs", it.delayMs },
+            { "channels", it.channels },
+            { "gains", gains },
+            { "routingAuto", it.routingAuto },
+            { "routes", routes },
+            { "effects", effects },
+        });
+    }
+    return QString::fromUtf8(QJsonDocument(rows).toJson(QJsonDocument::Compact));
+}
+
+void AudioInputListModel::queueRosterWrite()
+{
+    SettingsService *settings = SettingsService::instancePtr();
+    if (!settings || !EngineBridge::instance().booted())
+        return;   // engine gone (shutdown) or settings not ready — nothing to write to
+    settings->setValue(QStringLiteral("session.audioRoster"), serializeRoster());
+}
+
+void AudioInputListModel::saveRoster()
+{
+    if (saveTimer_)
+        saveTimer_->stop();
+    queueRosterWrite();
+}
+
+int AudioInputListModel::restoreRoster()
+{
+    SettingsService *settings = SettingsService::instancePtr();
+    if (!settings || !EngineBridge::instance().booted())
+        return 0;
+    const QString blob = settings->value(QStringLiteral("session.audioRoster")).toString();
+    if (blob.isEmpty())
+        return 0;
+    const QJsonDocument doc = QJsonDocument::fromJson(blob.toUtf8());
+    if (!doc.isArray())
+        return 0;
+
+    const QJsonArray rows = doc.array();
+    if (rows.isEmpty())
+        return 0;
+    beginResetModel();
+    m_inputs.clear();
+    int nextId = 1;
+    for (const QJsonValue &rv : rows) {
+        const QJsonObject o = rv.toObject();
+        AudioInputItem it;
+        it.id = o.value(QStringLiteral("id")).toString();
+        it.name = o.value(QStringLiteral("name")).toString();
+        it.kind = o.value(QStringLiteral("kind")).toString(QStringLiteral("device"));
+        it.sublabel = o.value(QStringLiteral("sublabel")).toString();
+        it.level = o.value(QStringLiteral("level")).toDouble();
+        it.muted = o.value(QStringLiteral("muted")).toBool();
+        it.mode = std::clamp(o.value(QStringLiteral("mode")).toInt(), 0, 3);
+        it.delayMs = std::clamp(o.value(QStringLiteral("delayMs")).toInt(), 0, 1000);
+        it.channels = std::clamp(o.value(QStringLiteral("channels")).toInt(2), 1, 8);
+        for (const QJsonValue &g : o.value(QStringLiteral("gains")).toArray())
+            it.channelGains.append(std::clamp(g.toDouble(1.0), 0.0, 1.0));
+        it.routingAuto = o.value(QStringLiteral("routingAuto")).toBool();
+        for (const QJsonValue &cell : o.value(QStringLiteral("routes")).toArray()) {
+            QList<int> buses;
+            for (const QJsonValue &b : cell.toArray()) buses.append(b.toInt());
+            it.channelRoutes.append(buses);
+        }
+        // Effects: enable/value restored over the DEFAULT template, so a
+        // future effect added in code keeps its range/label metadata.
+        it.effects = defaultEffects();
+        const QJsonObject savedFx = o.value(QStringLiteral("effects")).toObject();
+        for (AudioEffect &e : it.effects) {
+            if (savedFx.contains(e.key)) {
+                const QJsonObject se = savedFx.value(e.key).toObject();
+                e.enabled = se.value(QStringLiteral("enabled")).toBool(e.enabled);
+                e.value = std::clamp(se.value(QStringLiteral("value")).toDouble(e.value),
+                                     e.minValue, e.maxValue);
+            }
+        }
+            // Ids: keep the saved one; renumber only broken/missing entries.
+        if (it.id.isEmpty())
+            it.id = QStringLiteral("a%1").arg(m_nextId);
+        bool okNum = false;
+        const int num = it.id.mid(1).toInt(&okNum);
+        if (okNum)
+            nextId = std::max(nextId, num + 1);
+        m_inputs.append(it);
+    }
+    m_nextId = std::max(m_nextId, nextId);
+    endResetModel();
+
+    // The buses' cached routes may reference restored rows by id — re-derive.
+    if (BusListModel *buses = BusListModel::Instance())
+        buses->refreshRoutes();
+    return m_inputs.size();
 }
 
 QVariantMap AudioInputListModel::getRouting(int index) const
@@ -334,6 +535,7 @@ void AudioInputListModel::setRoutingAuto(int index, bool auto_)
     m_inputs[index].routingAuto = auto_;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { RoutingAutoRole });
+    scheduleSave();
 }
 
 void AudioInputListModel::toggleChannelRoute(int index, int channel, int busIndex)
@@ -364,6 +566,7 @@ void AudioInputListModel::toggleChannelRoute(int index, int channel, int busInde
 
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { RoutingRole });
+    scheduleSave();
 }
 
 void AudioInputListModel::setChannelRoutes(int index, const QVariantList &perChannel)
@@ -394,6 +597,7 @@ void AudioInputListModel::setChannelRoutes(int index, const QVariantList &perCha
     item.channelRoutes = parsed;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { RoutingRole });
+    scheduleSave();
 }
 
 static AudioEffect *findEffect(QList<AudioEffect> &effects, const QString &key)
@@ -416,6 +620,7 @@ void AudioInputListModel::setEffectEnabled(int index, const QString &key, bool e
     effect->enabled = enabled;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { EffectsRole });
+    scheduleSave();
 }
 
 void AudioInputListModel::setEffectValue(int index, const QString &key, qreal value)
@@ -433,6 +638,7 @@ void AudioInputListModel::setEffectValue(int index, const QString &key, qreal va
     effect->value = clamped;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { EffectsRole });
+    scheduleSave();
 }
 
 QVariantList AudioInputListModel::defaultEffectsTemplate() const
@@ -452,6 +658,8 @@ QVariantMap AudioInputListModel::getInput(int index) const
     QVariantList effects;
     for (const AudioEffect &effect : item.effects)
         effects.append(effectToVariant(effect));
+    QVariantList gains;
+    for (qreal g : item.channelGains) gains.append(g);
 
     return {
         { "name", item.name },
@@ -462,6 +670,7 @@ QVariantMap AudioInputListModel::getInput(int index) const
         { "mode", item.mode },
         { "delayMs", item.delayMs },
         { "channels", item.channels },
+        { "channelGains", gains },
         { "routingAuto", item.routingAuto },
         { "routing", routingVariant(item.channelRoutes) },
         { "effects", effects },

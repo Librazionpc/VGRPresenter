@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QObject>
+#include <QMap>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QJSValue>
@@ -76,6 +78,19 @@ class EngineBridge : public QObject
     Q_PROPERTY(QString ndiState READ ndiState NOTIFY devicesChanged)
     Q_PROPERTY(QString ndiVersion READ ndiVersion NOTIFY devicesChanged)
     Q_PROPERTY(QString ndiDownloadUrl READ ndiDownloadUrl CONSTANT)
+    // LIVE audio input metering — real per-channel peak/RMS from the PAL's
+    // WASAPI capture tap (a roster card's mic/line-in metered end-to-end).
+    // Entries: { deviceId, label, channelCount, layout, sampleRateHz,
+    // framesCaptured, peaks: [..], rms: [..] } — layout is "mono" | "stereo"
+    // | "multi" (1/2/N channels of the endpoint's live mix format, engine
+    // truth, not the roster's stored count). One snapshot per metered device,
+    // refreshed ~20×/s by an internal GUI-side pump that only runs while at
+    // least one tap is active; peaks/rms are 0..1 fractions of full scale and
+    // the list is EMPTY when nothing is metered ("no signal", never a
+    // synthetic waveform). QML calls startInputMeter(label) when an audio
+    // dialog opens (empty label meters the default input) and
+    // stopInputMeter() when it closes.
+    Q_PROPERTY(QVariantList inputLevels READ inputLevels NOTIFY inputLevelsChanged)
 
 public:
     static EngineBridge &instance();
@@ -114,10 +129,26 @@ public:
     // a screen can force a refresh when it opens). Safe before boot — yields
     // empty lists when the PAL has no backend installed.
     Q_INVOKABLE void refreshDevices();
+
+    // ---- Live input metering (see the inputLevels property) -------------
+    // Taps are a SET keyed by device — the AV board keeps every device row
+    // metered while it is open, and a dialog reading a device's snapshot is
+    // just another consumer. startInputMeter ENSURES a tap for the capture
+    // device with this roster label (the AV board stores labels as its
+    // sublabels; an empty label meters the platform's DEFAULT input) and is
+    // idempotent per device. Safe to call when a device vanishes: unknown
+    // labels warn and no-op, failures never throw.
+    Q_INVOKABLE void startInputMeter(const QString &deviceLabel);
+    // Stop one device's tap (identified by the label it was started with).
+    Q_INVOKABLE void stopInputMeter(const QString &deviceLabel);
+    // Stop every meter tap and the refresh pump — the AV screen calls this
+    // when it is destroyed (nothing meters while settings are closed).
+    Q_INVOKABLE void stopAllInputMeters();
     // Each entry: { id, label, value } — value mirrors label because the AV
     // board stores the human-readable sublabel on its rows; ids ride along
     // for the future capture-graph plumbing.
     QVariantList audioDevices() const { return audioDevices_; }
+    QVariantList inputLevels() const { return inputLevels_; }
     QVariantList screenDevices() const { return screenDevices_; }
     QVariantList videoDevices() const { return videoDevices_; }
     QVariantList ndiSources() const { return ndiSources_; }
@@ -172,6 +203,12 @@ signals:
     // platform hot-plug event.
     void devicesChanged();
 
+    // ~20×/s while a meter tap is live: inputLevels_ was refreshed from the
+    // PAL's snapshots. QML reads the property fresh on each emission — a
+    // deliberately modest rate (not the ~480Hz the captures run at) so the
+    // meter dots animate like a real VU without flooding the GUI thread.
+    void inputLevelsChanged();
+
 private:
     explicit EngineBridge(QObject *parent = nullptr);
     Q_DISABLE_COPY(EngineBridge)
@@ -194,6 +231,15 @@ private:
     QVariantList screenDevices_;
     QVariantList videoDevices_;
     QVariantList ndiSources_;
+
+    // ---- Live input metering state --------------------------------------
+    QVariantList inputLevels_;          // the published snapshot set
+    class QTimer *inputMeterPump_ = nullptr;   // 50 ms poll while taps are live
+    QMap<uint32_t, QString> inputLabels_;   // waveIn device id → roster label
+    // Every label with a requested tap (idempotent startInputMeter calls);
+    // labels resolve again on re-enumeration so hot-plug re-binds.
+    QSet<QString> requestedMeters_;
+    void resolveAndStartMeter(const QString &deviceLabel);
     bool ndiAvailable_ = false;
     bool ndiRetried_ = false;   // one deferred NDI re-query per boot/refreshDevices()
     qint64 lastEnumerationMs_ = 0;   // throttles refreshDevices()

@@ -32,15 +32,34 @@ Column {
     property int mode: 0
     // ---- Delay (latency compensation, ms) ----
     property int delayMs: 0
-    // ---- Volume (0..100 internal, shown as dBFS-equivalent) ----
+    // ---- Volume (0..100, a LINEAR gain fader ×0..×1) ----
+    // Scales the channel meters (post-fader display — see the meter rows)
+    // and reads as dB gain (20·log10). Stored on the model; the engine
+    // applies it as real DSP once gain lands there.
     property real volume: 0
     // ---- Muted (meters flatten; caller syncs with the signal pane) ----
     property bool muted: false
     // ---- Channels block ----
     property int channels: 2
-    // Live meter fill per channel row (0..1) — the fake-signal hook; the
-    // dialogs drive it from the volume slider until real telemetry lands.
-    property real meterLevel: 0
+    // Live per-channel meter fill (0..1 each, index = channel row) — REAL
+    // telemetry from the engine's WASAPI capture tap (EngineBridge.inputLevels
+    // → the dialogs). An empty array, or a strip the tap no longer feeds,
+    // renders dark: the meters read "no signal", they never fake it.
+    property var meterLevels: []
+    // The tap's live channel LAYOUT — "mono" | "stereo" | "multi" (engine
+    // truth from the capture format). While metering, this WINS over the
+    // stored `channels` count: the rows re-render to match what the device
+    // actually delivers (a mono mic shows one strip even if the roster said
+    // 2; a stereo line-in shows two). Empty string = not metering.
+    property string meterLayout: ""
+    // How many channel rows to render right now: the live tap's layout when
+    // metering, the stored count otherwise.
+    readonly property int renderedChannels: meterLayout === "mono" ? 1
+        : meterLayout === "stereo" ? 2
+        : meterLayout === "multi" && meterLevels.length > 0 ? meterLevels.length
+        : channels
+    // Back-compat passthrough for the single-level case.
+    property real meterLevel: meterLevels.length > 0 ? meterLevels[0] : 0
     // (No raw field aliases — the id names below are the targets; all
     // consumer access goes through the typed passthroughs.)
 
@@ -50,6 +69,16 @@ Column {
     signal channelsEdited(int channels)
     signal routingClicked()
     signal channelToggled(int index, bool enabled)
+    // The channel row's gain knob moved (0..1); index = channel row.
+    // The dialogs write it through AudioInputListModel.setChannelGain.
+    signal channelGainEdited(int index, real gain)
+    // Mute toggle request — the form has no mute control of its own (the
+    // signal pane that held it was removed), but consumers like the Bus
+    // dialog reuse the strip and wire their own mute through this.
+    signal mutedToggled()
+    // Seed a row's knob from the model (call via the gainKnobFor callback
+    // below — a function keeps the binding lazy, no array copy per row).
+    property var gainFor: function(index) { return 1.0 }
 
     spacing: 0
 
@@ -64,43 +93,56 @@ Column {
     // Channel enable-state — an exceptions array over a default-on base,
     // copy-on-written so re-assignment re-fires the row bindings.
     property var channelOn: []
-    // A shrinking channel count (a different device picked) must not leave
-    // stale exceptions behind for channels that no longer exist.
-    onChannelsChanged: {
-        if (root.channelOn.length > root.channels)
-            root.channelOn = root.channelOn.slice(0, root.channels)
+    // A shrinking channel count (a different device picked, or the live tap
+    // reporting a narrower layout than the roster) must not leave stale
+    // exceptions behind for channels that no longer exist.
+    onChannelsChanged: root.trimChannelExceptions()
+    onRenderedChannelsChanged: root.trimChannelExceptions()
+    function trimChannelExceptions() {
+        if (root.channelOn.length > root.renderedChannels)
+            root.channelOn = root.channelOn.slice(0, root.renderedChannels)
     }
     function channelEnabled(i) { return root.channelOn[i] !== false }
     function setChannelEnabled(i, on) {
         if (root.channelEnabled(i) === on) return
         const next = root.channelOn.slice()
-        while (next.length < root.channels) next.push(true)
+        while (next.length < root.renderedChannels) next.push(true)
         next[i] = on
         root.channelOn = next
         root.channelToggled(i, on)
     }
     function setAllChannels(on) {
         let changed = false
-        for (let i = 0; i < root.channels; i++) {
+        for (let i = 0; i < root.renderedChannels; i++) {
             if (root.channelEnabled(i) !== on) changed = true
         }
         if (!changed) return
         const next = []
-        for (let i = 0; i < root.channels; i++) next.push(on)
+        for (let i = 0; i < root.renderedChannels; i++) next.push(on)
         root.channelOn = next
-        for (let i = 0; i < root.channels; i++) root.channelToggled(i, on)
+        for (let i = 0; i < root.renderedChannels; i++) root.channelToggled(i, on)
     }
     readonly property int channelsOnCount: {
         let n = 0
-        for (let i = 0; i < root.channels; i++) if (root.channelEnabled(i)) n++
+        for (let i = 0; i < root.renderedChannels; i++) if (root.channelEnabled(i)) n++
         return n
     }
 
-    // dB readout — linear 0..100 mapped over a professional −60..0 range
-    // (0 = −∞ per convention; the dial's 0 *is* silence).
-    function dBText(v) {
+    // ---- dB readouts (linear convention, matching the meter math) -------
+    // gainText: the fader's gain in dB — 100 → "0 dB" (unity), 50 → "−6 dB",
+    // 0 → "−∞". levelText: a measured 0..1 level in dBFS — what a channel's
+    // cell shows LIVE from the tap (a healthy song peaks around −6..−3).
+    // (The old readout mapped the fader's POSITION over −60..0 dB, which
+    // printed "0 dB" at max and a misleading −30 dB at mid — unrelated to
+    // what the meters actually showed. Both readouts now use the same
+    // 20·log10 math the post-fader display applies.)
+    function gainText(v) {
         if (v <= 0) return "-\u221E dB"
-        return (Math.max(-60, Math.round(-60 + (v / 100) * 60)) + " dB")
+        return Math.round(20 * Math.log10(v / 100)) + " dB"
+    }
+    function levelText(l) {
+        if (l <= 0.0005) return "-\u221E dB"   // ≈ −66 dBFS floor → silence
+        return Math.round(20 * Math.log10(l)) + " dB"
     }
 
     // The shared label rail — every row starts with this.
@@ -395,7 +437,7 @@ Column {
 
             Text {
                 anchors.centerIn: parent
-                text: root.dBText(root.volume)
+                text: root.gainText(root.volume)
                 color: Theme.textPrimary
                 font.family: Theme.fontFamily
                 font.pixelSize: Theme.textSm
@@ -417,7 +459,9 @@ Column {
 
             Text {
                 anchors.verticalCenter: parent.verticalCenter
-                text: qsTr("Channels")
+                text: root.meterLayout === "mono" ? qsTr("Channels · Mono")
+                    : root.meterLayout === "stereo" ? qsTr("Channels · Stereo")
+                    : qsTr("Channels")
                 color: "#c3cad8"
                 font.family: Theme.fontFamily
                 font.pixelSize: Theme.textSm
@@ -461,12 +505,15 @@ Column {
     }
 
     // ---- Channel rows -----------------------------------------------------
+    // The row count follows the LIVE tap layout while metering (see
+    // renderedChannels) — the user sees the device's real mono/stereo/N shape
+    // the moment the meter starts, not the roster's stored guess.
     Column {
         width: parent.width
         spacing: 5
 
         Repeater {
-            model: root.channels
+            model: root.renderedChannels
 
             delegate: Rectangle {
                 id: chRow
@@ -479,35 +526,24 @@ Column {
                 border.color: "#2c3040"
 
                 readonly property bool chOn: root.channelEnabled(chRow.index)
-                // Per-channel phase offset — rows never pulse in unison.
-                readonly property real phase: chRow.index * 0.37
+                Component.onCompleted: knob.gain = root.gainFor(chRow.index)
 
-                // LIVE METER: a real envelope driven by meterLevel — peaks
-                // follow the level UP instantly, then DECAY back down when
-                // it drops (the classic VU ballistics), with a small per-row
-                // variation so the channels breathe independently. Stuck-flat
-                // before: the fill sat at the volume position with only a
-                // ±0.06 wobble, so moving the slider read as no change.
-                property real cycle: 0
-                property real env: 0
-                readonly property bool signalOn: chRow.chOn && root.meterLevel > 0.001 && !root.muted
-                Timer {
-                    interval: 60
-                    running: chRow.chOn && !root.muted && root.meterLevel > 0.001
-                    repeat: true
-                    onTriggered: {
-                        chRow.cycle = (chRow.cycle + 0.37) % (Math.PI * 2)
-                        // Target rides the level with a gentle pulse; ATTACK
-                        // is instant, RELEASE decays at ~35%/tick — the meter
-                        // visibly rises and falls WITH the slider.
-                        const target = Math.max(0, Math.min(1,
-                            root.meterLevel
-                            + Math.sin(chRow.cycle + chRow.phase * 2.0) * 0.05))
-                        chRow.env = target > chRow.env
-                                    ? target
-                                    : chRow.env * 0.65 + target * 0.35
-                    }
+                // POST-FADER METER — the real WASAPI tap (channel i's own
+                // entry of meterLevels) through the full chain: master fader
+                // → this channel's gain knob, gated by the row's enable
+                // checkbox and the input's mute. The SIGNAL is engine truth;
+                // the gain math is display-side — the exact scaling the
+                // engine's DSP will apply once gain lands there.
+                // A cut/muted row reads "no signal" (nothing passes it).
+                readonly property bool passes: chRow.chOn && !root.muted
+                readonly property real rawLevel: {
+                    const v = root.meterLevels.length > chRow.index
+                              ? root.meterLevels[chRow.index] : 0
+                    return Math.max(0, Math.min(1, v))
                 }
+                readonly property real level: chRow.passes
+                    ? Math.min(1, chRow.rawLevel * (root.volume / 100) * knob.gain)
+                    : 0
 
                 // Checkbox — the reference's plain square check.
                 Rectangle {
@@ -578,11 +614,19 @@ Column {
                             // threshold this dot represents.
                             readonly property real pos: dot.index / (meterRow.segs - 1)
                             width: meterRow.segW; height: 12; radius: 2
-                            // A dot is LIT when the row's live envelope has
-                            // reached it (attack/release ballistics above) —
-                            // the leading edge rides the level and sinks when
-                            // it drops, like a real VU.
-                            readonly property bool lit: chRow.env - dot.pos > 0.015
+                            // A dot is LIT when the channel's level has
+                            // reached it. CALIBRATION: the comparison runs in
+                            // dB — a linear threshold pins healthy signals at
+                            // the top (a −6 dBFS song lights ~94% of a linear
+                            // strip). levelDb maps 0..1 → −60..0 dBFS; dots
+                            // light below (levelDb + 60·pos... via the dB
+                            // distance), so a −12 dBFS signal reads ~80%, and
+                            // the red band only lights above −12 dBFS — head-
+                            // room like a real VU. (This is the "−12 dB
+                            // display alignment" calibration knob.)
+                            readonly property real levelDb: chRow.level > 0.0005
+                                ? Math.max(-60, 20 * Math.log10(chRow.level)) : -60
+                            readonly property bool lit: levelDb > -60 + dot.pos * 60 + 0.5
                             // The green→yellow→red ramp is ALWAYS visible
                             // (dimmed) — the meter reads as a scale even at
                             // rest, exactly like the reference; signal
@@ -596,23 +640,26 @@ Column {
                     }
                 }
 
-                // dB cell.
+                // dB cell — the channel's LIVE post-fader level in dBFS
+                // (was: a static echo of the fader's gain, which printed
+                // "0 dB" no matter what the meter did).
                 Text {
                     id: dbCell
                     anchors.right: knob.left
                     anchors.rightMargin: 14
                     anchors.verticalCenter: parent.verticalCenter
-                    text: root.dBText(root.volume)
+                    text: root.levelText(chRow.level)
                     color: "#8a94a6"
                     font.family: Theme.fontFamily
                     font.pixelSize: Theme.textSm
                 }
 
                 // The reference's green gain knob — a mini ring with an
-                // indicator line that rotates across −135°..+135° with the
-                // volume. (Same 0..100 mapping as the master slider; the
-                // per-channel value is the shared level until per-channel
-                // gains exist in the model.)
+                // The channel's own GAIN KNOB — the green ring, now REAL:
+                // it is this channel's fader (0..1, default unity), dragged
+                // vertically, double-clicked to reset. The meter shows the
+                // full post-fader chain: WASAPI level → master fader → this
+                // knob → the row's dots and dB cell.
                 Item {
                     id: knob
                     anchors.right: parent.right
@@ -620,18 +667,30 @@ Column {
                     anchors.verticalCenter: parent.verticalCenter
                     width: 24; height: 24
 
-                    readonly property real angle: -135 + (root.volume / 100) * 270
+                    // This channel's gain (0..1): read from the model if the
+                    // caller wired channelGainEdited, else a local default
+                    // (the component stays usable without a backing model).
+                    property real gain: 1.0
+                    // Drag math: full knob travel = ±135° over 0..1, ~0.4 dB
+                    // per pixel (270° over ~120px of travel) — slow enough
+                    // for fine trims, fast enough to sweep 0..1 quickly.
+                    readonly property real angle: -135 + gain * 270
+                    readonly property bool atUnity: Math.abs(gain - 1.0) < 0.005
+
+                    function setGain(g) {
+                        gain = Math.max(0, Math.min(1, g))
+                        root.channelGainEdited(chRow.index, gain)
+                    }
 
                     Rectangle {
                         anchors.fill: parent
                         radius: 12
                         color: "#2c3040"
                         border.width: 2
-                        border.color: "#4ade80"
+                        border.color: knob.atUnity ? "#4ade80" : "#eab308"
+                        Behavior on border.color { ColorAnimation { duration: 100 } }
                     }
-                    // Indicator line: a taller item pivoting about its own
-                    // top-center at the knob's middle — the classic knob
-                    // needle (line from center outward, rotating).
+                    // The classic needle, rotating −135°..+135° with gain.
                     Item {
                         anchors.centerIn: parent
                         width: 2.5; height: 12
@@ -645,6 +704,20 @@ Column {
                             radius: 1
                             color: "#e2e8f0"
                         }
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -6
+                        cursorShape: Qt.PointingHandCursor
+                        property real lastY: 0
+                        onPressed: (m) => lastY = m.y
+                        onPositionChanged: (m) => {
+                            // Up = louder (pull the fader), ~0.4 dB/px.
+                            knob.setGain(knob.gain + (lastY - m.y) / 120)
+                            lastY = m.y
+                        }
+                        onDoubleClicked: knob.setGain(1.0)   // double-click → unity
                     }
                 }
             }
@@ -665,7 +738,7 @@ Column {
             anchors.margins: -4
             cursorShape: Qt.PointingHandCursor
             // Any channel off → all on; otherwise all off.
-            onClicked: root.setAllChannels(root.channelsOnCount < root.channels)
+            onClicked: root.setAllChannels(root.channelsOnCount < root.renderedChannels)
         }
     }
 }

@@ -12,8 +12,13 @@
 #include <audioclient.h>
 #include <functiondiscoverykeys_devpkey.h>
 
+#include <atomic>
+#include <cmath>
+#include <cstring>
+#include <functional>
 #include <map>
 #include <string>
+#include <thread>
 
 namespace bps::platform {
 
@@ -122,7 +127,362 @@ bool NameMatches(const std::string &winmmName, const std::string &endpointName)
     return true;
 }
 
+// Friendly name of an MMDevAPI endpoint (property store read — the same
+// lookup QueryWasapiMixFormats performs; shared so the meter thread matches
+// endpoints by the exact convention the roster was built with).
+std::string EndpointName(IMMDevice *device)
+{
+    IPropertyStore *props = nullptr;
+    std::string name;
+    if (device && SUCCEEDED(device->OpenPropertyStore(STGM_READ, &props)) && props) {
+        PROPVARIANT var{};
+        props->GetValue(PKEY_Device_FriendlyName, &var);
+        if (var.vt == VT_LPWSTR && var.pwszVal)
+            name = win::Utf8(std::wstring(var.pwszVal));
+        PropVariantClear(&var);
+        props->Release();
+    }
+    return name;
+}
+
 } // namespace
+
+// ============================================================================
+// Input metering — a REAL WASAPI capture tap per metered device. The GUI
+// thread only ever touches the lock-protected snapshot struct; each tap runs
+// its own capture thread that owns every COM object it touches (MMDeviceAPI
+// objects are apartment-bound and must not cross threads).
+//
+// Analysis runs on ~50 ms windows: the tap accumulates per-channel running
+// peak (max |sample|) and sum-of-squares, then publishes one InputMeterLevels
+// snapshot per window under the shared metersMutex_. 16-bit PCM converts
+// with the symmetric 1/32768 scaling; float capture formats read directly.
+// ============================================================================
+struct WindowsAudio::MeterTap {
+    std::atomic<bool> running{false};
+    uint32_t deviceId = 0;
+    std::string deviceName;   // roster name — the reliable endpoint match key
+    IAudio::InputMeterLevels latest;   // written by the capture thread under the table's mutex
+    // Owned + joined by the tap itself: erasing the tap (Stop, destructor)
+    // blocks until the capture thread has fully exited, so no reference into
+    // this storage — or into the table's mutex, which the thread takes to
+    // publish — can outlive the objects it points at.
+    std::thread worker;
+    ~MeterTap() { if (worker.joinable()) worker.join(); }
+};
+
+// The pimpl: all metering state. unique_ptr<incomplete> in the header is
+// safe because EVERY destruction of this object happens inside this .cpp
+// (WindowsAudio's out-of-line destructor; the default ctor's cleanup only
+// ever sees a null pointer, which never calls the deleter).
+struct WindowsAudio::MeterTable {
+    std::mutex mutex;
+    std::map<uint32_t, std::unique_ptr<MeterTap>> taps;
+
+    // Erase-with-join, the one removal path: signal the tap, move it out,
+    // destroy it with the mutex FREE (the worker takes this mutex to publish
+    // its snapshots — joining while holding it would deadlock against
+    // exactly that publish).
+    void Erase(uint32_t deviceId)
+    {
+        std::unique_ptr<MeterTap> tap;
+        {
+            const std::lock_guard<std::mutex> lock(mutex);
+            auto it = taps.find(deviceId);
+            if (it == taps.end())
+                return;
+            it->second->running.store(false);
+            tap = std::move(it->second);
+            taps.erase(it);
+        }
+        tap.reset();   // ~MeterTap joins the worker here
+    }
+
+    // Stop every live tap (shutdown path) — same outside-the-lock join.
+    void Clear()
+    {
+        std::map<uint32_t, std::unique_ptr<MeterTap>> all;
+        {
+            const std::lock_guard<std::mutex> lock(mutex);
+            for (auto &[id, tap] : taps)
+                tap->running.store(false);
+            all.swap(taps);
+        }
+        all.clear();   // joins, mutex free
+    }
+
+    ~MeterTable() { Clear(); }
+};
+
+WindowsAudio::WindowsAudio() : meters_(std::make_unique<MeterTable>()) {}
+// ~MeterTable joins every live tap before the members die.
+WindowsAudio::~WindowsAudio() = default;
+
+void WindowsAudio::MeterThread(MeterTap &tap, std::mutex &publishMutex)
+{
+    // This thread's own COM apartment + enumerator: MMDeviceAPI objects are
+    // not marshalled across apartments, so nothing here is shared.
+    ScopedComInit com;
+    IMMDeviceEnumerator *enumerator = nullptr;
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                  __uuidof(IMMDeviceEnumerator),
+                                  reinterpret_cast<void **>(&enumerator));
+    if (FAILED(hr) || !enumerator) return;
+
+    // wavein:<n> → the eCapture endpoint. PRIMARY match: the device's
+    // friendly name (WinMM names are truncated prefixes of the endpoint's —
+    // the exact correlation QueryWasapiMixFormats establishes; raw indexes
+    // disagree whenever a legacy WinMM device has no ACTIVE MMDevAPI
+    // endpoint). Fallback: positional, for name-less exotic devices.
+    IMMDeviceCollection *collection = nullptr;
+    hr = enumerator->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE, &collection);
+    IMMDevice *device = nullptr;
+    if (SUCCEEDED(hr) && collection) {
+        UINT count = 0;
+        collection->GetCount(&count);
+        if (!tap.deviceName.empty()) {
+            for (UINT i = 0; i < count && !device; ++i) {
+                IMMDevice *candidate = nullptr;
+                if (FAILED(collection->Item(i, &candidate)) || !candidate)
+                    continue;
+                if (NameMatches(tap.deviceName, EndpointName(candidate)))
+                    device = candidate;   // ownership passes out of the loop
+                else
+                    candidate->Release();
+            }
+        }
+        if (!device && tap.deviceId < count)
+            collection->Item(static_cast<UINT>(tap.deviceId), &device);
+    }
+    if (collection) collection->Release();
+    if (!device) {
+        enumerator->Release();
+        return;
+    }
+
+    IAudioClient *client = nullptr;
+    WAVEFORMATEX *fmt = nullptr;
+    if (FAILED(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                reinterpret_cast<void **>(&client)))
+        || !client
+        || FAILED(client->GetMixFormat(&fmt)) || !fmt
+        // Shared-mode capture on the endpoint's mix format: read-only tap of
+        // what the OS already mixes — no format negotiation, no exclusive
+        // hold, nothing the user's apps can hear. The 100 ms period is a hint;
+        // WASAPI snaps it to the endpoint's own quantum.
+        || FAILED(client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0,
+                                     1000000 /* 100 ms */, 0, fmt, nullptr))) {
+        if (fmt) CoTaskMemFree(fmt);
+        if (client) client->Release();
+        device->Release();
+        enumerator->Release();
+        return;
+    }
+
+    // The packet pump lives on the SEPARATE capture-client interface —
+    // IAudioClient only exposes GetBufferSize/Start/Stop.
+    IAudioCaptureClient *capture = nullptr;
+    if (FAILED(client->GetService(__uuidof(IAudioCaptureClient),
+                                  reinterpret_cast<void **>(&capture)))
+        || !capture) {
+        client->Release();
+        device->Release();
+        enumerator->Release();
+        return;
+    }
+
+    const UINT32 channels = fmt->nChannels;
+    const UINT32 rate = fmt->nSamplesPerSec;
+    const UINT32 bytesPerFrame = fmt->nBlockAlign;
+    // The shared-mode mix format is float32 in practice; extensible formats
+    // are classified by their frame size (no ksmedia subtype GUID needed —
+    // MinGW's headers don't reliably carry KSDATAFORMAT_SUBTYPE_IEEE_FLOAT).
+    const bool isFloat = fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT
+                         || (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE
+                             && bytesPerFrame == channels * 4);
+    CoTaskMemFree(fmt);
+
+    if (channels == 0 || rate == 0 || bytesPerFrame == 0
+        || FAILED(client->Start())) {
+        client->Release();
+        device->Release();
+        enumerator->Release();
+        return;
+    }
+
+    IAudio::InputMeterLevels base;   // identity fields, snapshotted before the loop
+    base.deviceId = tap.deviceId;
+    base.channelCount = static_cast<uint8_t>(
+        channels > IAudio::kMaxInputMeterChannels ? IAudio::kMaxInputMeterChannels : channels);
+    base.sampleRateHz = rate;
+    base.layout = IAudio::InputMeterLevels::LayoutFor(static_cast<int>(channels));
+    // Publish the layout BEFORE the first window: the UI renders its channel
+    // rows (mono vs stereo vs N) the moment the tap is alive, with the meters
+    // dark until real samples arrive — layout is truth too.
+    {
+        const std::lock_guard<std::mutex> lock(publishMutex);
+        tap.latest = base;
+    }
+
+    const UINT32 windowFrames = rate / 20;   // ~50 ms of analysis per snapshot
+    UINT32 framesSinceSnapshot = 0;
+    float peaks[IAudio::kMaxInputMeterChannels] = {};
+    double sumSq[IAudio::kMaxInputMeterChannels] = {};
+    UINT64 totalFrames = 0;
+
+    UINT32 bufferFrames = 0;
+    client->GetBufferSize(&bufferFrames);
+    std::vector<uint8_t> data(bufferFrames * bytesPerFrame);
+
+    while (tap.running.load(std::memory_order_relaxed)) {
+        // The capture contract: GetNextPacketSize → GetBuffer → ReleaseBuffer,
+        // per discrete packet. A drained stream sleeps a short quantum and
+        // re-polls (no busy spin, no dependence on timer resolution).
+        UINT32 packet = 0;
+        if (FAILED(capture->GetNextPacketSize(&packet)) || packet == 0) {
+            Sleep(5);
+            continue;
+        }
+        BYTE *p = nullptr;
+        UINT32 frames = 0;
+        DWORD flags = 0;
+        // MinGW's headers carry no 3-arg inline overload — the raw COM
+        // method's device/QPC position out-params are mandatory (docs allow
+        // nullptr, but locals are simpler than arguing with the vtable).
+        UINT64 devicePosition = 0, qpcPosition = 0;
+        if (FAILED(capture->GetBuffer(&p, &frames, &flags,
+                                      &devicePosition, &qpcPosition))) {
+            Sleep(5);
+            continue;
+        }
+        // SILENT-flag packets still advance the clock — the tap keeps
+        // publishing zeroed windows so the UI's layout stays live; the data
+        // pointer may be null when that flag is set, so only dereference it
+        // for real audio.
+        const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
+        for (UINT32 f = 0; f < frames; ++f) {
+            if (!silent) {
+                const uint8_t *frame = p + static_cast<size_t>(f) * bytesPerFrame;
+                for (UINT32 c = 0; c < channels; ++c) {
+                    float sample = 0.f;
+                    if (isFloat) {
+                        sample = reinterpret_cast<const float *>(frame)[c];
+                    } else if (bytesPerFrame == channels * 2) {
+                        // 16-bit PCM — the shared-mode mix format's integer case.
+                        sample = static_cast<float>(reinterpret_cast<const int16_t *>(frame)[c])
+                                 / 32768.f;
+                    }
+                    if (c < IAudio::kMaxInputMeterChannels) {
+                        const float a = sample < 0.f ? -sample : sample;
+                        if (a > peaks[c]) peaks[c] = a;
+                        sumSq[c] += static_cast<double>(sample) * sample;
+                    }
+                }
+            }
+            ++totalFrames;
+            if (++framesSinceSnapshot >= windowFrames) {
+                IAudio::InputMeterLevels snap = base;
+                snap.framesCaptured = totalFrames;
+                for (int c = 0; c < snap.channelCount; ++c) {
+                    snap.peaks[c] = peaks[c];
+                    snap.rms[c] = static_cast<float>(
+                        std::sqrt(sumSq[c] / static_cast<double>(framesSinceSnapshot)));
+                    peaks[c] = 0.f;
+                    sumSq[c] = 0.0;
+                }
+                {
+                    const std::lock_guard<std::mutex> lock(publishMutex);
+                    tap.latest = snap;
+                }
+                framesSinceSnapshot = 0;
+            }
+        }
+        capture->ReleaseBuffer(frames);
+    }
+
+    client->Stop();
+    capture->Release();
+    client->Release();
+    device->Release();
+    enumerator->Release();
+}
+
+Result<void> WindowsAudio::StartInputMeter(uint32_t deviceId)
+{
+    // One roster pass validates the id AND captures the device's friendly
+    // name: a bogus id must fail with NotFound (not spawn a thread that
+    // immediately dies of a missing endpoint), and the name is what the tap
+    // thread matches the WASAPI endpoint by (see MeterThread).
+    bool known = false;
+    std::string rosterName;
+    for (const auto &d : Enumerate()) {
+        if (d.isInput && d.id == "wavein:" + std::to_string(deviceId)) {
+            known = true;
+            rosterName = d.name;
+            break;
+        }
+    }
+    if (!known)
+        return Error::Make(Err::NotFound, "Audio",
+                           "no input device wavein:" + std::to_string(deviceId));
+
+    if (!meters_)
+        meters_ = std::make_unique<MeterTable>();
+
+    std::unique_ptr<MeterTap> stale;
+    {
+        const std::lock_guard<std::mutex> lock(meters_->mutex);
+        auto &slot = meters_->taps[deviceId];
+        if (slot && slot->running.load())
+            return Ok();   // idempotent — already running
+        if (slot) {
+            // A stopped tap lingers here (its device failed mid-stream);
+            // replace it — and join the old worker OUTSIDE the lock below.
+            slot->running.store(false);
+            stale = std::move(slot);
+        }
+        auto tap = std::make_unique<MeterTap>();
+        tap->deviceId = deviceId;
+        tap->deviceName = rosterName;
+        tap->running.store(true);
+        // The worker references this tap's storage and the table's mutex;
+        // both outlive it because every removal path joins via ~MeterTap.
+        tap->worker = std::thread(&WindowsAudio::MeterThread, std::ref(*tap),
+                                  std::ref(meters_->mutex));
+        slot = std::move(tap);
+    }
+    stale.reset();   // join the replaced tap with the mutex free
+    return Ok();
+}
+
+Result<void> WindowsAudio::StopInputMeter(uint32_t deviceId)
+{
+    if (meters_)
+        meters_->Erase(deviceId);
+    return Ok();
+}
+
+IAudio::InputMeterLevels WindowsAudio::InputLevels(uint32_t deviceId)
+{
+    if (!meters_)
+        return IAudio::InputMeterLevels{};
+    const std::lock_guard<std::mutex> lock(meters_->mutex);
+    auto it = meters_->taps.find(deviceId);
+    if (it == meters_->taps.end())
+        return IAudio::InputMeterLevels{};
+    return it->second->latest;
+}
+
+std::vector<uint32_t> WindowsAudio::ActiveInputMeters() const
+{
+    std::vector<uint32_t> ids;
+    if (!meters_)
+        return ids;
+    const std::lock_guard<std::mutex> lock(meters_->mutex);
+    for (const auto &[id, tap] : meters_->taps)
+        if (tap->running.load()) ids.push_back(id);
+    return ids;
+}
 
 std::vector<AudioDeviceInfo> WindowsAudio::Enumerate() const {
     ScopedComInit com;

@@ -22,6 +22,8 @@
 #include <QUrl>
 #include <QVariantMap>
 
+#include <cmath>
+
 #include <atomic>
 
 namespace {
@@ -275,6 +277,9 @@ void EngineBridge::shutdown()
     // EventBus subscriptions run on engine threads and must not fire into the
     // UI while (or after) Kernel::Shutdown() is dismantling those systems.
     stopRelay();
+    // Meter taps run their own WASAPI threads and must be joined before the
+    // PAL's platform backend is torn down underneath them.
+    stopAllInputMeters();
     // The undo stack holds QJSValue closures inside the engine's static
     // UndoRedoManager, which outlives the QML engine — drop them now (aboutToQuit,
     // JS engine still alive) rather than at static destruction.
@@ -568,6 +573,139 @@ void EngineBridge::refreshDevices()
         return;
     ndiRetried_ = false;
     enumerateDevices();
+}
+
+// ============================================================================
+// Live input metering — the UI half of the PAL's WASAPI capture tap.
+//
+// Taps are a SET keyed by device (the PAL holds one tap per waveIn id):
+// the AV screen starts a meter for every device row on the board (and one
+// for the default input on the Add dialog), each consumer reads its own
+// device's snapshot from the inputLevels list, and stopInputMeter(label)
+// releases just that device when its row goes away. Resolution re-runs on
+// every enumeration so a hot-plugged device re-binds to its requested tap.
+// A 50 ms GUI-side pump republishes inputLevels_ while any tap is live.
+// ============================================================================
+void EngineBridge::resolveAndStartMeter(const QString &deviceLabel)
+{
+    auto &audio = bps::platform::PlatformAccessor::Get().Audio();
+
+    // Resolve the roster label → waveIn device number. The roster is the same
+    // enumeration the AV board's device select is built from, so a picked
+    // option always resolves; an unknown label (device unplugged) no-ops
+    // silently here — it retries on the next enumeration instead of warning
+    // every second.
+    const QString want = deviceLabel.trimmed();
+    for (const auto &d : audio.Enumerate()) {
+        if (!d.isInput)
+            continue;
+        if (want.isEmpty() ? d.isDefault : qstr(d.name) == want) {
+            // Windows ids are "wavein:<n>"; other platforms have no WASAPI
+            // tap to address (their IAudio keeps the default Unsupported
+            // metering) — never guess a number from an alien id scheme.
+            if (d.id.rfind("wavein:", 0) != 0)
+                return;
+            const uint32_t deviceId = static_cast<uint32_t>(std::stoul(d.id.substr(7)));
+            if (audio.StartInputMeter(deviceId).ok())
+                inputLabels_[deviceId] = want;
+            return;
+        }
+    }
+}
+
+void EngineBridge::startInputMeter(const QString &deviceLabel)
+{
+    if (!bps::platform::PlatformAccessor::Installed())
+        return;
+    requestedMeters_.insert(deviceLabel.trimmed());
+    resolveAndStartMeter(deviceLabel);
+
+    if (!inputMeterPump_) {
+        inputMeterPump_ = new QTimer(this);
+        inputMeterPump_->setInterval(50);
+        connect(inputMeterPump_, &QTimer::timeout, this, [this]() {
+            if (!bps::platform::PlatformAccessor::Installed())
+                return;   // platform torn down mid-pump (shutdown) — idle out
+            auto &a = bps::platform::PlatformAccessor::Get().Audio();
+            QVariantList levels;
+            for (auto it = inputLabels_.constBegin(); it != inputLabels_.constEnd(); ++it) {
+                const uint32_t id = it.key();
+                const auto snap = a.InputLevels(id);
+                QVariantList peaks;
+                QVariantList rms;
+                for (int c = 0; c < snap.channelCount; ++c) {
+                    peaks.append(snap.peaks[c]);
+                    rms.append(snap.rms[c]);
+                }
+                levels.append(QVariantMap{
+                    {QStringLiteral("deviceId"), (int)id},
+                    {QStringLiteral("label"), it.value()},
+                    {QStringLiteral("channelCount"), snap.channelCount},
+                    {QStringLiteral("layout"),
+                     QString::fromLatin1(bps::platform::IAudio::InputMeterLevels::ToString(snap.layout))},
+                    {QStringLiteral("sampleRateHz"), (int)snap.sampleRateHz},
+                    {QStringLiteral("framesCaptured"), (qulonglong)snap.framesCaptured},
+                    {QStringLiteral("peaks"), peaks},
+                    {QStringLiteral("rms"), rms},
+                });
+            }
+            inputLevels_ = std::move(levels);
+            emit inputLevelsChanged();
+        });
+    }
+    if (!inputMeterPump_->isActive())
+        inputMeterPump_->start();
+}
+
+void EngineBridge::stopInputMeter(const QString &deviceLabel)
+{
+    const QString want = deviceLabel.trimmed();
+    if (!requestedMeters_.remove(want))
+        return;   // not metering that label — nothing to release
+    // Stop the tap under its label (labels map 1:1 to ids while the device
+    // is present; a vanished device's tap already died with its endpoint).
+    if (bps::platform::PlatformAccessor::Installed()) {
+        auto &audio = bps::platform::PlatformAccessor::Get().Audio();
+        for (auto it = inputLabels_.constBegin(); it != inputLabels_.constEnd(); ++it) {
+            if (it.value() == want) {
+                (void)audio.StopInputMeter(it.key());
+                break;
+            }
+        }
+    }
+    for (auto it = inputLabels_.begin(); it != inputLabels_.end();) {
+        if (it.value() == want)
+            it = inputLabels_.erase(it);
+        else
+            ++it;
+    }
+    // No requested meters left: stop the pump and publish the empty set.
+    if (requestedMeters_.isEmpty()) {
+        if (inputMeterPump_)
+            inputMeterPump_->stop();
+        inputLabels_.clear();
+        if (!inputLevels_.isEmpty()) {
+            inputLevels_.clear();
+            emit inputLevelsChanged();
+        }
+    }
+}
+
+void EngineBridge::stopAllInputMeters()
+{
+    requestedMeters_.clear();
+    if (inputMeterPump_)
+        inputMeterPump_->stop();
+    if (bps::platform::PlatformAccessor::Installed()) {
+        auto &audio = bps::platform::PlatformAccessor::Get().Audio();
+        for (const uint32_t id : audio.ActiveInputMeters())
+            (void)audio.StopInputMeter(id);
+    }
+    inputLabels_.clear();
+    if (!inputLevels_.isEmpty()) {
+        inputLevels_.clear();
+        emit inputLevelsChanged();
+    }
 }
 
 void EngineBridge::startRelay()

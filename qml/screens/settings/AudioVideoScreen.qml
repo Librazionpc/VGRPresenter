@@ -45,6 +45,66 @@ Item {
         function onRowsRemoved() { root.modelsRev++ }
     }
 
+    // ---- Live input metering (the channel rows' real VU feed) -------------
+    // Taps are a SET keyed by device: the board keeps every device row
+    // metered while this screen exists, and the dialogs just read their own
+    // device's snapshot from the published list. onInputLevelsChanged is NOT
+    // wired to re-resolution — resolution happens inside the bridge on every
+    // enumeration, so a hot-plugged device re-binds by itself.
+    readonly property var audioMeterList: EngineBridge.inputLevels
+    function meterSnapshotFor(label) {
+        const want = label === undefined ? "" : String(label).trim()
+        const list = root.audioMeterList
+        for (let i = 0; i < list.length; i++) {
+            const s = list[i]
+            // Empty label ↔ the bridge's default-input entry (it stores "").
+            if ((s.label || "") === want)
+                return s
+        }
+        return null
+    }
+    // The dialog feed: the device being edited (Add dialog with no pick yet
+    // meters the default input — the empty label).
+    readonly property var audioMeterSnapshot: {
+        if (root.editAudioIndex >= 0 && root.editAudioKind === "device")
+            return root.meterSnapshotFor(root.editAudioSublabel)
+        if (root.addSourceShown && root.addSourceType === "audio"
+            && root.addSourceKind === "device")
+            return root.meterSnapshotFor(root.addSourceSublabel)
+        return null
+    }
+    readonly property var audioMeterLevels: {
+        const s = root.audioMeterSnapshot
+        return s && s.peaks !== undefined ? s.peaks : []
+    }
+    readonly property string audioMeterLayout: {
+        const s = root.audioMeterSnapshot
+        return s && s.layout !== undefined ? s.layout : ""
+    }
+
+    function openAudioMeter(label) {
+        EngineBridge.startInputMeter(label === undefined ? "" : String(label))
+    }
+    function closeAudioMeter(label) {
+        EngineBridge.stopInputMeter(label === undefined ? "" : String(label))
+    }
+    // Ensure the taps the CURRENT dialog state wants (device rows only —
+    // media/NDI carry no WASAPI device). Taps are idempotent per device, so
+    // re-calling after a re-pick just adds/releases the difference.
+    function syncAudioMeter() {
+        if (root.editAudioIndex >= 0 && root.editAudioKind === "device")
+            root.openAudioMeter(root.editAudioSublabel)
+        else if (root.addSourceShown && root.addSourceType === "audio"
+                 && root.addSourceKind === "device")
+            root.openAudioMeter(root.addSourceSublabel)   // empty pick → default input
+    }
+    // The whole screen's taps — Component.onDestruction (a screen can be
+    // destroyed while the app lives) and shutdown both land here.
+    function closeAllAudioMeters() {
+        EngineBridge.stopAllInputMeters()
+    }
+    Component.onDestruction: root.closeAllAudioMeters()
+
     // ---- Routing matrix modal — shared by the Add + Edit audio dialogs.
     // Which dialog opened it decides where Apply lands: edit writes the
     // model row directly; add writes the buffered pre-row state (consumed
@@ -83,6 +143,7 @@ Item {
     property int editAudioMode: 0
     property int editAudioDelayMs: 0
     property int editAudioChannels: 2
+    property var editAudioGains: []   // per-channel faders, live from the model
     // Effective channel rows shown: the ENGINE's per-device truth (WASAPI
     // mix format) wins when the row names a known device; the stored count
     // covers media rows and unknown devices.
@@ -112,7 +173,11 @@ Item {
         root.editAudioMode = data.mode !== undefined ? data.mode : 0
         root.editAudioDelayMs = data.delayMs !== undefined ? data.delayMs : 0
         root.editAudioChannels = data.channels !== undefined ? data.channels : 2
+        root.editAudioGains = data.channelGains !== undefined ? data.channelGains : []
         root.editAudioSelectedEffect = ""
+        // Real metering for device rows — the tap's live channel layout
+        // (mono/stereo/multi) re-renders the channel rows below.
+        root.syncAudioMeter()
     }
     function saveEditAudio() {
         if (root.editAudioIndex < 0)
@@ -126,6 +191,10 @@ Item {
         AudioInputListModel.setDelayMs(root.editAudioIndex, root.editAudioDelayMs)
         AudioInputListModel.setChannels(root.editAudioIndex, root.editAudioChannels)
         root.editAudioIndex = -1
+        // Dialog closed — release the dialog's tap (the board rows' taps stay;
+        // they live with the screen, not the dialog).
+        if (root.editAudioKind === "device")
+            root.closeAudioMeter(root.editAudioSublabel)
     }
 
     // ---- Add Source dialog ----
@@ -149,6 +218,7 @@ Item {
     property int addSourceMode: 0
     property int addSourceDelayMs: 0
     property int addSourceChannels: 2
+    property var addSourceGains: []   // buffered per-channel faders (unity default)
     // Same engine-truth precedence as the Edit dialog (see there).
     readonly property int addSourceEffectiveChannels: {
         const n = root.addSourceKind === "device" ? root.deviceChannels(root.addSourceSublabel) : 0
@@ -303,6 +373,7 @@ Item {
         root.addSourceMode = 0
         root.addSourceDelayMs = 0
         root.addSourceChannels = 2
+        root.addSourceGains = []
         root.addSourceRoutingAuto = false
         root.addSourceRoutes = ({})
         // Seed the rack from the model's template (no row exists yet to read
@@ -313,6 +384,9 @@ Item {
         // Real roster, fresh from the engine (a camera plugged in since boot
         // shows up the moment the dialog opens).
         EngineBridge.refreshDevices()
+        // Audio + device kind meters the default input until a Source pick
+        // re-targets the tap (syncAudioMeter is the single switchboard).
+        root.syncAudioMeter()
     }
 
     function submitAddSource() {
@@ -327,6 +401,8 @@ Item {
             AudioInputListModel.setMode(idx, root.addSourceMode)
             AudioInputListModel.setDelayMs(idx, root.addSourceDelayMs)
             AudioInputListModel.setChannels(idx, root.addSourceEffectiveChannels)
+            for (let g = 0; g < root.addSourceGains.length; g++)
+                AudioInputListModel.setChannelGain(idx, g, root.addSourceGains[g])
             AudioInputListModel.setRoutingAuto(idx, root.addSourceRoutingAuto)
             const routeLists = []
             for (let c = 0; c < root.addSourceEffectiveChannels; c++)
@@ -345,6 +421,8 @@ Item {
                                          root.addSourceVideoMode)
         }
         root.addSourceShown = false
+        if (root.addSourceType === "audio" && root.addSourceKind === "device")
+            root.closeAudioMeter(root.addSourceSublabel)   // the dialog's tap only
     }
 
     // ---- Edit Video Source dialog ----
@@ -931,12 +1009,35 @@ Item {
                                 elide: Text.ElideRight
                             }
 
+                            // LIVE board meter — the row's own device tap
+                            // (started below, once per device row), PRE-fader:
+                            // a board row meters its SOURCE (the dialogs'
+                            // channel strips meter the post-fader chain). The
+                            // old post-fader math made a row with a low stored
+                            // level (e.g. 10%) invisible even with strong
+                            // signal — raw × 0.1 reads as dead. Media/NDI rows
+                            // keep the stored fader value: no device, no tap,
+                            // no fake signal.
                             LevelTrack {
                                 x: 28; y: 48
                                 width: board.colW - 90
-                                value: inRow.level
+                                value: {
+                                    if (inRow.sublabel === "")
+                                        return inRow.level   // media/NDI row
+                                    const s = root.meterSnapshotFor(inRow.sublabel)
+                                    const raw = s && s.peaks !== undefined && s.peaks.length > 0
+                                                ? s.peaks[0] : 0
+                                    return inRow.muted ? 0 : Math.min(100, raw * 100)
+                                }
                                 // Color follows the VALUE (VU zones) — the
                                 // old hardcoded green read "safe" at 100.
+                            }
+                            // This row's device tap — ensure-on-row-created.
+                            // Idempotent in the bridge; the empty-sublabel
+                            // case (media/NDI) never calls it.
+                            Component.onCompleted: {
+                                if (inRow.sublabel !== "")
+                                    root.openAudioMeter(inRow.sublabel)
                             }
 
                             Text {
@@ -1117,10 +1218,32 @@ Item {
                                 font.pixelSize: Theme.textXs
                             }
 
+                            // LIVE BUS METER — the bus SUMS its routed
+                            // audio sources' pre-fader tap levels (a real
+                            // mix bus's meter shows the mix feeding it),
+                            // then applies the bus's own fader + mute:
+                            // post-fader on the bus, pre-fader on the
+                            // sources. Empty/unrouted buses sit dark —
+                            // the truth, never a synthetic wiggle.
                             LevelTrack {
                                 x: 12; y: 48
                                 width: board.busColW - 90
-                                value: busRow.level
+                                value: {
+                                    let mix = 0
+                                    const rows = busRow.routedAudioInputs
+                                    for (let i = 0; i < rows.length; i++) {
+                                        const r = rows[i]
+                                        const data = AudioInputListModel.getInput(r)
+                                        if (!data || data.muted)
+                                            continue
+                                        const s = root.meterSnapshotFor(data.sublabel)
+                                        const raw = s && s.peaks !== undefined && s.peaks.length > 0
+                                                    ? s.peaks[0] : 0
+                                        if (raw > mix) mix = raw   // loudest source wins (peak mix)
+                                    }
+                                    const post = mix * (busRow.level / 100)
+                                    return busRow.muted ? 0 : Math.min(100, post * 100)
+                                }
                                 // Buses tint by TYPE (categorical), not by
                                 // level — an explicit fixed color.
                                 fixedColor: true
@@ -1638,6 +1761,7 @@ Item {
                                     root.editAudioKind = modelData.key
                                     // The old pick belongs to the previous kind.
                                     root.editAudioSublabel = ""
+                                    root.syncAudioMeter()   // non-device kinds un-meter
                                 }
                             }
                         }
@@ -1660,15 +1784,28 @@ Item {
                     sourceLabel: qsTr("Source")
                     sourceValue: root.editAudioSublabel
                     sourceOptions: root.audioSourceOptions(root.editAudioKind)
-                    onSourcePicked: (v) => root.editAudioSublabel = v
+                    onSourcePicked: (v) => {
+                        root.editAudioSublabel = v
+                        root.syncAudioMeter()   // re-target the tap at the new device
+                    }
                     mode: root.editAudioMode
                     delayMs: root.editAudioDelayMs
                     volume: root.editAudioLevel
                     muted: root.editAudioMuted
                     channels: root.editAudioEffectiveChannels
-                    // Fake-signal hook: slider amplitude reads as the rows'
-                    // meter fill until real telemetry lands.
-                    meterLevel: root.editAudioLevel / 100
+                    // REAL telemetry — the engine's WASAPI tap for this row's
+                    // device, not a volume-slider echo. While metering, the
+                    // tap's live layout (mono/stereo/multi) re-renders the
+                    // channel rows to match the capture format.
+                    meterLevels: root.audioMeterLevels
+                    meterLayout: root.audioMeterLayout
+                    // Per-channel gain knobs read the model row; a moved knob
+                    // writes straight through (persisted, debounced).
+                    gainFor: function(i) {
+                        return root.editAudioGains.length > i ? root.editAudioGains[i] : 1.0
+                    }
+                    onChannelGainEdited: (i, g) =>
+                        AudioInputListModel.setChannelGain(root.editAudioIndex, i, g)
                     onModeEdited: (m) => root.editAudioMode = m
                     onDelayEdited: (ms) => root.editAudioDelayMs = ms
                     onVolumeEdited: (v) => root.editAudioLevel = v
@@ -1899,12 +2036,159 @@ Item {
             }
         }
 
-        LabeledSlider {
+        // ---- Channel strip (ProAudioForm) — the bus is a real channel:
+        // master fader (gain-dB readout), mute via the strip's rows, and
+        // one metered channel row per ROUTED audio input (the bus's own
+        // meter = the mix of these). Type/video/what-routes sections below
+        // are unchanged; Save/Cancel still commit the strip through the
+        // existing setters.
+        ProAudioForm {
             width: parent.width
-            label: qsTr("Level")
-            suffix: "%"
-            value: root.editBusLevel
-            onMoved: (v) => root.editBusLevel = v
+            visible: root.editBusType !== "video"
+            nameLabel: qsTr("Master")
+            sourceLabel: qsTr("Sources")
+            sourceValue: qsTr("%1 routed").arg(root.busRoutedAudio().length)
+            sourceOptions: []
+            mode: 1   // display-only row (the segmented control stays out of the bus contract)
+            delayMs: 0
+            volume: root.editBusLevel
+            muted: root.editBusMuted
+            channels: 0   // rows come from the routing, not a channel count
+            meterLevels: []
+            meterLayout: ""
+            onVolumeEdited: (v) => root.editBusLevel = v
+            onMutedToggled: root.editBusMuted = !root.editBusMuted
+            Component.onCompleted: {
+                // The strip's checkbox rows double as a per-source meter
+                // view; hide them for now — routed-source rows below carry
+                // the metering.
+            }
+        }
+
+        // Routed-source channel rows — LIVE per-source meters inside the bus
+        // dialog, each with its checkbox = that source's route into this bus
+        // (unchecking it un-routes — the same toggle the list below uses).
+        Column {
+            width: parent.width
+            spacing: 5
+            visible: root.editBusType !== "video"
+
+            Repeater {
+                model: AudioInputListModel
+
+                delegate: Rectangle {
+                    id: busChRow
+                    required property int index
+                    required property string name
+                    required property string sublabel
+                    required property real level
+                    required property bool muted
+
+                    width: parent.width
+                    height: 34
+                    radius: Theme.radiusSm
+                    color: "#1d2029"
+                    border.width: 1
+                    border.color: root.busRoutedAudio().indexOf(busChRow.index) >= 0
+                                  ? "#3a4f66" : "#2c3040"
+
+                    readonly property bool routed:
+                        root.busRoutedAudio().indexOf(busChRow.index) >= 0
+                    readonly property var snap:
+                        sublabel !== "" ? root.meterSnapshotFor(sublabel) : null
+                    readonly property real rawLevel:
+                        snap && snap.peaks !== undefined && snap.peaks.length > 0
+                            ? snap.peaks[0] : 0
+                    // Post-fader: source tap × source level × bus level,
+                    // gated by both mutes — exactly what the bus sums.
+                    readonly property real postLevel: routed && !muted && !root.editBusMuted
+                        ? Math.min(1, rawLevel * (level / 100) * (root.editBusLevel / 100))
+                        : 0
+
+                    // Route checkbox — the same toggle as the plain list.
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 12
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 15; height: 15
+                        radius: 3
+                        color: busChRow.routed ? "#3574f0" : "transparent"
+                        border.width: 1
+                        border.color: busChRow.routed ? "#3574f0" : "#4a4f66"
+
+                        Text {
+                            anchors.centerIn: parent
+                            visible: busChRow.routed
+                            text: "\u2713"
+                            color: "#ffffff"
+                            font.pixelSize: 13
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            anchors.margins: -7
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: BusListModel.toggleAudioRoute(root.editBusIndex, busChRow.index)
+                        }
+                    }
+
+                    Text {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 41
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width - 200
+                        text: busChRow.name
+                        color: busChRow.routed ? "#e2e8f0" : "#5c6475"
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.textSm
+                        elide: Text.ElideRight
+                    }
+
+                    // Mini VU — same dimmed-scale convention as ProAudioForm.
+                    Row {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 150
+                        anchors.right: dbCell.left
+                        anchors.rightMargin: 16
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 2
+                        clip: true
+                        visible: width > 24
+
+                        readonly property int segs: 24
+                        readonly property real segW: Math.max(4, (width - (segs - 1) * spacing) / segs)
+
+                        Repeater {
+                            model: 24
+
+                            delegate: Rectangle {
+                                required property int index
+                                readonly property real pos: index / 23
+                                readonly property real lvl: busChRow.postLevel > 0.0005
+                                    ? Math.max(-60, 20 * Math.log10(busChRow.postLevel)) : -60
+                                width: parent.segW; height: 12; radius: 2
+                                readonly property bool lit: lvl > -60 + pos * 60 + 0.5
+                                color: pos < 0.625 ? "#4ade80"
+                                     : pos < 0.8125 ? "#f5c26b"
+                                     : "#ff4d3d"
+                                opacity: busChRow.routed ? (lit ? 1 : 0.22) : 0.08
+                            }
+                        }
+                    }
+
+                    Text {
+                        id: dbCell
+                        anchors.right: parent.right
+                        anchors.rightMargin: 12
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: busChRow.postLevel > 0.0005
+                              ? Math.round(20 * Math.log10(busChRow.postLevel)) + " dB"
+                              : "-\u221E dB"
+                        color: "#8a94a6"
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.textSm
+                    }
+                }
+            }
         }
 
         Item {
@@ -2045,6 +2329,7 @@ Item {
                     onPicked: {
                         root.addSourceType = modelData.key
                         root.addSourceKind = modelData.key === "audio" ? "device" : "camera"
+                        root.syncAudioMeter()   // video rows never meter
                     }
                 }
             }
@@ -2093,6 +2378,7 @@ Item {
                                     root.addSourceKind = modelData.key
                                     // The old pick belongs to the previous kind.
                                     root.addSourceSublabel = ""
+                                    root.syncAudioMeter()
                                 }
                             }
                         }
@@ -2113,15 +2399,30 @@ Item {
                     sourceLabel: qsTr("Source")
                     sourceValue: root.addSourceSublabel
                     sourceOptions: root.audioSourceOptions(root.addSourceKind)
-                    onSourcePicked: (v) => root.addSourceSublabel = v
+                    onSourcePicked: (v) => {
+                        root.addSourceSublabel = v
+                        root.syncAudioMeter()
+                    }
                     mode: root.addSourceMode
                     delayMs: root.addSourceDelayMs
                     volume: root.addSourceLevel
                     muted: root.addSourceMuted
                     channels: root.addSourceEffectiveChannels
-                    // Fake-signal hook: slider amplitude reads as the rows'
-                    // meter fill until real telemetry lands.
-                    meterLevel: root.addSourceLevel / 100
+                    // REAL telemetry — same WASAPI tap as the Edit dialog
+                    // (the two dialogs are mutually exclusive, so whichever
+                    // opened last owns the singleton tap).
+                    meterLevels: root.audioMeterLevels
+                    meterLayout: root.audioMeterLayout
+                    // Add dialog: knobs live in the buffered state until the
+                    // row is submitted (same contract as every other field).
+                    gainFor: function(i) {
+                        return root.addSourceGains.length > i ? root.addSourceGains[i] : 1.0
+                    }
+                    onChannelGainEdited: (i, g) => {
+                        while (root.addSourceGains.length <= i)
+                            root.addSourceGains.push(1.0)
+                        root.addSourceGains[i] = g
+                    }
                     onModeEdited: (m) => root.addSourceMode = m
                     onDelayEdited: (ms) => root.addSourceDelayMs = ms
                     onVolumeEdited: (v) => root.addSourceLevel = v
