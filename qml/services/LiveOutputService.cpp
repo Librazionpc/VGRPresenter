@@ -243,6 +243,20 @@ bool LiveOutputService::previous()
     return false;
 }
 
+// The preview toolbar's ‹ › (FreeShow's OutputHelper.advanceOutputs): a step
+// inside the on-air set is plain navigation; at either END of the set (a
+// single-verse pick makes BOTH ends) the step becomes a PASSAGE step — the
+// tab whose content is on air re-picks the neighbouring passage and replays
+// it, exactly like the preview pane's own ‹ › pills.
+void LiveOutputService::stepPassage(int direction)
+{
+    if (!live_)
+        return;
+    const bool moved = direction < 0 ? previous() : next();
+    if (!moved)
+        emit passageStepRequested(direction);
+}
+
 bool LiveOutputService::jumpTo(int index)
 {
     if (!live_ || index < 0)

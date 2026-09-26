@@ -54,6 +54,7 @@ void TestGoLivePaths();
 void TestStyleBackgroundImage();
 void TestBlockScenes();
 void TestTemplateStyleScenes();
+void TestOutputStore();
 void TestProjectUndoRedo();
 void TestProjectWorkspace();
 void TestProjectSessionSnapshot();

@@ -482,15 +482,31 @@ Column {
                 // Per-channel phase offset — rows never pulse in unison.
                 readonly property real phase: chRow.index * 0.37
 
-                // Meter wobble phase — ONE timer per channel row shared by all 24
-                // dots (was a Timer per dot: 24 x channels of them).
+                // LIVE METER: a real envelope driven by meterLevel — peaks
+                // follow the level UP instantly, then DECAY back down when
+                // it drops (the classic VU ballistics), with a small per-row
+                // variation so the channels breathe independently. Stuck-flat
+                // before: the fill sat at the volume position with only a
+                // ±0.06 wobble, so moving the slider read as no change.
                 property real cycle: 0
-                readonly property bool signalOn: chRow.chOn && root.meterLevel > 0 && !root.muted
+                property real env: 0
+                readonly property bool signalOn: chRow.chOn && root.meterLevel > 0.001 && !root.muted
                 Timer {
-                    interval: 140
-                    running: chRow.signalOn
+                    interval: 60
+                    running: chRow.chOn && !root.muted && root.meterLevel > 0.001
                     repeat: true
-                    onTriggered: chRow.cycle = (chRow.cycle + 0.11) % 2
+                    onTriggered: {
+                        chRow.cycle = (chRow.cycle + 0.37) % (Math.PI * 2)
+                        // Target rides the level with a gentle pulse; ATTACK
+                        // is instant, RELEASE decays at ~35%/tick — the meter
+                        // visibly rises and falls WITH the slider.
+                        const target = Math.max(0, Math.min(1,
+                            root.meterLevel
+                            + Math.sin(chRow.cycle + chRow.phase * 2.0) * 0.05))
+                        chRow.env = target > chRow.env
+                                    ? target
+                                    : chRow.env * 0.65 + target * 0.35
+                    }
                 }
 
                 // Checkbox — the reference's plain square check.
@@ -562,14 +578,11 @@ Column {
                             // threshold this dot represents.
                             readonly property real pos: dot.index / (meterRow.segs - 1)
                             width: meterRow.segW; height: 12; radius: 2
-                            // A dot is LIT when the level has reached it —
-                            // with a small wobble on the boundary so the
-                            // leading edge dances like a real VU needle.
-                            readonly property real env: !chRow.signalOn ? 0
-                                : Math.max(0, Math.min(1,
-                                    root.meterLevel - dot.pos
-                                    + Math.sin(chRow.cycle + dot.index * 0.8) * 0.06))
-                            readonly property bool lit: dot.env > 0.02
+                            // A dot is LIT when the row's live envelope has
+                            // reached it (attack/release ballistics above) —
+                            // the leading edge rides the level and sinks when
+                            // it drops, like a real VU.
+                            readonly property bool lit: chRow.env - dot.pos > 0.015
                             // The green→yellow→red ramp is ALWAYS visible
                             // (dimmed) — the meter reads as a scale even at
                             // rest, exactly like the reference; signal

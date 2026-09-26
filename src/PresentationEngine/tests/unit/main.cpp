@@ -89,6 +89,7 @@ static const Suite kSuites[] = {
     {"project", "proj-pkg", TestProjectPackage},
     {"project", "proj-data", TestDataManager},
     {"styles", "style-store", TestStyleStore},
+    {"styles", "output-store", TestOutputStore},
     {"styles", "style-builder", TestStyleBuilder},
     {"styles", "scene-styles", TestSceneBuilderStyles},
     {"styles", "active-style", TestSetActiveOutputStyle},

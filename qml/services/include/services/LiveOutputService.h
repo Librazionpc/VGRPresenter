@@ -73,6 +73,14 @@ public:
     Q_INVOKABLE bool previous();
     Q_INVOKABLE bool jumpTo(int index);
 
+    // The preview toolbar's ‹ ›: advance within the on-air set when it has
+    // somewhere to go; at either end (or on a single-slide pick) the step
+    // falls through to passageStepRequested — the content tab that owns the
+    // air re-picks the neighbouring passage and replays it (the same path
+    // its own pills take), so the toolbar behaves like the preview pane
+    // instead of going dead on a one-slide passage.
+    Q_INVOKABLE void stepPassage(int direction);
+
     // Any slide of the live set as design blocks (same shape as onAirSlide):
     // a thumbnail strip renders the whole presentation from this. Empty map
     // when not live or the index is out of range (hidden slides are skipped,
@@ -86,6 +94,9 @@ signals:
     void liveChanged();
     void frameRevChanged();
     void onAirChanged();
+    // stepPassage() reached the edge of the on-air set: the tab whose content
+    // IS on air should re-pick the neighbouring passage (direction -1/+1).
+    void passageStepRequested(int direction);
 
 private:
     explicit LiveOutputService(QObject *parent = nullptr);

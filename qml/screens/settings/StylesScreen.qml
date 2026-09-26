@@ -58,6 +58,25 @@ Item {
         }
         return templatePicker.nameFor(key)
     }
+    // The template's own ACCENT from the engine design (its category chip
+    // colour) — the card's template chip takes it, so the row reads as "this
+    // exact engine design", not a grey label. Legacy presets get the slate
+    // fallback (they have no design to read).
+    function templateColorFor(key) {
+        void root.templateCatalogRev
+        if (typeof key === "string" && key.indexOf("tpl-") === 0) {
+            const c = TemplateLibraryService.design(key).color
+            if (c) return c
+        }
+        return ""
+    }
+    // Is this style ON the active output right now? (engine state, not the
+    // roster's opinion — OutputListModel is the one that pushed the spec.)
+    function isOnAir(styleId) {
+        void root.modelsRev
+        const ai = OutputListModel.activeIndex()
+        return ai >= 0 && styleId !== "" && OutputListModel.getOutput(ai).styleId === styleId
+    }
 
     // ---- Edit Style dialog ----
     // Editable copies loaded when the dialog opens — the model is only
@@ -352,12 +371,52 @@ Item {
                                         }
                                     }
 
-                                    Text {
+                                    // The template as a CHIP wearing the ENGINE
+                                    // design's own accent (its category colour),
+                                    // not a grey text label — the row now reads
+                                    // "this exact engine design" at a glance.
+                                    Rectangle {
                                         anchors.verticalCenter: parent.verticalCenter
-                                        text: root.templateNameFor(styleRow.templateKey)
-                                        color: Theme.textSecondary
-                                        font.family: Theme.fontFamily
-                                        font.pixelSize: Theme.textXs
+                                        height: 18
+                                        width: templateLabel.implicitWidth + 12
+                                        radius: 4
+                                        color: root.templateColorFor(styleRow.templateKey) !== ""
+                                               ? root.templateColorFor(styleRow.templateKey) : "#262a3a"
+
+                                        Text {
+                                            id: templateLabel
+                                            anchors.centerIn: parent
+                                            text: root.templateNameFor(styleRow.templateKey)
+                                            color: root.templateColorFor(styleRow.templateKey) !== ""
+                                                   ? "#ffffff" : Theme.textPrimary
+                                            font.family: Theme.fontFamily
+                                            font.pixelSize: 10
+                                            font.weight: Font.Bold
+                                        }
+                                    }
+
+                                    // ON AIR — engine truth (this style is the
+                                    // active output's): a live-red chip, not a
+                                    // dot the eye has to hunt for.
+                                    Rectangle {
+                                        visible: root.isOnAir(styleRow.styleId)
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        height: 18
+                                        width: onAirLabel.implicitWidth + 12
+                                        radius: 9
+                                        color: "#33ff4d3d"
+                                        border.color: "#66ff4d3d"
+                                        border.width: 1
+
+                                        Text {
+                                            id: onAirLabel
+                                            anchors.centerIn: parent
+                                            text: qsTr("● ON AIR")
+                                            color: "#ff6b61"
+                                            font.family: Theme.fontFamily
+                                            font.pixelSize: 9
+                                            font.weight: Font.Bold
+                                        }
                                     }
 
                                     // Mini content pills — grey = that tab is
@@ -388,7 +447,7 @@ Item {
                                                     id: miniLabel
                                                     anchors.centerIn: parent
                                                     text: parent.modelData.label
-                                                    color: parent.modelData.on ? Theme.textSecondary : Theme.textMuted
+                                                    color: parent.modelData.on ? Theme.textPrimary : Theme.textMuted
                                                     font.family: Theme.fontFamily
                                                     font.pixelSize: 9
                                                     font.bold: parent.modelData.on
@@ -401,7 +460,7 @@ Item {
                                         visible: styleRow.rowCategory !== ""
                                         anchors.verticalCenter: parent.verticalCenter
                                         text: "·  " + styleRow.rowCategory
-                                        color: Theme.textMuted
+                                        color: Theme.textSecondary
                                         font.family: Theme.fontFamily
                                         font.italic: true
                                         font.pixelSize: Theme.textXs
@@ -414,24 +473,29 @@ Item {
                                     TextInput {
                                         width: Math.max(implicitWidth + 2, 80)
                                         text: styleRow.res
-                                        color: Theme.textMuted
+                                        color: Theme.textSecondary
                                         font.family: Theme.fontFamily
                                         font.pixelSize: Theme.textXs
+                                        font.weight: Font.Medium
                                         selectByMouse: true
                                         onEditingFinished: StyleListModel.setResolution(styleRow.index, text)
                                     }
 
                                     Text {
                                         // modelsRev referenced inside the
-                                        // binding keeps this count honest.
+                                        // binding keeps this count honest. BOLD
+                                        // when this style is actually on air —
+                                        // the usage line carries state now, not
+                                        // just a count.
                                         text: {
                                             root.modelsRev
                                             const u = root.styleUsage(styleRow.styleId)
                                             return "·  applied by " + u + (u === 1 ? " output" : " outputs")
                                         }
-                                        color: Theme.textMuted
+                                        color: root.isOnAir(styleRow.styleId) ? "#ff8a80" : Theme.textSecondary
                                         font.family: Theme.fontFamily
                                         font.pixelSize: Theme.textXs
+                                        font.weight: root.isOnAir(styleRow.styleId) ? Font.DemiBold : Font.Normal
                                     }
                                 }
                             }

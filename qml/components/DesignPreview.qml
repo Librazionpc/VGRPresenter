@@ -29,6 +29,17 @@ Item {
 
     property var blocks: []
     property string background: "transparent"
+    // A background IMAGE painted over the colour, under the blocks — the
+    // engine's own order (SceneBuilder: background colour object, then the
+    // style image cover-fit, then content). Hosts pass the STYLE's image
+    // here so a preview mirrors what the output renders behind the blocks;
+    // empty = none (library cards, canvas thumbnails).
+    property string backgroundImage: ""
+    // The transparency checkerboard behind a clear background. The output
+    // monitor tile turns it OFF: there the pane under the preview paints the
+    // OUTPUT STYLE's colour/image, and checkers would cover it (a styled
+    // output must never read as "transparent/unstyled").
+    property bool showCheckerboard: true
     // What time the clocks show; the host ticks it (one shared ticker rather than one per card).
     property date now: new Date()
     // Checkerboard tile size in stage units - a strip of many small slides passes a bigger one to keep them cheap.
@@ -64,12 +75,22 @@ Item {
         Checkerboard {
             anchors.fill: parent
             tileSize: root.checkerSize
-            visible: root.isClear(root.background)
+            visible: root.showCheckerboard && root.isClear(root.background)
         }
         Rectangle {
             anchors.fill: parent
             visible: !root.isClear(root.background)
             color: root.background
+        }
+        // The style's background IMAGE — over the colour, under every block,
+        // cover-fit (SceneBuilder's CoverRect). Only when the image is set:
+        // a slide's own composed colour stays visible through a transparent
+        // image slot.
+        Image {
+            anchors.fill: parent
+            visible: root.backgroundImage !== ""
+            source: root.backgroundImage !== "" ? "file:///" + root.backgroundImage : ""
+            fillMode: Image.PreserveAspectCrop
         }
 
         Repeater {

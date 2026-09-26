@@ -30,6 +30,20 @@ ApplicationWindow {
     property string currentView: "show"
     property real selfTestT6: 0   // (self-test probe timing scratch)
     property real selfTestPillT: 0   // (stage 6c pill-search timing scratch)
+    property int selfTestStyleRow: -1   // (stage 8s test style row — restored after the grab)
+    // Singleton warm-up: QML singletons are created LAZILY — one no binding
+    // has touched yet simply doesn't exist, and the C++ side reads
+    // StyleListModel::instance() (the outputs model's roster relay, the
+    // boot-time engine style push, every styleBackground() role read) and
+    // gets null. Nothing in the boot scene touches the Styles screen, so
+    // this stayed null for a whole session: the output's assigned style
+    // resolved as "no style" everywhere — the monitor tile showed the
+    // transparency checkerboard over the style's colour/image and the
+    // engine rendered unstyled. Referencing both here forces them to exist
+    // while the root's properties bind — before any child (the monitor
+    // wall) is created — and OutputListModel's singleShot(0) retry then
+    // wires the relay against the now-real instance.
+    readonly property var _singletonWarmup: [StyleListModel.rowCount(), OutputListModel.rowCount()]
     // The window-level layer that carries a drag between panes (DragSource / DropArea); see DragLayer.qml.
     readonly property var dragLayer: dragLayerItem
 
@@ -506,10 +520,88 @@ ApplicationWindow {
             const s3 = Date.now()
             console.log("[SELFTEST] stage 7 STEADY (GUI-thread dispatch — what typing feels): 'god' =", (s1 - s0) + "ms",
                         "'then friend' =", (s2 - s1) + "ms", "'the' =", (s3 - s2) + "ms")
-            selfTestHeartbeat.running = false   // nothing fires into teardown
+            selfTestStage8.restart()
+        }
+    }
+    // Monitor-wall rendering audit (style backgrounds vs checkerboards —
+    // the output-preview regression): grabs the wall's pixels + logs every
+    // output's style/color/image state so the PNG can be interpreted.
+    Timer {
+        id: selfTestStage8
+        interval: 300
+        onTriggered: {
+            const roster = OutputListModel.rowCount()
+            const ai = OutputListModel.activeIndex()
+            // (typeof only — no method call: calling rowCount() here would
+            // force-instantiate the singleton and mask the warm-up fix.)
+            console.log("[SELFTEST] stage 8: roster =", roster, "active =", ai,
+                        "styles singleton:", (typeof StyleListModel !== "undefined") ? "defined" : "NOT DEFINED")
+            const state = []
+            for (let i = 0; i < roster; ++i) {
+                const o = OutputListModel.getOutput(i)
+                const bg = OutputListModel.styleBackground(i)
+                state.push({ name: o.name, styleId: o.styleId, active: o.active,
+                             color: bg.color, image: bg.image, hasImage: bg.hasImage })
+            }
+            console.log("[SELFTEST] stage 8a state:", JSON.stringify(state))
+            const wall = SelfTest.findItem("selfTestMonitorWall")
+            console.log("[SELFTEST] stage 8a wall:", wall ? "found" : "NOT FOUND")
+            SelfTest.grab("selfTestMonitorWall", "shot_monitor_wall.png")
+            // (quit() DESTROYS the window while grabToImage's async render is
+            // still in flight — quit one beat later, after the save lands.)
+            selfTestStage8s.restart()
+        }
+    }
+    // Stage 8s: PROVE the styled path — a real style with a solid bg colour
+    // assigned to the active output. The dataChanged relay must repaint the
+    // wall: checkerboard gone, the colour showing.
+    Timer {
+        id: selfTestStage8s
+        interval: 300
+        onTriggered: {
+            try {
+                const row = StyleListModel.rowCount()
+                window.selfTestStyleRow = row
+                StyleListModel.addStyle()
+                StyleListModel.setBackgroundColor(row, "#1064b0")
+                OutputListModel.setStyle(0, StyleListModel.getStyle(row).id)
+                console.log("[SELFTEST] stage 8s: style", StyleListModel.getStyle(row).id,
+                            "bg #1064b0 assigned to output 0")
+            } catch (e) { console.log("[SELFTEST] stage 8s THREW:", e) }
+            selfTestStage8c.restart()
+        }
+    }
+    Timer {
+        id: selfTestStage8c
+        interval: 700
+        onTriggered: {
+            try {
+                const ai = OutputListModel.activeIndex()
+                const bg = OutputListModel.styleBackground(ai)
+                console.log("[SELFTEST] stage 8c styled state:", JSON.stringify(bg))
+                SelfTest.grab("selfTestMonitorWall", "shot_monitor_wall_styled.png")
+            } catch (e) { console.log("[SELFTEST] stage 8c THREW:", e) }
+            selfTestStage8b.restart()
+        }
+    }
+    Timer {
+        id: selfTestStage8b
+        interval: 1200
+        onTriggered: {
+            // Restore exactly what the stage touched (no test residue left in
+            // the user's saved roster/styles).
+            try {
+                if (window.selfTestStyleRow >= 0) {
+                    OutputListModel.setStyle(0, "")
+                    StyleListModel.removeStyle(window.selfTestStyleRow)
+                    window.selfTestStyleRow = -1
+                }
+            } catch (e) { console.log("[SELFTEST] cleanup failed:", e) }
+            selfTestHeartbeat.running = false
             SelfTest.quit()
         }
-    }    Timer {
+    }
+    Timer {
         id: selfTestStage4d
         running: false
         interval: 9999999

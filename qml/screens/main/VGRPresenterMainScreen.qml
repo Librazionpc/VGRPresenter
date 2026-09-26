@@ -718,6 +718,17 @@ Rectangle {
                         // the tab bar feeds them to the search box and routes picks back here.
                         Component.onCompleted: media_tab_bar.registerSuggester("scripture", scripturePane)
                         onSuggestionChosen: (ref) => scripturePane.applySuggestion(ref)
+                        // The preview toolbar's ‹ › at the edge of the on-air
+                        // set: this tab re-picks the neighbouring passage and
+                        // replays it (its own stepAndPlay path) when ITS content
+                        // is the one on air.
+                        Connections {
+                            target: LiveOutputService
+                            function onPassageStepRequested(direction) {
+                                if (scripturePane.visible && scripturePane.adapter.liveIsOurs(scripturePane.referenceText))
+                                    scripturePane.stepAndPlay(direction)
+                            }
+                        }
                     }
                     TheTablePane {
                         id: tablePane
@@ -728,6 +739,14 @@ Rectangle {
                         // The Table autocompletes the same way (its suggest() offers sermons).
                         Component.onCompleted: media_tab_bar.registerSuggester("table", tablePane)
                         onSuggestionChosen: (ref) => tablePane.applySuggestion(ref)
+                        // Same passage-step relay as Scripture (see there).
+                        Connections {
+                            target: LiveOutputService
+                            function onPassageStepRequested(direction) {
+                                if (tablePane.visible && tablePane.adapter.liveIsOurs(tablePane.referenceText))
+                                    tablePane.stepAndPlay(direction)
+                            }
+                        }
                         // The same show-building path Scripture uses (Main.qml's
                         // handler is generic: name + slides -> a new show).
                         onConvertToShowRequested: (name, slides) => vGRPresenter_Main_Screen.scriptureShowRequested(name, slides)
@@ -1686,6 +1705,9 @@ Rectangle {
             // was removed (user call); the wall owns the whole column now.
             MonitorWall {
                 id: monitorWall
+                // Self-test handle (VGR_SELFTEST grabs this item to PNG for
+                // pixel-sampling the checkerboard/style-bg rendering).
+                objectName: "selfTestMonitorWall"
 
                 x: (parent.width - width) / 2
                 y: 0

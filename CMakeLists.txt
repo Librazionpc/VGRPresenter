@@ -203,6 +203,7 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/project/ProjectManager.cpp
     ${BPS_ROOT}/modules/project/WorkspaceManager.cpp
     ${BPS_ROOT}/modules/project/StyleStore.cpp
+    ${BPS_ROOT}/modules/project/OutputStore.cpp
     ${BPS_ROOT}/modules/project/DocumentManager.cpp
     ${BPS_ROOT}/modules/project/UndoRedoManager.cpp
     ${BPS_ROOT}/modules/project/HistoryManager.cpp

@@ -660,9 +660,17 @@ Item {
     // Floating pill buttons: previous / next picked passage (FreeShow's
     // _moveSelection), play what's picked. Wired by the wrappers to the live
     // service when their content is on air; plain navigation otherwise.
+    // OWNERSHIP IS CHECKED BEFORE THE STEP: after root.step() the reference
+    // text is already the NEW passage while the on-air title is still the
+    // old one — a post-step liveIsOurs(newRef) can never match, so the
+    // replay never fired and the output stayed frozen on the previous verse
+    // while the pane's selection walked on (the toolbar ‹ › and the pane's
+    // own pills both died this way).
     function stepAndPlay(direction) {
+        const wasOurs = root.adapter && root.adapter.liveIsOurs
+                        && root.adapter.liveIsOurs(root.referenceText)
         root.step(direction)
-        if (root.adapter && root.adapter.liveIsOurs && root.adapter.liveIsOurs())
+        if (wasOurs)
             root.playPicked()
     }
 

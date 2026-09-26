@@ -7,6 +7,7 @@
 #include "modules/presentation/PresentationEngine.hpp"
 #include "modules/presentation/PresentationRuntime.hpp"
 #include "modules/presentation/SceneBuilder.hpp"
+#include "modules/project/OutputStore.hpp"
 #include "modules/project/StyleStore.hpp"
 #include "modules/rendering/PngCodec.hpp"
 
@@ -64,6 +65,55 @@ void TestStyleStore() {
     CHECK(proj::StyleStore::Instance().Save(smaller).ok());
     auto after = proj::StyleStore::Instance().Get();
     CHECK(after.size() == 1 && after[0].id == "s9");
+}
+
+// ---------------------------------------------------------------------------
+// OutputStore — the OUTPUT ROSTER document (styles' sibling): the style
+// assignment must survive a restart or the boot-time style push is empty.
+// ---------------------------------------------------------------------------
+void TestOutputStore() {
+    CHECK(DatabaseManager::Instance().Open("").ok());   // in-memory for the test
+    auto fresh = proj::OutputStore::Instance().Get();
+    CHECK(fresh.empty());
+
+    std::vector<proj::StoredOutput> roster;
+    proj::StoredOutput a;
+    a.id = "out-1";
+    a.name = "Main Output";
+    a.badge = "LIVE 1";
+    a.kind = "HDMI";
+    a.res = "1920x1080";
+    a.refresh = "60 Hz";
+    a.screenName = "\\\\.\\DISPLAY1";
+    a.active = true;
+    a.styleId = "s1";                     // THE assignment
+    a.contentToggles = { true, false, true, true, true, false };
+    roster.push_back(a);
+    proj::StoredOutput b;
+    b.id = "out-2";
+    b.name = "Stage";
+    roster.push_back(b);   // defaults on the remaining fields
+    CHECK(proj::OutputStore::Instance().Save(roster).ok());
+
+    auto back = proj::OutputStore::Instance().Get();
+    CHECK(back.size() == 2);
+    if (back.size() == 2) {
+        CHECK(back[0].id == "out-1" && back[0].name == "Main Output");
+        CHECK(back[0].styleId == "s1" && back[0].active);
+        CHECK(back[0].screenName == "\\\\.\\DISPLAY1");
+        CHECK(!back[0].contentToggles[1] && back[0].contentToggles[2]);
+        CHECK(back[1].styleId.empty() && !back[1].active && back[1].enabled);
+    }
+
+    // Overwrite: the second save replaces the first (one roster document).
+    std::vector<proj::StoredOutput> smaller;
+    proj::StoredOutput c;
+    c.id = "out-9";
+    c.name = "Only";
+    smaller.push_back(c);
+    CHECK(proj::OutputStore::Instance().Save(smaller).ok());
+    CHECK(proj::OutputStore::Instance().Get().size() == 1
+          && proj::OutputStore::Instance().Get()[0].id == "out-9");
 }
 
 // ---------------------------------------------------------------------------

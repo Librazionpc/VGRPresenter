@@ -91,6 +91,14 @@ public:
         StyleIdRole,
         StyleNameRole,
         ContentRole,
+        // This output's style background as a QVariantMap { color, image,
+        // hasImage } — what a CLEAR output (nothing on air, or a cleared
+        // screen) shows in its monitor tile, and what sits under the block
+        // render while live. A ROLE so every tile's preview re-evaluates the
+        // moment the style or its assignment changes: an INVOKABLE (the old
+        // activeStyleBackground()) is opaque to the QML engine, so the binding
+        // captured its value once at creation and never moved again.
+        StyleBackgroundRole,
     };
     Q_ENUM(Role)
 
@@ -161,6 +169,21 @@ public:
     // this before going live (a private Q_INVOKABLE is invisible to QML).
     Q_INVOKABLE bool activeStyleAllows(const QString &contentType) const;
 
+    // This output's style background as QML colours: { color, image,
+    // hasImage }. What the output renders behind its content when nothing
+    // else paints there (the engine's OutputStyleSpec): a monitor tile paints
+    // it when the output is CLEAR (off air) — the style's look, not a
+    // transparency checkerboard that reads as "unstyled" — and under the
+    // block render while live (DesignPreview draws only flat colours, so a
+    // style background IMAGE would be invisible on the tile otherwise).
+    // Delivered as the StyleBackground ROLE (per OUTPUT, not a global "active"
+    // invokable): data() re-resolves through StyleListModel per read, and the
+    // dataChanged/rosterChanged relays below make every tile re-evaluate.
+    // Q_INVOKABLE: the self-test scenario reads every output's background
+    // straight from QML (OutputListModel.styleBackground(i)) to log the
+    // state beside the monitor-wall grab.
+    Q_INVOKABLE QVariantMap styleBackground(int index) const;
+
 signals:
     void activeStyleChanged();
 
@@ -199,6 +222,12 @@ private:
     bool styleRosterConnected_ = false;
     bool templateLibraryConnected_ = false;
     bool engineBootConnected_ = false;
+
+    // Persists the roster into the engine's OutputStore (the kernel
+    // database's "outputs" collection) — the style ASSIGNMENT, screen
+    // assignment, enabled/test-pattern/content state all survive a
+    // restart. Every mutator calls it; hydrate happens in the constructor.
+    void saveRoster();
 
     static QPointer<OutputListModel> s_instance;
     static QList<OutputContentToggle> defaultContent();

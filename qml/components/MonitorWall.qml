@@ -235,6 +235,11 @@ Item {
         readonly property bool atStart: LiveOutputService.onAirIndex <= 0
         readonly property bool atEnd: LiveOutputService.onAirTotal > 0 && LiveOutputService.onAirIndex >= LiveOutputService.onAirTotal - 1
         readonly property bool onAir: LiveOutputService.onAirTotal > 0
+        // A single-slide pick (one verse) makes BOTH ends true — but the
+        // ‹ › must stay live: at the ends they become PASSAGE steps (the
+        // tab that owns the air re-picks the neighbouring passage), the
+        // same way the preview pane's own pills advance it.
+        readonly property bool multiSlide: LiveOutputService.onAirTotal > 1
 
         // A toolbar button — one glyph in a PILL (always-visible rounded
         // chip, like FreeShow's MaterialButton tiles) that brightens on
@@ -286,24 +291,32 @@ Item {
             Row {
                 width: parent.width
 
+                // ‹ › (FreeShow's OutputHelper.advanceOutputs): a step within
+                // the on-air set, or — at either end of it — a PASSAGE step:
+                // the tab whose content is on air re-picks the neighbouring
+                // passage and replays it, so the arrows keep driving the
+                // output preview even on a single-verse pick (like the
+                // preview pane's own pills).
                 ToolButton {
                     width: parent.width / 5; height: 30
                     icon: "previous"
-                    enabled2: !toolbar.atStart
-                    onPicked: LiveOutputService.previous()
+                    // Dead only mid-set with nowhere back (a multi-slide pick
+                    // already on the first slide): a single-verse pick keeps
+                    // the arrow (it passage-steps).
+                    enabled2: toolbar.onAir && !(toolbar.multiSlide && toolbar.atStart)
+                    onPicked: LiveOutputService.stepPassage(-1)
                 }
                 ToolButton {
                     width: parent.width / 5; height: 30
                     icon: "next"
-                    enabled2: !toolbar.atEnd
-                    onPicked: LiveOutputService.next()
+                    enabled2: toolbar.onAir && !(toolbar.multiSlide && toolbar.atEnd)
+                    onPicked: LiveOutputService.stepPassage(1)
                 }
-                // Play: when live, an end-of-list restart (the engine runs
-                // the show itself; there is no separate start).
+                // Play: restart the on-air set from its first slide.
                 ToolButton {
                     width: parent.width / 5; height: 30
                     icon: "play"
-                    enabled2: toolbar.atEnd || !toolbar.onAir
+                    enabled2: toolbar.onAir
                     onPicked: {
                         if (!LiveOutputService.live) return
                         LiveOutputService.jumpTo(0)

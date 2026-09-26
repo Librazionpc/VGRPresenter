@@ -52,6 +52,10 @@ Item {
     property string routingModalFor: ""   // "add" | "edit"
     RoutingMatrixModal {
         id: routingModal
+        // ABOVE the Edit/Add dialogs (declared before them, and QML siblings
+        // stack in declaration order — the modal opened UNDER the edit dialog
+        // and looked like "nothing happened"). z beats declaration order.
+        z: 50
         busRev: root.modelsRev
         onApplied: (autoRoute, routes) => {
             if (root.routingModalFor === "edit" && root.editAudioIndex >= 0) {

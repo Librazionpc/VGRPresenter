@@ -5,10 +5,13 @@
 #include "services/SettingsService.h"
 #include "services/ShowConverter.h"
 #include "modules/presentation/PresentationTypes.hpp"
+#include "modules/project/OutputStore.hpp"
 
 #include <QGuiApplication>
 #include <QScreen>
 #include <QTimer>
+#include <QFile>
+#include <QTimerEvent>
 #include <algorithm>
 
 namespace {
@@ -16,6 +19,9 @@ namespace {
 // way to put anything on the primary display, so it's protected everywhere
 // (Settings · Outputs hides its Delete affordance; removeOutput refuses).
 constexpr auto kMainOutputName = "Main Output";
+// The Edit dialog's item-kind keys, in OutputContentToggle display order —
+// the same order the engine's OutputStore persists the toggles in.
+constexpr const char *kContentKeys[] = { "text", "camera", "media", "clock", "timer", "shape" };
 }
 
 QPointer<OutputListModel> OutputListModel::s_instance = nullptr;
@@ -28,35 +34,82 @@ OutputListModel::OutputListModel(QObject *parent)
 
     const QList<OutputContentToggle> content = defaultContent();
 
-    // The ONE mandatory output: the primary display — every show needs a
-    // way to put content on the main screen. Everything else (stage,
-    // nursery, stream overlays…) is user-added; no more hardcoded demo
-    // roster. Its res/refresh read from the actual primary screen so the
-    // card shows the machine's real mode, not a mock 1920×1080@60.
+    // ---- HYDRATE the persisted roster (the engine's OutputStore, the
+    // sibling of StyleStore). This is what makes a style ASSIGNMENT survive
+    // a restart: without it the roster rebuilt itself fresh every launch
+    // ("Main Output", styleId "") and the boot-time style push carried an
+    // empty spec no matter what was saved in Styles. A missing document
+    // (first run) or a corrupt one reads as an empty roster — the Main
+    // Output default below takes over, never a failed boot.
     const QList<QScreen *> screens = QGuiApplication::screens();
     const QScreen *primary = QGuiApplication::primaryScreen();
     if (!primary && !screens.isEmpty())
         primary = screens.first();
 
-    OutputItem main;
-    main.name = QStringLiteral("Main Output");
-    main.badge = QStringLiteral("LIVE 1");
-    main.kind = QStringLiteral("HDMI");
-    if (primary) {
-        const QSize mode = primary->size();
-        const qreal refresh = primary->refreshRate();
-        main.res = QStringLiteral("%1×%2").arg(mode.width()).arg(mode.height());
-        main.refresh = refresh > 0 ? QStringLiteral("%1 Hz").arg(qRound(refresh))
-                                   : QStringLiteral("60 Hz");
-        main.screenName = primary->name();
-    } else {
-        main.res = QStringLiteral("1920×1080");
-        main.refresh = QStringLiteral("60 Hz");
+    bool sawActive = false;
+    for (const bps::project::StoredOutput &so : bps::project::OutputStore::Instance().Get()) {
+        OutputItem item;
+        item.name = QString::fromStdString(so.name);
+        item.badge = QString::fromStdString(so.badge);
+        item.kind = QString::fromStdString(so.kind);
+        item.res = QString::fromStdString(so.res);
+        item.refresh = QString::fromStdString(so.refresh);
+        item.testPattern = QString::fromStdString(so.testPattern);
+        item.screenName = QString::fromStdString(so.screenName);
+        item.boundsLocked = so.boundsLocked;
+        item.isEnabled = so.enabled;
+        item.styleId = QString::fromStdString(so.styleId);
+        item.content = content;   // the six defaults, then the persisted toggles on top
+        for (int i = 0; i < item.content.size() && i < 6; ++i)
+            item.content[i].enabled = so.contentToggles[i];
+        // A persisted screenName may name a display that is no longer there
+        // (unplugged monitor): keep the row but drop the dead assignment —
+        // the output shows "unassigned" instead of silently pointing at
+        // nothing. Resolution still snaps on the next setScreenName.
+        if (!item.screenName.isEmpty()) {
+            bool screenThere = false;
+            for (const QScreen *s : screens)
+                if (s->name() == item.screenName) { screenThere = true; break; }
+            if (!screenThere) {
+                item.screenName.clear();
+                item.res.clear();
+                item.refresh.clear();
+            }
+        }
+        sawActive = sawActive || item.active;
+        m_outputs.append(item);
     }
-    main.active = true;
-    main.styleId = QStringLiteral();
-    main.content = content;
-    m_outputs.append(main);
+
+    // The ONE mandatory output: the primary display — every show needs a
+    // way to put content on the main screen. Seeded only when the persisted
+    // roster is empty (first run); a saved roster that somehow lost it gets
+    // it back (removeOutput refuses for it, so this is belt-and-braces).
+    const bool hasMain = std::any_of(m_outputs.cbegin(), m_outputs.cend(),
+                                     [](const OutputItem &o) { return o.name == QLatin1String(kMainOutputName); });
+    if (!hasMain) {
+        OutputItem main;
+        main.name = QStringLiteral("Main Output");
+        main.badge = QStringLiteral("LIVE 1");
+        main.kind = QStringLiteral("HDMI");
+        if (primary) {
+            const QSize mode = primary->size();
+            const qreal refresh = primary->refreshRate();
+            main.res = QStringLiteral("%1×%2").arg(mode.width()).arg(mode.height());
+            main.refresh = refresh > 0 ? QStringLiteral("%1 Hz").arg(qRound(refresh))
+                                       : QStringLiteral("60 Hz");
+            main.screenName = primary->name();
+        } else {
+            main.res = QStringLiteral("1920×1080");
+            main.refresh = QStringLiteral("60 Hz");
+        }
+        main.content = content;
+        m_outputs.prepend(main);
+    }
+    // Exactly one active output per session (a crashed run can save none).
+    if (!sawActive && !m_outputs.isEmpty())
+        m_outputs.first().active = true;
+
+    saveRoster();
 
     // A style edit renames/re-keys the theme every output's styleName shows —
     // re-resolve the derived roles when the roster changes. The engine spec
@@ -75,6 +128,34 @@ OutputListModel::OutputListModel(QObject *parent)
         connectToTemplateLibrary();
         connectToEngineBoot();
     });
+}
+
+// The whole roster back into the engine's OutputStore (StyleListModel::save
+// is the same shape for styles). Every mutator funnels through here.
+void OutputListModel::saveRoster()
+{
+    QList<bps::project::StoredOutput> stored;
+    stored.reserve(m_outputs.size());
+    for (const OutputItem &item : m_outputs) {
+        bps::project::StoredOutput so;
+        so.id = QStringLiteral("out-%1").arg(qHash(item.name)).toStdString();
+        so.name = item.name.toStdString();
+        so.badge = item.badge.toStdString();
+        so.kind = item.kind.toStdString();
+        so.res = item.res.toStdString();
+        so.refresh = item.refresh.toStdString();
+        so.testPattern = item.testPattern.toStdString();
+        so.screenName = item.screenName.toStdString();
+        so.boundsLocked = item.boundsLocked;
+        so.active = item.active;
+        so.enabled = item.isEnabled;
+        so.styleId = item.styleId.toStdString();
+        for (int i = 0; i < item.content.size() && i < 6; ++i)
+            so.contentToggles[i] = item.content.at(i).enabled;
+        stored.append(so);
+    }
+    (void)bps::project::OutputStore::Instance().Save(
+        std::vector<bps::project::StoredOutput>(stored.cbegin(), stored.cend()));
 }
 
 void OutputListModel::connectToEngineBoot()
@@ -107,12 +188,16 @@ void OutputListModel::connectToStyleRoster()
     if (!styles)
         return;
     styleRosterConnected_ = true;
+    styleRosterConnected_ = true;
     connect(styles, &StyleListModel::rosterChanged, this, [this]() {
         if (m_outputs.isEmpty())
             return;
         const QModelIndex first = index(0);
         const QModelIndex last = index(m_outputs.size() - 1);
-        emit dataChanged(first, last, { StyleIdRole, StyleNameRole });
+        // StyleBackgroundRole rides along: a Save Changes on a style any
+        // output wears (colour or background image) must repaint that
+        // output's monitor tile the moment the dialog closes.
+        emit dataChanged(first, last, { StyleIdRole, StyleNameRole, StyleBackgroundRole });
         // Save Changes on a style that is ON AIR must reach the engine NOW
         // (FreeShow's reactive output.style — the live render loop picks the
         // new spec up within a frame). pushEngineStyle only ran on output
@@ -177,6 +262,8 @@ QVariant OutputListModel::data(const QModelIndex &index, int role) const
             list.append(QVariantMap{ { "key", toggle.key }, { "label", toggle.label }, { "enabled", toggle.enabled } });
         return list;
     }
+    case StyleBackgroundRole:
+        return styleBackground(index.row());
     default: return {};
     }
 }
@@ -197,6 +284,7 @@ QHash<int, QByteArray> OutputListModel::roleNames() const
         { StyleIdRole, "styleId" },
         { StyleNameRole, "styleName" },
         { ContentRole, "content" },
+        { StyleBackgroundRole, "styleBackground" },
     };
 }
 
@@ -225,6 +313,7 @@ void OutputListModel::addScreen(const QString &name, const QString &type,
     item.content = defaultContent();
     m_outputs.append(item);
     endInsertRows();
+    saveRoster();
 }
 
 void OutputListModel::addOutput()
@@ -244,10 +333,10 @@ void OutputListModel::duplicateOutput(int index)
     copy.badge = QStringLiteral("OUT %1").arg(m_outputs.size() + 1);
     copy.active = false; // a duplicate starts dark, never fighting the original
     copy.isEnabled = true; // a duplicate always starts usable
-
     beginInsertRows(QModelIndex(), index + 1, index + 1);
     m_outputs.insert(index + 1, copy);
     endInsertRows();
+    saveRoster();
 }
 
 void OutputListModel::removeOutput(int index)
@@ -266,6 +355,7 @@ void OutputListModel::removeOutput(int index)
     beginRemoveRows(QModelIndex(), index, index);
     m_outputs.removeAt(index);
     endRemoveRows();
+    saveRoster();
 
     if (wasActive)
         pushEngineStyle(QString());
@@ -291,6 +381,7 @@ void OutputListModel::setActive(int index)
         const bool shouldBeActive = (i == index);
         if (m_outputs[i].active != shouldBeActive) {
             m_outputs[i].active = shouldBeActive;
+            saveRoster();
             const QModelIndex changed = this->index(i);
             emit dataChanged(changed, changed, { ActiveRole });
         }
@@ -310,10 +401,12 @@ void OutputListModel::setEnabled(int index, bool on)
         return;
 
     m_outputs[index].isEnabled = on;
+    saveRoster();
     // Disabling also pulls the screen off air — a disabled screen must not
     // keep rendering as LIVE anywhere.
     if (!on && m_outputs[index].active) {
         m_outputs[index].active = false;
+        saveRoster();
         const QModelIndex changed = this->index(index);
         emit dataChanged(changed, changed, { EnabledRole, ActiveRole });
         pushEngineStyle(QString());
@@ -335,6 +428,7 @@ void OutputListModel::renameOutput(int index, const QString &name)
     m_outputs[index].name = trimmed;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { NameRole });
+    saveRoster();
 }
 
 void OutputListModel::setResolution(int index, const QString &res)
@@ -347,6 +441,7 @@ void OutputListModel::setResolution(int index, const QString &res)
     m_outputs[index].res = res;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { ResRole });
+    saveRoster();
 }
 
 void OutputListModel::setKind(int index, const QString &kind)
@@ -359,6 +454,7 @@ void OutputListModel::setKind(int index, const QString &kind)
     m_outputs[index].kind = kind;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { KindRole });
+    saveRoster();
 }
 
 void OutputListModel::setRefresh(int index, const QString &refresh)
@@ -372,6 +468,7 @@ void OutputListModel::setRefresh(int index, const QString &refresh)
     m_outputs[index].refresh = trimmed;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { RefreshRole });
+    saveRoster();
 }
 
 void OutputListModel::setTestPattern(int index, const QString &pattern)
@@ -384,6 +481,7 @@ void OutputListModel::setTestPattern(int index, const QString &pattern)
     m_outputs[index].testPattern = pattern;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { TestPatternRole });
+    saveRoster();
 }
 
 void OutputListModel::setStyle(int index, const QString &styleId)
@@ -400,7 +498,8 @@ void OutputListModel::setStyle(int index, const QString &styleId)
 
     m_outputs[index].styleId = normalized;
     const QModelIndex changed = this->index(index);
-    emit dataChanged(changed, changed, { StyleIdRole, StyleNameRole });
+    emit dataChanged(changed, changed, { StyleIdRole, StyleNameRole, StyleBackgroundRole });
+    saveRoster();
 
     // Restyling the output that is on air takes effect immediately —
     // FreeShow's output.style swap (the new style lands on the next frame).
@@ -422,6 +521,7 @@ void OutputListModel::toggleContent(int index, const QString &key)
         content[i].enabled = !content[i].enabled;
         const QModelIndex changed = this->index(index);
         emit dataChanged(changed, changed, { ContentRole });
+        saveRoster();
         return;
     }
 }
@@ -497,12 +597,14 @@ void OutputListModel::setScreenName(int index, const QString &screenName)
             m_outputs[index].refresh = QStringLiteral("%1 Hz").arg(qRound(screen->refreshRate()));
             const QModelIndex changed = this->index(index);
             emit dataChanged(changed, changed, { ScreenNameRole, ResRole, RefreshRole });
+            saveRoster();
             return;
         }
     }
 
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { ScreenNameRole });
+    saveRoster();
 }
 
 void OutputListModel::setBoundsLocked(int index, bool locked)
@@ -515,6 +617,7 @@ void OutputListModel::setBoundsLocked(int index, bool locked)
     m_outputs[index].boundsLocked = locked;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { BoundsLockedRole });
+    saveRoster();
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +643,20 @@ bool OutputListModel::activeStyleAllows(const QString &contentType) const
     if (!style.contains(key))
         return true;   // unknown content type: not gated
     return style.value(key).toBool();
+}
+
+QVariantMap OutputListModel::styleBackground(int index) const
+{
+    const int row = styleRowForId(index >= 0 && index < m_outputs.size()
+                                      ? m_outputs.at(index).styleId : QString());
+    if (row < 0)
+        return { { "color", QStringLiteral("transparent") },
+                 { "image", QString() }, { "hasImage", false } };
+    const QVariantMap style = StyleListModel::instance()->getStyle(row);
+    const QString image = style.value(QStringLiteral("backgroundImage")).toString();
+    return { { "color", style.value(QStringLiteral("backgroundColor")).toString() },
+             { "image", image },
+             { "hasImage", !image.isEmpty() && QFile::exists(image) } };
 }
 
 QString OutputListModel::styleIdAt(int row) const
@@ -663,9 +780,11 @@ void OutputListModel::detachStyleEverywhere(const QString &styleId)
             continue;
         m_outputs[i].styleId = QString();
         const QModelIndex changed = index(i);
-        emit dataChanged(changed, changed, { StyleIdRole, StyleNameRole });
+        emit dataChanged(changed, changed, { StyleIdRole, StyleNameRole, StyleBackgroundRole });
         touched = true;
     }
+    if (touched)
+        saveRoster();
     // If the on-air output wore the removed style, the engine drops it now.
     if (touched && activeStyleId().isEmpty())
         pushEngineStyle(QString());
