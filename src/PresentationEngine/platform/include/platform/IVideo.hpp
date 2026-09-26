@@ -53,14 +53,18 @@ public:
     // deviceId is the device's own id (VideoDeviceInfo::id — the symbolic
     // link string on Windows, NOT a positional index: cameras hot-plug).
 
-    // Begin previewing the named capture device. Real MF Source Reader on
-    // Windows: the device's native media type, ~15 fps drain, frames
-    // converted to JPEG (downscaled where the driver allows). Idempotent:
-    // a second Start on a running tap is a no-op. NotFound when the device
-    // doesn't exist, Unsupported on platforms without capture support.
-    virtual Result<void> StartPreview(const std::string &deviceId)
+    // Begin previewing the named capture device. mode is the UI's capture
+    // pick ("1920x1080p60" — width×height are honored; fps only breaks
+    // ties between native types of the same size); an empty mode keeps the
+    // device's default. Real MF Source Reader on Windows: native type at
+    // the requested frame size, ~15 fps drain, frames converted to JPEG.
+    // Idempotent: a second Start on a running tap is a no-op. NotFound
+    // when the device doesn't exist, Unsupported on platforms without
+    // capture support.
+    virtual Result<void> StartPreview(const std::string &deviceId, const std::string &mode)
     {
         (void)deviceId;
+        (void)mode;
         return Error::Make(Err::Unsupported, "Video",
                            "video preview is not implemented on this platform");
     }

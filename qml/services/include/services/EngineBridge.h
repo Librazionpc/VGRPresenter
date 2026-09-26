@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QQuickImageProvider>
 #include <QObject>
 #include <QMap>
 #include <QSet>
@@ -93,6 +94,21 @@ class EngineBridge : public QObject
     Q_PROPERTY(QVariantList inputLevels READ inputLevels NOTIFY inputLevelsChanged)
 
 public:
+    // The QML image source is "image://videopreview/<deviceId>?<nonce>" —
+    // the provider (main.cpp registers it up-front, before QML loads) pulls
+    // the PAL's newest JPEG for that device on every request; the nonce is
+    // what forces QML's image cache to re-fetch. Public: main.cpp constructs
+    // it directly.
+    class VideoPreviewProvider : public QQuickImageProvider {
+    public:
+        explicit VideoPreviewProvider(EngineBridge *owner) : QQuickImageProvider(QQuickImageProvider::Image), owner_(owner) {}
+        QImage requestImage(const QString &id, QSize *size, const QSize &requested) override;
+    private:
+        EngineBridge *owner_;   // not owned
+    };
+    friend class VideoPreviewProvider;
+    QImage latestPreviewFrame(const QString &deviceId);
+
     static EngineBridge &instance();
     static EngineBridge *create(QQmlEngine *engine, QJSEngine *jsEngine);
 
@@ -144,6 +160,28 @@ public:
     // Stop every meter tap and the refresh pump — the AV screen calls this
     // when it is destroyed (nothing meters while settings are closed).
     Q_INVOKABLE void stopAllInputMeters();
+
+    // ---- Live video preview ---------------------------------------------
+    // Start (or restart) a REAL Media Foundation Source Reader tap for the
+    // capture device with this roster label, locking to the given capture
+    // mode pick when non-empty ("1920x1080p60" — size honored, fps breaks
+    // ties). QML then points an Image at
+    //   image://videopreview/<label>?<nonce>
+    // and bumps the nonce ~15×/s — each request returns the newest JPEG
+    // (the provider drains straight from the PAL's tap). Idempotent per
+    // device; a mode re-pick restarts the tap at the new size.
+    // owner: who holds this tap ("board" row vs "dialog" pane) — the board
+    // row AND a dialog pane can preview the same camera at once, and each
+    // reconciles its own hold independently (mode re-picks, camera switches).
+    // A start is idempotent per owner; the tap dies only when its LAST owner
+    // releases. Defaults keep plain QML calls working.
+    Q_INVOKABLE void startVideoPreview(const QString &deviceLabel, const QString &mode,
+                                       const QString &owner = QStringLiteral("dialog"));
+    // Release one device's preview tap (label-keyed, like the meter taps).
+    Q_INVOKABLE void stopVideoPreview(const QString &deviceLabel,
+                                      const QString &owner = QStringLiteral("dialog"));
+    // Release every preview tap (the AV screen's teardown).
+    Q_INVOKABLE void stopAllVideoPreviews();
     // Each entry: { id, label, value } — value mirrors label because the AV
     // board stores the human-readable sublabel on its rows; ids ride along
     // for the future capture-graph plumbing.
@@ -240,6 +278,27 @@ private:
     // labels resolve again on re-enumeration so hot-plug re-binds.
     QSet<QString> requestedMeters_;
     void resolveAndStartMeter(const QString &deviceLabel);
+
+    // ---- Live video preview state ---------------------------------------
+    QMap<QString, QString> previewModes_;   // roster label → requested mode pick
+    QMap<QString, QString> previewIds_;     // roster label → engine device id
+    // Owner set per label — who currently holds a tap on this camera. The
+    // tap dies only when its last owner releases; start/stop are idempotent
+    // per owner so repeated reconcile calls can't leak or over-release.
+    QHash<QString, QSet<QString>> previewOwners_;
+    // Decode-once cache (see latestPreviewFrame in the .cpp): per device id,
+    // the last decoded frame + the JPEG size + FNV-1a hash that produced it.
+    // requestImage runs on the GUI thread and several consumers poll the
+    // same tap — decoding per request starved the render loop.
+    QMap<QString, QImage> previewDecoded_;
+    QMap<QString, int> previewRawLen_;
+    QMap<QString, quint32> previewFrameHash_;   // FNV-1a of the JPEG bytes
+    // One-shot diagnostics: the first-frame log line (tap→publish→fetch→
+    // decode works end to end) and the per-label no-tap warning.
+    QSet<QString> previewFirstFrameLogged_;
+    QSet<QString> previewNoTapWarned_;
+    QSet<QString> previewServedLogged_;   // per-label frame-served confirmation
+
     bool ndiAvailable_ = false;
     bool ndiRetried_ = false;   // one deferred NDI re-query per boot/refreshDevices()
     qint64 lastEnumerationMs_ = 0;   // throttles refreshDevices()

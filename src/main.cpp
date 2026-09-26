@@ -153,6 +153,12 @@ int main(int argc, char *argv[])
     // the QML Image resolves the URL before the singleton exists.
     engine.addImageProvider(QStringLiteral("livepreview"), new LivePreviewProvider);
 
+    // Camera preview frames (image://videopreview/<label>?<nonce>) — the
+    // QQuickImageProvider half of EngineBridge's video preview taps, same
+    // up-front registration convention.
+    engine.addImageProvider(QStringLiteral("videopreview"),
+                            new EngineBridge::VideoPreviewProvider(&EngineBridge::instance()));
+
     engine.loadFromModule("VGRPresenterUI", "Main");
 
     // TEMPORARY diagnostic (kept, env-gated): UI self-test driver. With

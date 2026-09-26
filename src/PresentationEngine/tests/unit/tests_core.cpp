@@ -908,6 +908,66 @@ void TestPal() {
         }
     }
 
+    // --- Video preview tap (IAudio-style contract on IVideo): THE PER-
+    // DEVICE VERDICT RUN. Every enumerated camera gets its own tap, a poll
+    // window, and a one-line verdict. This is the ground truth the UI
+    // debates kept circling: per device, does the PAL deliver JPEG frames
+    // or not — independent of bridge, provider, and QML. Also the crash
+    // repro: the app died around the 6th camera switch; if the crash is in
+    // the tap lifecycle it happens HERE, under the test, with the
+    // symbolized crash log naming the faulting module.
+    {
+        auto& vid = plat.Video();
+        const auto cams = vid.Enumerate();
+        int frames_ok = 0, frames_dead = 0, skipped = 0;
+        std::printf("[videopreview] === per-device frame verdicts (%zu cameras) ===\n", cams.size());
+        for (const auto& cam : cams) {
+            const auto started = vid.StartPreview(cam.id, "");
+            if (!started.ok()) {
+                // Unsupported = deliberately refused (NDI virtual cam et al.)
+                // — a policy decision, not a failure.
+                std::printf("[videopreview] %-28s SKIPPED (%s)\n", cam.name.c_str(),
+                            started.error().message.c_str());
+                ++skipped;
+                CHECK(started.error().code == Err::Unsupported
+                      || started.error().code == Err::NotFound);
+                continue;
+            }
+            size_t best = 0;
+            int distinct = 0;
+            size_t lastSize = 0;
+            for (int ms = 0; ms < 3500; ms += 100) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                const auto frame = vid.PreviewFrame(cam.id);
+                if (!frame.empty() && frame.size() > best) {
+                    best = frame.size();
+                    if (frame.size() != lastSize) {   // size changes ≈ distinct frames
+                        ++distinct;
+                        lastSize = frame.size();
+                    }
+                }
+            }
+            if (best > 2) {
+                const auto frame = vid.PreviewFrame(cam.id);
+                const bool jpeg = frame.size() > 1 && frame[0] == 0xFF && frame[1] == 0xD8;
+                std::printf("[videopreview] %-28s FRAMES  (max %zu B, ~%d distinct, JPEG=%s)\n",
+                            cam.name.c_str(), best, distinct, jpeg ? "yes" : "NO");
+                CHECK(jpeg);
+                ++frames_ok;
+            } else {
+                std::printf("[videopreview] %-28s NO FRAMES in 3.5 s\n", cam.name.c_str());
+                ++frames_dead;
+            }
+            CHECK(vid.StopPreview(cam.id).ok());
+            CHECK(vid.PreviewFrame(cam.id).empty());   // tap released
+            // Driver settle: the next device's activation must not race this
+            // one's release (the virtual-cam stacks are fragile here).
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        std::printf("[videopreview] === verdict summary: %d producing, %d dead, %d skipped ===\n",
+                    frames_ok, frames_dead, skipped);
+    }
+
     // --- Input devices (DoD §11) ---
     auto& input = plat.Input();
     for (const auto& d : input.Enumerate()) {

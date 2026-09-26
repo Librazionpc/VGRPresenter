@@ -16,6 +16,7 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#include <dbghelp.h>   // SYMBOL_INFO / IMAGEHLP_MODULE64 (dll still loaded dynamically)
 #else
 #include <execinfo.h>
 #include <unistd.h>
@@ -108,6 +109,46 @@ void HandleTerminate()
 }
 
 #if defined(_WIN32)
+
+// In-crash symbolization via dbghelp, loaded dynamically (never a hard
+// dependency): raw frame addresses are useless post-mortem — module layout
+// dies with the process — so the faulting MODULE + SYMBOL must be resolved
+// while the process still lives. Everything is GetProcAddress'ed; any
+// failure falls back to the raw-address records (previous behavior).
+// dbghelp is documented as not fully thread-safe, but the SEH filter runs
+// once on the faulting thread with the process already broken — the
+// accepted trade-off for a diagnosable crash over a silent one.
+struct CrashSym
+{
+    BOOL initialized = FALSE;
+
+    using FnSymInitialize = BOOL(WINAPI *)(HANDLE, PCSTR, BOOL);
+    using FnSymFromAddr = BOOL(WINAPI *)(HANDLE, DWORD64, PDWORD64, PSYMBOL_INFO);
+    using FnSymGetModuleInfo64 = BOOL(WINAPI *)(HANDLE, DWORD64, PIMAGEHLP_MODULE64);
+
+    FnSymInitialize symInit = nullptr;
+    FnSymFromAddr symFromAddr = nullptr;
+    FnSymGetModuleInfo64 symModInfo = nullptr;
+
+    CrashSym()
+    {
+        HMODULE dbg = LoadLibraryA("dbghelp.dll");
+        if (!dbg)
+            return;
+        symInit = reinterpret_cast<FnSymInitialize>(
+            reinterpret_cast<void *>(GetProcAddress(dbg, "SymInitialize")));
+        symFromAddr = reinterpret_cast<FnSymFromAddr>(
+            reinterpret_cast<void *>(GetProcAddress(dbg, "SymFromAddr")));
+        symModInfo = reinterpret_cast<FnSymGetModuleInfo64>(
+            reinterpret_cast<void *>(GetProcAddress(dbg, "SymGetModuleInfo64")));
+        if (symInit && symFromAddr && symModInfo)
+            initialized = symInit(GetCurrentProcess(), nullptr, FALSE);
+        // invade=FALSE: SymInitialize(TRUE) walks every thread's stack, which
+        // can deadlock on the loader lock if the fault happened inside one —
+        // the cheap non-invasive init still resolves module/symbol names.
+    }
+};
+
 LONG WINAPI HandleSEH(EXCEPTION_POINTERS *info)
 {
     if (!g_crashLogPath.empty()) {
@@ -121,13 +162,63 @@ LONG WINAPI HandleSEH(EXCEPTION_POINTERS *info)
             std::snprintf(buf, sizeof(buf), "code=0x%08lx address=%p at=%s",
                           static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode),
                           info->ExceptionRecord->ExceptionAddress, ts);
-            AppendLine(f, buf);
+            // EVERY line is flushed as it is written: if the process dies
+            // mid-handler (nested fault inside dbghelp, or the corruption
+            // spreading), stdio's buffer would otherwise take the evidence
+            // with it — the first instrumented run lost all frames exactly
+            // this way and left only the header.
+            auto FlushLine = [&](const char *line) {
+                AppendLine(f, line);
+                std::fflush(f);
+            };
+
+            FlushLine(buf);
 
             void *frames[32];
             USHORT count = CaptureStackBackTrace(0, 32, frames, nullptr);
             for (USHORT i = 0; i < count; ++i) {
                 std::snprintf(buf, sizeof(buf), "  #%u %p", i, frames[i]);
-                AppendLine(f, buf);
+                FlushLine(buf);   // raw addresses FIRST — never lose them
+            }
+
+            // Best-effort symbolization AFTER the raw record is durable: a
+            // driver-DLL crash (virtual cam) lands in a module we do not
+            // build, and that name alone ends the "whose bug is it" fight.
+            CrashSym sym;
+            if (sym.initialized) {
+                IMAGEHLP_MODULE64 faultMod{};
+                faultMod.SizeOfStruct = sizeof(faultMod);
+                if (sym.symModInfo(GetCurrentProcess(),
+                                   reinterpret_cast<DWORD64>(info->ExceptionRecord->ExceptionAddress),
+                                   &faultMod)) {
+                    std::snprintf(buf, sizeof(buf), "  faulting-module: %s",
+                                  faultMod.ImageName[0] ? faultMod.ImageName : "?");
+                    FlushLine(buf);
+                }
+                for (USHORT i = 0; i < count; ++i) {
+                    const DWORD64 addr = reinterpret_cast<DWORD64>(frames[i]);
+                    char symBuf[sizeof(SYMBOL_INFO) + 160] = {};
+                    auto *si = reinterpret_cast<SYMBOL_INFO *>(symBuf);
+                    si->SizeOfStruct = sizeof(SYMBOL_INFO);
+                    si->MaxNameLen = 159;
+                    DWORD64 disp = 0;
+                    IMAGEHLP_MODULE64 modInfo{};
+                    modInfo.SizeOfStruct = sizeof(modInfo);
+                    const BOOL hasSym = sym.symFromAddr(GetCurrentProcess(), addr, &disp, si);
+                    const BOOL hasMod = sym.symModInfo(GetCurrentProcess(), addr, &modInfo);
+                    if (hasSym || hasMod) {
+                        std::snprintf(buf, sizeof(buf), "  sym #%u %s!%s+%llu",
+                                      i,
+                                      hasMod && modInfo.ImageName[0]
+                                          ? (strrchr(modInfo.ImageName, '\\')
+                                                 ? strrchr(modInfo.ImageName, '\\') + 1
+                                                 : modInfo.ImageName)
+                                          : "?",
+                                      hasSym ? si->Name : "?",
+                                      static_cast<unsigned long long>(disp));
+                        FlushLine(buf);
+                    }
+                }
             }
             std::fclose(f);
         }

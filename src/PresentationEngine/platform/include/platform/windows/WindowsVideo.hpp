@@ -25,7 +25,7 @@ public:
     std::vector<VideoDeviceInfo> Enumerate() const override;
     std::string Fingerprint() const override;
 
-    Result<void> StartPreview(const std::string &deviceId) override;
+    Result<void> StartPreview(const std::string &deviceId, const std::string &mode) override;
     Result<void> StopPreview(const std::string &deviceId) override;
     std::vector<uint8_t> PreviewFrame(const std::string &deviceId) override;
     std::vector<std::string> ActivePreviews() const override;

@@ -613,6 +613,125 @@ ApplicationWindow {
 
 
 
+    // ---- SELFTEST: video preview pane scenario (env-gated by the same
+    // VGR_SELFTEST=1 the driver uses; inert in normal runs). Drives the REAL
+    // UI into the Add Source dialog's video preview and grabs the pane —
+    // pixel truth for "is the live camera actually rendering".
+    Timer {
+        id: selfTestPreviewStage1
+        running: typeof SelfTest !== "undefined"
+        interval: 1500
+        onTriggered: {
+            console.log("[SELFTEST-PREVIEW] stage 1: open Settings > Audio & Video")
+            window.openSettings("av")
+            selfTestPreviewStage2.restart()
+        }
+    }
+    Timer {
+        id: selfTestPreviewStage2
+        interval: 800
+        onTriggered: {
+            console.log("[SELFTEST-PREVIEW] stage 2: open Add Source dialog")
+            const screen = SelfTest.findItem("audioVideoScreen")
+            if (screen && screen.openAddSource) {
+                screen.openAddSource("video")
+                console.log("[SELFTEST-PREVIEW] openAddSource(video) invoked")
+            } else {
+                console.log("[SELFTEST-PREVIEW] FAIL: audioVideoScreen not found")
+            }
+            selfTestPreviewStage3.restart()
+        }
+    }
+    // ALL-CAMERAS sweep: pick every enumerated camera in turn through the
+    // real pick path, wait for the tap to warm up, log the pane's live state
+    // and grab the pane per camera — pixel truth per device, not just the
+    // first one. (The user-visible bug: switching cams showed "the same
+    // thing"; this sweep proves whether each device individually renders.)
+    property int selfTestCamIndex: -1
+    property var selfTestCamLabels: []
+    property bool selfTestSweepDone: false
+    function selfTestPickNextCam() {
+        const screen = SelfTest.findItem("audioVideoScreen")
+        selfTestCamIndex++
+        if (!screen || !screen.selfTestPickVideoSource
+                || selfTestCamIndex >= selfTestCamLabels.length) {
+            console.log("[SELFTEST-PREVIEW] sweep done over", selfTestCamLabels.length, "camera(s)")
+            selfTestSweepDone = true
+            return
+        }
+        const label = selfTestCamLabels[selfTestCamIndex]
+        console.log("[SELFTEST-PREVIEW] picking camera", selfTestCamIndex, ":", label)
+        screen.selfTestPickVideoSource(label)
+        selfTestPreviewStage4.restart()
+    }
+    Timer {
+        id: selfTestPreviewStage3
+        interval: 500
+        onTriggered: {
+            const cams = EngineBridge.videoDevices
+            const labels = []
+            for (let i = 0; i < cams.length; ++i) {
+                const l = String(cams[i].label || "")
+                // NDI virtual cams crash their driver when opened as MF
+                // capture devices — they are served by the NDI pipeline,
+                // not this tap; the sweep must not exercise them.
+                if (l !== "" && !/ndi/i.test(l)) labels.push(l)
+            }
+            window.selfTestCamLabels = labels
+            window.selfTestCamIndex = -1
+            console.log("[SELFTEST-PREVIEW] stage 3: sweeping", labels.length, "camera(s):", JSON.stringify(labels))
+            window.selfTestPickNextCam()
+        }
+    }
+    // Second window grab 2.5 s after cam 0's — if the live frame MOVES
+    // between the two window shots, rendering + streaming both work.
+    Timer {
+        id: selfTestPreviewStage4b
+        interval: 2500
+        running: false
+        onTriggered: {
+            console.log("[SELFTEST-PREVIEW] stage 4b: motion witness grab")
+            const paneItem = SelfTest.findItem("selfTestPreviewPane")
+            if (paneItem) {
+                // Window-space rect of the pane — the pixel-diff target
+                // between shot_window_0.png and this grab.
+                const r = paneItem.mapToItem(null, 0, 0, paneItem.width, paneItem.height)
+                console.log("[SELFTEST-PREVIEW] pane rect: x=" + Math.round(r.x) + " y=" + Math.round(r.y)
+                            + " w=" + Math.round(r.width) + " h=" + Math.round(r.height))
+            }
+            SelfTest.grab("", "shot_window_0_late.png")
+        }
+    }
+    Timer {
+        id: selfTestPreviewStage4
+        interval: 4000   // tap warm-up + several pump ticks per camera
+        running: false
+        onTriggered: {
+            if (window.selfTestSweepDone)
+                return
+            const label = window.selfTestCamIndex < window.selfTestCamLabels.length
+                          ? window.selfTestCamLabels[window.selfTestCamIndex] : "?"
+            const shot = "shot_cam_" + window.selfTestCamIndex + ".png"
+            const paneItem = SelfTest.findItem("selfTestPreviewPane")
+            const frameImg = SelfTest.findItem("selfTestPreviewPaneImage")
+            console.log("[SELFTEST-PREVIEW] stage 4: grabbing", shot, "for", label,
+                        "pane:", (paneItem ? "alive" : "MISSING"),
+                        "image:", frameImg
+                            ? ("status=" + frameImg.status + " size=" + frameImg.sourceSize.width + "x" + frameImg.sourceSize.height
+                               + " src=" + String(frameImg.source).slice(0, 48) + " vis=" + frameImg.visible) : "MISSING")
+            // Pixel truth at three levels: the Image element alone, the
+            // pane subtree, and the WHOLE WINDOW (what a user actually
+            // sees). If the window shot shows the camera but the pane shot
+            // is dark, the defect is grab compositing, not the app.
+            SelfTest.grab("selfTestPreviewPaneImage", "shot_img_" + window.selfTestCamIndex + ".png")
+            SelfTest.grab("selfTestPreviewPane", shot)
+            SelfTest.grab("", "shot_window_" + window.selfTestCamIndex + ".png")
+            if (window.selfTestCamIndex === 0)
+                selfTestPreviewStage4b.restart()   // motion witness for cam 0
+            window.selfTestPickNextCam()
+        }
+    }
+
     // ---- Settings overlay ----
     // Shared ModalScrim: click-dismisses, and consumes wheel events so a
     // modal's scroll never leaks into the Flickables on the page behind.
@@ -686,7 +805,7 @@ ApplicationWindow {
 
     Component {
         id: audioVideoScreenComponent
-        AudioVideoScreen {}
+        AudioVideoScreen { objectName: "audioVideoScreen" }
     }
 
     Component {

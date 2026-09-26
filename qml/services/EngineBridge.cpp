@@ -278,8 +278,10 @@ void EngineBridge::shutdown()
     // UI while (or after) Kernel::Shutdown() is dismantling those systems.
     stopRelay();
     // Meter taps run their own WASAPI threads and must be joined before the
-    // PAL's platform backend is torn down underneath them.
+    // PAL's platform backend is torn down underneath them. Same for the
+    // camera preview taps (MF Source Reader drain threads).
     stopAllInputMeters();
+    stopAllVideoPreviews();
     // The undo stack holds QJSValue closures inside the engine's static
     // UndoRedoManager, which outlives the QML engine — drop them now (aboutToQuit,
     // JS engine still alive) rather than at static destruction.
@@ -590,27 +592,32 @@ void EngineBridge::resolveAndStartMeter(const QString &deviceLabel)
 {
     auto &audio = bps::platform::PlatformAccessor::Get().Audio();
 
-    // Resolve the roster label → waveIn device number. The roster is the same
-    // enumeration the AV board's device select is built from, so a picked
-    // option always resolves; an unknown label (device unplugged) no-ops
-    // silently here — it retries on the next enumeration instead of warning
-    // every second.
+    // Resolve the roster label → waveIn device number from the CACHED
+    // roster (audioDevices_) — a live IAudio::Enumerate() here re-ran the
+    // WASAPI mix-format COM queries on every kind chip / device pick, and
+    // that storm stalled the dialogs exactly like the video one did.
     const QString want = deviceLabel.trimmed();
-    for (const auto &d : audio.Enumerate()) {
-        if (!d.isInput)
+    QString id;
+    for (const QVariant &v : audioDevices_) {
+        const QVariantMap d = v.toMap();
+        if (!d.value("isInput").toBool())
             continue;
-        if (want.isEmpty() ? d.isDefault : qstr(d.name) == want) {
-            // Windows ids are "wavein:<n>"; other platforms have no WASAPI
-            // tap to address (their IAudio keeps the default Unsupported
-            // metering) — never guess a number from an alien id scheme.
-            if (d.id.rfind("wavein:", 0) != 0)
-                return;
-            const uint32_t deviceId = static_cast<uint32_t>(std::stoul(d.id.substr(7)));
-            if (audio.StartInputMeter(deviceId).ok())
-                inputLabels_[deviceId] = want;
-            return;
+        const bool isDefault = d.value("isDefault").toBool();
+        if (want.isEmpty() ? isDefault : d.value("label").toString() == want) {
+            id = d.value("id").toString();
+            break;
         }
     }
+    if (id.isEmpty())
+        return;   // unknown label (unplugged) — retries on next enumeration
+    // Windows ids are "wavein:<n>"; other platforms have no WASAPI tap to
+    // address (their IAudio keeps the default Unsupported metering) — never
+    // guess a number from an alien id scheme.
+    if (!id.startsWith(QStringLiteral("wavein:")))
+        return;
+    const uint32_t deviceId = static_cast<uint32_t>(id.mid(7).toULong());
+    if (audio.StartInputMeter(deviceId).ok())
+        inputLabels_[deviceId] = want;
 }
 
 void EngineBridge::startInputMeter(const QString &deviceLabel)
@@ -706,6 +713,206 @@ void EngineBridge::stopAllInputMeters()
         inputLevels_.clear();
         emit inputLevelsChanged();
     }
+}
+
+// ============================================================================
+// Live video preview — the UI half of the PAL's MF Source Reader tap.
+//
+// Resolution flows label-first: QML knows the roster LABEL (what the board
+// stores), the PAL knows symbolic-link device ids. startVideoPreview keeps
+// a label→id map, refreshed on every call — the same re-resolution rule the
+// meter taps follow. QML polls the frames by re-fetching
+// image://videopreview/<label>?<nonce> (~15 Hz timer); the provider drains
+// the PAL's newest JPEG per device id.
+// ============================================================================
+QImage EngineBridge::latestPreviewFrame(const QString &deviceId)
+{
+    if (!bps::platform::PlatformAccessor::Installed())
+        return {};
+    const std::string id = deviceId.toStdString();
+    const std::vector<uint8_t> jpeg =
+        bps::platform::PlatformAccessor::Get().Video().PreviewFrame(id);
+    if (jpeg.empty())
+        return {};
+    // DECODE-ONCE CACHE — the hot path that killed the UI: requestImage
+    // runs on the GUI thread (synchronous QQuickImageProvider), and several
+    // consumers (board thumb + dialog pane) poll the same device at 8-15 Hz
+    // each. Decoding the JPEG per request meant 3-15 JPEG decodes/frame —
+    // the render loop starved and clicks were dropped. Decode only when the
+    // tap's bytes actually CHANGED (size + FNV-1a — size alone froze the
+    // pane whenever consecutive frames compressed to the same length), and
+    // hand every consumer a cheap COW copy.
+    const QByteArray raw(reinterpret_cast<const char *>(jpeg.data()), int(jpeg.size()));
+    const QString key = id.c_str();
+    quint32 hash = 2166136261u;
+    for (char b : raw) {
+        hash ^= static_cast<quint8>(b);
+        hash *= 16777619u;
+    }
+    const quint32 storedHash = previewFrameHash_.value(key, 0);
+    const int storedLen = previewRawLen_.value(key, -1);
+    if (storedLen == raw.size() && storedHash == hash)
+        return previewDecoded_.value(key);   // identical bytes → cached decode
+    QImage frame;
+    frame.loadFromData(raw, "JPEG");
+    if (!frame.isNull()) {
+        previewDecoded_[key] = frame;
+        previewRawLen_[key] = raw.size();
+        previewFrameHash_[key] = hash;
+        // One-shot chain confirmation per device: the log line proves the
+        // whole tap → publish → fetch → decode path worked end to end.
+        if (!previewFirstFrameLogged_.contains(key)) {
+            previewFirstFrameLogged_.insert(key);
+            qInfo("EngineBridge: first preview frame decoded for '%s' (%dx%d)",
+                  qUtf8Printable(key), frame.width(), frame.height());
+        }
+    }
+    return frame;
+}
+
+QImage EngineBridge::VideoPreviewProvider::requestImage(const QString &id, QSize *size, const QSize &requested)
+{
+    // id carries the roster LABEL, percent-encoded by the QML side, PLUS
+    // the nonce query (QQuickImageProvider does NOT strip "?n=..." — the
+    // first version looked up "Integrated Webcam?n=1" and missed the tap
+    // map on every request). Strip the query, then percent-decode. THE KEY
+    // CHAIN: the tap is keyed by the ENGINE device id (symbolic link), so
+    // the label translates through previewIds_.
+    QString path = id;
+    const int queryAt = path.indexOf(QLatin1Char('?'));
+    if (queryAt >= 0)
+        path.truncate(queryAt);
+    const QString label = QUrl::fromPercentEncoding(path.toUtf8());
+    const QString devId = owner_->previewIds_.value(label);
+    if (devId.isEmpty()) {
+        // One warning per label per session — a missing tap is a wiring
+        // bug (start never ran / a different label spelling), not a warm-up.
+        if (!owner_->previewNoTapWarned_.contains(label)) {
+            owner_->previewNoTapWarned_.insert(label);
+            qWarning("EngineBridge: preview requested for '%s' but no tap was started",
+                     qUtf8Printable(label));
+        }
+    }
+    QImage frame = owner_->latestPreviewFrame(devId.isEmpty() ? id : devId);
+    // One-shot per label: did the provider actually SERVE a frame through
+    // the label→id translation? (Decoded-frames-in-cache but a dark pane
+    // means this never fired with the pane's label.)
+    if (!frame.isNull() && !owner_->previewServedLogged_.contains(label)) {
+        owner_->previewServedLogged_.insert(label);
+        qInfo("EngineBridge: preview frame SERVED for label '%s'", qUtf8Printable(label));
+    }
+    if (frame.isNull()) {
+        // 1×1 transparent keeps the QML Image valid while the tap warms up
+        // — the pane keeps its glyph underneath.
+        frame = QImage(1, 1, QImage::Format_ARGB32_Premultiplied);
+        frame.fill(Qt::transparent);
+    } else if (requested.width() > 0 && frame.width() > requested.width()) {
+        // Downscale to the pane's demand — FastTransformation: Smooth on
+        // every pump at 15 Hz was the second UI-thread sink; a preview
+        // pane cannot see the difference.
+        frame = frame.scaledToWidth(requested.width(), Qt::FastTransformation);
+    }
+    if (size)
+        *size = frame.size();
+    return frame;
+}
+
+void EngineBridge::startVideoPreview(const QString &deviceLabel, const QString &mode,
+                                     const QString &owner)
+{
+    if (!bps::platform::PlatformAccessor::Installed())
+        return;
+    auto &video = bps::platform::PlatformAccessor::Get().Video();
+
+    // Resolve the roster label → device id from the CACHED roster
+    // (videoDevices_, refreshed at boot/hot-plug/dialog-open) — calling MF
+    // Enumerate() here was the second UI freeze: it activates every camera
+    // synchronously, hundreds of ms each, and this runs on every dialog
+    // open, mode re-pick, and board row construction. A label the cache
+    // doesn't know (first hot-plug race) falls back to one live enumeration.
+    const QString want = deviceLabel.trimmed();
+    QString id;
+    for (const QVariant &v : videoDevices_) {
+        const QVariantMap d = v.toMap();
+        if (d.value("label").toString() == want) {
+            id = d.value("id").toString();
+            break;
+        }
+    }
+    if (id.isEmpty()) {
+        for (const auto &d : video.Enumerate()) {
+            if (qstr(d.name) == want) {
+                id = qstr(d.id);
+                break;
+            }
+        }
+    }
+    if (id.isEmpty()) {
+        qWarning("EngineBridge: no camera named '%s' to preview", qUtf8Printable(want));
+        return;
+    }
+
+    // NDI virtual cameras crash their own driver DLL in-process when opened
+    // as MF capture devices — this tap must never touch them. The bridge
+    // refuses on the LABEL (reliable) after the PAL's id-derived name
+    // lookup proved unable to catch these devices. NDI sources belong to
+    // the dedicated NDI pipeline; the pane keeps its glyph until then.
+    if (want.contains("ndi", Qt::CaseInsensitive)) {
+        qWarning("EngineBridge: refusing camera preview tap for NDI virtual device '%s'",
+                 qUtf8Printable(want));
+        return;
+    }
+
+    // Owner-idempotent + ensure-semantics: the board row (owner "board",
+    // mode-less) and the dialog pane (owner "dialog", mode-locked) can hold
+    // the SAME camera at once. A repeat start from the same owner must not
+    // tear the tap down; an empty mode adopts the existing lock instead of
+    // re-locking the device default (that would bounce the dialog's tap).
+    // (fresh is evaluated before the insert below.)
+    const bool fresh = !previewOwners_.contains(want)
+                       || previewOwners_.value(want).isEmpty();
+    previewOwners_[want].insert(owner);
+    const bool ensureOnly = mode.isEmpty() && previewModes_.contains(want);
+    const QString effectiveMode = ensureOnly ? previewModes_.value(want) : mode;
+    const bool needRestart = fresh
+                             || previewIds_.value(want) != id
+                             || previewModes_.value(want) != effectiveMode;
+    previewIds_[want] = id;
+    previewModes_[want] = effectiveMode;
+    if (!needRestart)
+        return;
+    (void)video.StopPreview(id.toStdString());
+    if (!video.StartPreview(id.toStdString(), effectiveMode.toStdString()).ok())
+        qWarning("EngineBridge: camera preview tap failed for '%s'", qUtf8Printable(want));
+}
+
+void EngineBridge::stopVideoPreview(const QString &deviceLabel, const QString &owner)
+{
+    const QString want = deviceLabel.trimmed();
+    auto it = previewOwners_.find(want);
+    if (it == previewOwners_.end())
+        return;
+    it->remove(owner);
+    if (!it->isEmpty())
+        return;   // another owner (board row / dialog pane) still holds the tap
+    previewOwners_.erase(it);
+    const QString id = previewIds_.take(want);
+    previewModes_.remove(want);
+    if (id.isEmpty() || !bps::platform::PlatformAccessor::Installed())
+        return;
+    (void)bps::platform::PlatformAccessor::Get().Video().StopPreview(id.toStdString());
+}
+
+void EngineBridge::stopAllVideoPreviews()
+{
+    if (bps::platform::PlatformAccessor::Installed()) {
+        auto &video = bps::platform::PlatformAccessor::Get().Video();
+        for (const QString &id : previewIds_.values())
+            (void)video.StopPreview(id.toStdString());
+    }
+    previewIds_.clear();
+    previewModes_.clear();
+    previewOwners_.clear();
 }
 
 void EngineBridge::startRelay()
