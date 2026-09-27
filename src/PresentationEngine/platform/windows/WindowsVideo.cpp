@@ -14,6 +14,7 @@
 #include "platform/windows/WinUtil.hpp"
 
 #include <windows.h>
+#include <dwmapi.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfobjects.h>
@@ -171,6 +172,49 @@ std::vector<VideoDeviceInfo> WindowsVideo::Enumerate() const
     return out;
 }
 
+// Open, visible, capturable top-level windows — the Screen source's
+// "window" options (OBS-style Window Capture). Filters: visible, titled,
+// not cloaked (UWP ghosts), not toolwindows, not our own process's
+// windows. Sorted by title so the picker is stable across opens.
+struct EnumWindowsCtx {
+    std::vector<WindowInfo> out;
+    DWORD selfPid = 0;
+};
+
+BOOL CALLBACK WindowEnumProc(HWND hwnd, LPARAM lParam)
+{
+    auto *ctx = reinterpret_cast<EnumWindowsCtx *>(lParam);
+    if (!IsWindowVisible(hwnd)) return TRUE;
+    // Cloaked (DWM): invisible UWP/ghost windows pass IsWindowVisible but
+    // render nothing — skip them.
+    BOOL cloaked = FALSE;
+    if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) || cloaked)
+        return TRUE;
+    LONG exStyle = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    if (exStyle & WS_EX_TOOLWINDOW) return TRUE;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == 0 || pid == ctx->selfPid) return TRUE;
+    WCHAR titleW[256] = {};
+    int n = GetWindowTextW(hwnd, titleW, 256);
+    if (n <= 0) return TRUE;
+    WindowInfo info;
+    info.id = "win:" + std::to_string(reinterpret_cast<uintptr_t>(hwnd));
+    info.title = win::Utf8(std::wstring(titleW, n));
+    ctx->out.push_back(std::move(info));
+    return TRUE;
+}
+
+std::vector<WindowInfo> WindowsVideo::EnumerateWindows() const
+{
+    EnumWindowsCtx ctx;
+    ctx.selfPid = GetCurrentProcessId();
+    EnumWindows(WindowEnumProc, reinterpret_cast<LPARAM>(&ctx));
+    std::sort(ctx.out.begin(), ctx.out.end(),
+              [](const WindowInfo &a, const WindowInfo &b) { return a.title < b.title; });
+    return ctx.out;
+}
+
 std::string WindowsVideo::Fingerprint() const
 {
     std::string fp;
@@ -199,6 +243,11 @@ struct WindowsVideo::PreviewTap {
     std::thread worker;        // joined by ~PreviewTap (same discipline as MeterTap)
     ~PreviewTap() { if (worker.joinable()) worker.join(); }
 };
+
+// Screen taps key by the monitor id ("\\\.\DISPLAY1" from IMonitor's
+// Enumerate) in the SAME table as camera taps — the id namespaces cannot
+// collide ("\\\.\DISPLAY" vs camera symlinks), and PreviewFrame/Stop stay
+// single-surface for the bridge.
 
 struct WindowsVideo::PreviewTable {
     std::mutex mutex;
@@ -719,6 +768,194 @@ void WindowsVideo::PreviewThread(PreviewTap &tap, std::mutex &publishMutex)
 
     reader->Release();
     source->Release();
+}
+
+// The screen tap: BitBlt the monitor into a DIB section, downscale to the
+// pane budget, JPEG, publish — every ~66 ms, same shape as the camera drain.
+// The thread owns its own HDCs (created and released on that thread). Each
+// grab re-resolves the monitor by NAME so a display-settings change or
+// unplug surfaces as a missing HDC instead of garbage pixels.
+//
+// WINDOW branch: a "win:<hwnd>" id PrintWindows that window instead. The
+// per-grab IsWindow check ends the tap cleanly when the window closes
+// (the UI re-enumerates on dialog open, so stale ids self-heal).
+void WindowsVideo::ScreenPreviewThread(PreviewTap &tap, std::mutex &publishMutex)
+{
+    const bool isWindow = tap.deviceId.rfind("win:", 0) == 0;
+    HWND hwnd = nullptr;
+    if (isWindow)
+        hwnd = reinterpret_cast<HWND>(static_cast<UINT_PTR>(
+            std::strtoull(tap.deviceId.c_str() + 4, nullptr, 10)));
+    const std::wstring monitor = isWindow ? std::wstring() : win::Wide(tap.deviceId);
+    int consecutiveFailures = 0;
+    while (tap.running.load(std::memory_order_relaxed)) {
+        if (isWindow && !IsWindow(hwnd)) {
+            std::printf("[screenpreview] window closed: %s\n", tap.deviceId.c_str());
+            std::fflush(stdout);
+            break;
+        }
+        HDC screenDc = nullptr;
+        if (!isWindow) {
+            // A per-monitor DC: CreateDCW on the GDI device name captures
+            // THAT display only (its HORZRES/VERTRES are the monitor's own
+            // size), so multi-monitor rigs never bleed into each other and a
+            // gone monitor just fails DC creation. Re-created each grab so
+            // resolution changes are picked up without a tap restart.
+            screenDc = CreateDCW(monitor.c_str(), nullptr, nullptr, nullptr);
+        }
+        // Memory DC in BOTH branches: PrintWindow wants a compatible DC, and
+        // the previous GetDC(nullptr) display DC leaked one GDI object per
+        // grab (it pairs with ReleaseDC, never the DeleteDC below) — 15 fps of
+        // those exhausted the process GDI quota in minutes and hung the UI.
+        HDC memDc = CreateCompatibleDC(screenDc);
+        if (!screenDc && !memDc) {
+            // Transient (display-mode change, sleeping panel) vs gone: ride out
+            // a short failure streak before ending the tap — a mode change must
+            // not kill a tap whose comment promises it survives one.
+            if (++consecutiveFailures < 20) {
+                Sleep(100);
+                continue;
+            }
+            std::printf("[screenpreview] DC creation failed for %s\n", tap.deviceId.c_str());
+            std::fflush(stdout);
+            break;
+        }
+        const int srcW = isWindow
+            ? [] (HWND h) { RECT r{}; GetClientRect(h, &r); return (int)(r.right - r.left); }(hwnd)
+            : GetDeviceCaps(screenDc, HORZRES);
+        const int srcH = isWindow
+            ? [] (HWND h) { RECT r{}; GetClientRect(h, &r); return (int)(r.bottom - r.top); }(hwnd)
+            : GetDeviceCaps(screenDc, VERTRES);
+        if (srcW <= 0 || srcH <= 0) {
+            if (memDc) DeleteDC(memDc);
+            if (screenDc) DeleteDC(screenDc);
+            if (++consecutiveFailures >= 20)
+                break;   // window gone zero-sized / monitor vanished — stop hammering
+            Sleep(66);
+            continue;
+        }
+        // Downscale to ~640 wide — pane-sized; the dialog Image scales the
+        // rest of the way and GDI+ encodes a fraction of the pixels.
+        const int dstW = std::min(srcW, 640);
+        const int dstH = std::max(1, srcH * dstW / srcW);
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = dstW;
+        bi.bmiHeader.biHeight = -dstH;   // top-down
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void *bits = nullptr;
+        HBITMAP dib = CreateDIBSection(memDc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HGDIOBJ old = dib ? SelectObject(memDc, dib) : nullptr;
+        bool gotFrame = false;
+        if (dib && bits) {
+            SetStretchBltMode(memDc, COLORONCOLOR);
+            BOOL blitOk = FALSE;
+            if (isWindow) {
+                // PW_RENDERFULLCONTENT (Win 8.1+) includes DWM-composited
+                // content — Chromium/Qt clients render correctly — but it
+                // renders the window 1:1 and CANNOT scale: pointing it at
+                // the pane-sized DIB captured only the window's top-left
+                // corner, magnified (the "zoomed in, not the full window"
+                // report). Render at FULL client size into a transient DIB,
+                // then one GDI StretchBlt down into the pane-sized one.
+                BITMAPINFO fbi{};
+                fbi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                fbi.bmiHeader.biWidth = srcW;
+                fbi.bmiHeader.biHeight = -srcH;   // top-down, like the small DIB
+                fbi.bmiHeader.biPlanes = 1;
+                fbi.bmiHeader.biBitCount = 32;
+                fbi.bmiHeader.biCompression = BI_RGB;
+                void *fbits = nullptr;
+                HDC fullDc = CreateCompatibleDC(nullptr);
+                HBITMAP fdib = fullDc ? CreateDIBSection(fullDc, &fbi, DIB_RGB_COLORS,
+                                                         &fbits, nullptr, 0) : nullptr;
+                HGDIOBJ fold = fdib ? SelectObject(fullDc, fdib) : nullptr;
+                if (fdib && fbits) {
+                    if (PrintWindow(hwnd, fullDc, PW_CLIENTONLY | PW_RENDERFULLCONTENT))
+                        blitOk = StretchBlt(memDc, 0, 0, dstW, dstH, fullDc,
+                                            0, 0, srcW, srcH, SRCCOPY);
+                }
+                if (fdib) {
+                    SelectObject(fullDc, fold);
+                    DeleteObject(fdib);
+                }
+                if (fullDc) DeleteDC(fullDc);
+            } else {
+                blitOk = StretchBlt(memDc, 0, 0, dstW, dstH, screenDc,
+                                    0, 0, srcW, srcH, SRCCOPY | CAPTUREBLT);
+            }
+            if (blitOk) {
+                const UINT32 stride = static_cast<UINT32>(dstW) * 4;
+                std::vector<uint8_t> jpeg = EncodeJpeg(static_cast<const uint8_t *>(bits),
+                                                       static_cast<UINT32>(dstW),
+                                                       static_cast<UINT32>(dstH), stride, 70);
+                if (!jpeg.empty()) {
+                    const std::lock_guard<std::mutex> lock(publishMutex);
+                    tap.latestJpeg = std::move(jpeg);
+                    gotFrame = true;
+                }
+            }
+        }
+        if (dib) {
+            SelectObject(memDc, old);
+            DeleteObject(dib);
+        }
+        if (memDc) DeleteDC(memDc);
+        if (screenDc) DeleteDC(screenDc);
+        if (!gotFrame) {
+            if (++consecutiveFailures >= 20)
+                break;   // nothing blits for ~2 s — the source is gone, stop
+            Sleep(30);   // a failed grab retries a bit slower; success loops at ~15 fps
+        } else {
+            consecutiveFailures = 0;
+            Sleep(66);
+        }
+    }
+}
+
+Result<void> WindowsVideo::StartScreenPreview(const std::string &monitorId)
+{
+    const bool isWindow = monitorId.rfind("win:", 0) == 0;
+    if (!isWindow && monitorId.rfind("\\\\.\\DISPLAY", 0) != 0)
+        return Error::Make(Err::NotFound, "Video",
+                           "not a monitor id: " + monitorId);
+    if (isWindow) {
+        // Validate the hwnd NOW — a stale id from a closed window must fail
+        // with NotFound instead of starting a thread that dies on grab 1.
+        const HWND hwnd = reinterpret_cast<HWND>(static_cast<UINT_PTR>(
+            std::strtoull(monitorId.c_str() + 4, nullptr, 10)));
+        if (!IsWindow(hwnd) || !IsWindowVisible(hwnd))
+            return Error::Make(Err::NotFound, "Video",
+                               "window no longer exists: " + monitorId);
+    }
+
+    std::unique_ptr<PreviewTap> stale;
+    {
+        const std::lock_guard<std::mutex> lock(previews_->mutex);
+        auto &slot = previews_->taps[monitorId];
+        if (slot && slot->running.load())
+            return Ok();   // idempotent — already running
+        if (slot) {
+            slot->running.store(false);
+            stale = std::move(slot);
+        }
+        auto tap = std::make_unique<PreviewTap>();
+        tap->deviceId = monitorId;
+        tap->running.store(true);
+        tap->worker = std::thread(&WindowsVideo::ScreenPreviewThread, std::ref(*tap),
+                                  std::ref(previews_->mutex));
+        slot = std::move(tap);
+    }
+    stale.reset();
+    return Ok();
+}
+
+Result<void> WindowsVideo::StopScreenPreview(const std::string &monitorId)
+{
+    previews_->Erase(monitorId);
+    return Ok();
 }
 
 Result<void> WindowsVideo::StartPreview(const std::string &deviceId, const std::string &mode)

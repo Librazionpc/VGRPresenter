@@ -182,6 +182,16 @@ public:
                                       const QString &owner = QStringLiteral("dialog"));
     // Release every preview tap (the AV screen's teardown).
     Q_INVOKABLE void stopAllVideoPreviews();
+
+    // ---- Live SCREEN preview --------------------------------------------
+    // Same owner-counted discipline as the camera taps, keyed by the
+    // monitor's roster label; frames flow through the same
+    // image://videopreview/<label>?<nonce> provider path. The pane pumps
+    // the nonce; the PAL BitBlts the monitor named by the resolved id.
+    Q_INVOKABLE void startScreenPreview(const QString &monitorLabel,
+                                        const QString &owner = QStringLiteral("dialog"));
+    Q_INVOKABLE void stopScreenPreview(const QString &monitorLabel,
+                                       const QString &owner = QStringLiteral("dialog"));
     // Each entry: { id, label, value } — value mirrors label because the AV
     // board stores the human-readable sublabel on its rows; ids ride along
     // for the future capture-graph plumbing.

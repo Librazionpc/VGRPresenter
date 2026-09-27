@@ -642,44 +642,50 @@ ApplicationWindow {
             selfTestPreviewStage3.restart()
         }
     }
-    // ALL-CAMERAS sweep: pick every enumerated camera in turn through the
-    // real pick path, wait for the tap to warm up, log the pane's live state
-    // and grab the pane per camera — pixel truth per device, not just the
-    // first one. (The user-visible bug: switching cams showed "the same
-    // thing"; this sweep proves whether each device individually renders.)
+    // ALL-SOURCES sweep: every camera, then every display, then every open
+    // window — each picked through the REAL dialog path, warmed up, logged
+    // with the pane's live status, and pixel-grabbed. Per-source ground
+    // truth for the whole preview chain (cams/boards/windows share it).
     property int selfTestCamIndex: -1
-    property var selfTestCamLabels: []
+    property var selfTestCamLabels: []      // [{label, kind}] — kind: camera|screen
     property bool selfTestSweepDone: false
     function selfTestPickNextCam() {
         const screen = SelfTest.findItem("audioVideoScreen")
         selfTestCamIndex++
         if (!screen || !screen.selfTestPickVideoSource
                 || selfTestCamIndex >= selfTestCamLabels.length) {
-            console.log("[SELFTEST-PREVIEW] sweep done over", selfTestCamLabels.length, "camera(s)")
+            console.log("[SELFTEST-PREVIEW] sweep done over", selfTestCamLabels.length, "source(s)")
             selfTestSweepDone = true
             return
         }
-        const label = selfTestCamLabels[selfTestCamIndex]
-        console.log("[SELFTEST-PREVIEW] picking camera", selfTestCamIndex, ":", label)
-        screen.selfTestPickVideoSource(label)
+        const entry = selfTestCamLabels[selfTestCamIndex]
+        console.log("[SELFTEST-PREVIEW] picking", entry.kind, selfTestCamIndex, ":", entry.label)
+        screen.selfTestPickVideoSource(entry.label, entry.kind)
         selfTestPreviewStage4.restart()
     }
     Timer {
         id: selfTestPreviewStage3
         interval: 500
         onTriggered: {
+            const entries = []
             const cams = EngineBridge.videoDevices
-            const labels = []
             for (let i = 0; i < cams.length; ++i) {
                 const l = String(cams[i].label || "")
                 // NDI virtual cams crash their driver when opened as MF
                 // capture devices — they are served by the NDI pipeline,
                 // not this tap; the sweep must not exercise them.
-                if (l !== "" && !/ndi/i.test(l)) labels.push(l)
+                if (l !== "" && !/ndi/i.test(l)) entries.push({label: l, kind: "camera"})
             }
-            window.selfTestCamLabels = labels
+            // Screens: displays + open windows, same pane chain.
+            const scr = EngineBridge.screenDevices
+            for (let i = 0; i < scr.length; ++i) {
+                const l = String(scr[i].label || "")
+                if (l !== "") entries.push({label: l, kind: "screen"})
+            }
+            window.selfTestCamLabels = entries
             window.selfTestCamIndex = -1
-            console.log("[SELFTEST-PREVIEW] stage 3: sweeping", labels.length, "camera(s):", JSON.stringify(labels))
+            console.log("[SELFTEST-PREVIEW] stage 3: sweeping", entries.length,
+                        "source(s):", JSON.stringify(entries))
             window.selfTestPickNextCam()
         }
     }
@@ -709,9 +715,11 @@ ApplicationWindow {
         onTriggered: {
             if (window.selfTestSweepDone)
                 return
-            const label = window.selfTestCamIndex < window.selfTestCamLabels.length
-                          ? window.selfTestCamLabels[window.selfTestCamIndex] : "?"
-            const shot = "shot_cam_" + window.selfTestCamIndex + ".png"
+            const entry = window.selfTestCamIndex < window.selfTestCamLabels.length
+                          ? window.selfTestCamLabels[window.selfTestCamIndex] : null
+            const label = entry ? entry.label : "?"
+            const shot = "shot_src_" + window.selfTestCamIndex + "_"
+                         + (entry ? entry.kind : "?") + ".png"
             const paneItem = SelfTest.findItem("selfTestPreviewPane")
             const frameImg = SelfTest.findItem("selfTestPreviewPaneImage")
             console.log("[SELFTEST-PREVIEW] stage 4: grabbing", shot, "for", label,
@@ -723,7 +731,9 @@ ApplicationWindow {
             // pane subtree, and the WHOLE WINDOW (what a user actually
             // sees). If the window shot shows the camera but the pane shot
             // is dark, the defect is grab compositing, not the app.
-            SelfTest.grab("selfTestPreviewPaneImage", "shot_img_" + window.selfTestCamIndex + ".png")
+            SelfTest.grab("selfTestPreviewPaneImage",
+                          "shot_img_" + window.selfTestCamIndex + "_"
+                          + (entry ? entry.kind : "?") + ".png")
             SelfTest.grab("selfTestPreviewPane", shot)
             SelfTest.grab("", "shot_window_" + window.selfTestCamIndex + ".png")
             if (window.selfTestCamIndex === 0)

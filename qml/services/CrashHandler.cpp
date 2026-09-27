@@ -220,6 +220,44 @@ LONG WINAPI HandleSEH(EXCEPTION_POINTERS *info)
                     }
                 }
             }
+            // FULL-THREAD MINIDUMP, written LAST (after the text record is
+            // durable): a heap-corruption detonation usually happens on an
+            // innocent thread — the corrupting write lives on another stack —
+            // and MiniDumpNormal carries every thread's stack + module map,
+            // the cross-thread evidence the text record cannot hold. It also
+            // occasionally faults inside the corrupted heap (observed once:
+            // 0-byte dump, symbolization already done), which is why it goes
+            // after everything else rather than before it.
+            {
+                using FnMiniDump = BOOL(WINAPI *)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
+                                                  PMINIDUMP_EXCEPTION_INFORMATION,
+                                                  PMINIDUMP_USER_STREAM_INFORMATION,
+                                                  PMINIDUMP_CALLBACK_INFORMATION);
+                if (HMODULE dbgDump = LoadLibraryA("dbghelp.dll")) {
+                    const auto miniDump = reinterpret_cast<FnMiniDump>(reinterpret_cast<void *>(
+                        GetProcAddress(dbgDump, "MiniDumpWriteDump")));
+                    if (miniDump) {
+                        std::string dumpPath = g_crashLogPath;
+                        const auto slash = dumpPath.rfind('/');
+                        if (slash != std::string::npos)
+                            dumpPath = dumpPath.substr(0, slash + 1)
+                                       + "app-" + std::to_string(GetCurrentProcessId()) + ".dmp";
+                        if (HANDLE hDump = CreateFileA(dumpPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                                       CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                            hDump != INVALID_HANDLE_VALUE) {
+                            MINIDUMP_EXCEPTION_INFORMATION mei;
+                            mei.ThreadId = GetCurrentThreadId();
+                            mei.ExceptionPointers = info;
+                            mei.ClientPointers = FALSE;
+                            miniDump(GetCurrentProcess(), GetCurrentProcessId(), hDump,
+                                     MiniDumpNormal, &mei, nullptr, nullptr);
+                            CloseHandle(hDump);
+                            std::snprintf(buf, sizeof(buf), "dump: %s", dumpPath.c_str());
+                            FlushLine(buf);
+                        }
+                    }
+                }
+            }
             std::fclose(f);
         }
     }
@@ -310,6 +348,24 @@ void InstallCrashHandler()
                          + QStringLiteral("/crashes");
     QDir().mkpath(dir);
     g_crashLogPath = (dir + QStringLiteral("/crash.log")).toStdString();
+
+#ifdef _WIN32
+    // One boot line into the SAME crash log: the preferred module's runtime
+    // base address. Crash-record frame addresses minus this base = file
+    // offsets, so a raw-address-only record becomes symbolizable with
+    // `llvm-symbolizer`/`addr2line` later, even when the in-crash dbghelp
+    // path produced nothing.
+    {
+        HMODULE exeBase = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                           reinterpret_cast<LPCWSTR>(&InstallCrashHandler), &exeBase);
+        if (FILE *f = std::fopen(g_crashLogPath.c_str(), "a")) {
+            std::fprintf(f, "---- BOOT base=%p pid=%lu ----\n",
+                         reinterpret_cast<void *>(exeBase), GetCurrentProcessId());
+            std::fclose(f);
+        }
+    }
+#endif
 
     std::set_terminate(HandleTerminate);
     std::signal(SIGABRT, HandleAbort);

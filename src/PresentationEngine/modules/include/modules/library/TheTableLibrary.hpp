@@ -165,6 +165,15 @@ private:
     std::string NextFilePath() const;
 
     mutable std::mutex mutex_;
+    // The search-scan's paragraph cache lives and dies with the book
+    // topology: Load() clears it, imports erase entries, Search() inserts.
+    // Those three ran on three different threads with only mutex_ between
+    // them — but Search's scan holds mutex_ across the emplace, so the
+    // cache itself is covered by mutex_; THIS extra mutex serializes the
+    // scan's *book/chapter reference usage* against Load()'s wholesale
+    // books_.clear(), whose lock scope ends before the scan's begins. One
+    // recursive-shape guard, never held across anything slow.
+    mutable std::mutex scanMutex_;
     std::string filePath_;
     std::vector<TheTableBook> books_;
     uint32_t importSeq_ = 0;   // disambiguates same-named sermons

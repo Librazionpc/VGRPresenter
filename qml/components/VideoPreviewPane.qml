@@ -24,8 +24,9 @@ Column {
     // "camera" | "screen" | "media" | "ndi" — selects the glyph and the
     // pill/hint wording.
     property string kind: "camera"
-    // The camera device's roster label — non-empty + kind camera turns the
-    // pane live (a real tap). Empty = decorative.
+    // The source device's roster label — camera name or monitor label.
+    // non-empty + kind camera/screen turns the pane live (a real tap).
+    // Empty = decorative.
     property string previewLabel: ""
     property bool muted: false
     // Current capture-mode pick ("" = unset — the pill shows its fallback).
@@ -50,44 +51,59 @@ Column {
     // and won't re-request (the nonce changes every tick, so this only
     // matters if the pump stalls).
     property int previewNonce: 0
-    readonly property bool live: kind === "camera" && previewLabel !== ""
+    readonly property bool live: (kind === "camera" || kind === "screen")
+                                 && previewLabel !== ""
     // The tap registered for THIS pane, reconciled (never assumed): switching
     // cameras changes previewLabel while live stays true, so a start wired to
     // onLiveChanged alone left every re-pick tapless (the "no tap was started"
-    // storm) with the old camera still streaming. Reconcile stops the old
-    // label's tap and starts the new one; born-live panes (Edit dialog opens
+    // storm) with the old camera still streaming. Reconcile STOPS the old
+    // label's tap and starts the new one — switching sources FREES the old
+    // device (user policy: no pooled keeps-alive; a paused/switched-away
+    // camera must release its hardware). Born-live panes (Edit dialog opens
     // with a device already picked) get no change signal at all, so
     // onCompleted reconciles too.
     property string activeTapLabel: ""
-    // KEEP-ALIVE POOL (the FreeShow pattern — its manager exists to keep
-    // cameras active): switching cameras STARTS the new tap but never stops
-    // the old one. Repeatedly closing and re-opening hardware exhausts
-    // virtual-cam drivers (every sweep crashed on the 6th switch, any
-    // device); a stream opened once per session stays open and re-binds
-    // instantly on the next visit. Every tap of the screen is released at
-    // once by stopAllVideoPreviews() at screen teardown — the only stop
-    // path a camera switch may never invoke.
+    // The ACTIVE tap's kind — a re-pick can flip kind camera↔screen while
+    // switching labels, and the stop must address the OLD label's kind (the
+    // row-thumbnail reconcile tracks this too).
+    property string activeTapKind: ""
     function syncTap() {
-        const want = live ? previewLabel : ""
+        const want = effectiveLive ? previewLabel : ""
         if (want === activeTapLabel)
             return
+        const old = activeTapLabel
+        const oldKind = activeTapKind
         activeTapLabel = want
+        activeTapKind = want !== "" ? kind : ""
+        if (old !== "") {
+            if (oldKind === "screen")
+                EngineBridge.stopScreenPreview(old, "dialog")
+            else
+                EngineBridge.stopVideoPreview(old, "dialog")
+        }
         if (want !== "") {
-            EngineBridge.startVideoPreview(want, mode, "dialog")
+            if (kind === "screen")
+                EngineBridge.startScreenPreview(want, "dialog")
+            else
+                EngineBridge.startVideoPreview(want, mode, "dialog")
             previewNonce++
             previewTimer.restart()
         }
     }
-    onLiveChanged: syncTap()
+    // PAUSE FREES THE DEVICE: kind camera/screen + empty previewLabel OR a
+    // paused pane drops the effective-live → false → reconcile stops the
+    // tap (the hardware releases; the camera light goes off). Restarting is
+    // a plain re-pick.
+    readonly property bool effectiveLive: live && !muted
+    onEffectiveLiveChanged: syncTap()
     onPreviewLabelChanged: syncTap()
     Component.onCompleted: syncTap()
-    // No per-pane stop: the tap joins the screen's keep-alive pool and is
-    // released by stopAllVideoPreviews() at screen teardown (the dialog
-    // closing must not tear hardware down — the board thumbnail may be
-    // showing the same camera, and re-opening it later exhausts drivers).
-    // A Resolution re-pick re-locks the tap to the new size.
+    // Pause frees the device (see effectiveLive below); the frame pump and
+    // source follow the same state so a paused pane shows nothing.
+    // A Resolution re-pick re-locks the tap to the new size (cameras only —
+    // screens have no mode; the tap always follows the current resolution).
     onModeChanged: {
-        if (live && activeTapLabel === previewLabel) {
+        if (effectiveLive && activeTapLabel === previewLabel && kind === "camera") {
             EngineBridge.startVideoPreview(previewLabel, mode, "dialog")
             previewNonce++
         }
@@ -96,11 +112,16 @@ Column {
         id: previewTimer
         interval: 66   // ~15 fps, matching the tap's production rate
         repeat: true
-        running: root.live
+        running: root.effectiveLive
         onTriggered: root.previewNonce++
     }
-    readonly property url frameSource: live
+    readonly property url frameSource: effectiveLive
         ? "image://videopreview/" + encodeURIComponent(previewLabel) + "?n=" + previewNonce : ""
+    // True once REAL frames are flowing — the warm-up test for the decorative
+    // glyphs (they belong to the seconds before the first frame, not on top
+    // of a live feed).
+    readonly property bool frameReady: effectiveLive && frameImage.status === Image.Ready
+                                       && frameImage.sourceSize.width > 1
 
     // Audio-carrying kinds — the same rule the dialogs gate the Volume
     // slider with (media files and NDI streams embed audio; camera/screen
@@ -139,14 +160,14 @@ Column {
             anchors.fill: parent
             anchors.margins: 1
             source: root.frameSource
-            visible: root.live && status === Image.Ready && sourceSize.width > 1
-            fillMode: Image.PreserveAspectFit
+            visible: root.frameReady
+            fillMode: root.kind === "screen" ? Image.PreserveAspectFit : Image.PreserveAspectFit
             cache: false   // every nonce IS a new frame — never cache stale ones
         }
 
         Item {
             anchors.centerIn: parent
-            visible: root.kind === "camera"
+            visible: root.kind === "camera" && !root.frameReady
             width: 64; height: 64
 
             Rectangle {
@@ -193,7 +214,7 @@ Column {
 
         Item {
             anchors.centerIn: parent
-            visible: root.kind === "screen"
+            visible: root.kind === "screen" && !root.frameReady
             width: 80; height: 60
 
             Rectangle {

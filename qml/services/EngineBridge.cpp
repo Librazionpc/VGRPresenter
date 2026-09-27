@@ -451,6 +451,25 @@ void EngineBridge::enumerateDevices()
                 {QStringLiteral("heightPx"), m.heightPx},
             });
         }
+        // Open application WINDOWS join the same screen roster (OBS-style
+        // Window Capture): id "win:<hwnd>", label = the window title. The
+        // pane/thumb path already resolves roster labels → ids, so window
+        // capture rides the exact same tap + provider chain as displays.
+        // Re-enumerated on every enumerateDevices (dialog opens) — stale
+        // hwnd ids self-heal on the next pick.
+        for (const auto &w : platform.Video().EnumerateWindows()) {
+            const QString title = qstr(w.title);
+            if (title.isEmpty())
+                continue;
+            screenDevices_.append(QVariantMap{
+                {QStringLiteral("id"), qstr(w.id)},
+                {QStringLiteral("label"), title},
+                {QStringLiteral("value"), title},
+                {QStringLiteral("primary"), false},
+                {QStringLiteral("widthPx"), 0},
+                {QStringLiteral("heightPx"), 0},
+            });
+        }
         // Video capture: REAL device + mode lists from the PAL's IVideo
         // (Media Foundation on Windows). Mode labels are OBS-style
         // "<W>x<H>p<FPS>" (29.97 kept fractional); maxFps is the device's
@@ -901,6 +920,111 @@ void EngineBridge::stopVideoPreview(const QString &deviceLabel, const QString &o
     if (id.isEmpty() || !bps::platform::PlatformAccessor::Installed())
         return;
     (void)bps::platform::PlatformAccessor::Get().Video().StopPreview(id.toStdString());
+}
+
+// ---- Live SCREEN preview -------------------------------------------------
+// Same label-first, owner-counted discipline as the camera taps, keyed by
+// the monitor's roster label. The label resolves through the CACHED
+// screenDevices_ roster (refreshed at boot / enumerateDevices) to the
+// monitor id ("\\\.\DISPLAY1"); the tap lives in the PAL's shared preview
+// table and frames flow back through the SAME videopreview provider —
+// monitor ids can never collide with camera symlinks.
+void EngineBridge::startScreenPreview(const QString &monitorLabel, const QString &owner)
+{
+    if (!bps::platform::PlatformAccessor::Installed())
+        return;
+    const QString want = monitorLabel.trimmed();
+    // DIAGNOSTIC (env-gated): the window-thumbnail chain has one suspect per
+    // stage — resolution here, tap start below, provider label→id after.
+    // VGR_PREVIEW_DIAG=1 prints each stage's inputs; inert normally.
+    const bool diag = qEnvironmentVariableIsSet("VGR_PREVIEW_DIAG");
+    if (diag) {
+        QStringList roster;
+        for (const QVariant &v : screenDevices_)
+            roster << v.toMap().value("label").toString();
+        qInfo("EngineBridge[diag] startScreenPreview want='%s' owner=%s roster=%s",
+              qUtf8Printable(want), qUtf8Printable(owner), qUtf8Printable(roster.join(" | ")));
+    }
+    QString id;
+    for (const QVariant &v : screenDevices_) {
+        const QVariantMap d = v.toMap();
+        if (d.value("label").toString() == want) {
+            id = d.value("id").toString();
+            break;
+        }
+    }
+    if (id.isEmpty()) {
+        qWarning("EngineBridge: no display named '%s' to preview", qUtf8Printable(want));
+        return;
+    }
+    previewOwners_[want].insert(owner);
+    if (previewIds_.contains(want)) {
+        if (diag)
+            qInfo("EngineBridge[diag] startScreenPreview: existing tap id='%s'",
+                  qUtf8Printable(previewIds_.value(want)));
+        return;
+    }
+    auto startTap = [this](const QString &tapId) {
+        return bps::platform::PlatformAccessor::Get().Video()
+                   .StartScreenPreview(tapId.toStdString()).ok();
+    };
+    const bool ok = startTap(id);
+    // STALE WINDOW IDS SELF-HEAL HERE: a "win:<hwnd>" id captured at
+    // enumeration time dies with the window; the app re-opening re-enumerates
+    // under the SAME title with a NEW hwnd. Monitor ids ("\\.\DISPLAY1") are
+    // stable, so this only ever bites window rows — and without the retry the
+    // failed id would stay cached in previewIds_ and POISON the label: every
+    // later pick of that window title silently reused the dead hwnd and the
+    // pane stayed dark forever (the "shows in the dropdown, never previews"
+    // report). One fresh enumeration + one title match retries the tap.
+    QString usedId = id;
+    if (!ok && id.startsWith(QStringLiteral("win:"))) {
+        for (const auto &w : bps::platform::PlatformAccessor::Get().Video().EnumerateWindows()) {
+            if (qstr(w.title) == want) {
+                usedId = qstr(w.id);
+                break;
+            }
+        }
+        if (usedId != id && startTap(usedId))
+            qInfo("EngineBridge: screen tap '%s' re-resolved to fresh id '%s'",
+                  qUtf8Printable(want), qUtf8Printable(usedId));
+        else
+            usedId = id;   // still dead — roll back below so a later pick retries
+    }
+    if (ok || usedId != id) {
+        previewIds_[want] = usedId;
+        qInfo("EngineBridge: screen tap '%s' -> id '%s' started", qUtf8Printable(want),
+              qUtf8Printable(usedId));
+        return;
+    }
+    // Start FAILED: release this owner's claim too — a claim with no tap means
+    // no later startScreenPreview for this label can ever try again.
+    qWarning("EngineBridge: screen preview tap failed for '%s'", qUtf8Printable(want));
+    auto it = previewOwners_.find(want);
+    if (it != previewOwners_.end()) {
+        it->remove(owner);
+        if (it->isEmpty())
+            previewOwners_.erase(it);
+    }
+    // The thumbnail may have been built BEFORE this label existed in the
+    // roster (its provider request would have warned "no tap") — the nonce
+    // bump happens on the QML side; nothing to do here.
+}
+
+void EngineBridge::stopScreenPreview(const QString &monitorLabel, const QString &owner)
+{
+    const QString want = monitorLabel.trimmed();
+    auto it = previewOwners_.find(want);
+    if (it == previewOwners_.end())
+        return;
+    it->remove(owner);
+    if (!it->isEmpty())
+        return;
+    previewOwners_.erase(it);
+    const QString id = previewIds_.take(want);
+    if (id.isEmpty() || !bps::platform::PlatformAccessor::Installed())
+        return;
+    (void)bps::platform::PlatformAccessor::Get().Video().StopScreenPreview(id.toStdString());
 }
 
 void EngineBridge::stopAllVideoPreviews()

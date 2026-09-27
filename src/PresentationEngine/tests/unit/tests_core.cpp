@@ -968,6 +968,69 @@ void TestPal() {
                     frames_ok, frames_dead, skipped);
     }
 
+    // --- Screen-capture tap (the pane contract on IMonitor's roster): per
+    // monitor, start the GDI tap, poll ~2.5 s, verify JPEG delivery, stop.
+    {
+        const auto monitors = plat.Monitor().Enumerate();
+        auto& vid = plat.Video();
+        std::printf("[screenpreview] === per-monitor verdicts (%zu displays) ===\n", monitors.size());
+        for (const auto& mon : monitors) {
+            const auto started = vid.StartScreenPreview(mon.id);
+            if (!started.ok()) {
+                std::printf("[screenpreview] %-20s SKIPPED (%s)\n", mon.id.c_str(),
+                            started.error().message.c_str());
+                CHECK(started.error().code == Err::Unsupported || started.error().code == Err::NotFound);
+                continue;
+            }
+            size_t best = 0;
+            for (int ms = 0; ms < 2500; ms += 100) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                const auto frame = vid.PreviewFrame(mon.id);
+                if (frame.size() > best) best = frame.size();
+            }
+            if (best > 2) {
+                const auto frame = vid.PreviewFrame(mon.id);
+                const bool jpeg = frame.size() > 1 && frame[0] == 0xFF && frame[1] == 0xD8;
+                std::printf("[screenpreview] %-20s FRAMES  (max %zu B, JPEG=%s)\n",
+                            mon.id.c_str(), best, jpeg ? "yes" : "NO");
+                CHECK(jpeg);
+            } else {
+                std::printf("[screenpreview] %-20s NO FRAMES in 2.5 s\n", mon.id.c_str());
+                CHECK(false);   // a monitor that yields nothing is a defect
+            }
+            CHECK(vid.StopScreenPreview(mon.id).ok());
+            CHECK(vid.PreviewFrame(mon.id).empty());   // tap released
+        }
+
+        // WINDOW capture verdict: enumerate the desktop's open windows and
+        // capture the first one (usually a file explorer or the terminal
+        // itself). Also proves a STALE id fails NotFound cleanly.
+        const auto wins = vid.EnumerateWindows();
+        std::printf("[screenpreview] %zu open window(s) enumerated\n", wins.size());
+        CHECK(!wins.empty());   // a desktop with zero visible windows is absurd
+        if (!wins.empty()) {
+            const auto& w = wins.front();
+            const auto started = vid.StartScreenPreview(w.id);
+            if (started.ok()) {
+                size_t bestW = 0;
+                for (int ms = 0; ms < 2000; ms += 100) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    const auto frame = vid.PreviewFrame(w.id);
+                    if (frame.size() > bestW) bestW = frame.size();
+                }
+                std::printf("[screenpreview] window '%.28s' %s (max %zu B)\n",
+                            w.title.c_str(), bestW > 2 ? "FRAMES" : "NO FRAMES", bestW);
+                CHECK(bestW > 2);
+                CHECK(vid.StopScreenPreview(w.id).ok());
+            } else {
+                std::printf("[screenpreview] window '%.28s' refused (%s)\n",
+                            w.title.c_str(), started.error().message.c_str());
+            }
+            const auto stale = vid.StartScreenPreview("win:999999999");
+            CHECK(!stale.ok() && stale.error().code == Err::NotFound);   // gone hwnd
+        }
+    }
+
     // --- Input devices (DoD §11) ---
     auto& input = plat.Input();
     for (const auto& d : input.Enumerate()) {

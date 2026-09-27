@@ -1337,6 +1337,10 @@ Result<void> TheTableLibrary::Persist(const std::vector<TheTableBook>& books) co
 }
 
 Result<void> TheTableLibrary::Load() {
+    // scanMutex_ first: a concurrent Search()'s scan must never see the
+    // between-clears state (books_ empty, cache alive → stale pointers) nor
+    // interleave with the reload.
+    std::lock_guard<std::mutex> scanLock(scanMutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     books_.clear();
     lowerParagraphs_.clear();
@@ -1772,6 +1776,15 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         }
     };
     {
+        // scanMutex_ + mutex_ TOGETHER: the scan walks books_ and populates
+        // lowerParagraphs_ while Load() (books_.clear + lowerParagraphs_.clear)
+        // and imports (books_.push_back / lowerParagraphs_.erase) run on other
+        // threads. mutex_ alone did NOT order the scan against Load's two-step
+        // teardown — a scan between Load's lock scopes walked freed book
+        // vectors (the heap-corruption crash the symbolizer kept landing in
+        // IndexStorage::Upsert's neighbor containers). One lock pair for the
+        // whole walk; nothing inside blocks.
+        std::lock_guard<std::mutex> scanLock(scanMutex_);
         std::lock_guard<std::mutex> lock(mutex_);
         int rank = 0;
         for (const TheTableBook& book : books_)
@@ -1940,6 +1953,8 @@ Result<std::string> TheTableLibrary::AddCleanText(std::string_view fileName, con
     const Placement place = PlacementOf(name);
     const std::string& title = place.title;
 
+    // Import mutates the topology the scan walks — same pair as Load.
+    std::lock_guard<std::mutex> scanLock(scanMutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     TheTableBook& book = BookForYear(place.year);
     TheTableChapter ch;

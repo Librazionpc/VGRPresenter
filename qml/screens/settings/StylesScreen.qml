@@ -643,6 +643,13 @@ Item {
             onTextEdited: (t) => root.editStyleName = t
         }
 
+        // CONTENT TYPE = ACTIVATION (user request): a chip ON means an output
+        // wearing this style ALLOWS that content type; OFF refuses it on air
+        // (OutputListModel::activeStyleAllows reads these flags). Multi-select
+        // — a style serves any subset. The style's template family
+        // (editStyleContentType, what the Template picker below edits) follows
+        // the chips: picking a chip re-targets the family, deactivating the
+        // family's own chip migrates it to another active one.
         Column {
             width: parent.width
             spacing: Theme.space2
@@ -666,75 +673,36 @@ Item {
                     ]
                     delegate: SelectableChip {
                         required property var modelData
-                        label: modelData.label
-                        selected: root.editStyleContentType === modelData.key
-                        onPicked: root.editStyleContentType = modelData.key
-                    }
-                }
-            }
-        }
-
-        // TEMPLATES PER CONTENT TYPE (FreeShow: one style carries a template
-        // for Shows, Media, Scripture and Table). A pill OFF greys out — that
-        // tab's content is NOT meant for an output wearing this style; go-live
-        // refuses it with a toast instead of showing nothing.
-        Column {
-            width: parent.width
-            spacing: Theme.space2
-
-            Text {
-                text: qsTr("Templates for")
-                color: Theme.textSecondary
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textXs
-            }
-
-            Row {
-                spacing: Theme.space2
-
-                Repeater {
-                    model: [
-                        { key: "shows", label: qsTr("Shows") },
-                        { key: "media", label: qsTr("Media") },
-                        { key: "scripture", label: qsTr("Scripture") },
-                        { key: "table", label: qsTr("The Table") }
-                    ]
-                    delegate: Rectangle {
-                        id: tmplPill
-                        required property var modelData
                         readonly property bool on: {
                             if (modelData.key === "shows") return root.editShowShows
                             if (modelData.key === "media") return root.editShowMedia
                             if (modelData.key === "scripture") return root.editShowScripture
                             return root.editShowTable
                         }
-                        width: tmplPillLabel.implicitWidth + 22
-                        height: 26
-                        radius: 13
-                        border.color: tmplPill.on ? Theme.accent : Theme.border
-                        border.width: 1
-                        color: tmplPill.on ? "#2e6c5ce7" : "transparent"
-                        opacity: tmplPill.on ? 1.0 : 0.45
-                        Behavior on opacity { NumberAnimation { duration: 120 } }
-
-                        Text {
-                            id: tmplPillLabel
-                            anchors.centerIn: parent
-                            text: tmplPill.modelData.label
-                            color: tmplPill.on ? Theme.textPrimary : Theme.textMuted
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.textXs
-                            font.weight: tmplPill.on ? Font.DemiBold : Font.Normal
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                if (tmplPill.modelData.key === "shows") root.editShowShows = !root.editShowShows
-                                else if (tmplPill.modelData.key === "media") root.editShowMedia = !root.editShowMedia
-                                else if (tmplPill.modelData.key === "scripture") root.editShowScripture = !root.editShowScripture
-                                else root.editShowTable = !root.editShowTable
+                        label: modelData.label
+                        selected: on
+                        onPicked: {
+                            const next = !on
+                            if (modelData.key === "shows") root.editShowShows = next
+                            else if (modelData.key === "media") root.editShowMedia = next
+                            else if (modelData.key === "scripture") root.editShowScripture = next
+                            else root.editShowTable = next
+                            // The template family must stay on an ACTIVE
+                            // type: picking a chip targets it; switching one
+                            // OFF moves the family to another still-active
+                            // chip (unchanged when it wasn't the family or
+                            // when nothing else is active).
+                            if (next) {
+                                root.editStyleContentType = modelData.key
+                            } else if (root.editStyleContentType === modelData.key) {
+                                const others = ["shows", "media", "scripture", "table"]
+                                    .filter((k) => k !== modelData.key
+                                            && (k === "shows" ? root.editShowShows
+                                                : k === "media" ? root.editShowMedia
+                                                : k === "scripture" ? root.editShowScripture
+                                                : root.editShowTable))
+                                if (others.length > 0)
+                                    root.editStyleContentType = others[0]
                             }
                         }
                     }
@@ -743,7 +711,7 @@ Item {
 
             Text {
                 width: parent.width
-                text: qsTr("A greyed tab is not meant for this output — its content is refused on air.")
+                text: qsTr("An unselected type is not allowed on an output wearing this style — its content is refused on air. The Template below belongs to the picked type.")
                 color: Theme.textMuted
                 font.family: Theme.fontFamily
                 font.pixelSize: Theme.textXs

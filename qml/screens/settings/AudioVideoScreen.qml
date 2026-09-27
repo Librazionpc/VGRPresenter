@@ -49,9 +49,11 @@ Item {
     // dialog's device pick without poking pixels — sets the same state the
     // SelectField's onValuePicked handler sets, so the pane's live chain
     // (start tap → pump → frames) runs exactly as a real user's pick.
-    function selfTestPickVideoSource(label) {
+    // kind selects the row type: "camera" (default) or "screen" — screens
+    // sweep displays AND open windows through the same pane.
+    function selfTestPickVideoSource(label, kind) {
         root.addSourceType = "video"
-        root.addSourceKind = "camera"
+        root.addSourceKind = kind || "camera"
         root.addSourceSublabel = label
         root.addSourceShown = true
         syncAudioMeter()
@@ -1369,7 +1371,9 @@ Item {
                             readonly property bool hasAudio: vidRow.kind === "media"
                                                              || vidRow.kind === "ndi"
                             // The row's live thumbnail source (nonce-pumped
-                            // by the thumb itself — see vidThumb).
+                            // by the thumb itself — see vidThumb). Cameras
+                            // AND screens: the monitor label resolves through
+                            // the same videopreview provider.
                             readonly property url liveThumb:
                                 vidThumb.liveCam
                                 ? "image://videopreview/" + encodeURIComponent(vidRow.sublabel)
@@ -1491,9 +1495,11 @@ Item {
                                 Image {
                                     anchors.fill: parent
                                     source: vidRow.liveThumb
-                                    visible: vidRow.kind === "camera"
+                                    visible: (vidRow.kind === "camera" || vidRow.kind === "screen")
                                              && status === Image.Ready && sourceSize.width > 1
-                                    fillMode: Image.PreserveAspectCrop
+                                             && !vidRow.muted
+                                    fillMode: vidRow.kind === "screen" ? Image.PreserveAspectFit
+                                                                       : Image.PreserveAspectCrop
                                     cache: false
                                 }
                                 // The row's tap + pump, reconciled like the
@@ -1504,16 +1510,43 @@ Item {
                                 // (repeated close/re-open exhausts virtual-cam
                                 // drivers; the screen-wide stopAllVideoPreviews
                                 // at teardown is the only release).
-                                readonly property bool liveCam: vidRow.kind === "camera" && vidRow.sublabel !== ""
+                                readonly property bool liveCam:
+                                    (vidRow.kind === "camera" || vidRow.kind === "screen")
+                                    && vidRow.sublabel !== ""
+                                    && !vidRow.muted
                                 property int thumbNonce: 0
                                 property string activeTapLabel: ""
+                                // The PREVIOUS tap's kind — the stop call must
+                                // address the OLD label's kind, not the row's
+                                // current one: after a camera→screen re-pick, a
+                                // stop routed by the new kind would call
+                                // stopScreenPreview for a camera label, and the
+                                // camera's tap would stream on forever.
+                                property string activeTapKind: ""
+                                // PAUSE FREES THE DEVICE: a muted row's tap is
+                                // stopped outright (camera light off) instead of
+                                // pooled. liveCam folds the mute state in, so the
+                                // reconcile below sees want=="" and releases.
                                 function syncTap() {
                                     const want = vidThumb.liveCam ? vidRow.sublabel : ""
                                     if (want === activeTapLabel)
                                         return
+                                    const old = activeTapLabel
+                                    const oldKind = activeTapKind
                                     activeTapLabel = want
-                                    if (want !== "")
-                                        EngineBridge.startVideoPreview(want, "", "board")
+                                    activeTapKind = want !== "" ? vidRow.kind : ""
+                                    if (old !== "") {
+                                        if (oldKind === "screen")
+                                            EngineBridge.stopScreenPreview(old, "board")
+                                        else
+                                            EngineBridge.stopVideoPreview(old, "board")
+                                    }
+                                    if (want !== "") {
+                                        if (vidRow.kind === "screen")
+                                            EngineBridge.startScreenPreview(want, "board")
+                                        else
+                                            EngineBridge.startVideoPreview(want, "", "board")
+                                    }
                                 }
                                 Timer {
                                     interval: 125   // 8 fps thumbnail pump
@@ -1995,7 +2028,8 @@ Item {
         VideoPreviewPane {
             width: parent.width
             kind: root.editVideoKind
-            previewLabel: root.editVideoKind === "camera" ? root.editVideoSublabel : ""
+            previewLabel: root.editVideoKind === "camera" || root.editVideoKind === "screen"
+                          ? root.editVideoSublabel : ""
             muted: root.editVideoMuted
             mode: root.editVideoMode
             modes: root.editVideoKind === "camera"
@@ -2583,7 +2617,8 @@ Item {
                 showHint: false
                 paneObjectName: "selfTestPreviewPane"   // the ADD dialog's pane — the grab target
                 kind: root.addSourceKind
-                previewLabel: root.addSourceKind === "camera" ? root.addSourceSublabel : ""
+                previewLabel: root.addSourceKind === "camera" || root.addSourceKind === "screen"
+                              ? root.addSourceSublabel : ""
                 muted: root.addSourceMuted
                 mode: root.addSourceVideoMode
                 modes: root.videoModesFor(root.addSourceSublabel)

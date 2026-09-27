@@ -309,7 +309,7 @@ if(WIN32)
     # Win32 subsystem libraries used by the Windows PAL backends (COM dialogs
     # need ole32; IPC needs ws2_32; MF video enumeration needs mfplat/mfuuid
     # + runtimeobject for the activation factory).
-    target_link_libraries(engine_core PUBLIC ws2_32 iphlpapi winmm shell32 user32 shcore ole32 mfplat mf mfuuid mfreadwrite runtimeobject gdi32 gdiplus uuid windowscodecs)
+    target_link_libraries(engine_core PUBLIC ws2_32 iphlpapi winmm shell32 user32 shcore ole32 mfplat mf mfuuid mfreadwrite runtimeobject gdi32 gdiplus dwmapi uuid windowscodecs)
     # _WIN32_WINNT/WINVER gate which Win32 APIs <windows.h> and friends
     # actually declare — left undefined, MinGW's headers default to an old
     # baseline and silently omit Vista+ APIs the Windows PAL backends use

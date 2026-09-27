@@ -37,6 +37,13 @@ struct VideoDeviceInfo {
     uint32_t maxFps = 0;
 };
 
+// One capturable TOP-LEVEL WINDOW (screen-source option, OBS-style
+// "Window Capture"): hwnd-derived stable key + the visible title.
+struct WindowInfo {
+    std::string id;    // "win:<hwnd>" — stable while the window lives
+    std::string title; // the window's visible title
+};
+
 class IVideo {
 public:
     virtual ~IVideo() = default;
@@ -44,6 +51,11 @@ public:
     // All active video-capture devices visible to the OS (best effort; may
     // be empty on hosts without a capture stack).
     virtual std::vector<VideoDeviceInfo> Enumerate() const = 0;
+
+    // Open, visible, capturable top-level windows (best effort; empty on
+    // platforms without window capture). Ids stay valid while the window
+    // lives — the UI re-enumerates on dialog open, so stale ids self-heal.
+    virtual std::vector<WindowInfo> EnumerateWindows() const { return {}; }
 
     // Stable summary of the current device set (ids) — the Kernel's platform
     // watcher compares successive values for capture hot-plug events.
@@ -86,6 +98,28 @@ public:
     }
     // Devices with a live preview tap (drives any future frame pump).
     virtual std::vector<std::string> ActivePreviews() const { return {}; }
+
+    // ---- Screen-capture taps (monitor id = IMonitor's "\\\.\DISPLAY1") ----
+    // Same pane contract as the camera taps: Start → ~15 fps JPEG via
+    // PreviewFrame, Stop, idempotent. The Windows backend grabs the monitor
+    // named by id via GDI BitBlt (no MF involvement); Unsupported elsewhere.
+    virtual Result<void> StartScreenPreview(const std::string &monitorId)
+    {
+        (void)monitorId;
+        return Error::Make(Err::Unsupported, "Video",
+                           "screen preview is not implemented on this platform");
+    }
+    virtual Result<void> StopScreenPreview(const std::string &monitorId)
+    {
+        (void)monitorId;
+        return Error::Make(Err::Unsupported, "Video",
+                           "screen preview is not implemented on this platform");
+    }
+    // Monitor ids flow through the same PreviewFrame as camera ids — the
+    // "\\\.\DISPLAY..." prefix can never collide with a camera symlink.
+    // The SAME taps also serve WINDOW capture: StartScreenPreview with a
+    // "win:<hwnd>" id BitBlts that window instead of a monitor; the
+    // per-grab IsWindow check ends the tap cleanly when the window closes.
 };
 
 } // namespace bps::platform
