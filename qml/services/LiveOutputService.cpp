@@ -8,6 +8,9 @@
 #include "modules/rendering/RenderOutputs.hpp"
 #include "modules/rendering/RenderEngine.hpp"
 
+#include "services/EngineBridge.h"
+
+#include <QCoreApplication>
 #include <QTimer>
 
 namespace pl = bps::presentation;
@@ -198,6 +201,189 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         poll_->start();
         pollTick();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Taken video input — the output preview's camera/screen layer
+// ---------------------------------------------------------------------------
+// The monitor tiles already composite raster layers (the style's PNG/JPG
+// background, the distributed frame) as plain QML Image items over the
+// image providers; a taken INPUT rides the same path — its frames come
+// from the PAL's videopreview taps (EngineBridge, owner "output"), the
+// SAME tap class the Settings dialogs' previews use, so the device
+// lifecycle (idempotent starts, owner-counted release) is already proven.
+void LiveOutputService::takeInput(const QString &label, const QString &kind, const QString &mode)
+{
+    if (kind != QLatin1String("camera") && kind != QLatin1String("screen")) {
+        // Honest refusal: media/NDI have no local tap yet (media plays
+        // through the player graph, NDI through the network receiver —
+        // neither is wired to a compositor layer today).
+        qWarning("LiveOutputService: input kind '%s' has no output-preview tap yet", kind.toUtf8().constData());
+        emit inputChanged();
+        return;
+    }
+    if (label.isEmpty())
+        return;
+
+    // Re-taking while taken: release the previous hold first (one layer).
+    if (inputLabel_ == label && inputKind_ == kind) {
+        // Same source re-picked: just keep the tap alive (mode changes are
+        // handled by the caller's new tap below).
+    } else if (!inputLabel_.isEmpty()) {
+        if (inputKind_ == QLatin1String("screen"))
+            EngineBridge::instance().stopScreenPreview(inputLabel_, QStringLiteral("output"));
+        else
+            EngineBridge::instance().stopVideoPreview(inputLabel_, QStringLiteral("output"));
+    }
+
+    inputLabel_ = label;
+    inputKind_ = kind;
+    bool started = false;
+    if (kind == QLatin1String("screen")) {
+        // startScreenPreview reports whether the label resolved to a live
+        // window/monitor and the tap started — a refused take (window closed,
+        // title drifted) unwinds the take here instead of parking a
+        // warm-up placeholder that can never fill.
+        started = EngineBridge::instance().startScreenPreview(label, QStringLiteral("output"));
+    } else {
+        EngineBridge::instance().startVideoPreview(label, mode, QStringLiteral("output"));
+        started = true;   // camera refusals surface via the provider's empty frames
+    }
+    if (!started) {
+        inputLabel_.clear();
+        inputKind_.clear();
+        emit inputChanged();
+        return;
+    }
+
+    if (!inputPump_) {
+        inputPump_ = new QTimer(this);
+        inputPump_->setInterval(66);   // ~15 fps, matching the tap's production rate
+        connect(inputPump_, &QTimer::timeout, this, [this] {
+            // FRAME DETECTION — SERVICE-SIDE, off the provider's decode-once
+            // cache (the same cache requestImage drains): the previous QML
+            // confirmInputFrame() round-trip created a write-in-binding
+            // feedback edge (tile's onStatusChanged → inputRev bump → the
+            // SAME tile's inputSource URL re-evaluates) and QML flagged it
+            // as a binding loop. inputLive now flips purely from the tap's
+            // real production; QML only reads.
+            if (!inputLive_ && !inputLabel_.isEmpty()) {
+                const QImage frame = EngineBridge::instance().previewFrameFor(inputLabel_);
+                if (!frame.isNull() && frame.width() > 1) {
+                    inputLive_ = true;
+                    qInfo("LiveOutputService: first frame decoded for '%s' (%dx%d)",
+                          qUtf8Printable(inputLabel_), frame.width(), frame.height());
+                }
+            }
+            // Unconditional rev bump while taken: the tile's Image must
+            // re-fetch every tick from the FIRST one (the provider answers
+            // warm-up requests with a 1×1 transparent, which keeps the
+            // placeholder up without ever flipping inputLive).
+            inputRev_++;
+            emit inputChanged();
+        });
+    }
+    inputPump_->start();
+    // inputLive_ flips true when the provider's first frame decodes — the
+    // service can't see the provider's cache, so the QML side confirms via
+    // confirmInputFrame() (warm-up honest: the pill/placeholder shows until
+    // then).
+    emit inputChanged();
+}
+
+// KEPT FOR COMPATIBILITY, DELIBERATELY EMPTY: frame detection moved into
+// the service's pump (reading the provider's decode cache). The previous
+// QML round-trip — tile's Image onStatusChanged → confirmInputFrame() →
+// inputRev bump → the SAME tile's inputSource URL — was a write-in-binding
+// feedback edge and QML flagged it as a binding loop.
+void LiveOutputService::confirmInputFrame(const QString &label)
+{
+    Q_UNUSED(label)
+}
+
+void LiveOutputService::clearInput()
+{
+    if (inputLabel_.isEmpty())
+        return;
+    if (inputKind_ == QLatin1String("screen"))
+        EngineBridge::instance().stopScreenPreview(inputLabel_, QStringLiteral("output"));
+    else
+        EngineBridge::instance().stopVideoPreview(inputLabel_, QStringLiteral("output"));
+    inputLabel_.clear();
+    inputKind_.clear();
+    inputLive_ = false;
+    if (inputPump_)
+        inputPump_->stop();
+    emit inputChanged();
+}
+
+// ---------------------------------------------------------------------------
+// Env-gated boot self-test: VGR_OUTPUT_INPUT_TEST=1 drives the WHOLE
+// taken-input chain automatically — enumerate → take the first real window
+// → wait through the tap's warm-up → read the provider's decode cache → log
+// a PASS/FAIL verdict. Exists so the input-preview pipeline can be verified
+// from a launch log alone (no clicks, no dialog, no QML binding involved —
+// the layer the binding loop poisoned). Inert without the env var.
+void LiveOutputService::runEnvSelfTest()
+{
+    if (!qEnvironmentVariableIsSet("VGR_OUTPUT_INPUT_TEST"))
+        return;
+    QTimer::singleShot(2500, &instance(), [] {
+        QString label;
+        const QVariantList screen = EngineBridge::instance().screenDevices();
+        for (const QVariant &v : screen) {
+            const QVariantMap d = v.toMap();
+            // First real window (not our own app's window — the engine's
+            // enumeration excludes self by pid, the roster label here is
+            // just belt-and-braces).
+            if (d.value("id").toString().startsWith(QStringLiteral("win:"))) {
+                label = d.value("label").toString();
+                if (label != QCoreApplication::applicationName())
+                    break;
+            }
+        }
+        if (label.isEmpty()) {
+            qWarning("LiveOutputService[selftest] FAIL: no window source to take");
+            return;
+        }
+        qInfo("LiveOutputService[selftest] taking window '%s'", qUtf8Printable(label));
+        instance().takeInput(label, QStringLiteral("screen"), QString());
+        if (instance().inputLabel().isEmpty()) {
+            qWarning("LiveOutputService[selftest] FAIL: take was refused");
+            return;
+        }
+        QTimer::singleShot(4000, &instance(), [label] {
+            // The service's OWN live flag — flipped by the decode-cache poll,
+            // i.e. proof the tap produced real pixels end to end.
+            if (instance().inputLive())
+                qInfo("LiveOutputService[selftest] PASS: frames decoded for '%s'",
+                      qUtf8Printable(label));
+            else
+                qWarning("LiveOutputService[selftest] FAIL: no frames decoded for '%s'",
+                         qUtf8Printable(label));
+            instance().clearInput();   // phase boundary — release before the next probe
+            // RE-ACTIVATION PROBE — the new gesture model: activation is a
+            // DOUBLE-click (one deliberate toggle in QML), so the service
+            // must survive a same-source re-activation without losing the
+            // tap or the frames (a stray rapid re-activation can also come
+            // from a double-toggled card). Take again, take the SAME source
+            // once more immediately, and expect the take — and the frames —
+            // to still be alive 2.5 s later.
+            QTimer::singleShot(400, &instance(), [label] {
+                instance().takeInput(label, QStringLiteral("screen"), QString());
+                instance().takeInput(label, QStringLiteral("screen"), QString());   // immediate re-activation
+                const bool held = instance().inputLabel() == label;
+                QTimer::singleShot(2500, &instance(), [label, held] {
+                    if (held && instance().inputLive())
+                        qInfo("LiveOutputService[selftest] REACTIVATE PASS: same-source re-activation kept the tap, frames flowing");
+                    else
+                        qWarning("LiveOutputService[selftest] REACTIVATE FAIL: held=%d live=%d",
+                                 held ? 1 : 0, instance().inputLive() ? 1 : 0);
+                    instance().clearInput();   // the self-test leaves NO side effects
+                });
+            });
+        });
+    });
 }
 
 void LiveOutputService::stop()

@@ -56,6 +56,11 @@ Item {
     signal entered()
     signal exited()
     signal clicked(var mouse)
+    // A quick second press+release (MouseArea's own detection) — the
+    // deliberate-activation gesture for surfaces where a stray single
+    // click must do nothing (the Media pane's input cards take/clear on
+    // DOUBLE-click; single clicks are ignored there).
+    signal doubleClicked(var mouse)
 
     // A BINDING (not a function call) deliberately: its initial evaluation
     // walks the ancestor chain and subscribes to every visible/enabled it
@@ -114,5 +119,6 @@ Item {
         anchors.fill: parent
         hoverEnabled: false
         onClicked: (mouse) => root.clicked(mouse)
+        onDoubleClicked: (mouse) => root.doubleClicked(mouse)
     }
 }

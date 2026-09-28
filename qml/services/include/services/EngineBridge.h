@@ -188,7 +188,10 @@ public:
     // monitor's roster label; frames flow through the same
     // image://videopreview/<label>?<nonce> provider path. The pane pumps
     // the nonce; the PAL BitBlts the monitor named by the resolved id.
-    Q_INVOKABLE void startScreenPreview(const QString &monitorLabel,
+    // Returns whether the tap is (now) running — LiveOutputService's take
+    // surfaces a refused label honestly instead of showing a warm-up
+    // placeholder that can never fill.
+    Q_INVOKABLE bool startScreenPreview(const QString &monitorLabel,
                                         const QString &owner = QStringLiteral("dialog"));
     Q_INVOKABLE void stopScreenPreview(const QString &monitorLabel,
                                        const QString &owner = QStringLiteral("dialog"));
@@ -200,6 +203,11 @@ public:
     QVariantList screenDevices() const { return screenDevices_; }
     QVariantList videoDevices() const { return videoDevices_; }
     QVariantList ndiSources() const { return ndiSources_; }
+    // The tap's latest decoded frame for a roster label (the SAME decode-once
+    // cache requestImage drains) — LiveOutputService's pump reads this to
+    // detect first frames itself, instead of QML confirming back (a write
+    // into the tile's own URL binding = binding loop).
+    QImage previewFrameFor(const QString &label);
     bool ndiAvailable() const { return ndiAvailable_; }
     QString ndiStatus() const { return ndiStatus_; }
     QString ndiState() const { return ndiState_; }

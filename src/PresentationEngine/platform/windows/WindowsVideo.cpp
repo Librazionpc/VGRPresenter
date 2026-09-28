@@ -185,13 +185,24 @@ BOOL CALLBACK WindowEnumProc(HWND hwnd, LPARAM lParam)
 {
     auto *ctx = reinterpret_cast<EnumWindowsCtx *>(lParam);
     if (!IsWindowVisible(hwnd)) return TRUE;
-    // Cloaked (DWM): invisible UWP/ghost windows pass IsWindowVisible but
-    // render nothing — skip them.
-    BOOL cloaked = FALSE;
-    if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) || cloaked)
-        return TRUE;
+    // TOOLWINDOW: palettes/tooltips sized 0×0 or worse, no taskbar presence —
+    // capture noise either way.
     LONG exStyle = GetWindowLongW(hwnd, GWL_EXSTYLE);
     if (exStyle & WS_EX_TOOLWINDOW) return TRUE;
+    // CLOAKED — the subtle one. The shell cloaks windows it keeps alive but
+    // off-screen: OTHER VIRTUAL DESKTOPS (DWM_CLOAKED_SHELL == 2 — the exact
+    // state of the workspace window in the repeat "no display named 'live url
+    // product sync gate'" report: probe showed visible=True, toolwin=False,
+    // cloaked=2 while the window sat on another virtual desktop) and
+    // suspended UWP apps (DWM_CLOAKED_APP, also skipped here — truly ghost
+    // pixels). PrintWindow(PW_RENDERFULLCONTENT) still captures a SHELL-cloaked
+    // window's real, current content, so those stay IN the roster — they are
+    // precisely the "window I left on desktop 2" the user picks as a screen
+    // source. Only fully-invisible app-level cloaks are filtered.
+    BOOL cloaked = FALSE;
+    if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
+        && cloaked == DWM_CLOAKED_APP)
+        return TRUE;
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
     if (pid == 0 || pid == ctx->selfPid) return TRUE;
@@ -876,6 +887,9 @@ void WindowsVideo::ScreenPreviewThread(PreviewTap &tap, std::mutex &publishMutex
                     if (PrintWindow(hwnd, fullDc, PW_CLIENTONLY | PW_RENDERFULLCONTENT))
                         blitOk = StretchBlt(memDc, 0, 0, dstW, dstH, fullDc,
                                             0, 0, srcW, srcH, SRCCOPY);
+                    else if (consecutiveFailures == 0)
+                        std::printf("[screenpreview] PrintWindow failed for %s\n",
+                                    tap.deviceId.c_str()), std::fflush(stdout);
                 }
                 if (fdib) {
                     SelectObject(fullDc, fold);
@@ -905,8 +919,12 @@ void WindowsVideo::ScreenPreviewThread(PreviewTap &tap, std::mutex &publishMutex
         if (memDc) DeleteDC(memDc);
         if (screenDc) DeleteDC(screenDc);
         if (!gotFrame) {
-            if (++consecutiveFailures >= 20)
+            if (++consecutiveFailures >= 20) {
+                std::printf("[screenpreview] tap gave up: 20 consecutive failed grabs for %s\n",
+                            tap.deviceId.c_str());
+                std::fflush(stdout);
                 break;   // nothing blits for ~2 s — the source is gone, stop
+            }
             Sleep(30);   // a failed grab retries a bit slower; success loops at ~15 fps
         } else {
             consecutiveFailures = 0;

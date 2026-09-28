@@ -161,6 +161,11 @@ int main(int argc, char *argv[])
 
     engine.loadFromModule("VGRPresenterUI", "Main");
 
+    // Env-gated taken-input self-test: takes a real window through the
+    // whole output-preview chain ~2.5s after launch and logs PASS/FAIL.
+    // Inert without VGR_OUTPUT_INPUT_TEST=1 (the static itself checks).
+    LiveOutputService::runEnvSelfTest();
+
     // TEMPORARY diagnostic (kept, env-gated): UI self-test driver. With
     // VGR_SELFTEST=1 the Main.qml scenario can drive the real app with REAL
     // cursor moves (genuine OS hover events) + synthetic clicks, and grab

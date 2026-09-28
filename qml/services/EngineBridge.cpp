@@ -744,6 +744,15 @@ void EngineBridge::stopAllInputMeters()
 // image://videopreview/<label>?<nonce> (~15 Hz timer); the provider drains
 // the PAL's newest JPEG per device id.
 // ============================================================================
+QImage EngineBridge::previewFrameFor(const QString &label)
+{
+    // Same translation the image provider does (label → engine id through
+    // previewIds_), then the SAME decode-once cache — the service-side frame
+    // detection reads exactly what the tiles' Image requests would read.
+    const QString devId = previewIds_.value(label.trimmed());
+    return devId.isEmpty() ? QImage{} : latestPreviewFrame(devId);
+}
+
 QImage EngineBridge::latestPreviewFrame(const QString &deviceId)
 {
     if (!bps::platform::PlatformAccessor::Installed())
@@ -929,10 +938,10 @@ void EngineBridge::stopVideoPreview(const QString &deviceLabel, const QString &o
 // monitor id ("\\\.\DISPLAY1"); the tap lives in the PAL's shared preview
 // table and frames flow back through the SAME videopreview provider —
 // monitor ids can never collide with camera symlinks.
-void EngineBridge::startScreenPreview(const QString &monitorLabel, const QString &owner)
+bool EngineBridge::startScreenPreview(const QString &monitorLabel, const QString &owner)
 {
     if (!bps::platform::PlatformAccessor::Installed())
-        return;
+        return false;
     const QString want = monitorLabel.trimmed();
     // DIAGNOSTIC (env-gated): the window-thumbnail chain has one suspect per
     // stage — resolution here, tap start below, provider label→id after.
@@ -948,26 +957,84 @@ void EngineBridge::startScreenPreview(const QString &monitorLabel, const QString
     QString id;
     for (const QVariant &v : screenDevices_) {
         const QVariantMap d = v.toMap();
-        if (d.value("label").toString() == want) {
+        // Trimmed + case-insensitive: roster labels are hand-stored strings,
+        // and a mismatch here silently downgrades a real window to the
+        // "no display named" toast below.
+        if (d.value("label").toString().trimmed().compare(want, Qt::CaseInsensitive) == 0) {
             id = d.value("id").toString();
             break;
         }
     }
+    // STALE LABEL SELF-HEAL (the sibling of the dead-id heal below): the
+    // boot-time roster may not hold the label AT ALL — a window opened or
+    // retitled after the last enumerateDevices (the output-preview take
+    // passes the row's stored sublabel straight here, possibly hours after
+    // boot). Resolve fresh before refusing: windows re-enumerate live,
+    // monitors are stable but cheap to re-ask.
     if (id.isEmpty()) {
-        qWarning("EngineBridge: no display named '%s' to preview", qUtf8Printable(want));
-        return;
+        auto &platform = bps::platform::PlatformAccessor::Get();
+        for (const auto &w : platform.Video().EnumerateWindows()) {
+            if (qstr(w.title).trimmed().compare(want, Qt::CaseInsensitive) == 0) {
+                id = qstr(w.id);
+                break;
+            }
+        }
+        if (id.isEmpty()) {
+            for (const auto &m : platform.Monitor().Enumerate()) {
+                const QString name = qstr(m.name);
+                if (name == want || (name.isEmpty() && qstr(m.id) == want)) {
+                    id = qstr(m.id);
+                    break;
+                }
+            }
+        }
+        if (id.isEmpty()) {
+            // DIAG: with VGR_PREVIEW_DIAG=1 a miss prints the titles live
+            // enumeration DID see — the difference is the diagnosis (title
+            // drift vs an OS filter hiding the window).
+            if (diag) {
+                QStringList live;
+                for (const auto &w : platform.Video().EnumerateWindows())
+                    live << qstr(w.title);
+                qInfo("EngineBridge[diag] label miss: live windows=%s",
+                      qUtf8Printable(live.join(" | ")));
+            }
+            qWarning("EngineBridge: no display named '%s' to preview", qUtf8Printable(want));
+            return false;
+        }
     }
     previewOwners_[want].insert(owner);
     if (previewIds_.contains(want)) {
         if (diag)
             qInfo("EngineBridge[diag] startScreenPreview: existing tap id='%s'",
                   qUtf8Printable(previewIds_.value(want)));
-        return;
+        return true;
     }
     auto startTap = [this](const QString &tapId) {
         return bps::platform::PlatformAccessor::Get().Video()
                    .StartScreenPreview(tapId.toStdString()).ok();
     };
+    // CACHED-DEAD-ID PRE-CHECK: a cached "win:<hwnd>" can be a DEAD window —
+    // the user closes the app and reopens it, enumeration re-runs under the
+    // SAME title with a NEW hwnd, but previewIds_ still serves the old id and
+    // the tap below would fail and unwind the whole take. Validate a cached
+    // window id by title right now: if the live window with this title has a
+    // different hwnd, retarget the tap to the fresh id before starting.
+    if (id.startsWith(QStringLiteral("win:"))) {
+        QString fresh = id;
+        for (const auto &w : bps::platform::PlatformAccessor::Get().Video().EnumerateWindows()) {
+            if (qstr(w.title).trimmed().compare(want, Qt::CaseInsensitive) == 0) {
+                fresh = qstr(w.id);
+                break;
+            }
+        }
+        if (fresh != id) {
+            if (diag)
+                qInfo("EngineBridge[diag] cached id '%s' stale -> live '%s'",
+                      qUtf8Printable(id), qUtf8Printable(fresh));
+            id = fresh;
+        }
+    }
     const bool ok = startTap(id);
     // STALE WINDOW IDS SELF-HEAL HERE: a "win:<hwnd>" id captured at
     // enumeration time dies with the window; the app re-opening re-enumerates
@@ -980,7 +1047,7 @@ void EngineBridge::startScreenPreview(const QString &monitorLabel, const QString
     QString usedId = id;
     if (!ok && id.startsWith(QStringLiteral("win:"))) {
         for (const auto &w : bps::platform::PlatformAccessor::Get().Video().EnumerateWindows()) {
-            if (qstr(w.title) == want) {
+            if (qstr(w.title).trimmed().compare(want, Qt::CaseInsensitive) == 0) {
                 usedId = qstr(w.id);
                 break;
             }
@@ -995,7 +1062,7 @@ void EngineBridge::startScreenPreview(const QString &monitorLabel, const QString
         previewIds_[want] = usedId;
         qInfo("EngineBridge: screen tap '%s' -> id '%s' started", qUtf8Printable(want),
               qUtf8Printable(usedId));
-        return;
+        return true;
     }
     // Start FAILED: release this owner's claim too — a claim with no tap means
     // no later startScreenPreview for this label can ever try again.
@@ -1009,6 +1076,7 @@ void EngineBridge::startScreenPreview(const QString &monitorLabel, const QString
     // The thumbnail may have been built BEFORE this label existed in the
     // roster (its provider request would have warned "no tap") — the nonce
     // bump happens on the QML side; nothing to do here.
+    return false;
 }
 
 void EngineBridge::stopScreenPreview(const QString &monitorLabel, const QString &owner)

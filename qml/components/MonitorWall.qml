@@ -30,6 +30,10 @@ Item {
     // static image request is skipped entirely while the frame hash is null).
     readonly property int frameRev: LiveOutputService.frameRev
     readonly property bool live: LiveOutputService.live
+    // A taken input engages the preview chrome too — the toolbar's clear
+    // actions are the wall-side way to release it (the Media pane's click
+    // is the take side).
+    readonly property bool inputTaken: LiveOutputService.inputLabel !== ""
 
     // External contract: hosts position content under the wall and drive
     // the page dots from these.
@@ -222,7 +226,7 @@ Item {
     // the real work.
     Rectangle {
         id: toolbar
-        visible: root.live
+        visible: root.live || root.inputTaken
         anchors.horizontalCenter: parent.horizontalCenter
         y: wall.y + wall.height + (wall.pageCount > 1 ? 22 : 8)
         width: 376
@@ -357,7 +361,17 @@ Item {
                     Text { text: qsTr("Clear all"); color: "#ff6b61"; font.family: "Segoe UI"; font.pixelSize: 12; font.weight: Font.Medium; anchors.verticalCenter: parent.verticalCenter }
                 }
                 HoverHandler { id: clearAllArea; cursorShape: Qt.PointingHandCursor }
-                TapHandler { onTapped: LiveOutputService.stop() }
+                TapHandler {
+                    onTapped: {
+                        // A taken input is one of the things "Clear all"
+                        // clears — releasing it here (without leaving the
+                        // wall for the Media pane) is the discoverable path.
+                        if (LiveOutputService.inputLabel !== "")
+                            LiveOutputService.clearInput()
+                        if (LiveOutputService.live)
+                            LiveOutputService.stop()
+                    }
+                }
             }
 
             // ClearButtons' per-layer group (image/slide/overlays/audio/timer)
@@ -380,7 +394,15 @@ Item {
                         required property var modelData
                         width: parent.width / 5; height: 30
                         icon: modelData.icon
-                        onPicked: LiveOutputService.stop()
+                        onPicked: {
+                            // Same contract as Clear all: the taken input is
+                            // a layer on the output preview — every clear
+                            // action releases it along with the air.
+                            if (LiveOutputService.inputLabel !== "")
+                                LiveOutputService.clearInput()
+                            if (LiveOutputService.live)
+                                LiveOutputService.stop()
+                        }
                     }
                 }
             }

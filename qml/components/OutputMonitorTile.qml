@@ -56,6 +56,27 @@ Rectangle {
                                             && onAirSlide.blocks
                                             && onAirSlide.blocks.length > 0
 
+    // ---- Taken input layer (the Media pane's click-to-preview) ----------
+    // The service owns the PAL tap; this tile composites the feed as one
+    // more IMAGE layer (the same way the style's PNG/JPG background rides
+    // above the base colour), UNDER the on-air content — camera-behind-lyrics.
+    readonly property bool inputTaken: LiveOutputService.inputLabel !== ""
+    // Pointed at the provider THE WHOLE TIME the input is taken — NOT only
+    // once frames are live: inputLive flips on the Image's own Ready status,
+    // so gating the source on it deadlocked the warm-up (empty URL → no
+    // request → no decode → no confirmation → the ring spun forever). The
+    // provider answers a not-yet-flowing tap with a 1×1 transparent frame,
+    // which reads as "not Ready enough" (sourceSize 1) and keeps the
+    // placeholder up until real pixels arrive.
+    readonly property url inputSource: inputTaken
+        ? "image://videopreview/" + encodeURIComponent(LiveOutputService.inputLabel)
+          + "?n=" + LiveOutputService.inputRev : ""
+
+    // First-frame detection lives in the SERVICE (its pump polls the
+    // provider's decode cache) — the previous tile-side confirm round-trip
+    // (Image status → confirmInputFrame() → inputRev bump → THIS URL) was a
+    // binding loop; QML only reads here now.
+
     // This output's own style background ({ color, image, hasImage }) —
     // "for THAT output": the tile the output wears paints ITS style's look,
     // not the active output's. Delivered as the StyleBackground ROLE (per
@@ -157,6 +178,42 @@ Rectangle {
             fillMode: Image.PreserveAspectCrop
         }
 
+        // The TAKEN INPUT's live frames — the camera/screen feed as one more
+        // image layer, under the on-air content (camera-behind-lyrics), above
+        // the style background. Fill the pane: feeds are 16:9-shaped like the
+        // pane itself. Placeholder glyphs from the shared pane's art keep the
+        // warm-up seconds honest.
+        Image {
+            id: inputImage
+            anchors.fill: parent
+            visible: root.inputTaken
+            source: root.inputSource
+            fillMode: Image.PreserveAspectCrop
+            cache: false   // every rev IS a new frame
+            asynchronous: false
+        }
+
+        // Warm-up placeholder while an input is taken but no frame has
+        // decoded yet (the shared pane's camera ring art, inline).
+        Item {
+            anchors.centerIn: parent
+            visible: root.inputTaken && !LiveOutputService.inputLive
+            width: 48; height: 48
+
+            Rectangle {
+                anchors.centerIn: parent
+                width: 34; height: 34; radius: 17
+                color: "transparent"
+                border.width: 2.4
+                border.color: "#6c5ce7"
+            }
+            Rectangle {
+                anchors.centerIn: parent
+                width: 10; height: 10; radius: 5
+                color: "#6c5ce7"
+            }
+        }
+
         // Rendered on-air slide: the engine's own blocks through the shared
         // renderer, with its own checkerboard OFF — a clear background here
         // means "the style's colour/image underneath shows through", and the
@@ -192,11 +249,14 @@ Rectangle {
         }
 
         // Transparency checkerboard — ONLY for an unstyled output with
-        // nothing on air. A styled output shows its colour/image instead
-        // ("black bg + image" looked unstyled before this).
+        // nothing on air AND no taken input (the input layer IS content:
+        // over an unstyled output the checker painted ON TOP of the feed
+        // and the picture read broken/dimmed). A styled output shows its
+        // colour/image instead ("black bg + image" looked unstyled before).
         Checkerboard {
             anchors.fill: parent
             visible: !root.hasFrame && !root.hasSlidePreview && !root.styled
+                     && !root.inputTaken
             tileSize: 9
             shadeA: "#3a3c48"
             shadeB: "#25262f"
@@ -221,6 +281,30 @@ Rectangle {
             font.pixelSize: 13
             font.weight: Font.Medium
             text: root.name
+        }
+
+        // Taken-input marker: purple dot + label, so the layer's presence
+        // reads even when the feed is hidden behind on-air content.
+        Row {
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 4
+            visible: root.inputTaken
+
+            Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                width: 6; height: 6; radius: 3
+                color: "#6c5ce7"
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Math.min(implicitWidth, 110)
+                elide: Text.ElideRight
+                color: "#9aa0b5"
+                font.family: "Segoe UI"
+                font.pixelSize: 10
+                text: LiveOutputService.inputLabel
+            }
         }
     }
 }

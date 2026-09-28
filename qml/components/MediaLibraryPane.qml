@@ -404,30 +404,69 @@ Item {
                     Repeater {
                         model: root.inputRows[root.inputTab]
                         delegate: Rectangle {
+                            id: card
                             required property int modelData
                             readonly property int index: modelData
                             readonly property string kind: root.inputTabs[root.inputTab].kind
+                            // VIDEO cards are a STATE WINDOW + the name below:
+                            // the rectangle shows the feed when the source is
+                            // receiving frames, "No signal" when it is not
+                            // (device disconnected / window gone), and an idle
+                            // glyph when the source is not taken. Audio/bus
+                            // keep the compact 44px rows.
+                            readonly property bool bigCard: kind === "video"
+                            readonly property string sub: {
+                                void root.modelsRev
+                                if (kind !== "video")
+                                    return ""
+                                const v = VideoSourceListModel.getSource(index)
+                                return v.sublabel !== undefined ? v.sublabel : ""
+                            }
+                            // The TAKEN source's card wears the accent —
+                            // "which one is on the output preview" reads
+                            // from the pane too.
+                            readonly property bool taken: sub !== ""
+                                                          && LiveOutputService.inputLabel === sub
                             width: (inputCards.width - 16) / 3
-                            height: 44
+                            height: bigCard ? 8 + (width - 16) * 9 / 16 + 6 + 32 + 8 : 44
                             radius: 6
                             color: cardHover.hovered ? "#1e1f28" : "#16171e"
+                            border.width: taken ? 2 : 1
+                            border.color: taken ? "#6c5ce7" : "transparent"
 
-                            // Kind chip - small colored square with the roster's icon.
+                            PositionHoverArea {
+                                id: cardHover
+                                anchors.fill: parent
+                                // DOUBLE-CLICK = OUTPUT PREVIEW (the deliberate
+                                // take): a stray single click can never grab or
+                                // drop a feed. Video cards toggle their feed
+                                // into the monitor wall's input layer on the
+                                // second click of a double-click; audio/bus
+                                // cards have no video feed — inert, as before.
+                                onDoubleClicked: {
+                                    if (kind === "video")
+                                        root.toggleVideoSourcePreview(index)
+                                }
+                            }
+
+                            // ---- COMPACT row (audio / bus) ----------------
                             Rectangle {
+                                visible: !bigCard
                                 x: 8; y: 10
                                 width: 24; height: 24
                                 radius: 5
-                                color: kind === "video" ? "#20304a" : (kind === "audio" ? "#173326" : "#3a1e18")
+                                color: kind === "audio" ? "#173326" : "#3a1e18"
                                 IconGlyph {
                                     anchors.centerIn: parent
                                     name: root.inputTabs[root.inputTab].icon
-                                    color: kind === "video" ? "#7fb3ff" : (kind === "audio" ? "#6fe0a0" : "#ff8d7f")
+                                    color: kind === "audio" ? "#6fe0a0" : "#ff8d7f"
                                     fit: true
                                     strokeWidth: 2
                                     width: 14; height: 14
                                 }
                             }
                             Column {
+                                visible: !bigCard
                                 x: 40; y: 6
                                 width: parent.width - 52
                                 spacing: 1
@@ -446,19 +485,100 @@ Item {
                                     font.family: Theme.fontFamily; font.pixelSize: 12
                                 }
                             }
-                            PositionHoverArea {
-                                id: cardHover
-                                anchors.fill: parent
-                                showCursor: false
-                                // CLICK = PREVIEW: a video source's card
-                                // sends the source to the output preview
-                                // (the monitor wall), the same take-live
-                                // path the video board's rows use. Audio/bus
-                                // cards have no video feed — inert, as before.
-                                onClicked: {
-                                    if (kind === "video")
-                                        root.takeVideoSourceLive(index)
+
+                            // ---- STATE WINDOW (video) ---------------------
+                            // The rectangle IS the signal state: feed while
+                            // frames flow, "No signal" while the taken source
+                            // delivers nothing (disconnected device, closed
+                            // window), idle glyph while not taken.
+                            Rectangle {
+                                id: stateWin
+                                visible: bigCard
+                                x: 8; y: 8
+                                width: parent.width - 16
+                                height: width * 9 / 16
+                                radius: 4
+                                clip: true
+                                color: "#0d0f14"
+                                border.width: 1
+                                border.color: card.taken ? "#3d3f6e" : "#232530"
+
+                                // RECEIVING: the live feed (the same provider
+                                // frames the monitor tile shows — the tap runs
+                                // under the service's take; the pump's rev
+                                // re-fetches at ~15 fps).
+                                Image {
+                                    anchors.fill: parent
+                                    visible: card.taken && LiveOutputService.inputLive
+                                    source: visible
+                                        ? "image://videopreview/" + encodeURIComponent(card.sub)
+                                          + "?n=" + LiveOutputService.inputRev : ""
+                                    fillMode: Image.PreserveAspectCrop
+                                    cache: false
+                                    asynchronous: false
                                 }
+                                // NOT RECEIVING: taken but no frames — the
+                                // honest "this device is not connected / not
+                                // delivering" state (also covers tap warm-up).
+                                Column {
+                                    anchors.centerIn: parent
+                                    visible: card.taken && !LiveOutputService.inputLive
+                                    spacing: 6
+                                    IconGlyph {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        name: root.inputTabs[root.inputTab].icon
+                                        color: "#5a5f72"
+                                        fit: true; strokeWidth: 2
+                                        width: 20; height: 20
+                                    }
+                                    Text {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        text: qsTr("No signal — device not receiving")
+                                        color: "#8a90a5"
+                                        font.family: Theme.fontFamily; font.pixelSize: 10
+                                    }
+                                }
+                                // IDLE: not taken — dim glyph; hover spells the
+                                // gesture (the double-click take).
+                                Column {
+                                    anchors.centerIn: parent
+                                    visible: !card.taken
+                                    spacing: 6
+                                    IconGlyph {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        name: root.inputTabs[root.inputTab].icon
+                                        color: "#4a5068"
+                                        fit: true; strokeWidth: 2
+                                        width: 20; height: 20
+                                    }
+                                    Text {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        text: cardHover.hovered
+                                              ? qsTr("double-click to preview on output")
+                                              : qsTr("idle")
+                                        color: cardHover.hovered ? "#a9b6d8" : "#565c72"
+                                        font.family: Theme.fontFamily; font.pixelSize: 10
+                                    }
+                                }
+                            }
+                            // NAME below the window, sublabel under it.
+                            Text {
+                                visible: bigCard
+                                x: 8; y: 8 + stateWin.height + 6
+                                width: parent.width - 16
+                                text: root.cardName(index, kind)
+                                color: Theme.textPrimary
+                                elide: Text.ElideRight
+                                font.family: Theme.fontFamily; font.pixelSize: 13; font.bold: true
+                            }
+                            Text {
+                                visible: bigCard
+                                x: 8; y: 8 + stateWin.height + 6 + 17 + 2
+                                width: parent.width - 16
+                                text: root.cardSub(index, kind)
+                                color: Theme.textMuted
+                                elide: Text.ElideRight
+                                font.family: Theme.fontFamily; font.pixelSize: 11
                             }
                         }
                     }
@@ -485,6 +605,29 @@ Item {
                 anchors.right: parent.right; anchors.rightMargin: 2
             }
         }
+    }
+
+    // ---- Output-preview input take (the video cards' click) --------------
+    // The service owns the PAL tap and the tile layer; this is the pane's
+    // thin toggle: taken-again clears, unsupported kinds toast honestly.
+    // (The double-click guard lives in the SERVICE — a double-click fires
+    // TWO clicked signals, and the too-fast second toggle is ignored there,
+    // so the take STAYS instead of flashing.)
+    function toggleVideoSourcePreview(i) {
+        const v = VideoSourceListModel.getSource(i)
+        const label = v.sublabel !== undefined ? v.sublabel : ""
+        if (label === "")
+            return
+        if (LiveOutputService.inputLabel === label) {
+            LiveOutputService.clearInput()
+            return
+        }
+        if (v.kind !== "camera" && v.kind !== "screen") {
+            EventBus.notify(qsTr("%1 feeds can't show in the output preview yet — camera and screen sources only.")
+                                .arg(v.kind), "info", qsTr("Output preview"), "media.preview.input")
+            return
+        }
+        LiveOutputService.takeInput(label, v.kind, v.mode !== undefined ? v.mode : "")
     }
 
     // Card label helpers - one lookup per roster so the delegates stay dumb.

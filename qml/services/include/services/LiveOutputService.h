@@ -48,6 +48,21 @@ class LiveOutputService : public QObject {
     // draw the on-air content with DesignPreview — the same renderer as the
     // ReferencePane preview — instead of re-guessing content from a title.
     Q_PROPERTY(QVariantMap onAirSlide READ onAirSlide NOTIFY onAirChanged)
+    // ---- Taken video input (the Media pane's click-to-preview) ----------
+    // A video source taken into the OUTPUT PREVIEW: the compositor layer
+    // under the on-air content on every monitor tile, exactly like the
+    // style's PNG/JPG background — QML Image layers all the way down. The
+    // service owns the PAL tap (owner "output") for camera/screen kinds
+    // and exposes the provider URL + a revision for the tiles' pump.
+    Q_PROPERTY(QString inputLabel READ inputLabel NOTIFY inputChanged)
+    Q_PROPERTY(QString inputKind READ inputKind NOTIFY inputChanged)
+    // Bumped ~15×/s while an input is taken and its tap produces frames —
+    // the tiles' Image.source cache-buster (the videopreview provider
+    // returns the PAL's newest JPEG per request).
+    Q_PROPERTY(qulonglong inputRev READ inputRev NOTIFY inputChanged)
+    // True while a taken input's tap is producing (warm-up honest: false
+    // until the provider's first frame decodes).
+    Q_PROPERTY(bool inputLive READ inputLive NOTIFY inputChanged)
 
 public:
     static LiveOutputService *create(QQmlEngine *engine, QJSEngine *jsEngine);
@@ -60,6 +75,28 @@ public:
     int onAirIndex() const { return onAirIndex_; }
     int onAirTotal() const { return onAirTotal_; }
     QVariantMap onAirSlide() const { return onAirSlide_; }
+
+    QString inputLabel() const { return inputLabel_; }
+    QString inputKind() const { return inputKind_; }
+    qulonglong inputRev() const { return inputRev_; }
+    bool inputLive() const { return inputLive_; }
+
+    // Take a video source's feed into the output preview (the Media pane's
+    // click). kind: "camera" | "screen" | "media" | "ndi"; only camera and
+    // screen have a real local tap today — the others report honestly and
+    // stay untaken. Taking a source releases the previous one (one input
+    // layer on the compositor); clearInput() releases the device.
+    Q_INVOKABLE void takeInput(const QString &label, const QString &kind, const QString &mode);
+    Q_INVOKABLE void clearInput();
+    // Kept for source compatibility; no longer used by the tiles (the
+    // service detects frames itself — see inputLive). Harmless no-op for a
+    // non-taken or already-live input.
+    Q_INVOKABLE void confirmInputFrame(const QString &label);
+
+    // Env-gated boot self-test (VGR_OUTPUT_INPUT_TEST=1): takes the first
+    // real window input ~2.5s after launch and logs PASS (frames decoded) /
+    // FAIL to the launch log ~4s later. Inert without the env var.
+    static void runEnvSelfTest();
 
     Q_INVOKABLE void goLive();
     // ANY-CONTENT go-live (scripture verses, a sermon, media items): the
@@ -94,6 +131,7 @@ signals:
     void liveChanged();
     void frameRevChanged();
     void onAirChanged();
+    void inputChanged();
     // stepPassage() reached the edge of the on-air set: the tab whose content
     // IS on air should re-pick the neighbouring passage (direction -1/+1).
     void passageStepRequested(int direction);
@@ -119,6 +157,13 @@ private:
     QVariantMap onAirSlide_;
     QTimer *poll_ = nullptr;   // while live: onAir/frames refresh at 10Hz
     std::unique_ptr<LivePreviewProvider> provider_;
+
+    // ---- taken-input state ----
+    QString inputLabel_;
+    QString inputKind_;
+    qulonglong inputRev_ = 0;
+    bool inputLive_ = false;
+    QTimer *inputPump_ = nullptr;   // while taken: inputRev bump at ~15Hz
 };
 
 // QQuickImageProvider over the engine preview output's last frame:
