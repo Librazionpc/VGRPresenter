@@ -72,14 +72,12 @@ Item {
             Rectangle {
                 id: track
                 anchors.fill: parent
-                radius: height / 2
                 color: Theme.chip
             }
 
             // Ghost — the full range, always faintly visible, so the scale reads at rest.
             Rectangle {
                 anchors.fill: parent
-                radius: height / 2
                 opacity: 0.12
                 color: root.fixedColor ? root.fillColor : "transparent"
                 gradient: root.fixedColor ? null : root.barGradient
@@ -99,7 +97,6 @@ Item {
                 Rectangle {
                     width: bar.width
                     height: parent.height
-                    radius: height / 2
                     color: root.fixedColor ? root.fillColor : "transparent"
                     gradient: root.fixedColor ? null : root.barGradient
                 }

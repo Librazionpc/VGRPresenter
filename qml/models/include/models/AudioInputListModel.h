@@ -50,9 +50,6 @@ struct AudioInputItem
     // user raises it — a new source must never appear "live" on its own.
     qreal level = 0;
     bool muted = false;
-    // Path mode — the Add/Edit dialog's Off / On / Auto Off / Auto On
-    // segmented control (0..3). Off until manually enabled by default.
-    int mode = 0;
     // Hardware latency compensation in milliseconds (the dialog's Delay
     // stepper). 0..1000, step 10 in the UI.
     int delayMs = 0;
@@ -111,7 +108,6 @@ public:
         SublabelRole,
         LevelRole,
         MutedRole,
-        ModeRole,
         DelayMsRole,
         ChannelsRole,
         ChannelGainsRole,
@@ -142,11 +138,15 @@ public:
     Q_INVOKABLE void renameInput(int index, const QString &name);
     Q_INVOKABLE void setKind(int index, const QString &kind);
     Q_INVOKABLE void setSublabel(int index, const QString &sublabel);
+    // Native audio-file picker (mp3/wav/flac/...) for a Media-kind row's
+    // "Media File" source option; "" when cancelled. Lives here (not QML)
+    // so the engine's dialog service is used, same as every other file
+    // picker in the app (see StyleListModel::pickImageFile).
+    Q_INVOKABLE QString pickAudioFile() const;
     Q_INVOKABLE void setLevel(int index, qreal level);
     Q_INVOKABLE void setMuted(int index, bool muted);
-    // Path mode (clamped 0..3), latency compensation (clamped 0..1000 ms)
-    // and channel count (clamped 1..8) — the pro-audio form's rows.
-    Q_INVOKABLE void setMode(int index, int mode);
+    // Latency compensation (clamped 0..1000 ms) and channel count (clamped
+    // 1..8) — the pro-audio form's rows.
     Q_INVOKABLE void setDelayMs(int index, int delayMs);
     Q_INVOKABLE void setChannels(int index, int channels);
     // Per-channel gain fader (0..1, clamped) — the channel row's knob.

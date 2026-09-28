@@ -110,6 +110,23 @@ Item {
         }
         return null
     }
+    // Same green→amber→red language the meters use elsewhere this session,
+    // sampled as a single COLOR at a given level (0..1) rather than a
+    // gradient fill — the L/R channel buttons glow with this instead of
+    // showing a partial-height bar.
+    function levelGlowColor(level, alpha) {
+        const t = Math.max(0, Math.min(1, level))
+        const stops = [
+            { r: 0.29, g: 0.88, b: 0.63 },   // #4ade80-ish green (quiet)
+            { r: 1.00, g: 0.82, b: 0.40 },   // amber (mid)
+            { r: 1.00, g: 0.42, b: 0.38 }    // red (hot)
+        ]
+        const seg = t < 0.5 ? 0 : 1
+        const k = t < 0.5 ? t / 0.5 : (t - 0.5) / 0.5
+        const a = stops[seg], b = stops[seg + 1]
+        return Qt.rgba(a.r + (b.r - a.r) * k, a.g + (b.g - a.g) * k,
+                       a.b + (b.b - a.b) * k, alpha === undefined ? 1 : alpha)
+    }
     function toggleAudioMeter(label) {
         const want = label === undefined ? "" : String(label).trim()
         const i = root.meteredLabels.indexOf(want)
@@ -508,6 +525,51 @@ Item {
                                 const b = BusListModel.getBus(index)
                                 return b.muted === true
                             }
+                            // Which state-window style this bus gets — the
+                            // audio input card's design for an audio (or
+                            // "both") bus, a video-flavored one for a video
+                            // bus (see the BUS STATE block below).
+                            readonly property string busType: {
+                                void root.modelsRev
+                                if (!busCard) return ""
+                                const b = BusListModel.getBus(index)
+                                return b.type !== undefined ? b.type : "audio"
+                            }
+                            // Live mix level (0..1, post-fader) — the SAME
+                            // "loudest routed source wins" computation the
+                            // routing board's own bus strip uses: real WASAPI
+                            // peaks off every routed audio input, not a fake
+                            // wiggle. A bus has no independent stereo capture
+                            // of its own, so both L/R buttons below read this
+                            // one mix value.
+                            readonly property real busAudioLevel: {
+                                void root.meterList
+                                void root.modelsRev
+                                if (!busCard || busType === "video") return 0
+                                const b = BusListModel.getBus(index)
+                                let mix = 0
+                                for (const r of b.routedAudioInputs) {
+                                    const data = AudioInputListModel.getInput(r)
+                                    if (!data || data.muted) continue
+                                    // Gain-aware, per-channel-mute-aware — the
+                                    // loudest of the source's channels, each
+                                    // scaled by that channel's own gain (0 when
+                                    // its L/R button muted it), not a bare
+                                    // peaks[0] (which never saw a right-channel
+                                    // mute at all).
+                                    const s = root.meterSnapshot(data.sublabel)
+                                    let raw = 0
+                                    if (s && s.peaks !== undefined) {
+                                        for (let c = 0; c < s.peaks.length; c++) {
+                                            const gain = AudioInputListModel.channelGain(r, c)
+                                            const lvl = Math.max(0, Math.min(1, s.peaks[c])) * gain
+                                            if (lvl > raw) raw = lvl
+                                        }
+                                    }
+                                    if (raw > mix) mix = raw
+                                }
+                                return card.busMuted ? 0 : mix * (b.level / 100)
+                            }
                             // REACHABILITY: a closed window / unplugged device
                             // flips this false (slash over the centre icon).
                             // Probed only while holding (the pump re-evaluates)
@@ -646,27 +708,21 @@ Item {
                                     asynchronous: false
                                 }
                                 // RECEIVING (audio): the L / R BUTTONS — one
-                                // capsule per channel that GLOWS with its own
-                                // live level and doubles as a channel-isolate
-                                // toggle (click L or R to highlight just that
-                                // channel; click again to clear). Replaces the
-                                // old pill-bar + separate text-label-below pair,
-                                // which drifted out of alignment under the bars
-                                // and didn't read as interactive — the letter now
-                                // lives INSIDE the capsule so it can't drift, and
-                                // the pair is centered as one unit.
+                                // round button per channel, centered as a pair,
+                                // that GLOWS with its own live level (a single
+                                // color sampled off the green→amber→red scale,
+                                // not a partial-height fill bar) and MUTES that
+                                // channel on click — a real mute, written
+                                // through the same setChannelGain the Edit
+                                // dialog's gain knob uses (gain 0 = muted).
                                 Row {
                                     id: pillsRow
                                     anchors.centerIn: parent
                                     visible: audioCard && card.metering && card.healthy
-                                    spacing: 18
-                                    // Local UI state — which channel (if any) is
-                                    // highlighted; -1 = none. Resets naturally
-                                    // when the card is recreated (model reset).
-                                    property int soloChannel: -1
+                                    spacing: 20
 
                                     Repeater {
-                                        // The classic L/R pair: one capsule per
+                                        // The classic L/R pair: one button per
                                         // side, from the snapshot's real channel
                                         // count (mono collapses to just L).
                                         model: {
@@ -676,15 +732,21 @@ Item {
                                             return Math.min(2, n)
                                         }
 
-                                        Item {
+                                        Rectangle {
                                             id: pill
                                             required property int modelData
                                             readonly property string chLabel: pill.modelData === 0 ? "L" : "R"
-                                            readonly property bool soloed: pillsRow.soloChannel === pill.modelData
-                                            width: 24
-                                            height: stateWin.height - 30
+                                            // Reactive through modelsRev — channelGain()
+                                            // itself is an untracked Q_INVOKABLE read.
+                                            readonly property bool muted: {
+                                                void root.modelsRev
+                                                return AudioInputListModel.channelGain(card.index, pill.modelData) <= 0.0005
+                                            }
+                                            width: 38; height: 38
+                                            radius: 19
                                             readonly property real level: {
                                                 void root.meterList
+                                                if (pill.muted) return 0
                                                 const s = root.meterSnapshot(card.sub)
                                                 if (!s || s.peaks === undefined
                                                     || s.peaks.length <= modelData)
@@ -699,90 +761,58 @@ Item {
                                                 return Math.sqrt(raw)
                                             }
                                             readonly property bool active: pill.level > 0.1
+                                            readonly property color glowColor: root.levelGlowColor(pill.level)
+
+                                            color: pill.muted ? "#241a1c" : "#171922"
+                                            border.width: pill.active ? 2 : 1
+                                            border.color: pill.muted ? "#7a3a38"
+                                                        : pill.active ? pill.glowColor : "#33364a"
+                                            Behavior on border.color { ColorAnimation { duration: 120 } }
+                                            Behavior on color { ColorAnimation { duration: 120 } }
 
                                             // Soft glow halo — the "premium" touch: a
-                                            // wider, dim corona that brightens with
-                                            // level, behind the capsule itself.
+                                            // wider, dim corona in the SAME sampled
+                                            // color, brightening with level.
                                             Rectangle {
                                                 anchors.centerIn: parent
-                                                width: parent.width + 12
-                                                height: parent.height + 12
+                                                width: parent.width + 14
+                                                height: parent.height + 14
                                                 radius: width / 2
                                                 color: "transparent"
-                                                border.width: 5
-                                                border.color: "#6fe0a0"
-                                                opacity: pill.level * 0.30
+                                                border.width: 6
+                                                border.color: pill.glowColor
+                                                opacity: pill.muted ? 0 : pill.level * 0.4
+                                                Behavior on opacity { NumberAnimation { duration: 100 } }
                                             }
 
-                                            // The capsule track — visible against
-                                            // the dark window; brightens at the rim
-                                            // when soloed.
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: pill.chLabel
+                                                color: pill.muted ? "#a05a56" : (pill.active ? pill.glowColor : "#8a90a5")
+                                                font.family: Theme.fontFamily
+                                                font.pixelSize: 12; font.bold: true
+                                                Behavior on color { ColorAnimation { duration: 120 } }
+                                            }
+                                            // Mute slash — only when actually muted,
+                                            // so an idle-but-live channel doesn't
+                                            // read as off.
                                             Rectangle {
-                                                anchors.fill: parent
-                                                radius: 12
-                                                color: "#171922"
-                                                border.width: pill.soloed ? 2 : 1
-                                                border.color: pill.soloed ? "#6fe0a0"
-                                                            : pill.active ? "#454964" : "#2c2e3c"
-                                                Behavior on border.color { ColorAnimation { duration: 120 } }
+                                                visible: pill.muted
+                                                anchors.centerIn: parent
+                                                width: 26; height: 2
+                                                rotation: 45
+                                                radius: 1
+                                                color: "#ff6b61"
                                             }
-                                            // The FILL: bottom-anchored window,
-                                            // height = level, over a full-height
-                                            // gradient — hot signals reach the
-                                            // capsule's red top, quiet ones stay
-                                            // green at the bottom.
-                                            Item {
-                                                anchors.bottom: parent.bottom
-                                                anchors.horizontalCenter: parent.horizontalCenter
-                                                width: parent.width - 4
-                                                height: Math.max(9, (parent.height - 4) * parent.level)
-                                                clip: true
-                                                Behavior on height { NumberAnimation { duration: 60 } }
-                                                Rectangle {
-                                                    anchors.bottom: parent.bottom
-                                                    width: parent.width
-                                                    height: pill.height - 4
-                                                    radius: 10
-                                                    gradient: Gradient {
-                                                        orientation: Gradient.Vertical
-                                                        GradientStop { position: 0.0; color: "#ff6b61" }
-                                                        GradientStop { position: 0.28; color: "#ff6b61" }
-                                                        GradientStop { position: 0.45; color: "#ffd166" }
-                                                        GradientStop { position: 0.72; color: "#6fe0a0" }
-                                                        GradientStop { position: 1.0; color: "#4ec98a" }
-                                                    }
-                                                }
-                                            }
-                                            // The channel letter — fused to the
-                                            // capsule's foot on a small dark chip so
-                                            // it reads clearly whether the fill is
-                                            // under it or not; can't drift out of
-                                            // alignment since it's part of the button.
-                                            Rectangle {
-                                                anchors.bottom: parent.bottom
-                                                anchors.bottomMargin: 3
-                                                anchors.horizontalCenter: parent.horizontalCenter
-                                                width: chLabelText.implicitWidth + 8
-                                                height: 13
-                                                radius: 6
-                                                color: Qt.rgba(0.04, 0.05, 0.08, 0.55)
-                                                Text {
-                                                    id: chLabelText
-                                                    anchors.centerIn: parent
-                                                    text: pill.chLabel
-                                                    color: pill.soloed ? "#6fe0a0" : "#e9ebf5"
-                                                    font.family: Theme.fontFamily
-                                                    font.pixelSize: 9; font.bold: true
-                                                }
-                                            }
+
                                             Behavior on scale { NumberAnimation { duration: 80 } }
-                                            scale: 1 + pill.level * 0.04
+                                            scale: 1 + pill.level * 0.05
 
                                             MouseArea {
                                                 anchors.fill: parent
                                                 cursorShape: Qt.PointingHandCursor
-                                                onClicked: pillsRow.soloChannel =
-                                                    (pill.soloed ? -1 : pill.modelData)
+                                                onClicked: AudioInputListModel.setChannelGain(
+                                                    card.index, pill.modelData, pill.muted ? 1.0 : 0.0)
                                             }
                                         }
                                     }
@@ -890,33 +920,109 @@ Item {
                                         font.family: Theme.fontFamily; font.pixelSize: 10
                                     }
                                 }
-                                // BUS STATE: a bus's live truth is its gain —
-                                // the window shows the level as a bar (0..100 →
-                                // the engine's -60..0 dB) with OPEN/MUTED.
+                                // BUS STATE (audio / both): the SAME L/R glow-
+                                // button design the audio Inputs cards use —
+                                // both buttons read the bus's own live mix
+                                // (busAudioLevel: loudest routed source, post-
+                                // fader), and clicking either mutes the WHOLE
+                                // bus (a bus has no independent per-channel
+                                // capture of its own to isolate).
+                                Row {
+                                    anchors.centerIn: parent
+                                    visible: busCard && card.busType !== "video"
+                                    spacing: 20
+
+                                    Repeater {
+                                        model: 2
+
+                                        Rectangle {
+                                            id: busPill
+                                            required property int modelData
+                                            readonly property string chLabel: busPill.modelData === 0 ? "L" : "R"
+                                            readonly property real level: {
+                                                const raw = Math.max(0, Math.min(1, card.busAudioLevel))
+                                                return Math.sqrt(raw)   // same perceptual lift as the input cards
+                                            }
+                                            readonly property bool active: busPill.level > 0.1
+                                            readonly property color glowColor: root.levelGlowColor(busPill.level)
+
+                                            width: 38; height: 38
+                                            radius: 19
+                                            color: card.busMuted ? "#241a1c" : "#171922"
+                                            border.width: busPill.active ? 2 : 1
+                                            border.color: card.busMuted ? "#7a3a38"
+                                                        : busPill.active ? busPill.glowColor : "#33364a"
+                                            Behavior on border.color { ColorAnimation { duration: 120 } }
+                                            Behavior on color { ColorAnimation { duration: 120 } }
+
+                                            Rectangle {
+                                                anchors.centerIn: parent
+                                                width: parent.width + 14
+                                                height: parent.height + 14
+                                                radius: width / 2
+                                                color: "transparent"
+                                                border.width: 6
+                                                border.color: busPill.glowColor
+                                                opacity: card.busMuted ? 0 : busPill.level * 0.4
+                                                Behavior on opacity { NumberAnimation { duration: 100 } }
+                                            }
+
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: busPill.chLabel
+                                                color: card.busMuted ? "#a05a56" : (busPill.active ? busPill.glowColor : "#8a90a5")
+                                                font.family: Theme.fontFamily
+                                                font.pixelSize: 12; font.bold: true
+                                                Behavior on color { ColorAnimation { duration: 120 } }
+                                            }
+                                            Rectangle {
+                                                visible: card.busMuted
+                                                anchors.centerIn: parent
+                                                width: 26; height: 2
+                                                rotation: 45
+                                                radius: 1
+                                                color: "#ff6b61"
+                                            }
+
+                                            Behavior on scale { NumberAnimation { duration: 80 } }
+                                            scale: 1 + busPill.level * 0.05
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: BusListModel.setMuted(index, !card.busMuted)
+                                            }
+                                        }
+                                    }
+                                }
+                                // BUS STATE (video): no compositor tap exists to
+                                // preview a bus's own mixed feed, so this stays a
+                                // simple, video-flavored open/muted readout —
+                                // video's own accent, a routed-source count, not
+                                // a fabricated live thumbnail.
                                 Column {
                                     anchors.centerIn: parent
-                                    visible: busCard
-                                    width: parent.width - 48
+                                    visible: busCard && card.busType === "video"
                                     spacing: 8
-                                    Item {
-                                        width: parent.width
-                                        height: 10
-                                        Rectangle {
-                                            anchors.fill: parent
-                                            radius: 5
-                                            color: "#1c1e29"
+
+                                    IconGlyph {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        name: "camera"
+                                        color: card.busMuted ? "#5a5f72" : "#8f7ff0"
+                                        fit: true; strokeWidth: 2
+                                        width: 22; height: 22
+                                    }
+                                    Text {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        text: {
+                                            void root.modelsRev
+                                            const b = BusListModel.getBus(index)
+                                            const n = b.routedVideoSources !== undefined ? b.routedVideoSources.length : 0
+                                            return n === 1 ? qsTr("1 video source routed")
+                                                           : qsTr("%1 video sources routed").arg(n)
                                         }
-                                        Rectangle {
-                                            width: {
-                                                void root.modelsRev
-                                                const b = BusListModel.getBus(index)
-                                                const lv = b.level !== undefined ? Number(b.level) : 0
-                                                return Math.max(0, Math.min(100, lv)) / 100 * parent.width
-                                            }
-                                            height: parent.height
-                                            radius: 5
-                                            color: card.busMuted ? "#5a5f72" : "#6fe0a0"
-                                        }
+                                        color: "#8a90a5"
+                                        font.family: Theme.fontFamily; font.pixelSize: 10
                                     }
                                     Text {
                                         anchors.horizontalCenter: parent.horizontalCenter
@@ -925,6 +1031,109 @@ Item {
                                               : qsTr("OPEN — click to mute")
                                         color: card.busMuted ? "#ff8d7f" : "#9aa0b5"
                                         font.family: Theme.fontFamily; font.pixelSize: 10; font.bold: card.busMuted
+                                    }
+                                }
+
+                                // VIDEO AUDIO — a small L/R pair overlaid on the
+                                // state window, always visible regardless of
+                                // preview state. Camera/screen sources have NO
+                                // audio capability in this engine (see
+                                // VideoSourceListModel's own documented
+                                // contract) — those stay greyed out and non-
+                                // interactive, a visible "this source type
+                                // doesn't carry audio" signal rather than
+                                // hidden entirely. Media/NDI rows DO carry
+                                // audio (NDI embeds it with its video); those
+                                // glow from the row's stored level/muted —
+                                // there is no live audio TAP for video-tab
+                                // rows yet (unlike the real per-device WASAPI
+                                // metering audio inputs get), so this reads
+                                // the stored fader, not a live signal, same
+                                // "no fake signal" rule as everywhere else.
+                                Row {
+                                    id: vidAudioRow
+                                    visible: videoCard
+                                    anchors.right: parent.right
+                                    anchors.bottom: parent.bottom
+                                    anchors.margins: 6
+                                    spacing: 6
+
+                                    readonly property bool audioCapable: rowKind === "media" || rowKind === "ndi"
+                                    readonly property real storedLevel: {
+                                        void root.modelsRev
+                                        if (!vidAudioRow.audioCapable) return 0
+                                        const v = VideoSourceListModel.getSource(index)
+                                        return v.level !== undefined
+                                               ? Math.max(0, Math.min(100, Number(v.level))) / 100 : 0
+                                    }
+                                    readonly property bool storedMuted: {
+                                        void root.modelsRev
+                                        const v = VideoSourceListModel.getSource(index)
+                                        return v.muted === true
+                                    }
+
+                                    Repeater {
+                                        model: 2
+
+                                        Rectangle {
+                                            id: vidPill
+                                            required property int modelData
+                                            readonly property string chLabel: vidPill.modelData === 0 ? "L" : "R"
+                                            readonly property bool capable: vidAudioRow.audioCapable
+                                            readonly property real level:
+                                                vidPill.capable && !vidAudioRow.storedMuted
+                                                    ? vidAudioRow.storedLevel : 0
+                                            readonly property bool active: vidPill.capable && vidPill.level > 0.05
+                                            readonly property color glowColor: root.levelGlowColor(vidPill.level)
+
+                                            width: 20; height: 20
+                                            radius: 10
+                                            color: !vidPill.capable ? "#15161c"
+                                                 : vidAudioRow.storedMuted ? "#241a1c" : "#171922"
+                                            border.width: 1
+                                            border.color: !vidPill.capable ? "#2a2c38"
+                                                        : vidAudioRow.storedMuted ? "#7a3a38"
+                                                        : vidPill.active ? vidPill.glowColor : "#33364a"
+                                            opacity: vidPill.capable ? 1 : 0.55
+                                            Behavior on border.color { ColorAnimation { duration: 120 } }
+
+                                            Rectangle {
+                                                visible: vidPill.capable
+                                                anchors.centerIn: parent
+                                                width: parent.width + 8
+                                                height: parent.height + 8
+                                                radius: width / 2
+                                                color: "transparent"
+                                                border.width: 4
+                                                border.color: vidPill.glowColor
+                                                opacity: vidAudioRow.storedMuted ? 0 : vidPill.level * 0.4
+                                            }
+
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: vidPill.chLabel
+                                                color: !vidPill.capable ? "#4a4f5f"
+                                                     : vidAudioRow.storedMuted ? "#a05a56"
+                                                     : (vidPill.active ? vidPill.glowColor : "#8a90a5")
+                                                font.family: Theme.fontFamily
+                                                font.pixelSize: 8; font.bold: true
+                                            }
+                                            Rectangle {
+                                                visible: vidPill.capable && vidAudioRow.storedMuted
+                                                anchors.centerIn: parent
+                                                width: 14; height: 1.5
+                                                rotation: 45
+                                                radius: 1
+                                                color: "#ff6b61"
+                                            }
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                enabled: vidPill.capable
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: VideoSourceListModel.setMuted(index, !vidAudioRow.storedMuted)
+                                            }
+                                        }
                                     }
                                 }
                             }

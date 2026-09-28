@@ -7,9 +7,6 @@ import "."
 //
 //   Name    [ Input Name            ]
 //   Source  [ ~~~ Microphone (...) ▼]
-//   Mode    [Off][On][Auto Off][Auto On]
-//           Off until manually enabled
-//   ─────────────────────────────────────
 //   Delay                          [0ms ▲▼]
 //   Volume        ────────●──────── [0dB]
 //   Channels (speaker)        [Routing…]
@@ -28,8 +25,6 @@ import "."
 Column {
     id: root
 
-    // ---- Mode (0 Off · 1 On · 2 Auto Off · 3 Auto On) ----
-    property int mode: 0
     // ---- Delay (latency compensation, ms) ----
     property int delayMs: 0
     // ---- Volume (0..100, a LINEAR gain fader ×0..×1) ----
@@ -63,7 +58,6 @@ Column {
     // (No raw field aliases — the id names below are the targets; all
     // consumer access goes through the typed passthroughs.)
 
-    signal modeEdited(int mode)
     signal delayEdited(int delayMs)
     signal volumeEdited(real volume)
     signal channelsEdited(int channels)
@@ -81,14 +75,6 @@ Column {
     property var gainFor: function(index) { return 1.0 }
 
     spacing: 0
-
-    readonly property var modeLabels: [qsTr("Off"), qsTr("On"), qsTr("Auto Off"), qsTr("Auto On")]
-    readonly property string modeHint: [
-        qsTr("Off until manually enabled"),
-        qsTr("Always passing signal"),
-        qsTr("Enabled automatically when signal is detected"),
-        qsTr("Enabled until signal ends")
-    ][root.mode] || ""   // out-of-range mode reads blank, not "undefined"
 
     // Channel enable-state — an exceptions array over a default-on base,
     // copy-on-written so re-assignment re-fires the row bindings.
@@ -214,81 +200,6 @@ Column {
             onValuePicked: (v) => root.sourcePicked(v)
         }
     }
-
-    // ---- MODE row ------------------------------------------------------
-    Item {
-        width: parent.width
-        height: 56
-
-        FormLabel {
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            text: qsTr("Mode")
-        }
-
-        Column {
-            anchors.left: parent.left
-            anchors.leftMargin: 76
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: 4
-
-            Row {
-                spacing: 0
-
-                Repeater {
-                    model: root.modeLabels
-
-                    delegate: Rectangle {
-                        id: seg
-                        required property int index
-                        required property string modelData
-                        width: 82
-                        height: 30
-                        color: root.mode === seg.index ? "#3574f0" : "#262933"
-                        border.width: 1
-                        border.color: root.mode === seg.index ? "#3574f0" : "#3a3d48"
-                        Behavior on color { ColorAnimation { duration: 110 } }
-
-                        // One pill: rounded only at the group's ends.
-                        topLeftRadius: seg.index === 0 ? Theme.radiusMd : 0
-                        bottomLeftRadius: seg.index === 0 ? Theme.radiusMd : 0
-                        topRightRadius: seg.index === root.modeLabels.length - 1 ? Theme.radiusMd : 0
-                        bottomRightRadius: seg.index === root.modeLabels.length - 1 ? Theme.radiusMd : 0
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: seg.modelData
-                            color: root.mode === seg.index ? "#ffffff" : "#aab2c4"
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.textSm
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.modeEdited(seg.index)
-                        }
-                    }
-                }
-            }
-
-            Text {
-                text: root.modeHint
-                color: Theme.textMuted
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textXs
-            }
-        }
-    }
-
-    // ---- Divider (the reference's section break before Delay) ---------
-    Rectangle {
-        width: parent.width
-        height: 1
-        color: "#23262f"
-    }
-
-    Item { width: 1; height: 12 }
 
     // ---- DELAY row ------------------------------------------------------
     Item {
@@ -663,7 +574,6 @@ Column {
                     // Ghost — the full range, always faintly visible, so the scale reads at rest.
                     Rectangle {
                         anchors.fill: parent
-                        radius: height / 2
                         opacity: 0.14
                         gradient: chRow.barGradient
                     }
@@ -680,7 +590,6 @@ Column {
                         Rectangle {
                             width: meterBar.width
                             height: parent.height
-                            radius: height / 2
                             gradient: chRow.barGradient
                         }
                     }

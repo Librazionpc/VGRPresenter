@@ -77,6 +77,44 @@ Item {
         }
         return null
     }
+    // The gain-aware, per-channel-mute-aware live level for one audio input
+    // row — the loudest of its channels, each scaled by that channel's own
+    // gain (0 when a channel's L/R button muted it in the Media pane).
+    // Every "how loud is this input right now" reading (the board row's own
+    // meter, a bus's mix, an Edit Bus routed-source row) MUST go through
+    // this, not a bare peaks[0]: reading channel 0 only meant muting the
+    // RIGHT channel from its own card never showed anywhere else — the
+    // bus and every downstream reading kept reporting the untouched left
+    // channel as if nothing had changed.
+    function inputMixLevel(rowIndex, sublabel) {
+        const s = root.meterSnapshotFor(sublabel)
+        if (!s || s.peaks === undefined || s.peaks.length === 0)
+            return 0
+        let mix = 0
+        for (let c = 0; c < s.peaks.length; c++) {
+            const gain = AudioInputListModel.channelGain(rowIndex, c)
+            const lvl = Math.max(0, Math.min(1, s.peaks[c])) * gain
+            if (lvl > mix) mix = lvl
+        }
+        return mix
+    }
+    // A bus's own live post-fader mix — the loudest of its routed sources'
+    // gain-aware channel levels (same "loudest wins" rule the routing
+    // board's own bus meter uses), scaled by the bus's own fader. Feeds the
+    // Edit Bus dialog's stereo master row pair (both channels mirror this;
+    // a bus has no independent L/R capture of its own).
+    function busMixLevel(busIndex) {
+        if (busIndex < 0) return 0
+        const b = BusListModel.getBus(busIndex)
+        let mix = 0
+        for (const r of b.routedAudioInputs) {
+            const data = AudioInputListModel.getInput(r)
+            if (!data || data.muted) continue
+            const raw = root.inputMixLevel(r, data.sublabel)
+            if (raw > mix) mix = raw
+        }
+        return mix * (b.level / 100)
+    }
     // The dialog feed: the device being edited (Add dialog with no pick yet
     // meters the default input — the empty label).
     readonly property var audioMeterSnapshot: {
@@ -151,11 +189,15 @@ Item {
     property string editAudioName: ""
     property string editAudioKind: "device"
     property string editAudioSublabel: ""
+    // Per-kind memory for the Source field — switching Kind away and back
+    // (Device → Media → Device) used to permanently blank the sublabel
+    // every time, even round-tripping back to a kind you'd already picked
+    // something for. See the Kind chips' onPicked below.
+    property var editAudioSublabelByKind: ({})
     property real editAudioLevel: 0   // silence by default — meter reflects it
     property bool editAudioMuted: false
-    // Pro-audio form state — Mode / Delay / Channels (the reference mock's
-    // rows), persisted on the model like level/muted.
-    property int editAudioMode: 0
+    // Pro-audio form state — Delay / Channels (the reference mock's rows),
+    // persisted on the model like level/muted.
     property int editAudioDelayMs: 0
     property int editAudioChannels: 2
     property var editAudioGains: []   // per-channel faders, live from the model
@@ -183,9 +225,11 @@ Item {
         root.editAudioName = data.name
         root.editAudioKind = data.kind
         root.editAudioSublabel = data.sublabel
+        // Fresh buffer per row — a previous row's remembered picks must
+        // never leak into this one.
+        root.editAudioSublabelByKind = ({})
         root.editAudioLevel = data.level
         root.editAudioMuted = data.muted
-        root.editAudioMode = data.mode !== undefined ? data.mode : 0
         root.editAudioDelayMs = data.delayMs !== undefined ? data.delayMs : 0
         root.editAudioChannels = data.channels !== undefined ? data.channels : 2
         root.editAudioGains = data.channelGains !== undefined ? data.channelGains : []
@@ -202,7 +246,6 @@ Item {
         AudioInputListModel.setSublabel(root.editAudioIndex, root.editAudioSublabel)
         AudioInputListModel.setLevel(root.editAudioIndex, root.editAudioLevel)
         AudioInputListModel.setMuted(root.editAudioIndex, root.editAudioMuted)
-        AudioInputListModel.setMode(root.editAudioIndex, root.editAudioMode)
         AudioInputListModel.setDelayMs(root.editAudioIndex, root.editAudioDelayMs)
         AudioInputListModel.setChannels(root.editAudioIndex, root.editAudioChannels)
         root.editAudioIndex = -1
@@ -225,12 +268,13 @@ Item {
     property string addSourceName: ""
     property string addSourceKind: "device"
     property string addSourceSublabel: ""
+    // Per-kind memory for the Source field — see editAudioSublabelByKind.
+    property var addSourceSublabelByKind: ({})
     property string addSourceVideoMode: ""   // video rows' capture mode
     property real addSourceLevel: 0   // silence by default — meter reflects it
     property bool addSourceMuted: false
-    // Pro-audio form state — Mode / Delay / Channels, written through the
-    // setters after addInput() like every other collected value.
-    property int addSourceMode: 0
+    // Pro-audio form state — Delay / Channels, written through the setters
+    // after addInput() like every other collected value.
     property int addSourceDelayMs: 0
     property int addSourceChannels: 2
     property var addSourceGains: []   // buffered per-channel faders (unity default)
@@ -284,6 +328,30 @@ Item {
         { label: qsTr("Media File") },
         { label: qsTr("Stream Capture") }
     ]
+    // AUDIO's own Media-kind source list — real audio tracks the Media
+    // Library has indexed (MediaLibraryService.items(), kind === "audio"),
+    // not the placeholder labels above (those were never wired to
+    // anything: picking one just stored its literal caption as the
+    // sublabel). "Browse for file..." opens the native picker via
+    // AudioInputListModel.pickAudioFile() — see onSourcePicked below.
+    // "Stream Capture" (per-app/stream loopback capture) is dropped here
+    // rather than kept as a still-fake button: there's no spec yet for
+    // what it should capture, and a button that LOOKS wired but does
+    // nothing is worse than one that isn't offered.
+    readonly property var audioMediaSourceOptions: {
+        void MediaLibraryService.totalCount   // reactivity dependency — items()
+                                               // itself is an untracked read
+        const list = []
+        const items = MediaLibraryService.items()
+        for (let i = 0; i < items.length; i++) {
+            if (items[i].kind === "audio")
+                list.push({ label: items[i].name, value: items[i].path })
+        }
+        if (list.length === 0)
+            list.push({ label: qsTr("No audio tracks in the Media Library yet"), disabled: true })
+        list.push({ label: qsTr("Browse for file…"), value: "__browse_audio_file__" })
+        return list
+    }
     readonly property var videoKinds: [
         { key: "camera", label: qsTr("Camera") },
         { key: "screen", label: qsTr("Screen") },
@@ -350,15 +418,52 @@ Item {
     // Audio NDI inputs draw from the same roster — NDI sources carry audio
     // as well as video.
     function audioSourceOptions(kind) {
-        if (kind === "media") return mediaSourceOptions
+        if (kind === "media") return audioMediaSourceOptions
         if (kind === "ndi") return ndiOptions
         return deviceOptions
+    }
+    // The Source field's "Browse for file..." option is a terminal ACTION
+    // (open the native picker), not a real sublabel value — resolve it here
+    // so both the Edit and Add dialogs' onSourcePicked handlers share the
+    // one path. A cancelled picker keeps the previous pick (empty return
+    // means "no change", not "clear the source").
+    function resolveAudioSourcePick(picked, previous) {
+        if (picked !== "__browse_audio_file__")
+            return picked
+        const file = AudioInputListModel.pickAudioFile()
+        return file !== "" ? file : previous
+    }
+    // VIDEO's own Media-kind source list — real video files the Media
+    // Library has indexed (MediaLibraryService.items(), kind === "video"),
+    // same real-data treatment as audioMediaSourceOptions above (see its
+    // comment for why the old placeholder labels were dropped).
+    readonly property var videoMediaSourceOptions: {
+        void MediaLibraryService.totalCount
+        const list = []
+        const items = MediaLibraryService.items()
+        for (let i = 0; i < items.length; i++) {
+            if (items[i].kind === "video")
+                list.push({ label: items[i].name, value: items[i].path })
+        }
+        if (list.length === 0)
+            list.push({ label: qsTr("No video files in the Media Library yet"), disabled: true })
+        list.push({ label: qsTr("Browse for file…"), value: "__browse_video_file__" })
+        return list
     }
     function videoSourceOptions(kind) {
         if (kind === "camera") return cameraOptions
         if (kind === "screen") return screenOptions
         if (kind === "ndi") return ndiOptions
+        if (kind === "media") return videoMediaSourceOptions
         return mediaSourceOptions
+    }
+    // Same "Browse for file..." resolution as resolveAudioSourcePick, for
+    // the video dialogs' Source field.
+    function resolveVideoSourcePick(picked, previous) {
+        if (picked !== "__browse_video_file__")
+            return picked
+        const file = VideoSourceListModel.pickVideoFile()
+        return file !== "" ? file : previous
     }
     // Kinds whose feed carries audio — media files and NDI streams (NDI
     // embeds audio with its video frames). These get the Volume slider and
@@ -382,10 +487,10 @@ Item {
         root.addSourceName = ""
         root.addSourceKind = type === "audio" ? "device" : "camera"
         root.addSourceSublabel = ""
+        root.addSourceSublabelByKind = ({})   // fresh buffer per dialog session
         root.addSourceVideoMode = ""
         root.addSourceLevel = 0
         root.addSourceMuted = false
-        root.addSourceMode = 0
         root.addSourceDelayMs = 0
         root.addSourceChannels = 2
         root.addSourceGains = []
@@ -413,7 +518,6 @@ Item {
             AudioInputListModel.setSublabel(idx, root.addSourceSublabel)
             AudioInputListModel.setLevel(idx, root.addSourceLevel)
             AudioInputListModel.setMuted(idx, root.addSourceMuted)
-            AudioInputListModel.setMode(idx, root.addSourceMode)
             AudioInputListModel.setDelayMs(idx, root.addSourceDelayMs)
             AudioInputListModel.setChannels(idx, root.addSourceEffectiveChannels)
             for (let g = 0; g < root.addSourceGains.length; g++)
@@ -445,6 +549,8 @@ Item {
     property string editVideoName: ""
     property string editVideoKind: "camera"
     property string editVideoSublabel: ""
+    // Per-kind memory for the Source field — see editAudioSublabelByKind.
+    property var editVideoSublabelByKind: ({})
     property string editVideoMode: ""
     property bool editVideoMuted: false
     property real editVideoLevel: 75
@@ -453,6 +559,7 @@ Item {
         const data = VideoSourceListModel.getSource(index)
         root.editVideoIndex = index
         root.editVideoName = data.name
+        root.editVideoSublabelByKind = ({})   // fresh buffer per row
         root.editVideoKind = data.kind
         root.editVideoSublabel = data.sublabel
         root.editVideoMode = data.mode !== undefined ? data.mode : ""
@@ -1039,9 +1146,7 @@ Item {
                                 value: {
                                     if (inRow.sublabel === "")
                                         return inRow.level   // media/NDI row
-                                    const s = root.meterSnapshotFor(inRow.sublabel)
-                                    const raw = s && s.peaks !== undefined && s.peaks.length > 0
-                                                ? s.peaks[0] : 0
+                                    const raw = root.inputMixLevel(inRow.index, inRow.sublabel)
                                     return inRow.muted ? 0 : Math.min(100, raw * 100)
                                 }
                                 // Color follows the VALUE (VU zones) — the
@@ -1251,9 +1356,7 @@ Item {
                                         const data = AudioInputListModel.getInput(r)
                                         if (!data || data.muted)
                                             continue
-                                        const s = root.meterSnapshotFor(data.sublabel)
-                                        const raw = s && s.peaks !== undefined && s.peaks.length > 0
-                                                    ? s.peaks[0] : 0
+                                        const raw = root.inputMixLevel(r, data.sublabel)
                                         if (raw > mix) mix = raw   // loudest source wins (peak mix)
                                     }
                                     const post = mix * (busRow.level / 100)
@@ -1839,6 +1942,11 @@ Item {
                 width: parent.width
                 spacing: Theme.space4
 
+                // Extra breathing room under the header — this dialog has no
+                // subtitle, so the Kind row sat right up against the title
+                // with just the generic header gap, reading as crowded.
+                Item { width: 1; height: Theme.space2 }
+
                 // Kind row — FIRST, on the same rail: the Source row's
                 // label and options below follow this selection.
                 Item {
@@ -1865,9 +1973,16 @@ Item {
                                 label: modelData.label
                                 selected: root.editAudioKind === modelData.key
                                 onPicked: {
+                                    // Remember this kind's pick before leaving it, restore
+                                    // the new kind's last pick if it had one — a bare reset
+                                    // here permanently blanked Device's pick the moment you
+                                    // so much as glanced at Media and came back.
+                                    const buf = Object.assign({}, root.editAudioSublabelByKind)
+                                    buf[root.editAudioKind] = root.editAudioSublabel
+                                    root.editAudioSublabelByKind = buf
                                     root.editAudioKind = modelData.key
-                                    // The old pick belongs to the previous kind.
-                                    root.editAudioSublabel = ""
+                                    root.editAudioSublabel = buf[modelData.key] !== undefined
+                                                              ? buf[modelData.key] : ""
                                     root.syncAudioMeter()   // non-device kinds un-meter
                                 }
                             }
@@ -1876,9 +1991,8 @@ Item {
                 }
 
                 // Pro-audio form — the reference layout: Name / Source on
-                // a shared 76px label rail, then Mode, a section divider,
-                // Delay, Volume, Channels (checkbox rows + pill meters +
-                // green gain knobs).
+                // a shared 76px label rail, then Delay, Volume, Channels
+                // (checkbox rows + pill meters + green gain knobs).
                 NdiRuntimeNotice {
                     width: parent.width
                     active: root.editAudioKind === "ndi"
@@ -1892,10 +2006,9 @@ Item {
                     sourceValue: root.editAudioSublabel
                     sourceOptions: root.audioSourceOptions(root.editAudioKind)
                     onSourcePicked: (v) => {
-                        root.editAudioSublabel = v
+                        root.editAudioSublabel = root.resolveAudioSourcePick(v, root.editAudioSublabel)
                         root.syncAudioMeter()   // re-target the tap at the new device
                     }
-                    mode: root.editAudioMode
                     delayMs: root.editAudioDelayMs
                     volume: root.editAudioLevel
                     muted: root.editAudioMuted
@@ -1913,7 +2026,6 @@ Item {
                     }
                     onChannelGainEdited: (i, g) =>
                         AudioInputListModel.setChannelGain(root.editAudioIndex, i, g)
-                    onModeEdited: (m) => root.editAudioMode = m
                     onDelayEdited: (ms) => root.editAudioDelayMs = ms
                     onVolumeEdited: (v) => root.editAudioLevel = v
                     onChannelsEdited: (n) => root.editAudioChannels = n
@@ -2019,9 +2131,14 @@ Item {
                             label: modelData.label
                             selected: root.editVideoKind === modelData.key
                             onPicked: {
+                                // Remember this kind's pick, restore the new
+                                // kind's last one — see editAudioSublabelByKind.
+                                const buf = Object.assign({}, root.editVideoSublabelByKind)
+                                buf[root.editVideoKind] = root.editVideoSublabel
+                                root.editVideoSublabelByKind = buf
                                 root.editVideoKind = modelData.key
-                                // The old pick belongs to the previous kind.
-                                root.editVideoSublabel = ""
+                                root.editVideoSublabel = buf[modelData.key] !== undefined
+                                                          ? buf[modelData.key] : ""
                                 root.editVideoMode = ""
                             }
                         }
@@ -2080,7 +2197,7 @@ Item {
             options: root.videoSourceOptions(root.editVideoKind)
             value: root.editVideoSublabel
             onValuePicked: (v) => {
-                root.editVideoSublabel = v
+                root.editVideoSublabel = root.resolveVideoSourcePick(v, root.editVideoSublabel)
                 root.editVideoMode = ""
             }
         }
@@ -2146,11 +2263,13 @@ Item {
         }
 
         // ---- Channel strip (ProAudioForm) — the bus is a real channel:
-        // master fader (gain-dB readout), mute via the strip's rows, and
-        // one metered channel row per ROUTED audio input (the bus's own
-        // meter = the mix of these). Type/video/what-routes sections below
-        // are unchanged; Save/Cancel still commit the strip through the
-        // existing setters.
+        // master fader (gain-dB readout), mute via the strip's rows, and a
+        // stereo L/R MASTER pair (the bus's own post-fader mix, same
+        // detailed meter + glowing speedometer knob every input channel
+        // row gets) above the per-source routed rows below. A bus has no
+        // independent stereo capture of its own, so both channels mirror
+        // the same live mix (the loudest routed, gain-aware source) — the
+        // same simplification the Media pane's bus L/R buttons use.
         ProAudioForm {
             width: parent.width
             visible: root.editBusType !== "video"
@@ -2158,147 +2277,21 @@ Item {
             sourceLabel: qsTr("Sources")
             sourceValue: qsTr("%1 routed").arg(root.busRoutedAudio().length)
             sourceOptions: []
-            mode: 1   // display-only row (the segmented control stays out of the bus contract)
             delayMs: 0
             volume: root.editBusLevel
             muted: root.editBusMuted
-            channels: 0   // rows come from the routing, not a channel count
-            meterLevels: []
-            meterLayout: ""
+            channels: 2
+            meterLevels: {
+                const lvl = root.editBusIndex >= 0 && !root.editBusMuted
+                    ? root.busMixLevel(root.editBusIndex) : 0
+                return [lvl, lvl]
+            }
+            meterLayout: "stereo"
             onVolumeEdited: (v) => root.editBusLevel = v
             onMutedToggled: root.editBusMuted = !root.editBusMuted
-            Component.onCompleted: {
-                // The strip's checkbox rows double as a per-source meter
-                // view; hide them for now — routed-source rows below carry
-                // the metering.
-            }
         }
 
-        // Routed-source channel rows — LIVE per-source meters inside the bus
-        // dialog, each with its checkbox = that source's route into this bus
-        // (unchecking it un-routes — the same toggle the list below uses).
-        Column {
-            width: parent.width
-            spacing: 5
-            visible: root.editBusType !== "video"
-
-            Repeater {
-                model: AudioInputListModel
-
-                delegate: Rectangle {
-                    id: busChRow
-                    required property int index
-                    required property string name
-                    required property string sublabel
-                    required property real level
-                    required property bool muted
-
-                    width: parent.width
-                    height: 34
-                    radius: Theme.radiusSm
-                    color: "#1d2029"
-                    border.width: 1
-                    border.color: root.busRoutedAudio().indexOf(busChRow.index) >= 0
-                                  ? "#3a4f66" : "#2c3040"
-
-                    readonly property bool routed:
-                        root.busRoutedAudio().indexOf(busChRow.index) >= 0
-                    readonly property var snap:
-                        sublabel !== "" ? root.meterSnapshotFor(sublabel) : null
-                    readonly property real rawLevel:
-                        snap && snap.peaks !== undefined && snap.peaks.length > 0
-                            ? snap.peaks[0] : 0
-                    // Post-fader: source tap × source level × bus level,
-                    // gated by both mutes — exactly what the bus sums.
-                    readonly property real postLevel: routed && !muted && !root.editBusMuted
-                        ? Math.min(1, rawLevel * (level / 100) * (root.editBusLevel / 100))
-                        : 0
-
-                    // Route checkbox — the same toggle as the plain list.
-                    Rectangle {
-                        anchors.left: parent.left
-                        anchors.leftMargin: 12
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: 15; height: 15
-                        radius: 3
-                        color: busChRow.routed ? "#3574f0" : "transparent"
-                        border.width: 1
-                        border.color: busChRow.routed ? "#3574f0" : "#4a4f66"
-
-                        Text {
-                            anchors.centerIn: parent
-                            visible: busChRow.routed
-                            text: "\u2713"
-                            color: "#ffffff"
-                            font.pixelSize: 13
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            anchors.margins: -7
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: BusListModel.toggleAudioRoute(root.editBusIndex, busChRow.index)
-                        }
-                    }
-
-                    Text {
-                        anchors.left: parent.left
-                        anchors.leftMargin: 41
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: parent.width - 200
-                        text: busChRow.name
-                        color: busChRow.routed ? "#e2e8f0" : "#5c6475"
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textSm
-                        elide: Text.ElideRight
-                    }
-
-                    // Mini VU — same dimmed-scale convention as ProAudioForm.
-                    Row {
-                        anchors.left: parent.left
-                        anchors.leftMargin: 150
-                        anchors.right: dbCell.left
-                        anchors.rightMargin: 16
-                        anchors.verticalCenter: parent.verticalCenter
-                        spacing: 2
-                        clip: true
-                        visible: width > 24
-
-                        readonly property int segs: 24
-                        readonly property real segW: Math.max(4, (width - (segs - 1) * spacing) / segs)
-
-                        Repeater {
-                            model: 24
-
-                            delegate: Rectangle {
-                                required property int index
-                                readonly property real pos: index / 23
-                                readonly property real lvl: busChRow.postLevel > 0.0005
-                                    ? Math.max(-60, 20 * Math.log10(busChRow.postLevel)) : -60
-                                width: parent.segW; height: 12; radius: 2
-                                readonly property bool lit: lvl > -60 + pos * 60 + 0.5
-                                color: pos < 0.625 ? "#4ade80"
-                                     : pos < 0.8125 ? "#f5c26b"
-                                     : "#ff4d3d"
-                                opacity: busChRow.routed ? (lit ? 1 : 0.22) : 0.08
-                            }
-                        }
-                    }
-
-                    Text {
-                        id: dbCell
-                        anchors.right: parent.right
-                        anchors.rightMargin: 12
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: busChRow.postLevel > 0.0005
-                              ? Math.round(20 * Math.log10(busChRow.postLevel)) + " dB"
-                              : "-\u221E dB"
-                        color: "#8a94a6"
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textSm
-                    }
-                }
-            }
-        }
+        // The per-source routing list ("Audio inputs routed in" below) is the one place that manages which sources feed this bus — the Channel 1/Channel 2 rows above are the bus's own output, independently selectable there.
 
         Item {
             width: parent.width
@@ -2484,9 +2477,14 @@ Item {
                                 label: modelData.label
                                 selected: root.addSourceKind === modelData.key
                                 onPicked: {
+                                    // Remember this kind's pick, restore the new
+                                    // kind's last one — see editAudioSublabelByKind.
+                                    const buf = Object.assign({}, root.addSourceSublabelByKind)
+                                    buf[root.addSourceKind] = root.addSourceSublabel
+                                    root.addSourceSublabelByKind = buf
                                     root.addSourceKind = modelData.key
-                                    // The old pick belongs to the previous kind.
-                                    root.addSourceSublabel = ""
+                                    root.addSourceSublabel = buf[modelData.key] !== undefined
+                                                              ? buf[modelData.key] : ""
                                     root.syncAudioMeter()
                                 }
                             }
@@ -2495,7 +2493,7 @@ Item {
                 }
 
                 // Pro-audio form — the reference layout (Name / Source on
-                // the shared label rail, Mode, Delay, Volume, Channels).
+                // the shared label rail, Delay, Volume, Channels).
                 NdiRuntimeNotice {
                     width: parent.width
                     active: root.addSourceKind === "ndi"
@@ -2509,10 +2507,9 @@ Item {
                     sourceValue: root.addSourceSublabel
                     sourceOptions: root.audioSourceOptions(root.addSourceKind)
                     onSourcePicked: (v) => {
-                        root.addSourceSublabel = v
+                        root.addSourceSublabel = root.resolveAudioSourcePick(v, root.addSourceSublabel)
                         root.syncAudioMeter()
                     }
-                    mode: root.addSourceMode
                     delayMs: root.addSourceDelayMs
                     volume: root.addSourceLevel
                     muted: root.addSourceMuted
@@ -2532,7 +2529,6 @@ Item {
                             root.addSourceGains.push(1.0)
                         root.addSourceGains[i] = g
                     }
-                    onModeEdited: (m) => root.addSourceMode = m
                     onDelayEdited: (ms) => root.addSourceDelayMs = ms
                     onVolumeEdited: (v) => root.addSourceLevel = v
                     onChannelsEdited: (n) => root.addSourceChannels = n
@@ -2583,9 +2579,14 @@ Item {
                             label: modelData.label
                             selected: root.addSourceKind === modelData.key
                             onPicked: {
+                                // Remember this kind's pick, restore the new
+                                // kind's last one — see editAudioSublabelByKind.
+                                const buf = Object.assign({}, root.addSourceSublabelByKind)
+                                buf[root.addSourceKind] = root.addSourceSublabel
+                                root.addSourceSublabelByKind = buf
                                 root.addSourceKind = modelData.key
-                                // The old pick belongs to the previous kind.
-                                root.addSourceSublabel = ""
+                                root.addSourceSublabel = buf[modelData.key] !== undefined
+                                                          ? buf[modelData.key] : ""
                                 root.addSourceVideoMode = ""
                             }
                         }
@@ -2609,7 +2610,7 @@ Item {
                 options: root.videoSourceOptions(root.addSourceKind)
                 value: root.addSourceSublabel
                 onValuePicked: (v) => {
-                    root.addSourceSublabel = v
+                    root.addSourceSublabel = root.resolveVideoSourcePick(v, root.addSourceSublabel)
                     // A new device is a new capability set — the old mode
                     // pick may not exist on it.
                     root.addSourceVideoMode = ""

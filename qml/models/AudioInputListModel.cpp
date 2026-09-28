@@ -3,6 +3,7 @@
 #include "BusListModel.h"
 #include "services/EngineBridge.h"
 #include "services/SettingsService.h"
+#include "platform/PlatformAccessor.hpp"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -130,7 +131,6 @@ QVariant AudioInputListModel::data(const QModelIndex &index, int role) const
     case SublabelRole: return item.sublabel;
     case LevelRole: return item.level;
     case MutedRole: return item.muted;
-    case ModeRole: return item.mode;
     case DelayMsRole: return item.delayMs;
     case ChannelsRole: return item.channels;
     case ChannelGainsRole: {
@@ -166,7 +166,6 @@ QHash<int, QByteArray> AudioInputListModel::roleNames() const
         { SublabelRole, "sublabel" },
         { LevelRole, "level" },
         { MutedRole, "muted" },
-        { ModeRole, "mode" },
         { DelayMsRole, "delayMs" },
         { ChannelsRole, "channels" },
         { ChannelGainsRole, "channelGains" },
@@ -274,6 +273,16 @@ void AudioInputListModel::setSublabel(int index, const QString &sublabel)
     scheduleSave();
 }
 
+QString AudioInputListModel::pickAudioFile() const
+{
+    if (!EngineBridge::instance().booted())
+        return {};
+    auto r = bps::platform::PlatformAccessor::Get().Dialogs().OpenFileDialog(
+        "Pick an audio file",
+        { "Audio files (*.mp3 *.wav *.flac *.m4a *.aac *.ogg)", "All files (*.*)" });
+    return r.ok() && r.value() ? QString::fromStdString(*r.value()) : QString();
+}
+
 void AudioInputListModel::setLevel(int index, qreal level)
 {
     if (index < 0 || index >= m_inputs.size())
@@ -298,20 +307,6 @@ void AudioInputListModel::setMuted(int index, bool muted)
     m_inputs[index].muted = muted;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { MutedRole });
-    scheduleSave();
-}
-
-void AudioInputListModel::setMode(int index, int mode)
-{
-    if (index < 0 || index >= m_inputs.size())
-        return;
-    const int clamped = std::clamp(mode, 0, 3);
-    if (m_inputs[index].mode == clamped)
-        return;
-
-    m_inputs[index].mode = clamped;
-    const QModelIndex changed = this->index(index);
-    emit dataChanged(changed, changed, { ModeRole });
     scheduleSave();
 }
 
@@ -405,7 +400,6 @@ QString AudioInputListModel::serializeRoster() const
             { "sublabel", it.sublabel },
             { "level", it.level },
             { "muted", it.muted },
-            { "mode", it.mode },
             { "delayMs", it.delayMs },
             { "channels", it.channels },
             { "gains", gains },
@@ -459,7 +453,6 @@ int AudioInputListModel::restoreRoster()
         it.sublabel = o.value(QStringLiteral("sublabel")).toString();
         it.level = o.value(QStringLiteral("level")).toDouble();
         it.muted = o.value(QStringLiteral("muted")).toBool();
-        it.mode = std::clamp(o.value(QStringLiteral("mode")).toInt(), 0, 3);
         it.delayMs = std::clamp(o.value(QStringLiteral("delayMs")).toInt(), 0, 1000);
         it.channels = std::clamp(o.value(QStringLiteral("channels")).toInt(2), 1, 8);
         for (const QJsonValue &g : o.value(QStringLiteral("gains")).toArray())
@@ -667,7 +660,6 @@ QVariantMap AudioInputListModel::getInput(int index) const
         { "sublabel", item.sublabel },
         { "level", item.level },
         { "muted", item.muted },
-        { "mode", item.mode },
         { "delayMs", item.delayMs },
         { "channels", item.channels },
         { "channelGains", gains },

@@ -3,6 +3,7 @@
 #include "BusListModel.h"
 #include "EngineBridge.h"
 #include "SettingsService.h"
+#include "platform/PlatformAccessor.hpp"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -294,6 +295,16 @@ void VideoSourceListModel::setSublabel(int index, const QString &sublabel)
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { SublabelRole });
     scheduleSave();
+}
+
+QString VideoSourceListModel::pickVideoFile() const
+{
+    if (!EngineBridge::instance().booted())
+        return {};
+    auto r = bps::platform::PlatformAccessor::Get().Dialogs().OpenFileDialog(
+        "Pick a video file",
+        { "Video files (*.mp4 *.mov *.mkv *.avi *.webm *.m4v)", "All files (*.*)" });
+    return r.ok() && r.value() ? QString::fromStdString(*r.value()) : QString();
 }
 
 void VideoSourceListModel::setMode(int index, const QString &mode)

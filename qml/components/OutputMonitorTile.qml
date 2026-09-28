@@ -294,26 +294,25 @@ Rectangle {
     // updateMeterChannel). Overlays the pane; appears only while audio
     // metering is engaged anywhere (an audio card clicked in Media, or the
     // program-mix tap while live).
-    Item {
-        id: meterRow
-        anchors.right: previewPane.right
-        anchors.rightMargin: 4
+    // One bar per channel — LEFT edge = left channel (peaks[0]), RIGHT edge
+    // = right channel (peaks[1]). A mono source (only one peak published)
+    // mirrors that single channel on both sides rather than leaving the
+    // second bar dark, so the pair still reads as "L / R either side" per
+    // the ask, not as a broken second channel.
+    component MeterBar: Item {
+        id: bar
+        required property int channelIndex
         y: previewPane.y + 4
         width: 4
         height: previewPane.height - 8
         visible: root.isEnabled && EngineBridge.anyAudioMetering
 
-        // The main/program level: the louder of the two channels (a mono or
-        // stereo-leaning signal still reads on this one strip — FreeShow's
-        // own "main" channel is likewise a single summed tap, not L/R).
         readonly property real rawLevel: {
             const s = EngineBridge.outputLevels
             if (!s || s.peaks === undefined || s.peaks.length < 1)
                 return 0
-            let lvl = Math.max(0, Math.min(1, s.peaks[0]))
-            if (s.peaks.length > 1)
-                lvl = Math.max(lvl, Math.max(0, Math.min(1, s.peaks[1])))
-            return lvl
+            const idx = Math.min(bar.channelIndex, s.peaks.length - 1)
+            return Math.max(0, Math.min(1, s.peaks[idx]))
         }
 
         // Fast attack (jumps up immediately), slow release — the exact easing
@@ -338,19 +337,19 @@ Rectangle {
 
         Timer {
             interval: 33
-            running: meterRow.visible
+            running: bar.visible
             repeat: true
             onTriggered: {
-                const target = meterRow.rawLevel
-                meterRow.smoothed = target > meterRow.smoothed
-                    ? target : meterRow.smoothed + (target - meterRow.smoothed) * 0.2
+                const target = bar.rawLevel
+                bar.smoothed = target > bar.smoothed
+                    ? target : bar.smoothed + (target - bar.smoothed) * 0.2
 
                 const now = Date.now()
-                if (meterRow.smoothed >= meterRow.peakValue) {
-                    meterRow.peakValue = meterRow.smoothed
-                    meterRow.peakHeldAt = now
-                } else if (now - meterRow.peakHeldAt > 2000) {
-                    meterRow.peakValue = Math.max(meterRow.smoothed, meterRow.peakValue - 0.02)
+                if (bar.smoothed >= bar.peakValue) {
+                    bar.peakValue = bar.smoothed
+                    bar.peakHeldAt = now
+                } else if (now - bar.peakHeldAt > 2000) {
+                    bar.peakValue = Math.max(bar.smoothed, bar.peakValue - 0.02)
                 }
             }
         }
@@ -372,7 +371,7 @@ Rectangle {
             anchors.fill: parent
             radius: width / 2
             opacity: 0.18
-            gradient: meterRow.barGradient
+            gradient: bar.barGradient
         }
 
         // Lit portion — clipped to the smoothed level, bottom-anchored; the
@@ -382,25 +381,25 @@ Rectangle {
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: parent.bottom
-            height: parent.height * meterRow.dbPct(meterRow.smoothed)
+            height: parent.height * bar.dbPct(bar.smoothed)
             clip: true
 
             Rectangle {
                 width: parent.width
-                height: meterRow.height
+                height: bar.height
                 anchors.bottom: parent.bottom
                 radius: width / 2
-                gradient: meterRow.barGradient
+                gradient: bar.barGradient
             }
         }
 
         // Peak-hold tick.
         Rectangle {
-            visible: meterRow.peakValue > 0.01
+            visible: bar.peakValue > 0.01
             anchors.left: parent.left
             anchors.right: parent.right
             height: 2
-            y: parent.height * (1 - meterRow.dbPct(meterRow.peakValue)) - 1
+            y: parent.height * (1 - bar.dbPct(bar.peakValue)) - 1
             color: "#ffffff"
             opacity: 0.55
         }
@@ -413,9 +412,20 @@ Rectangle {
             anchors.bottom: parent.bottom
             height: 2
             color: "#00c8c8"
-            opacity: meterRow.active ? 1 : 0.15
+            opacity: bar.active ? 1 : 0.15
             Behavior on opacity { NumberAnimation { duration: 100 } }
         }
+    }
+
+    MeterBar {
+        channelIndex: 0
+        anchors.left: previewPane.left
+        anchors.leftMargin: 4
+    }
+    MeterBar {
+        channelIndex: 1
+        anchors.right: previewPane.right
+        anchors.rightMargin: 4
     }
 
     // Footer: output name — anchored below the pane, full width (the meters
