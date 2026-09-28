@@ -139,9 +139,25 @@ Rectangle {
         return false
     }
 
-    // Caller sets width (or anchors); height follows as pane + footer.
+    // Caller sets width (or anchors); height follows as pane + footer (the
+    // meters OVERLAY the pane — see below).
     implicitWidth: 182
     implicitHeight: 6 + previewPane.height + 6 + 16 + 6
+
+    // ---- Program-mix meters (the Main Output's L/R LED strips) ------------
+    // The strips OVERLAY the preview pane's bottom-left and only appear when
+    // AUDIO metering is engaged anywhere (an audio card clicked in Media, or
+    // the program-mix tap while live) — meters-on-click, not permanent
+    // chrome. The tap itself runs while live on this (active) tile.
+    readonly property bool meterThis: root.active && LiveOutputService.live
+    onMeterThisChanged: {
+        if (meterThis)
+            EngineBridge.startOutputMeter()
+        else if (typeof EngineBridge !== "undefined")
+            EngineBridge.maybeStopOutputMeter()
+    }
+    Component.onCompleted: if (meterThis) EngineBridge.startOutputMeter()
+    Component.onDestruction: if (meterThis) EngineBridge.maybeStopOutputMeter()
     radius: 8
     // Live = danger-red border; inactive = visible slate border so an off
     // tile reads as "inactive", not just black.
@@ -266,7 +282,144 @@ Rectangle {
         // the active output.)
     }
 
-    // Footer: output name — anchored to the pane's bottom, full width.
+    // ---- Program-mix meter (FreeShow's own output-preview design) ---------
+    // FreeShow's Preview.svelte metres its output the exact same way this tile
+    // does (a live "main" tap over the preview), via the SAME AudioMeter.svelte
+    // used everywhere else in their app — vertical mode: ONE continuous strip
+    // pinned to the pane's right edge, full height, not the old two-strip/
+    // discrete-LED design. A "ghost" of the full gradient stays faintly visible
+    // at rest (so the scale reads even at silence), the lit portion reveals
+    // BOTTOM-UP as level rises, and a peak-hold tick marks the recent high
+    // (holds 2s, then eases down — src/.../drawer/audio/AudioMeter.svelte's
+    // updateMeterChannel). Overlays the pane; appears only while audio
+    // metering is engaged anywhere (an audio card clicked in Media, or the
+    // program-mix tap while live).
+    Item {
+        id: meterRow
+        anchors.right: previewPane.right
+        anchors.rightMargin: 4
+        y: previewPane.y + 4
+        width: 4
+        height: previewPane.height - 8
+        visible: root.isEnabled && EngineBridge.anyAudioMetering
+
+        // The main/program level: the louder of the two channels (a mono or
+        // stereo-leaning signal still reads on this one strip — FreeShow's
+        // own "main" channel is likewise a single summed tap, not L/R).
+        readonly property real rawLevel: {
+            const s = EngineBridge.outputLevels
+            if (!s || s.peaks === undefined || s.peaks.length < 1)
+                return 0
+            let lvl = Math.max(0, Math.min(1, s.peaks[0]))
+            if (s.peaks.length > 1)
+                lvl = Math.max(lvl, Math.max(0, Math.min(1, s.peaks[1])))
+            return lvl
+        }
+
+        // Fast attack (jumps up immediately), slow release — the exact easing
+        // AudioMeter.svelte's updateMeterChannel uses, ticked at the same
+        // ~30fps (33ms) it throttles its rAF loop to.
+        property real smoothed: 0
+        property real peakValue: 0
+        property real peakHeldAt: 0
+        readonly property bool active: rawLevel > 0.01
+
+        // `smoothed`/`peakValue` are raw LINEAR amplitude (0..1) — the WASAPI
+        // tap's own domain, kept for the envelope math. Normal program levels
+        // sit around -60..-6 dBFS (linear ~0.001..0.5), which pins a linear-
+        // height fill near the bottom for virtually all real audio — reads
+        // as dead. Meters read in dB, so the drawn height uses this -60..0 dB
+        // mapping instead of raw amplitude.
+        function dbPct(linear) {
+            if (linear <= 0.0005) return 0   // ≈ -66 dBFS floor → silence
+            const db = 20 * Math.log10(linear)
+            return Math.max(0, Math.min(1, (db + 60) / 60))
+        }
+
+        Timer {
+            interval: 33
+            running: meterRow.visible
+            repeat: true
+            onTriggered: {
+                const target = meterRow.rawLevel
+                meterRow.smoothed = target > meterRow.smoothed
+                    ? target : meterRow.smoothed + (target - meterRow.smoothed) * 0.2
+
+                const now = Date.now()
+                if (meterRow.smoothed >= meterRow.peakValue) {
+                    meterRow.peakValue = meterRow.smoothed
+                    meterRow.peakHeldAt = now
+                } else if (now - meterRow.peakHeldAt > 2000) {
+                    meterRow.peakValue = Math.max(meterRow.smoothed, meterRow.peakValue - 0.02)
+                }
+            }
+        }
+
+        // The gradient every layer below shares — bottom (quiet) = cyan,
+        // through green/amber, top (loud) = red. Qt's Vertical orientation
+        // puts position 0 at the top, 1 at the bottom, so the stops run in
+        // the opposite order CSS's `linear-gradient(0deg, ...)` lists them.
+        readonly property Gradient barGradient: Gradient {
+            orientation: Gradient.Vertical
+            GradientStop { position: 0.0; color: "#c80000" }
+            GradientStop { position: 0.16; color: "#ffc800" }
+            GradientStop { position: 0.45; color: "#00ff32" }
+            GradientStop { position: 1.0; color: "#00c8c8" }
+        }
+
+        // Ghost — the full range, always faintly visible.
+        Rectangle {
+            anchors.fill: parent
+            radius: width / 2
+            opacity: 0.18
+            gradient: meterRow.barGradient
+        }
+
+        // Lit portion — clipped to the smoothed level, bottom-anchored; the
+        // gradient rectangle inside is the FULL strip height so the revealed
+        // colors line up with the ghost behind it.
+        Item {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            height: parent.height * meterRow.dbPct(meterRow.smoothed)
+            clip: true
+
+            Rectangle {
+                width: parent.width
+                height: meterRow.height
+                anchors.bottom: parent.bottom
+                radius: width / 2
+                gradient: meterRow.barGradient
+            }
+        }
+
+        // Peak-hold tick.
+        Rectangle {
+            visible: meterRow.peakValue > 0.01
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: 2
+            y: parent.height * (1 - meterRow.dbPct(meterRow.peakValue)) - 1
+            color: "#ffffff"
+            opacity: 0.55
+        }
+
+        // Signal indicator — a thin on/off tick at the strip's foot, the
+        // vertical form AudioMeter.svelte's own signal-dot takes.
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            height: 2
+            color: "#00c8c8"
+            opacity: meterRow.active ? 1 : 0.15
+            Behavior on opacity { NumberAnimation { duration: 100 } }
+        }
+    }
+
+    // Footer: output name — anchored below the pane, full width (the meters
+    // overlay the pane; the footer sits where it always sat).
     Item {
         x: 6
         y: previewPane.y + previewPane.height + 6

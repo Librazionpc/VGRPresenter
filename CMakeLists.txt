@@ -171,6 +171,7 @@ set(BPS_CORE_SOURCES
     # Importing (FreeShow's formats): the format list, the plain-text lyric converter, and turning imports into shows
     ${BPS_ROOT}/modules/import/SongText.cpp
     ${BPS_ROOT}/modules/import/ImportEngine.cpp
+    ${BPS_ROOT}/modules/import/Archive.cpp
     ${BPS_ROOT}/modules/presentation/LiveOutputController.cpp
     ${BPS_ROOT}/modules/settings/Telemetry.cpp
     # Native .vgr format (docs/specs/22)

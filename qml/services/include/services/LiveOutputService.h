@@ -16,6 +16,7 @@
 
 #include <QImage>
 #include <QQuickImageProvider>
+#include <QSet>
 #include <QObject>
 #include <QQmlEngine>
 #include <QtQml/qqmlregistration.h>
@@ -56,10 +57,14 @@ class LiveOutputService : public QObject {
     // and exposes the provider URL + a revision for the tiles' pump.
     Q_PROPERTY(QString inputLabel READ inputLabel NOTIFY inputChanged)
     Q_PROPERTY(QString inputKind READ inputKind NOTIFY inputChanged)
-    // Bumped ~15×/s while an input is taken and its tap produces frames —
-    // the tiles' Image.source cache-buster (the videopreview provider
-    // returns the PAL's newest JPEG per request).
+    // Bumped ~15×/s while an input is taken OR any card preview is held —
+    // the tiles'/cards' Image.source cache-buster (the videopreview
+    // provider returns the PAL's newest JPEG per request).
     Q_PROPERTY(qulonglong inputRev READ inputRev NOTIFY inputChanged)
+    // The labels currently held as INTERNAL card previews (one-click).
+    // Cards read membership to show their live thumbnail; output takes are
+    // inputLabel (double-click, purple border) and stay separate.
+    Q_PROPERTY(QVariantList cardPreviews READ cardPreviewsList NOTIFY inputChanged)
     // True while a taken input's tap is producing (warm-up honest: false
     // until the provider's first frame decodes).
     Q_PROPERTY(bool inputLive READ inputLive NOTIFY inputChanged)
@@ -80,6 +85,13 @@ public:
     QString inputKind() const { return inputKind_; }
     qulonglong inputRev() const { return inputRev_; }
     bool inputLive() const { return inputLive_; }
+    QVariantList cardPreviewsList() const
+    {
+        QVariantList out;
+        for (const QString &k : cardPreviews_.keys())
+            out.append(k);
+        return out;
+    }
 
     // Take a video source's feed into the output preview (the Media pane's
     // click). kind: "camera" | "screen" | "media" | "ndi"; only camera and
@@ -92,6 +104,23 @@ public:
     // service detects frames itself — see inputLive). Harmless no-op for a
     // non-taken or already-live input.
     Q_INVOKABLE void confirmInputFrame(const QString &label);
+
+    // ---- INTERNAL CARD PREVIEWS (the Media pane's one-click thumbnails) ---
+    // ONE click starts a small owner-"card" tap whose frames feed the card's
+    // own state window — the INTERNAL preview, independent of the output
+    // take (owner "output", double-click, purple border). Re-click releases.
+    Q_INVOKABLE void previewInput(const QString &label, const QString &kind, const QString &mode);
+    Q_INVOKABLE void endPreviewInput(const QString &label);
+    // HEALTH: is this source currently reachable AND (when a tap is held)
+    // producing frames? The card's slashed-icon "can't reach" state reads
+    // this — a closed window / unplugged camera flips it within one pump
+    // tick (~66 ms) and the icon gets its slash.
+    Q_INVOKABLE bool inputHealthy(const QString &label, const QString &kind) const;
+    // Is this label's tap PRODUCING frames (decoded at least one)? Per-label
+    // — inputLive only tracks the OUTPUT take, but a card-only preview must
+    // light its thumbnail too. QML reads it inside bindings that also read
+    // inputRev, so it refreshes at the pump's rate.
+    Q_INVOKABLE bool inputProducing(const QString &label) const;
 
     // Env-gated boot self-test (VGR_OUTPUT_INPUT_TEST=1): takes the first
     // real window input ~2.5s after launch and logs PASS (frames decoded) /
@@ -142,6 +171,11 @@ private:
     static LiveOutputService *s_instance;
 
     void pollTick();   // refresh onAir* + framesSent from the engine
+    // The shared input pump tick (~15 Hz while ANY tap is held): flips
+    // inputLive on the taken input's first frame (decode-cache poll) and
+    // bumps inputRev so every consuming Image re-fetches. Stops itself when
+    // neither a take nor a card preview is held.
+    void pumpTick();
     // Re-reads the runtime's current slide into onAirSlide_ (onAirChanged
     // piggybacks the emit). The slide's blocks change without the title or
     // index moving (a document edit re-synced while live), so the 10Hz poll
@@ -164,6 +198,13 @@ private:
     qulonglong inputRev_ = 0;
     bool inputLive_ = false;
     QTimer *inputPump_ = nullptr;   // while taken: inputRev bump at ~15Hz
+    // The internal card previews (one-click): label → {kind, mode}. Their
+    // taps ride the SAME previewIds_ table under owner "card"; releasing is
+    // per-label (endPreviewInput).
+    QVariantMap cardPreviews_;
+    // Labels whose taps have decoded at least one frame (pump-maintained);
+    // inputProducing() reads it. Pruned on release.
+    QSet<QString> producing_;
 };
 
 // QQuickImageProvider over the engine preview output's last frame:

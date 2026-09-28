@@ -175,7 +175,11 @@ public:
     // reconciles its own hold independently (mode re-picks, camera switches).
     // A start is idempotent per owner; the tap dies only when its LAST owner
     // releases. Defaults keep plain QML calls working.
-    Q_INVOKABLE void startVideoPreview(const QString &deviceLabel, const QString &mode,
+    // Returns whether the tap is (now) running — the internal card previews
+    // and LiveOutputService's take both surface a refused label honestly
+    // (the slashed "unreachable" state) instead of a placeholder that can
+    // never fill.
+    Q_INVOKABLE bool startVideoPreview(const QString &deviceLabel, const QString &mode,
                                        const QString &owner = QStringLiteral("dialog"));
     // Release one device's preview tap (label-keyed, like the meter taps).
     Q_INVOKABLE void stopVideoPreview(const QString &deviceLabel,
@@ -192,9 +196,37 @@ public:
     // surfaces a refused label honestly instead of showing a warm-up
     // placeholder that can never fill.
     Q_INVOKABLE bool startScreenPreview(const QString &monitorLabel,
+                                        const QString &owner = QStringLiteral("dialog"));    Q_INVOKABLE void stopScreenPreview(const QString &monitorLabel,
                                         const QString &owner = QStringLiteral("dialog"));
-    Q_INVOKABLE void stopScreenPreview(const QString &monitorLabel,
-                                       const QString &owner = QStringLiteral("dialog"));
+    // QUIET reachability probe — the SAME resolution chain startScreenPreview
+    // uses (cached roster → live windows → monitors; camera: cached roster →
+    // live enumerate) but SILENT: the Media card previews gate their tap
+    // start on this, so a CLOSED WINDOW shows the card's slashed "No signal"
+    // state instead of toasting. GUI-thread only (like enumerateDevices).
+    Q_INVOKABLE bool inputSourceReachable(const QString &label, const QString &kind);
+    // The current meter snapshots (label → { peaks[], rms[], channelCount,
+    // layout, ... }) — the Media pane's audio cards read their device's
+    // peaks for the live level state window (same list the AV dialogs use).
+    Q_INVOKABLE QVariantList inputMeterList() const { return inputLevels_; }
+    // ---- OUTPUT metering (the program mix) -------------------------------
+    // WASAPI loopback on the default render endpoint — the levels of what
+    // the engine is actually playing out. The monitor tile's L/R meters
+    // read outputLevels while outputMetering.
+    Q_INVOKABLE void startOutputMeter();
+    Q_INVOKABLE void stopOutputMeter();
+    // Refcounted release: several tiles may ask for the meter while live —
+    // the tap dies only when the LAST consumer releases. Tiles call this
+    // from destruction/visibility changes; startOutputMeter re-arms.
+    Q_INVOKABLE void maybeStopOutputMeter();
+    Q_PROPERTY(bool outputMetering READ outputMetering NOTIFY outputMeteringChanged)
+    Q_PROPERTY(QVariantMap outputLevels READ outputLevels NOTIFY outputLevelsChanged)
+    bool outputMetering() const { return outputMetering_; }
+    QVariantMap outputLevels() const { return outputLevels_; }
+    // True while ANY audio metering is engaged — an input tap (an audio card
+    // clicked in the Media pane) or the program-mix loopback. The output
+    // tile's OVERLAID LED strips read this: audio clicked → meters on.
+    Q_PROPERTY(bool anyAudioMetering READ anyAudioMetering NOTIFY audioMeteringChanged)
+    bool anyAudioMetering() const { return outputMetering_ || !requestedMeters_.isEmpty(); }
     // Each entry: { id, label, value } — value mirrors label because the AV
     // board stores the human-readable sublabel on its rows; ids ride along
     // for the future capture-graph plumbing.
@@ -264,6 +296,9 @@ signals:
     // deliberately modest rate (not the ~480Hz the captures run at) so the
     // meter dots animate like a real VU without flooding the GUI thread.
     void inputLevelsChanged();
+    void outputLevelsChanged();
+    void outputMeteringChanged();
+    void audioMeteringChanged();
 
 private:
     explicit EngineBridge(QObject *parent = nullptr);
@@ -290,12 +325,24 @@ private:
 
     // ---- Live input metering state --------------------------------------
     QVariantList inputLevels_;          // the published snapshot set
+    // Output (program-mix) meter state: the loopback tap's id + the single
+    // published snapshot (the default render endpoint's L/R).
+    bool outputMetering_ = false;
+    QVariantMap outputLevels_;
+    uint32_t outputMeterDevice_ = 0;   // the waveout roster number
+    int outputMeterRefs_ = 0;          // consumers holding the loopback tap
     class QTimer *inputMeterPump_ = nullptr;   // 50 ms poll while taps are live
     QMap<uint32_t, QString> inputLabels_;   // waveIn device id → roster label
-    // Every label with a requested tap (idempotent startInputMeter calls);
-    // labels resolve again on re-enumeration so hot-plug re-binds.
-    QSet<QString> requestedMeters_;
+    // Every label with a requested tap, REFCOUNTED — the board row that
+    // creates a device row and a dialog editing that same device can both
+    // hold it open independently (e.g. closing the Edit dialog must not
+    // kill the board row's own meter). Labels resolve again on
+    // re-enumeration so hot-plug re-binds.
+    QMap<QString, int> requestedMeters_;
     void resolveAndStartMeter(const QString &deviceLabel);
+    // One tick of the shared meter pump: input snapshots + (when on) the
+    // program-mix loopback snapshot. Both meter UIs breathe off this.
+    void pumpMeterSnapshot();
 
     // ---- Live video preview state ---------------------------------------
     QMap<QString, QString> previewModes_;   // roster label → requested mode pick

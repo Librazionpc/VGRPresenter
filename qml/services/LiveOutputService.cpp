@@ -1,6 +1,8 @@
 #include "services/LiveOutputService.h"
 
 #include "services/ShowConverter.h"
+
+#include <QSet>
 #include "modules/presentation/LiveOutputController.hpp"
 #include "modules/presentation/PresentationEngine.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
@@ -259,29 +261,7 @@ void LiveOutputService::takeInput(const QString &label, const QString &kind, con
     if (!inputPump_) {
         inputPump_ = new QTimer(this);
         inputPump_->setInterval(66);   // ~15 fps, matching the tap's production rate
-        connect(inputPump_, &QTimer::timeout, this, [this] {
-            // FRAME DETECTION — SERVICE-SIDE, off the provider's decode-once
-            // cache (the same cache requestImage drains): the previous QML
-            // confirmInputFrame() round-trip created a write-in-binding
-            // feedback edge (tile's onStatusChanged → inputRev bump → the
-            // SAME tile's inputSource URL re-evaluates) and QML flagged it
-            // as a binding loop. inputLive now flips purely from the tap's
-            // real production; QML only reads.
-            if (!inputLive_ && !inputLabel_.isEmpty()) {
-                const QImage frame = EngineBridge::instance().previewFrameFor(inputLabel_);
-                if (!frame.isNull() && frame.width() > 1) {
-                    inputLive_ = true;
-                    qInfo("LiveOutputService: first frame decoded for '%s' (%dx%d)",
-                          qUtf8Printable(inputLabel_), frame.width(), frame.height());
-                }
-            }
-            // Unconditional rev bump while taken: the tile's Image must
-            // re-fetch every tick from the FIRST one (the provider answers
-            // warm-up requests with a 1×1 transparent, which keeps the
-            // placeholder up without ever flipping inputLive).
-            inputRev_++;
-            emit inputChanged();
-        });
+        connect(inputPump_, &QTimer::timeout, this, &LiveOutputService::pumpTick);
     }
     inputPump_->start();
     // inputLive_ flips true when the provider's first frame decodes — the
@@ -301,6 +281,114 @@ void LiveOutputService::confirmInputFrame(const QString &label)
     Q_UNUSED(label)
 }
 
+// ---------------------------------------------------------------------------
+// The shared input pump — while a take (owner "output") OR a card preview
+// (owner "card") is held, this ticks at ~15 Hz: flips inputLive on the taken
+// input's first decoded frame (SERVICE-SIDE, off the provider's decode-once
+// cache — the previous QML confirmInputFrame() round-trip was a write-in-
+// binding feedback edge QML flagged as a binding loop; QML only reads now),
+// then bumps inputRev so every consuming Image re-fetches (the provider
+// answers warm-up requests with a 1×1 transparent that keeps placeholders
+// up without ever flipping inputLive). Stops itself when nothing is held.
+void LiveOutputService::pumpTick()
+{
+    if (!inputLive_ && !inputLabel_.isEmpty()) {
+        const QImage frame = EngineBridge::instance().previewFrameFor(inputLabel_);
+        if (!frame.isNull() && frame.width() > 1) {
+            inputLive_ = true;
+            qInfo("LiveOutputService: first frame decoded for '%s' (%dx%d)",
+                  qUtf8Printable(inputLabel_), frame.width(), frame.height());
+        }
+    }
+    // Per-label production (card previews' thumbnails light off this —
+    // inputLive only tracks the OUTPUT take). Freshly-taken labels enter
+    // producing_ on their first frame; released labels are pruned in
+    // clearInput/endPreviewInput.
+    for (const QString &held : cardPreviews_.keys()) {
+        if (producing_.contains(held))
+            continue;
+        const QImage frame = EngineBridge::instance().previewFrameFor(held);
+        if (!frame.isNull() && frame.width() > 1)
+            producing_.insert(held);
+    }
+    if (!inputLabel_.isEmpty() && !producing_.contains(inputLabel_)) {
+        const QImage frame = EngineBridge::instance().previewFrameFor(inputLabel_);
+        if (!frame.isNull() && frame.width() > 1)
+            producing_.insert(inputLabel_);
+    }
+    // Unconditional rev bump while ANY tap is held — tiles and cards share
+    // the nonce, so both re-fetch.
+    inputRev_++;
+    emit inputChanged();
+    if (inputLabel_.isEmpty() && cardPreviews_.isEmpty())
+        inputPump_->stop();
+}
+
+bool LiveOutputService::inputProducing(const QString &label) const
+{
+    return producing_.contains(label);
+}
+
+// ---------------------------------------------------------------------------
+// Internal card previews — ONE click on a Media card shows its live feed in
+// the card's own state window (owner "card"); the OUTPUT take (double-click,
+// owner "output", purple border) stays a separate, deliberate gesture. Both
+// ride the SAME owner-counted PAL taps, so a card preview and the output
+// take can hold the same source at once without fighting.
+// ---------------------------------------------------------------------------
+void LiveOutputService::previewInput(const QString &label, const QString &kind, const QString &mode)
+{
+    if (label.isEmpty() || (kind != QLatin1String("camera") && kind != QLatin1String("screen")))
+        return;
+    // Refuse UNREACHABLE sources quietly: a closed window / unplugged camera
+    // must show the card's slashed "can't reach" state, not a toast.
+    if (!EngineBridge::instance().inputSourceReachable(label, kind)) {
+        qInfo("LiveOutputService: '%s' is not reachable right now (window closed / device gone)",
+              qUtf8Printable(label));
+        emit inputChanged();
+        return;
+    }
+    if (kind == QLatin1String("screen"))
+        EngineBridge::instance().startScreenPreview(label, QStringLiteral("card"));
+    else
+        EngineBridge::instance().startVideoPreview(label, mode, QStringLiteral("card"));
+    cardPreviews_[label] = QVariantMap{
+        { QStringLiteral("kind"), kind },
+        { QStringLiteral("mode"), mode },
+    };
+    if (!inputPump_) {
+        inputPump_ = new QTimer(this);
+        inputPump_->setInterval(66);
+        connect(inputPump_, &QTimer::timeout, this, &LiveOutputService::pumpTick);
+    }
+    if (!inputPump_->isActive())
+        inputPump_->start();
+    emit inputChanged();
+}
+
+void LiveOutputService::endPreviewInput(const QString &label)
+{
+    if (!cardPreviews_.contains(label))
+        return;
+    const QVariantMap entry = cardPreviews_.take(label).toMap();
+    const QString kind = entry.value("kind").toString();
+    if (kind == QLatin1String("screen"))
+        EngineBridge::instance().stopScreenPreview(label, QStringLiteral("card"));
+    else
+        EngineBridge::instance().stopVideoPreview(label, QStringLiteral("card"));
+    producing_.remove(label);
+    emit inputChanged();
+}
+
+bool LiveOutputService::inputHealthy(const QString &label, const QString &kind) const
+{
+    // Unreachable BY RESOLUTION (window closed / device unplugged): the
+    // slash state. A held tap that simply hasn't produced its first frame
+    // yet (warm-up) still counts as healthy — reachability is the question,
+    // not instantaneous throughput.
+    return EngineBridge::instance().inputSourceReachable(label, kind);
+}
+
 void LiveOutputService::clearInput()
 {
     if (inputLabel_.isEmpty())
@@ -312,7 +400,9 @@ void LiveOutputService::clearInput()
     inputLabel_.clear();
     inputKind_.clear();
     inputLive_ = false;
-    if (inputPump_)
+    producing_.remove(inputLabel_);
+    // A held card preview keeps the pump (and its rev bumps) alive.
+    if (inputPump_ && cardPreviews_.isEmpty())
         inputPump_->stop();
     emit inputChanged();
 }
@@ -380,6 +470,46 @@ void LiveOutputService::runEnvSelfTest()
                         qWarning("LiveOutputService[selftest] REACTIVATE FAIL: held=%d live=%d",
                                  held ? 1 : 0, instance().inputLive() ? 1 : 0);
                     instance().clearInput();   // the self-test leaves NO side effects
+                    // METER PHASE: start the FIRST audio input's meter tap and
+                    // wait through warm-up + a capture window. FAIL = the tap
+                    // never produced a non-zero channelCount (no signal — the
+                    // "meter doesn't animate" report), PASS = real peaks.
+                    const QVariantList audio = EngineBridge::instance().audioDevices();
+                    QString audioLabel;
+                    for (const QVariant &v : audio) {
+                        const QVariantMap d = v.toMap();
+                        if (d.value("isInput").toBool()) {
+                            audioLabel = d.value("label").toString();
+                            break;
+                        }
+                    }
+                    if (audioLabel.isEmpty()) {
+                        qWarning("LiveOutputService[selftest] METER SKIP: no audio input device");
+                        return;
+                    }
+                    qInfo("LiveOutputService[selftest] metering input '%s'", qUtf8Printable(audioLabel));
+                    EngineBridge::instance().startInputMeter(audioLabel);
+                    QTimer::singleShot(1200, &instance(), [audioLabel] {
+                        QVariantMap snap;
+                        const QVariantList list = EngineBridge::instance().inputMeterList();
+                        for (const QVariant &v : list) {
+                            const QVariantMap s = v.toMap();
+                            if (s.value("label").toString().compare(audioLabel, Qt::CaseInsensitive) == 0) {
+                                snap = s;
+                                break;
+                            }
+                        }
+                        const int cc = snap.value("channelCount").toInt();
+                        if (cc > 0) {
+                            QVariantList peaks = snap.value("peaks").toList();
+                            qInfo("LiveOutputService[selftest] METER PASS: '%s' tap live, %d channels, peak=%.3f",
+                                  qUtf8Printable(audioLabel), cc,
+                                  peaks.isEmpty() ? 0.0 : peaks.first().toDouble());
+                        } else
+                            qWarning("LiveOutputService[selftest] METER FAIL: '%s' produced no snapshot (no signal)",
+                                     qUtf8Printable(audioLabel));
+                        EngineBridge::instance().stopInputMeter(audioLabel);
+                    });
                 });
             });
         });

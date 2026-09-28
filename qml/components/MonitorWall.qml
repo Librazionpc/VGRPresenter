@@ -117,9 +117,9 @@ Item {
         readonly property int pageCount: Math.max(1, Math.ceil(count / perPage))
         readonly property real pageW: 376
         readonly property real slotW: count === 1 ? 376 : 182
-        readonly property real slotH: count === 1
-                                     ? 6 + (slotW - 12) * 9 / 16 + 6 + 16 + 6
-                                     : 143
+        // The tile's REAL height: pane + footer — the LED meters OVERLAY the
+        // pane (bottom-left), so nothing extra sits below it.
+        readonly property real slotH: 6 + (slotW - 12) * 9 / 16 + 6 + 16 + 6
 
         width: 376
         height: pageCount === 1 ? slotH

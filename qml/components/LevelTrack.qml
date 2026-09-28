@@ -1,38 +1,109 @@
 import QtQuick
 import VGRPresenterUI
 
-// The 4px level meter on a routing-board card (audio rows, video media
-// rows, buses). Extracted so track/fill geometry can't drift across
-// delegates — place it and give it `value` (0..100, clamped).
+// The small level meter on a routing-board card (audio rows, video media rows, buses).
+// FreeShow's own compact meter (src/frontend/components/drawer/live/Mic.svelte): a signal
+// dot beside a thin bar. The bar's a CONTINUOUS gradient (cyan -> green -> amber -> red),
+// not discrete LED segments — a faint "ghost" of the full range stays visible at rest (so
+// the scale reads even at silence), and the lit portion reveals left-to-right as `value`
+// rises. Extracted so track/fill geometry can't drift across delegates — place it and give
+// it `value` (0..100, clamped).
 //
-// COLOR IS VALUE-DRIVEN, like a real VU meter: green in the safe zone,
-// amber approaching the top, red in the hot zone. The old hardcoded green
-// read "all good" at any level — a row pinned at 100 looked identical to
-// one at 20, which is exactly the kind of dishonest visual this component
-// exists to avoid. Pass fillColor ONLY for a deliberate fixed color
-// (e.g. a neutral state); the default tracks the value.
-Rectangle {
+// COLOR IS VALUE-DRIVEN, like a real VU meter, EXCEPT when a caller passes a deliberate
+// fixed color (fixedColor: true — e.g. a bus row tinting by TYPE, not level): then the bar
+// is a flat fill in that color instead of the gradient, same as before.
+Item {
     id: root
 
     property real value: 0
-    // Explicit override; when unset the fill follows the VU zones below.
-    property color fillColor: root.zoneColor
-    // Set true to keep a caller-supplied fillColor from being reinterpreted.
+    // Used only when fixedColor is set; otherwise the bar is the gradient below.
+    property color fillColor: Theme.success
     property bool fixedColor: false
 
-    // VU zones: green below 60, amber 60-84, red 85+.
-    readonly property color zoneColor: root.value >= 85 ? Theme.danger
-                                      : root.value >= 60 ? Theme.warning
-                                      : Theme.success
+    implicitWidth: 100
+    implicitHeight: 4
 
-    width: 100; height: 4; radius: 2
-    color: Theme.chip
+    // `value` (0..100) is a raw LINEAR amplitude percentage straight off the
+    // WASAPI tap. Normal speech/ambient levels sit around -60..-20 dBFS,
+    // which is a linear amplitude of ~0.001..0.1 — mapped directly to width
+    // that pins the bar in the leftmost few percent for virtually all real
+    // audio, so it reads as dead/not-animating. Meters read in dB, not
+    // linear amplitude (every real VU/level meter does this), so the FILL
+    // is mapped on the same -60..0 dB scale the gradient's zones assume.
+    function dbPct(linearPct) {
+        const linear = linearPct / 100
+        if (linear <= 0.0005) return 0   // ≈ -66 dBFS floor → silence
+        const db = 20 * Math.log10(linear)
+        return Math.max(0, Math.min(1, (db + 60) / 60))
+    }
+    readonly property real pct: root.dbPct(root.value)
+    // "is anything coming in at all" — mirrors Mic.svelte's rawDb > -60 dot: a small
+    // nonzero floor so a hair of noise floor doesn't flicker the dot on its own.
+    readonly property bool active: root.value > 1.5
 
-    Rectangle {
-        width: parent.width * Math.max(0, Math.min(1, root.value / 100))
-        height: parent.height
-        radius: 2
-        color: root.fixedColor ? root.fillColor : root.zoneColor
-        Behavior on color { ColorAnimation { duration: 150 } }
+    readonly property Gradient barGradient: Gradient {
+        orientation: Gradient.Horizontal
+        GradientStop { position: 0.0; color: "#00c8c8" }
+        GradientStop { position: 0.55; color: "#00ff32" }
+        GradientStop { position: 0.84; color: "#ffc800" }
+        GradientStop { position: 1.0; color: "#c80000" }
+    }
+
+    Row {
+        anchors.fill: parent
+        spacing: 4
+
+        // Signal dot — on/off, not level-proportional (FreeShow's own convention).
+        Rectangle {
+            id: dot
+            anchors.verticalCenter: parent.verticalCenter
+            width: 4; height: 4; radius: 2
+            color: root.fixedColor ? root.fillColor : "#00c8c8"
+            opacity: root.active ? 1 : 0.2
+            Behavior on opacity { NumberAnimation { duration: 100 } }
+        }
+
+        Item {
+            id: bar
+            anchors.verticalCenter: parent.verticalCenter
+            width: parent.width - dot.width - parent.spacing
+            height: parent.height
+
+            Rectangle {
+                id: track
+                anchors.fill: parent
+                radius: height / 2
+                color: Theme.chip
+            }
+
+            // Ghost — the full range, always faintly visible, so the scale reads at rest.
+            Rectangle {
+                anchors.fill: parent
+                radius: height / 2
+                opacity: 0.12
+                color: root.fixedColor ? root.fillColor : "transparent"
+                gradient: root.fixedColor ? null : root.barGradient
+            }
+
+            // Lit portion — clipped to `value`; the gradient is sized to the FULL bar
+            // width so the revealed colors line up with the ghost underneath it.
+            Item {
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                width: bar.width * root.pct
+                clip: true
+                // FreeShow's own Mic.svelte transition: width 0.05s ease.
+                Behavior on width { NumberAnimation { duration: 50; easing.type: Easing.OutQuad } }
+
+                Rectangle {
+                    width: bar.width
+                    height: parent.height
+                    radius: height / 2
+                    color: root.fixedColor ? root.fillColor : "transparent"
+                    gradient: root.fixedColor ? null : root.barGradient
+                }
+            }
+        }
     }
 }

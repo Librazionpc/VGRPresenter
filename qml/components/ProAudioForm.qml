@@ -519,7 +519,11 @@ Column {
                 id: chRow
                 required property int index
                 width: parent.width
-                height: 34
+                // Taller than before (was 34): FreeShow's "detailed" AudioMeter
+                // (src/frontend/components/drawer/audio/AudioMeter.svelte, the
+                // exact one AudioChannelMixer.svelte gives each channel strip)
+                // carries a dB scale under the bar, not just the bar itself.
+                height: 52
                 radius: Theme.radiusSm
                 color: "#1d2029"
                 border.width: 1
@@ -545,12 +549,37 @@ Column {
                     ? Math.min(1, chRow.rawLevel * (root.volume / 100) * knob.gain)
                     : 0
 
+                // Fast attack, slow release (FreeShow's AudioMeter.svelte's
+                // updateMeterChannel), and a peak-hold that sticks 2s before
+                // easing down — the same behaviour OutputMonitorTile's meter uses.
+                property real smoothed: 0
+                property real peakValue: 0
+                property real peakHeldAt: 0
+                Timer {
+                    interval: 33
+                    running: chRow.visible
+                    repeat: true
+                    onTriggered: {
+                        const target = chRow.level
+                        chRow.smoothed = target > chRow.smoothed
+                            ? target : chRow.smoothed + (target - chRow.smoothed) * 0.2
+                        const now = Date.now()
+                        if (chRow.smoothed >= chRow.peakValue) {
+                            chRow.peakValue = chRow.smoothed
+                            chRow.peakHeldAt = now
+                        } else if (now - chRow.peakHeldAt > 2000) {
+                            chRow.peakValue = Math.max(chRow.smoothed, chRow.peakValue - 0.02)
+                        }
+                    }
+                }
+
                 // Checkbox — the reference's plain square check.
                 Rectangle {
                     id: box
                     anchors.left: parent.left
                     anchors.leftMargin: 12
-                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.top: parent.top
+                    anchors.topMargin: 9
                     width: 15; height: 15
                     radius: 3
                     color: chRow.chOn ? "#3574f0" : "transparent"
@@ -576,66 +605,121 @@ Column {
                 Text {
                     anchors.left: box.right
                     anchors.leftMargin: 14
-                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenter: box.verticalCenter
                     text: qsTr("Channel %1").arg(chRow.index + 1)
                     color: chRow.chOn ? "#e2e8f0" : "#5c6475"
                     font.family: Theme.fontFamily
                     font.pixelSize: Theme.textSm
                 }
 
-                // Mini VU — segmented dots (green → amber → red), lit only
-                // while the channel is enabled and the caller reports signal.
-                // The strip stretches horizontally across the free width
-                // between the channel label and the dB cell — one long scale,
-                // not a short fixed chip row.
-                Row {
-                    id: meterRow
+                // Signal dot — on/off, not level-proportional (FreeShow's own convention).
+                Rectangle {
+                    id: signalDot
                     anchors.left: parent.left
                     anchors.leftMargin: 150
+                    anchors.verticalCenter: box.verticalCenter
+                    width: 5; height: 5; radius: 2.5
+                    color: "#00c8c8"
+                    opacity: chRow.level > 0.01 ? 1 : 0.2
+                    Behavior on opacity { NumberAnimation { duration: 100 } }
+                }
+
+                // The gradient every layer below shares — left (quiet) = cyan,
+                // through green/amber, right (loud) = red.
+                readonly property Gradient barGradient: Gradient {
+                    orientation: Gradient.Horizontal
+                    GradientStop { position: 0.0; color: "#00c8c8" }
+                    GradientStop { position: 0.55; color: "#00ff32" }
+                    GradientStop { position: 0.84; color: "#ffc800" }
+                    GradientStop { position: 1.0; color: "#c80000" }
+                }
+
+                // `chRow.smoothed`/`peakValue` are raw LINEAR amplitude (0..1) — the
+                // WASAPI tap's own domain, kept for the envelope math. Real speech/
+                // ambient levels sit around -60..-20 dBFS (linear ~0.001..0.1), which
+                // pins a linear-width fill in the leftmost few percent for virtually
+                // all real audio — reads as dead. Meters read in dB, so the FILL and
+                // peak tick are positioned on the same -60..0 dB scale as the ticks
+                // below (dbScale), not raw amplitude.
+                function dbPct(linear) {
+                    if (linear <= 0.0005) return 0   // ≈ -66 dBFS floor → silence
+                    const db = 20 * Math.log10(linear)
+                    return Math.max(0, Math.min(1, (db + 60) / 60))
+                }
+
+                // The bar itself — a CONTINUOUS gradient reveal (FreeShow's real design),
+                // not discrete LED dots. Stretches across the free width between the
+                // signal dot and the dB cell.
+                Item {
+                    id: meterBar
+                    anchors.left: signalDot.right
+                    anchors.leftMargin: 10
                     anchors.right: dbCell.left
                     anchors.rightMargin: 16
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: 2
-                    clip: true
-                    visible: width > 24   // a squeezed dialog drops the strip instead of overflowing it
+                    anchors.verticalCenter: box.verticalCenter
+                    height: 10
+                    visible: width > 24   // a squeezed dialog drops the bar instead of overflowing it
 
-                    readonly property int segs: 24
-                    // Segments widen to share the strip, so the meter fills
-                    // the row at any dialog width.
-                    readonly property real segW: Math.max(4, (width - (segs - 1) * spacing) / segs)
+                    // Ghost — the full range, always faintly visible, so the scale reads at rest.
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: height / 2
+                        opacity: 0.14
+                        gradient: chRow.barGradient
+                    }
+
+                    // Lit portion — clipped to the smoothed level; the gradient rectangle
+                    // inside is the FULL bar width so its colors line up with the ghost.
+                    Item {
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: parent.width * chRow.dbPct(chRow.smoothed)
+                        clip: true
+
+                        Rectangle {
+                            width: meterBar.width
+                            height: parent.height
+                            radius: height / 2
+                            gradient: chRow.barGradient
+                        }
+                    }
+
+                    // Peak-hold tick.
+                    Rectangle {
+                        visible: chRow.peakValue > 0.01
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: 2
+                        x: parent.width * chRow.dbPct(chRow.peakValue) - 1
+                        color: "#ffffff"
+                        opacity: 0.6
+                    }
+                }
+
+                // dB scale — FreeShow's own ladder (-60..0, major ticks every 6dB), positioned
+                // linearly in dB (same -60..0 → 0..1 mapping the bar's fill above uses) so the
+                // ticks line up with what the bar actually shows, evenly spaced every 6dB.
+                Item {
+                    id: dbScale
+                    anchors.left: meterBar.left
+                    anchors.right: meterBar.right
+                    anchors.top: meterBar.bottom
+                    anchors.topMargin: 4
+                    height: 12
+                    visible: meterBar.visible
 
                     Repeater {
-                        model: meterRow.segs
-
-                        delegate: Rectangle {
-                            id: dot
-                            required property int index
-                            // Position across the meter (0..1) — the level
-                            // threshold this dot represents.
-                            readonly property real pos: dot.index / (meterRow.segs - 1)
-                            width: meterRow.segW; height: 12; radius: 2
-                            // A dot is LIT when the channel's level has
-                            // reached it. CALIBRATION: the comparison runs in
-                            // dB — a linear threshold pins healthy signals at
-                            // the top (a −6 dBFS song lights ~94% of a linear
-                            // strip). levelDb maps 0..1 → −60..0 dBFS; dots
-                            // light below (levelDb + 60·pos... via the dB
-                            // distance), so a −12 dBFS signal reads ~80%, and
-                            // the red band only lights above −12 dBFS — head-
-                            // room like a real VU. (This is the "−12 dB
-                            // display alignment" calibration knob.)
-                            readonly property real levelDb: chRow.level > 0.0005
-                                ? Math.max(-60, 20 * Math.log10(chRow.level)) : -60
-                            readonly property bool lit: levelDb > -60 + dot.pos * 60 + 0.5
-                            // The green→yellow→red ramp is ALWAYS visible
-                            // (dimmed) — the meter reads as a scale even at
-                            // rest, exactly like the reference; signal
-                            // brightens the portion the level has reached.
-                            color: dot.pos < 0.625 ? "#4ade80"
-                                 : dot.pos < 0.8125 ? "#f5c26b"
-                                 : "#ff4d3d"
-                            opacity: dot.lit ? 1 : 0.22
-                            Behavior on opacity { NumberAnimation { duration: 90 } }
+                        model: [-60, -54, -48, -42, -36, -30, -24, -18, -12, -6, 0]
+                        delegate: Text {
+                            required property int modelData
+                            readonly property real pct: (modelData + 60) / 60
+                            x: Math.min(dbScale.width - implicitWidth, dbScale.width * pct - implicitWidth / 2)
+                            y: 0
+                            text: modelData === 0 ? "0" : String(modelData)
+                            color: "#5c6475"
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 8
                         }
                     }
                 }
@@ -647,7 +731,7 @@ Column {
                     id: dbCell
                     anchors.right: knob.left
                     anchors.rightMargin: 14
-                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenter: box.verticalCenter
                     text: root.levelText(chRow.level)
                     color: "#8a94a6"
                     font.family: Theme.fontFamily
@@ -659,12 +743,12 @@ Column {
                 // it is this channel's fader (0..1, default unity), dragged
                 // vertically, double-clicked to reset. The meter shows the
                 // full post-fader chain: WASAPI level → master fader → this
-                // knob → the row's dots and dB cell.
+                // knob → the row's bar and dB cell.
                 Item {
                     id: knob
                     anchors.right: parent.right
                     anchors.rightMargin: 12
-                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenter: box.verticalCenter
                     width: 24; height: 24
 
                     // This channel's gain (0..1): read from the model if the
@@ -676,10 +760,31 @@ Column {
                     // for fine trims, fast enough to sweep 0..1 quickly.
                     readonly property real angle: -135 + gain * 270
                     readonly property bool atUnity: Math.abs(gain - 1.0) < 0.005
+                    // The needle's own sweep — LIVE level (same dbPct/smoothed the bar
+                    // uses), not gain. A glowing ring alone still read as "not moving";
+                    // this is the actual speedometer-style needle motion that was missing.
+                    readonly property real liveAngle: -135 + chRow.dbPct(chRow.smoothed) * 270
 
                     function setGain(g) {
                         gain = Math.max(0, Math.min(1, g))
                         root.channelGainEdited(chRow.index, gain)
+                    }
+
+                    // Live glow ring — the knob itself is a manual gain trim (it only
+                    // moves when dragged), but sitting right beside the live dB
+                    // reading it reads as broken/frozen if nothing about it ever
+                    // responds to signal. This ring brightens with the SAME
+                    // smoothed/dbPct level driving the bar, so the knob visibly
+                    // pulses with live audio without disturbing the drag gesture.
+                    Rectangle {
+                        anchors.fill: parent
+                        anchors.margins: -3
+                        radius: 15
+                        color: "transparent"
+                        border.width: 2
+                        border.color: "#00c8c8"
+                        opacity: Math.min(0.85, chRow.dbPct(chRow.smoothed))
+                        Behavior on opacity { NumberAnimation { duration: 80 } }
                     }
 
                     Rectangle {
@@ -690,11 +795,30 @@ Column {
                         border.color: knob.atUnity ? "#4ade80" : "#eab308"
                         Behavior on border.color { ColorAnimation { duration: 100 } }
                     }
-                    // The classic needle, rotating −135°..+135° with gain.
+                    // Gain-trim marker — a small fixed tick on the outer glow ring
+                    // showing where the manual trim sits (the needle below now sweeps
+                    // live level instead, so trim gets its own, separate indicator).
+                    Item {
+                        anchors.centerIn: parent
+                        width: 2; height: 30
+                        rotation: knob.angle
+
+                        Rectangle {
+                            anchors.top: parent.top
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            width: 2; height: 4
+                            radius: 1
+                            color: knob.atUnity ? "#4ade80" : "#eab308"
+                        }
+                    }
+
+                    // The needle — sweeps −135°..+135° with LIVE level, speedometer-style
+                    // (fast attack / slow release, same smoothing driving the bar).
                     Item {
                         anchors.centerIn: parent
                         width: 2.5; height: 12
-                        rotation: knob.angle
+                        rotation: knob.liveAngle
+                        Behavior on rotation { NumberAnimation { duration: 60; easing.type: Easing.OutQuad } }
 
                         Rectangle {
                             anchors.top: parent.top

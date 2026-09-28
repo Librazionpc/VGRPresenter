@@ -44,7 +44,16 @@ ModalCard {
     // wherever its state lives (model row or Add-dialog buffer).
     signal applied(bool autoRoute, var routes)
 
-    onAccepted: root.applied(root.autoRoute, root.routes)
+    // Unlike the screen's other dialogs, this modal isn't driven by a
+    // parent-owned `shown` property (it's opened imperatively via open() so
+    // it can be shared between the Add and Edit dialogs) — so it must close
+    // itself here, or Apply/Discard look completely dead even though Apply
+    // does correctly hand the patch back through applied().
+    onAccepted: {
+        root.applied(root.autoRoute, root.routes)
+        root.close()
+    }
+    onCancelled: root.close()
 
     function toggle(channel, bus) {
         if (root.autoRoute) return

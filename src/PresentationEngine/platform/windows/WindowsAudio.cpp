@@ -162,6 +162,7 @@ struct WindowsAudio::MeterTap {
     std::atomic<bool> running{false};
     uint32_t deviceId = 0;
     std::string deviceName;   // roster name — the reliable endpoint match key
+    bool loopback = false;    // false = input capture, true = render loopback
     IAudio::InputMeterLevels latest;   // written by the capture thread under the table's mutex
     // Owned + joined by the tap itself: erasing the tap (Stop, destructor)
     // blocks until the capture thread has fully exited, so no reference into
@@ -218,7 +219,7 @@ WindowsAudio::WindowsAudio() : meters_(std::make_unique<MeterTable>()) {}
 // ~MeterTable joins every live tap before the members die.
 WindowsAudio::~WindowsAudio() = default;
 
-void WindowsAudio::MeterThread(MeterTap &tap, std::mutex &publishMutex)
+void WindowsAudio::MeterThread(MeterTap &tap, std::mutex &publishMutex, bool loopback)
 {
     // This thread's own COM apartment + enumerator: MMDeviceAPI objects are
     // not marshalled across apartments, so nothing here is shared.
@@ -229,13 +230,16 @@ void WindowsAudio::MeterThread(MeterTap &tap, std::mutex &publishMutex)
                                   reinterpret_cast<void **>(&enumerator));
     if (FAILED(hr) || !enumerator) return;
 
-    // wavein:<n> → the eCapture endpoint. PRIMARY match: the device's
-    // friendly name (WinMM names are truncated prefixes of the endpoint's —
-    // the exact correlation QueryWasapiMixFormats establishes; raw indexes
-    // disagree whenever a legacy WinMM device has no ACTIVE MMDevAPI
-    // endpoint). Fallback: positional, for name-less exotic devices.
+    // wavein:<n> → the eCapture endpoint; waveout:<n> LOOPBACK → the
+    // eRender endpoint captured with AUDCLNT_STREAMFLAGS_LOOPBACK (the
+    // program mix). PRIMARY match: the device's friendly name (WinMM names
+    // are truncated prefixes of the endpoint's — the exact correlation
+    // QueryWasapiMixFormats establishes; raw indexes disagree whenever a
+    // legacy WinMM device has no ACTIVE MMDevAPI endpoint). Fallback:
+    // positional, for name-less exotic devices.
     IMMDeviceCollection *collection = nullptr;
-    hr = enumerator->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE, &collection);
+    hr = enumerator->EnumAudioEndpoints(loopback ? eRender : eCapture,
+                                        DEVICE_STATE_ACTIVE, &collection);
     IMMDevice *device = nullptr;
     if (SUCCEEDED(hr) && collection) {
         UINT count = 0;
@@ -269,8 +273,11 @@ void WindowsAudio::MeterThread(MeterTap &tap, std::mutex &publishMutex)
         // Shared-mode capture on the endpoint's mix format: read-only tap of
         // what the OS already mixes — no format negotiation, no exclusive
         // hold, nothing the user's apps can hear. The 100 ms period is a hint;
-        // WASAPI snaps it to the endpoint's own quantum.
-        || FAILED(client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0,
+        // WASAPI snaps it to the endpoint's own quantum. LOOPBACK adds the
+        // stream flag that turns a render endpoint into a capture source —
+        // the engine's playout IS the machine's playout.
+        || FAILED(client->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                                     loopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0,
                                      1000000 /* 100 ms */, 0, fmt, nullptr))) {
         if (fmt) CoTaskMemFree(fmt);
         if (client) client->Release();
@@ -340,6 +347,22 @@ void WindowsAudio::MeterThread(MeterTap &tap, std::mutex &publishMutex)
         // re-polls (no busy spin, no dependence on timer resolution).
         UINT32 packet = 0;
         if (FAILED(capture->GetNextPacketSize(&packet)) || packet == 0) {
+            // LOOPBACK SILENCE: a render endpoint delivers NO packets at all
+            // while nothing plays (an input tap keeps clocking silence). Keep
+            // the meters alive by publishing zeroed windows at the same pace —
+            // the UI reads "playing silence", not a dead tap.
+            if (loopback) {
+                if (++framesSinceSnapshot >= windowFrames) {
+                    IAudio::InputMeterLevels snap = base;
+                    snap.framesCaptured = totalFrames;
+                    {
+                        const std::lock_guard<std::mutex> lock(publishMutex);
+                        tap.latest = snap;
+                    }
+                    framesSinceSnapshot = 0;
+                }
+                totalFrames += windowFrames / 4;
+            }
             Sleep(5);
             continue;
         }
@@ -448,7 +471,7 @@ Result<void> WindowsAudio::StartInputMeter(uint32_t deviceId)
         // The worker references this tap's storage and the table's mutex;
         // both outlive it because every removal path joins via ~MeterTap.
         tap->worker = std::thread(&WindowsAudio::MeterThread, std::ref(*tap),
-                                  std::ref(meters_->mutex));
+                                  std::ref(meters_->mutex), false);
         slot = std::move(tap);
     }
     stale.reset();   // join the replaced tap with the mutex free
@@ -480,8 +503,82 @@ std::vector<uint32_t> WindowsAudio::ActiveInputMeters() const
         return ids;
     const std::lock_guard<std::mutex> lock(meters_->mutex);
     for (const auto &[id, tap] : meters_->taps)
-        if (tap->running.load()) ids.push_back(id);
+        if (tap->running.load() && !tap->loopback) ids.push_back(id);
     return ids;
+}
+
+// ---- OUTPUT metering (the program mix, via WASAPI loopback) ----------------
+// Mirrors StartInputMeter: one roster pass validates the waveout id and
+// captures the friendly name the tap thread matches the RENDER endpoint by;
+// the loopback flag routes MeterThread through AUDCLNT_STREAMFLAGS_LOOPBACK.
+// Input and output taps share the table — the id namespaces (wavein:/
+// waveout:) never collide because both sides validate their own prefix.
+Result<void> WindowsAudio::StartOutputMeter(uint32_t deviceId)
+{
+    bool known = false;
+    std::string rosterName;
+    for (const auto &d : Enumerate()) {
+        if (!d.isInput && d.id == "waveout:" + std::to_string(deviceId)) {
+            known = true;
+            rosterName = d.name;
+            break;
+        }
+    }
+    if (!known)
+        return Error::Make(Err::NotFound, "Audio",
+                           "no output device waveout:" + std::to_string(deviceId));
+
+    if (!meters_)
+        meters_ = std::make_unique<MeterTable>();
+
+    std::unique_ptr<MeterTap> stale;
+    {
+        const std::lock_guard<std::mutex> lock(meters_->mutex);
+        auto &slot = meters_->taps[deviceId];
+        if (slot && slot->running.load() && slot->loopback)
+            return Ok();   // idempotent — already running
+        if (slot) {
+            slot->running.store(false);
+            stale = std::move(slot);
+        }
+        auto tap = std::make_unique<MeterTap>();
+        tap->deviceId = deviceId;
+        tap->deviceName = rosterName;
+        tap->loopback = true;
+        tap->running.store(true);
+        tap->worker = std::thread(&WindowsAudio::MeterThread, std::ref(*tap),
+                                  std::ref(meters_->mutex), true);
+        slot = std::move(tap);
+    }
+    stale.reset();   // join the replaced tap with the mutex free
+    return Ok();
+}
+
+Result<void> WindowsAudio::StopOutputMeter(uint32_t deviceId)
+{
+    if (!meters_)
+        return Ok();
+    // Only erase when the tap IS a loopback one — an input tap may share the
+    // id slot is impossible (namespaces differ), but stay precise anyway.
+    {
+        const std::lock_guard<std::mutex> lock(meters_->mutex);
+        auto it = meters_->taps.find(deviceId);
+        if (it == meters_->taps.end() || !it->second->loopback)
+            return Ok();
+    }
+    meters_->Erase(deviceId);
+    return Ok();
+}
+
+IAudio::InputMeterLevels WindowsAudio::OutputLevels(uint32_t deviceId)
+{
+    if (!meters_)
+        return IAudio::InputMeterLevels{};
+    const std::lock_guard<std::mutex> lock(meters_->mutex);
+    auto it = meters_->taps.find(deviceId);
+    if (it == meters_->taps.end() || !it->second->loopback)
+        return IAudio::InputMeterLevels{};
+    return it->second->latest;
 }
 
 std::vector<AudioDeviceInfo> WindowsAudio::Enumerate() const {

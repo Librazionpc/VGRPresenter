@@ -615,6 +615,9 @@ void EngineBridge::resolveAndStartMeter(const QString &deviceLabel)
     // roster (audioDevices_) — a live IAudio::Enumerate() here re-ran the
     // WASAPI mix-format COM queries on every kind chip / device pick, and
     // that storm stalled the dialogs exactly like the video one did.
+    // Matching is TRIMMED + CASE-INSENSITIVE now: a hand-stored sublabel
+    // that differs by whitespace/case used to die SILENTLY here (the meter
+    // card showed idle forever — "no signal" with no reason logged).
     const QString want = deviceLabel.trimmed();
     QString id;
     for (const QVariant &v : audioDevices_) {
@@ -622,72 +625,201 @@ void EngineBridge::resolveAndStartMeter(const QString &deviceLabel)
         if (!d.value("isInput").toBool())
             continue;
         const bool isDefault = d.value("isDefault").toBool();
-        if (want.isEmpty() ? isDefault : d.value("label").toString() == want) {
+        if (want.isEmpty() ? isDefault
+                           : d.value("label").toString().trimmed().compare(want, Qt::CaseInsensitive) == 0) {
             id = d.value("id").toString();
             break;
         }
     }
-    if (id.isEmpty())
-        return;   // unknown label (unplugged) — retries on next enumeration
+    if (id.isEmpty()) {
+        // LOUD now: the earlier silent return hid the exact failure class
+        // the "meter doesn't get signal" report was (unresolvable label).
+        qWarning("EngineBridge: no input device named '%s' to meter (unplugged or roster drift)",
+                 qUtf8Printable(want.isEmpty() ? QStringLiteral("<default>") : want));
+        return;
+    }
     // Windows ids are "wavein:<n>"; other platforms have no WASAPI tap to
     // address (their IAudio keeps the default Unsupported metering) — never
     // guess a number from an alien id scheme.
-    if (!id.startsWith(QStringLiteral("wavein:")))
+    if (!id.startsWith(QStringLiteral("wavein:"))) {
+        qWarning("EngineBridge: input '%s' has a non-WASAPI id (%s) — no meter on this platform",
+                 qUtf8Printable(want), qUtf8Printable(id));
         return;
+    }
     const uint32_t deviceId = static_cast<uint32_t>(id.mid(7).toULong());
     if (audio.StartInputMeter(deviceId).ok())
         inputLabels_[deviceId] = want;
+    else
+        qWarning("EngineBridge: input meter tap failed to start for '%s' (wavein:%u)",
+                 qUtf8Printable(want), deviceId);
 }
 
 void EngineBridge::startInputMeter(const QString &deviceLabel)
 {
     if (!bps::platform::PlatformAccessor::Installed())
         return;
-    requestedMeters_.insert(deviceLabel.trimmed());
+    // Refcounted: the board row and a dialog editing the same device can
+    // each hold this label open independently (see the header comment).
+    ++requestedMeters_[deviceLabel.trimmed()];
     resolveAndStartMeter(deviceLabel);
+    emit audioMeteringChanged();   // the overlay gates on ANY audio metering
 
     if (!inputMeterPump_) {
         inputMeterPump_ = new QTimer(this);
         inputMeterPump_->setInterval(50);
-        connect(inputMeterPump_, &QTimer::timeout, this, [this]() {
-            if (!bps::platform::PlatformAccessor::Installed())
-                return;   // platform torn down mid-pump (shutdown) — idle out
-            auto &a = bps::platform::PlatformAccessor::Get().Audio();
-            QVariantList levels;
-            for (auto it = inputLabels_.constBegin(); it != inputLabels_.constEnd(); ++it) {
-                const uint32_t id = it.key();
-                const auto snap = a.InputLevels(id);
-                QVariantList peaks;
-                QVariantList rms;
-                for (int c = 0; c < snap.channelCount; ++c) {
-                    peaks.append(snap.peaks[c]);
-                    rms.append(snap.rms[c]);
-                }
-                levels.append(QVariantMap{
-                    {QStringLiteral("deviceId"), (int)id},
-                    {QStringLiteral("label"), it.value()},
-                    {QStringLiteral("channelCount"), snap.channelCount},
-                    {QStringLiteral("layout"),
-                     QString::fromLatin1(bps::platform::IAudio::InputMeterLevels::ToString(snap.layout))},
-                    {QStringLiteral("sampleRateHz"), (int)snap.sampleRateHz},
-                    {QStringLiteral("framesCaptured"), (qulonglong)snap.framesCaptured},
-                    {QStringLiteral("peaks"), peaks},
-                    {QStringLiteral("rms"), rms},
-                });
-            }
-            inputLevels_ = std::move(levels);
-            emit inputLevelsChanged();
-        });
+        connect(inputMeterPump_, &QTimer::timeout, this, [this]() { pumpMeterSnapshot(); });
     }
     if (!inputMeterPump_->isActive())
         inputMeterPump_->start();
 }
 
+// One tick of the shared meter pump (~20 Hz): publishes the input taps'
+// snapshots AND — when output metering is on — the program-mix loopback
+// snapshot. The UI's meters breathe off these two lists.
+void EngineBridge::pumpMeterSnapshot()
+{
+    if (!bps::platform::PlatformAccessor::Installed())
+        return;   // platform torn down mid-pump (shutdown) — idle out
+    auto &a = bps::platform::PlatformAccessor::Get().Audio();
+    QVariantList levels;
+    for (auto it = inputLabels_.constBegin(); it != inputLabels_.constEnd(); ++it) {
+        const uint32_t id = it.key();
+        const auto snap = a.InputLevels(id);
+        QVariantList peaks;
+        QVariantList rms;
+        for (int c = 0; c < snap.channelCount; ++c) {
+            peaks.append(snap.peaks[c]);
+            rms.append(snap.rms[c]);
+        }
+        levels.append(QVariantMap{
+            {QStringLiteral("deviceId"), (int)id},
+            {QStringLiteral("label"), it.value()},
+            {QStringLiteral("channelCount"), snap.channelCount},
+            {QStringLiteral("layout"),
+             QString::fromLatin1(bps::platform::IAudio::InputMeterLevels::ToString(snap.layout))},
+            {QStringLiteral("sampleRateHz"), (int)snap.sampleRateHz},
+            {QStringLiteral("framesCaptured"), (qulonglong)snap.framesCaptured},
+            {QStringLiteral("peaks"), peaks},
+            {QStringLiteral("rms"), rms},
+        });
+    }
+    inputLevels_ = std::move(levels);
+    emit inputLevelsChanged();
+
+    // The OUTPUT (program-mix) tap rides the same pump: one snapshot from
+    // the loopback capture on the render endpoint.
+    if (outputMetering_) {
+        const auto osnap = a.OutputLevels(outputMeterDevice_);
+        QVariantList opeaks;
+        QVariantList orms;
+        for (int c = 0; c < osnap.channelCount; ++c) {
+            opeaks.append(osnap.peaks[c]);
+            orms.append(osnap.rms[c]);
+        }
+        QVariantMap next{
+            {QStringLiteral("channelCount"), osnap.channelCount},
+            {QStringLiteral("peaks"), opeaks},
+            {QStringLiteral("rms"), orms},
+            {QStringLiteral("layout"),
+             QString::fromLatin1(bps::platform::IAudio::InputMeterLevels::ToString(osnap.layout))},
+            {QStringLiteral("framesCaptured"), (qulonglong)osnap.framesCaptured},
+        };
+        if (next != outputLevels_) {
+            outputLevels_ = std::move(next);
+            emit outputLevelsChanged();
+        }
+    }
+}
+
+// ---- OUTPUT metering (the program mix) -------------------------------------
+// One loopback tap on the DEFAULT render endpoint (waveout:0's endpoint —
+// the roster marks it default; falling back to the first output device). The
+// pump reuses the input-meter cadence (50 ms) and publishes the same snapshot
+// shape under outputLevels_.
+void EngineBridge::startOutputMeter()
+{
+    if (!bps::platform::PlatformAccessor::Installed())
+        return;
+    // REFCOUNTED: several consumers (every visible active tile) can hold the
+    // program-mix meter; the tap dies only when the last releases via
+    // maybeStopOutputMeter().
+    ++outputMeterRefs_;
+    if (outputMetering_)
+        return;
+    auto &audio = bps::platform::PlatformAccessor::Get().Audio();
+    // The DEFAULT render endpoint's roster number.
+    uint32_t id = UINT32_MAX;
+    for (const QVariant &v : audioDevices_) {
+        const QVariantMap d = v.toMap();
+        if (!d.value("isInput").toBool() && d.value("isDefault").toBool()) {
+            const QString did = d.value("id").toString();
+            if (did.startsWith(QStringLiteral("waveout:")))
+                id = did.mid(8).toUInt();
+            break;
+        }
+    }
+    if (id == UINT32_MAX) {
+        for (const QVariant &v : audioDevices_) {
+            const QVariantMap d = v.toMap();
+            if (!d.value("isInput").toBool()) {
+                const QString did = d.value("id").toString();
+                if (did.startsWith(QStringLiteral("waveout:")))
+                    id = did.mid(8).toUInt();
+                break;
+            }
+        }
+    }
+    if (id == UINT32_MAX || !audio.StartOutputMeter(id).ok()) {
+        qWarning("EngineBridge: output meter unavailable (no render endpoint / no loopback)");
+        return;
+    }
+    outputMeterDevice_ = id;
+    outputMetering_ = true;
+    emit outputMeteringChanged();
+    emit audioMeteringChanged();
+    // The pump is SHARED with the input meters (same 50 ms cadence) —
+    // create it here directly when no input meter made it first (do NOT
+    // start a default-input tap as a side effect).
+    if (!inputMeterPump_) {
+        inputMeterPump_ = new QTimer(this);
+        inputMeterPump_->setInterval(50);
+        connect(inputMeterPump_, &QTimer::timeout, this, [this]() { pumpMeterSnapshot(); });
+    }
+    if (!inputMeterPump_->isActive())
+        inputMeterPump_->start();
+}
+
+void EngineBridge::stopOutputMeter()
+{
+    outputMeterRefs_ = 0;
+    if (!outputMetering_)
+        return;
+    if (bps::platform::PlatformAccessor::Installed())
+        (void)bps::platform::PlatformAccessor::Get().Audio().StopOutputMeter(outputMeterDevice_);
+    outputMetering_ = false;
+    outputLevels_ = QVariantMap{};
+    emit outputLevelsChanged();
+    emit outputMeteringChanged();
+    emit audioMeteringChanged();
+}
+
+void EngineBridge::maybeStopOutputMeter()
+{
+    if (outputMeterRefs_ > 0)
+        --outputMeterRefs_;
+    if (outputMeterRefs_ == 0)
+        stopOutputMeter();
+}
+
 void EngineBridge::stopInputMeter(const QString &deviceLabel)
 {
     const QString want = deviceLabel.trimmed();
-    if (!requestedMeters_.remove(want))
+    const auto it = requestedMeters_.find(want);
+    if (it == requestedMeters_.end())
         return;   // not metering that label — nothing to release
+    if (--it.value() > 0)
+        return;   // another consumer (board row / other dialog) still holds it open
+    requestedMeters_.erase(it);
     // Stop the tap under its label (labels map 1:1 to ids while the device
     // is present; a vanished device's tap already died with its endpoint).
     if (bps::platform::PlatformAccessor::Installed()) {
@@ -705,8 +837,10 @@ void EngineBridge::stopInputMeter(const QString &deviceLabel)
         else
             ++it;
     }
-    // No requested meters left: stop the pump and publish the empty set.
-    if (requestedMeters_.isEmpty()) {
+    // No requested meters left: stop the pump and publish the empty set —
+    // unless the OUTPUT meter still needs it (the same pump drives its
+    // loopback snapshots).
+    if (requestedMeters_.isEmpty() && !outputMetering_) {
         if (inputMeterPump_)
             inputMeterPump_->stop();
         inputLabels_.clear();
@@ -715,12 +849,15 @@ void EngineBridge::stopInputMeter(const QString &deviceLabel)
             emit inputLevelsChanged();
         }
     }
+    emit audioMeteringChanged();   // the overlay gates on ANY audio metering
 }
 
 void EngineBridge::stopAllInputMeters()
 {
     requestedMeters_.clear();
-    if (inputMeterPump_)
+    // The output (program-mix) meter shares this pump — only stop it when
+    // nothing on the output side is metering either.
+    if (inputMeterPump_ && !outputMetering_)
         inputMeterPump_->stop();
     if (bps::platform::PlatformAccessor::Installed()) {
         auto &audio = bps::platform::PlatformAccessor::Get().Audio();
@@ -845,11 +982,11 @@ QImage EngineBridge::VideoPreviewProvider::requestImage(const QString &id, QSize
     return frame;
 }
 
-void EngineBridge::startVideoPreview(const QString &deviceLabel, const QString &mode,
+bool EngineBridge::startVideoPreview(const QString &deviceLabel, const QString &mode,
                                      const QString &owner)
 {
     if (!bps::platform::PlatformAccessor::Installed())
-        return;
+        return false;
     auto &video = bps::platform::PlatformAccessor::Get().Video();
 
     // Resolve the roster label → device id from the CACHED roster
@@ -877,7 +1014,7 @@ void EngineBridge::startVideoPreview(const QString &deviceLabel, const QString &
     }
     if (id.isEmpty()) {
         qWarning("EngineBridge: no camera named '%s' to preview", qUtf8Printable(want));
-        return;
+        return false;
     }
 
     // NDI virtual cameras crash their own driver DLL in-process when opened
@@ -888,7 +1025,7 @@ void EngineBridge::startVideoPreview(const QString &deviceLabel, const QString &
     if (want.contains("ndi", Qt::CaseInsensitive)) {
         qWarning("EngineBridge: refusing camera preview tap for NDI virtual device '%s'",
                  qUtf8Printable(want));
-        return;
+        return false;
     }
 
     // Owner-idempotent + ensure-semantics: the board row (owner "board",
@@ -908,10 +1045,13 @@ void EngineBridge::startVideoPreview(const QString &deviceLabel, const QString &
     previewIds_[want] = id;
     previewModes_[want] = effectiveMode;
     if (!needRestart)
-        return;
+        return true;
     (void)video.StopPreview(id.toStdString());
-    if (!video.StartPreview(id.toStdString(), effectiveMode.toStdString()).ok())
+    if (!video.StartPreview(id.toStdString(), effectiveMode.toStdString()).ok()) {
         qWarning("EngineBridge: camera preview tap failed for '%s'", qUtf8Printable(want));
+        return false;
+    }
+    return true;
 }
 
 void EngineBridge::stopVideoPreview(const QString &deviceLabel, const QString &owner)
@@ -938,6 +1078,64 @@ void EngineBridge::stopVideoPreview(const QString &deviceLabel, const QString &o
 // monitor id ("\\\.\DISPLAY1"); the tap lives in the PAL's shared preview
 // table and frames flow back through the SAME videopreview provider —
 // monitor ids can never collide with camera symlinks.
+bool EngineBridge::inputSourceReachable(const QString &label, const QString &kind)
+{
+    // QUIET probe, same chains startScreenPreview/startVideoPreview resolve
+    // through: cached roster first, then one live enumeration. NO warnings —
+    // the caller (a Media card's internal preview) draws the "unreachable"
+    // state instead of toasting.
+    const QString want = label.trimmed();
+    if (want.isEmpty() || !bps::platform::PlatformAccessor::Installed())
+        return false;
+    auto &video = bps::platform::PlatformAccessor::Get().Video();
+    if (kind == QLatin1String("screen")) {
+        for (const QVariant &v : screenDevices_) {
+            const QVariantMap d = v.toMap();
+            if (d.value("label").toString().trimmed().compare(want, Qt::CaseInsensitive) == 0)
+                return true;
+        }
+        for (const auto &w : video.EnumerateWindows())
+            if (qstr(w.title).trimmed().compare(want, Qt::CaseInsensitive) == 0)
+                return true;
+        for (const auto &m : bps::platform::PlatformAccessor::Get().Monitor().Enumerate()) {
+            const QString name = qstr(m.name);
+            if (name == want || (name.isEmpty() && qstr(m.id) == want))
+                return true;
+        }
+        return false;
+    }
+    if (kind == QLatin1String("camera")) {
+        for (const QVariant &v : videoDevices_) {
+            const QVariantMap d = v.toMap();
+            if (d.value("label").toString().trimmed().compare(want, Qt::CaseInsensitive) == 0)
+                return true;
+        }
+        for (const auto &d : video.Enumerate())
+            if (qstr(d.name).trimmed().compare(want, Qt::CaseInsensitive) == 0)
+                return true;
+        return false;
+    }
+    if (kind == QLatin1String("audio")) {
+        // The WASAPI roster (enumerateDevices fills it; hot-plug refreshes
+        // it). An empty label means the DEFAULT input — reachable while any
+        // input device exists.
+        if (want.isEmpty()) {
+            for (const QVariant &v : audioDevices_)
+                if (v.toMap().value("isInput").toBool())
+                    return true;
+            return false;
+        }
+        for (const QVariant &v : audioDevices_) {
+            const QVariantMap d = v.toMap();
+            if (d.value("isInput").toBool()
+                && d.value("label").toString().trimmed().compare(want, Qt::CaseInsensitive) == 0)
+                return true;
+        }
+        return false;
+    }
+    return false;
+}
+
 bool EngineBridge::startScreenPreview(const QString &monitorLabel, const QString &owner)
 {
     if (!bps::platform::PlatformAccessor::Installed())

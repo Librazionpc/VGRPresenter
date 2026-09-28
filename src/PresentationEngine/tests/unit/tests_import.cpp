@@ -7,6 +7,7 @@
 
 #include "modules/import/ImportEngine.hpp"
 #include "modules/import/SongText.hpp"
+#include "modules/content/Vfs.hpp"
 
 namespace im = bps::import;
 
@@ -159,6 +160,70 @@ void TestImportFiles() {
     }
     auto sqlite = im::ImportFiles("openlp", { File("db", "sqlite", "x") });
     CHECK(sqlite.ok() && sqlite.value().shows.empty() && sqlite.value().warnings.size() == 1);
+
+    // ---- FreeShow PROJECT: a zip of show files (built with the engine's own
+    // ZipWriter — the same reader the import path uses must read what the
+    // app's packaging produces), and the JSON-array shape (an array of
+    // [id, show]). Every show inside imports in order; a broken member is
+    // its own warning.
+    {
+        const std::string showA =
+            R"({"name":"Project Song A","slides":{"a":{"group":"verse","items":[{"lines":[{"text":[{"value":"Alpha"}]}]}]}}})";
+        const std::string showB =
+            R"({"name":"Project Song B","slides":{"b":{"group":"chorus","items":[{"lines":[{"text":[{"value":"Beta"}]}]}]}}})";
+        content::ZipWriter zw;
+        CHECK(zw.AddEntry("shows/one.show", std::vector<uint8_t>(showA.begin(), showA.end())).ok());
+        CHECK(zw.AddEntry("shows/two.show", std::vector<uint8_t>(showB.begin(), showB.end())).ok());
+        auto zipBytes = zw.Finalize();
+        CHECK(zipBytes.ok());
+        if (zipBytes.ok()) {
+            auto zip = im::ImportFiles("freeshow_project",
+                                       { File("bundle", "project",
+                                              std::string(zipBytes.value().begin(), zipBytes.value().end())) });
+            CHECK(zip.ok() && zip.value().shows.size() == 2);
+            if (zip.ok() && zip.value().shows.size() == 2) {
+                CHECK(zip.value().shows[0].name == "Project Song A" && zip.value().shows[1].name == "Project Song B");
+                CHECK(zip.value().shows[0].sections[0].slides[0].text == "Alpha");
+            }
+        }
+        // A broken member inside an otherwise good archive fails alone.
+        content::ZipWriter zw2;
+        CHECK(zw2.AddEntry("good.show", std::vector<uint8_t>(showA.begin(), showA.end())).ok());
+        CHECK(zw2.AddEntry("bad.show", std::vector<uint8_t>{ '{', 'n', 'o' }).ok());
+        auto zip2 = zw2.Finalize();
+        CHECK(zip2.ok());
+        if (zip2.ok()) {
+            auto mixed = im::ImportFiles("freeshow_project",
+                                         { File("mixed", "project",
+                                                std::string(zip2.value().begin(), zip2.value().end())) });
+            CHECK(mixed.ok() && mixed.value().shows.size() == 1 && mixed.value().warnings.size() == 1);
+        }
+        // The JSON-array shape (not a zip): ["id1", show], ["id2", show]
+        const std::string jsonArray =
+            std::string("[") + "\"id1\"," + showA + "," + "\"id2\"," + showB + "]";
+        auto list = im::ImportFiles("freeshow_project", { File("list", "shows", jsonArray) });
+        CHECK(list.ok() && list.value().shows.size() == 2 && list.value().shows[1].name == "Project Song B");
+    }
+
+    // ---- ProPresenter BUNDLE: a zip of OpenSong-shaped show XMLs ----
+    {
+        const std::string proShow =
+            R"(<song><title>Bundle Song</title><verse name="v1"><lines>[C]Bundle line one</lines></verse></song>)";
+        content::ZipWriter zw;
+        CHECK(zw.AddEntry("shows/song.pro6", std::vector<uint8_t>(proShow.begin(), proShow.end())).ok());
+        auto zipBytes = zw.Finalize();
+        CHECK(zipBytes.ok());
+        if (zipBytes.ok()) {
+            auto bundle = im::ImportFiles("propresenter",
+                                          { File("pack", "probundle",
+                                                 std::string(zipBytes.value().begin(), zipBytes.value().end())) });
+            CHECK(bundle.ok() && bundle.value().shows.size() == 1);
+            if (bundle.ok() && !bundle.value().shows.empty()) {
+                CHECK(bundle.value().shows[0].name == "Bundle Song");
+                CHECK(bundle.value().shows[0].sections[0].slides[0].text == "Bundle line one");
+            }
+        }
+    }
 
     // ---- Bibles go to the BibleEngine ----
     auto& engine = bb::BibleEngine::Instance();

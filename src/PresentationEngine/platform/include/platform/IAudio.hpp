@@ -117,6 +117,31 @@ public:
     }
     // Devices with a live meter tap (drives the UI's metering refresh pump).
     virtual std::vector<uint32_t> ActiveInputMeters() const { return {}; }
+
+    // ---- OUTPUT metering (the program mix) ------------------------------
+    // The SAME snapshot shape, taken from a LOOPBACK capture on a RENDER
+    // endpoint (Windows WASAPI loopback): the levels of everything the
+    // machine — and therefore the engine's playout — is playing right now.
+    // deviceId is the OUTPUT device's roster number (AudioDeviceInfo::id is
+    // "waveout:<n>"); the default render endpoint is what the UI meters.
+    virtual Result<void> StartOutputMeter(uint32_t deviceId)
+    {
+        (void)deviceId;
+        return Error::Make(Err::Unsupported, "Audio",
+                           "output metering is not implemented on this platform");
+    }
+    virtual Result<void> StopOutputMeter(uint32_t deviceId)
+    {
+        (void)deviceId;
+        return Error::Make(Err::Unsupported, "Audio",
+                           "output metering is not implemented on this platform");
+    }
+    // Zeros (channelCount 0) when no loopback tap is running.
+    virtual InputMeterLevels OutputLevels(uint32_t deviceId)
+    {
+        (void)deviceId;
+        return InputMeterLevels{};
+    }
 };
 
 } // namespace bps::platform

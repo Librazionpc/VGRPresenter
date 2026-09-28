@@ -31,14 +31,22 @@ public:
     InputMeterLevels InputLevels(uint32_t deviceId) override;
     std::vector<uint32_t> ActiveInputMeters() const override;
 
+    // OUTPUT metering — WASAPI LOOPBACK capture on the render endpoint (the
+    // program mix the engine plays out). Same tap/snapshot discipline as the
+    // input meters; deviceId is the waveout:<n> roster number.
+    Result<void> StartOutputMeter(uint32_t deviceId) override;
+    Result<void> StopOutputMeter(uint32_t deviceId) override;
+    InputMeterLevels OutputLevels(uint32_t deviceId) override;
+
 private:
     struct MeterTap;
-    struct MeterTable;   // the pimpl: mutex + one tap per waveIn device id
+    struct MeterTable;   // the pimpl: mutex + one tap per waveIn/waveOut device id
     // The capture thread body (one per running tap) — a static member so it
     // can touch the private nested type. Takes the table's mutex (the same
     // one Start/Stop/InputLevels callers hold) so snapshots publish
-    // consistently.
-    static void MeterThread(MeterTap &tap, std::mutex &publishMutex);
+    // consistently. loopback=false → input capture; true → render-endpoint
+    // loopback (the program mix).
+    static void MeterThread(MeterTap &tap, std::mutex &publishMutex, bool loopback);
 
     // unique_ptr<incomplete MeterTable>: its destructor is only ever used
     // inside this class's own out-of-line destructor (an in-header cleanup

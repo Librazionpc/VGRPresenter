@@ -2,6 +2,7 @@
 
 #include "core/config/Json.hpp"
 #include "modules/bible/BibleEngine.hpp"
+#include "modules/import/Archive.hpp"
 #include "modules/import/SongText.hpp"
 #include "modules/songs/ISongProvider.hpp"
 
@@ -36,7 +37,7 @@ std::vector<ImportFormat> BuildFormats() {
 
     // ---- FreeShow's own files ----
     f.push_back(Fmt("freeshow", "FreeShow Song/Presentation File", { "show", "json" }, K::Show, "freeshow", true, "presentation", true));
-    f.push_back(Fmt("freeshow_project", "FreeShow Project File", { "project", "shows", "json", "zip" }, K::Project, "freeshow", false, "folder", true));
+    f.push_back(Fmt("freeshow_project", "FreeShow Project File", { "project", "shows", "json", "zip" }, K::Project, "freeshow", true, "folder", true));
     f.push_back(Fmt("freeshow_template", "FreeShow Template File", { "fstemplate", "fst", "template", "json", "zip" }, K::Template, "freeshow", false, "layoutTemplate"));
     f.push_back(Fmt("freeshow_action", "FreeShow Action File", { "fsaction", "action", "json" }, K::Other, "freeshow", false, "wrench"));
     f.push_back(Fmt("freeshow_stage", "FreeShow Stage Layout File", { "fsstage", "stage", "json" }, K::Other, "freeshow", false, "presentation"));
@@ -353,8 +354,71 @@ Result<ImportResult> ImportFiles(std::string_view formatId, const std::vector<Im
         } else if (formatId == "freeshow") {
             auto show = ParseFreeShowFile(file);
             if (show.ok()) result.shows.push_back(std::move(show.value())); else fail(show.error().message);
+        } else if (formatId == "freeshow_project") {
+            // A FreeShow PROJECT: a zip of show files (or a JSON ARRAY of
+            // [id, show] pairs) — every show inside is imported in archive
+            // order, a broken member failing its own warning only.
+            if (LooksLikeZip(file.content)) {
+                auto zip = ReadZip(file.content);
+                if (!zip.ok()) { fail(zip.error().message); continue; }
+                size_t members = 0;
+                for (ArchiveEntry& entry : zip.value()) {
+                    if (entry.name.ends_with("/")) continue;
+                    ++members;
+                    ImportFile member;
+                    member.name = entry.name.substr(entry.name.find_last_of("/") + 1);
+                    const size_t dot = member.name.find_last_of('.');
+                    member.extension = dot == std::string::npos ? std::string() : Lower(member.name.substr(dot + 1));
+                    member.path = file.path + "::" + entry.name;
+                    member.content = std::move(entry.data);
+                    auto show = ParseFreeShowFile(member);
+                    if (show.ok()) result.shows.push_back(std::move(show.value()));
+                    else result.warnings.push_back(std::format("{}: {}", entry.name, show.error().message));
+                }
+                if (members == 0) fail("the project archive is empty");
+            } else {
+                // A project saved as one JSON document: an ARRAY of [id, show].
+                auto parsed = json::Parse(file.content);
+                if (!parsed.ok()) { fail(std::format("'{}' is not a FreeShow project: {}", file.name, parsed.error().message)); continue; }
+                const J* root = &parsed.value();
+                if (!root->asArray()) { fail("the project is not an array of shows"); continue; }
+                size_t members = 0;
+                for (const J& entry : *root->asArray()) {
+                    const J* showNode = entry.asArray() && entry.asArray()->size() >= 2 ? &(*entry.asArray())[1] : &entry;
+                    ImportFile member;
+                    member.name = file.name + "-" + std::to_string(members + 1);
+                    member.extension = "show";
+                    member.content = showNode->ToString();
+                    auto show = ParseFreeShowFile(member);
+                    if (show.ok()) { ++members; result.shows.push_back(std::move(show.value())); }
+                    else result.warnings.push_back(std::format("{}[{}]: {}", file.name, members + 1, show.error().message));
+                }
+                if (members == 0 && result.warnings.empty()) fail("the project holds no shows");
+            }
         } else if (auto provider = SongProviderFor(formatId)) {
-            if (file.extension == "sqlite" || file.extension == "probundle") { fail(std::format("'.{}' files are not readable yet", file.extension)); continue; }
+            if (file.extension == "probundle") {
+                // A ProPresenter BUNDLE: a zip of OpenSong-shaped show XMLs
+                // (Pro6 documents are the same shape ParseProPresenterProvider
+                // reads). Every member imports on its own.
+                auto zip = ReadZip(file.content);
+                if (!zip.ok()) { fail(zip.error().message); continue; }
+                size_t members = 0;
+                for (ArchiveEntry& entry : zip.value()) {
+                    if (entry.name.ends_with("/")) continue;
+                    if (!entry.data.starts_with("<")) continue;   // metadata/assets live in there too
+                    ++members;
+                    ImportFile member;
+                    member.name = entry.name.substr(entry.name.find_last_of("/") + 1);
+                    const size_t dot = member.name.find_last_of('.');
+                    member.extension = dot == std::string::npos ? std::string() : Lower(member.name.substr(dot + 1));
+                    member.path = file.path + "::" + entry.name;
+                    auto song = provider->Parse(entry.data, provider->Format());
+                    if (song.ok()) result.shows.push_back(SongToImported(song.value(), member, "propresenter"));
+                    else result.warnings.push_back(std::format("{}: {}", entry.name, song.error().message));
+                }
+                if (members == 0) fail("the bundle holds no readable shows");
+                continue;
+            }
             auto song = provider->Parse(file.content, provider->Format());
             if (song.ok()) result.shows.push_back(SongToImported(song.value(), file, std::string(formatId)));
             else fail(song.error().message);
