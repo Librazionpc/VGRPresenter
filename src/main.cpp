@@ -16,6 +16,7 @@
 #include "services/SearchService.h"
 #include "services/MediaLibraryService.h"
 #include "services/LiveOutputService.h"
+#include "services/RecordingService.h"
 #include "services/MediaThumbnailProvider.h"
 #include "services/EventBus.h"
 #ifdef VGR_ENABLE_SELFTEST
@@ -159,6 +160,11 @@ int main(int argc, char *argv[])
     engine.addImageProvider(QStringLiteral("videopreview"),
                             new EngineBridge::VideoPreviewProvider(&EngineBridge::instance()));
 
+    // Taken-media frames (image://mediaplay?v=<mediaRev>) — LiveOutputService's
+    // media-on-air player (a video/image file composited into every monitor
+    // tile under the on-air content), same up-front registration convention.
+    engine.addImageProvider(QStringLiteral("mediaplay"), new LiveMediaFrameProvider);
+
     engine.loadFromModule("VGRPresenterUI", "Main");
 
     // Env-gated taken-input self-test: takes a real window through the
@@ -186,12 +192,20 @@ int main(int argc, char *argv[])
     // crash still goes through CrashHandler.cpp's SEH/signal path, which
     // this can't catch.
     try {
-        return app.exec();
+        const int code = app.exec();
+        // Finalize any still-running recording BEFORE the kernel tears the
+        // engine down — the file on disk must be complete (a planned exit
+        // has no excuse for a half-written recording; a CRASHED one recovers
+        // through the engine's journal on the next boot).
+        RecordingService::instance().shutdown();
+        return code;
     } catch (const std::exception &e) {
         qCritical() << "Unhandled exception:" << e.what();
+        RecordingService::instance().shutdown();
         return 1;
     } catch (...) {
         qCritical() << "Unhandled unknown exception.";
+        RecordingService::instance().shutdown();
         return 1;
     }
 }

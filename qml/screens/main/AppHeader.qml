@@ -50,29 +50,34 @@ Rectangle {
 
     // The one on-air switch: red pill, GO LIVE / STOP (the transport arrows
     // and Clear stay on the monitor wall — this is the global switch).
-    Rectangle {
+    // Same icon-pill-above/caption-below layout as Search and Settings
+    // (below) — was icon-left/text-right, the odd one out in the row.
+    Item {
         id: goLiveButton
         anchors.right: settingsButton.left
         anchors.rightMargin: 18
-        anchors.verticalCenter: settingsButton.verticalCenter
-        width: goLiveRow.implicitWidth + 28
-        height: 30
-        radius: 8
-        color: goLiveArea.containsMouse ? Qt.lighter(goLiveButton.baseColor(), 1.15)
-                                        : goLiveButton.baseColor()
-        Behavior on color { ColorAnimation { duration: 120 } }
+        y: root.titleRowHeight + (root.tabRowHeight - height) / 2
+        width: Math.max(goLiveLabel.implicitWidth, pillGoLive.width) + 12
+        height: 52
 
         function baseColor() {
             return root.live ? "#7a2a24" : "#b03630"
         }
 
-        Row {
-            id: goLiveRow
-            anchors.centerIn: parent
-            spacing: 7
+        Rectangle {
+            id: pillGoLive
+            anchors.horizontalCenter: parent.horizontalCenter
+            // Same vertical centring as pillSearch/pillGear below.
+            y: 4
+            width: 60
+            height: 30
+            radius: 8
+            color: goLiveArea.containsMouse ? Qt.lighter(goLiveButton.baseColor(), 1.15)
+                                            : goLiveButton.baseColor()
+            Behavior on color { ColorAnimation { duration: 120 } }
 
             Rectangle {
-                anchors.verticalCenter: parent.verticalCenter
+                anchors.centerIn: parent
                 width: 8; height: 8; radius: 4
                 color: root.live ? "#ff6b61" : "#ffffff"
                 // On air: the dot pulses (a quiet "this is live" tell).
@@ -83,22 +88,25 @@ Rectangle {
                     NumberAnimation { to: 1.0; duration: 700 }
                 }
             }
-            Text {
-                anchors.verticalCenter: parent.verticalCenter
-                text: root.live ? qsTr("STOP") : qsTr("GO LIVE")
-                color: "#ffffff"
-                font.family: "Segoe UI"
-                font.pixelSize: 13
-                font.weight: Font.DemiBold
-                font.letterSpacing: 0.5
+
+            PositionHoverArea {
+                id: goLiveArea
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.live ? LiveOutputService.stop() : LiveOutputService.goLive()
             }
         }
-
-        PositionHoverArea {
-            id: goLiveArea
-            anchors.fill: parent
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.live ? LiveOutputService.stop() : LiveOutputService.goLive()
+        Text {
+            id: goLiveLabel
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: 32
+            text: root.live ? qsTr("STOP") : qsTr("GO LIVE")
+            color: root.live ? "#ff6b61" : "#e2e8f0"
+            font.family: "Segoe UI"
+            font.pixelSize: 13
+            font.weight: Font.DemiBold
+            font.letterSpacing: 0.5
+            textFormat: Text.PlainText
         }
     }
 

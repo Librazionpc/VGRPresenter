@@ -69,12 +69,31 @@ public:
     // Every slide the passage needs (verses shared out by the options): [{ title, blocks }] - what "Convert to show" builds.
     Q_INVOKABLE QVariantList slides(const QString &bibleId, const QString &bookId, int chapter, const QVariantList &verses) const;
 
+    // ---- user data (REAL, engine-stored — docs/specs/24 §User data) -------
+    // Notes and highlights live in the ENGINE (AddNote/SetHighlight, stored
+    // separately from Scripture text and persisted with it) — never in QML
+    // state. A note replaces the reference's previous one ("" text removes).
+    // All calls resolve `reference` through the engine ("John 3:16"); a bad
+    // reference is a false return / empty list, never a crash.
+    Q_INVOKABLE bool setNote(const QString &bibleId, const QString &reference, const QString &text);
+    // One reference's note text ("" = none).
+    Q_INVOKABLE QString note(const QString &bibleId, const QString &reference) const;
+    // Every note: [{ reference, bookId, book, chapter, verseStart, verseEnd, text, modifiedMs }], newest first.
+    Q_INVOKABLE QVariantList notes(const QString &bibleId) const;
+    // Highlight on/off (a re-toggle removes it).
+    Q_INVOKABLE bool setHighlighted(const QString &bibleId, const QString &reference, bool on);
+    Q_INVOKABLE bool isHighlighted(const QString &bibleId, const QString &reference) const;
+    // Every highlighted reference: ["JHN 3:16", ...] (the engine's canonical form).
+    Q_INVOKABLE QVariantList highlights(const QString &bibleId) const;
+
     // ---- installing ----
     // Asks for a Bible file (json / xml / osis / usfm / txt) and installs it. Returns true when one was installed.
     Q_INVOKABLE bool importBible();
 
 signals:
     void changed();
+    // A note or highlight was written — verse rows re-read their marks.
+    void userDataChanged();
     // searchAsync's answer: token matches the request, rows are the hits
     // (search()'s shape). Stale tokens never emit.
     void searchResultsReady(int token, const QVariantList &rows);

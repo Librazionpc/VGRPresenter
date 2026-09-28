@@ -217,13 +217,17 @@ Item {
     //   [ ✕ Clear all ]   ClearButtons' red full-width clear.all — everything
     //                     off air
     //   [🖼 📄 ⊙ 🎵 ⏱]   ClearButtons' group — clear background / slide /
-    //                     overlays / audio / timers, red-tinted while there
-    //                     is something of that layer on air to clear, dimmed
-    //                     when that layer is already empty
-    // The engine exposes stop() (all layers) and prev/next per slide; the
-    // per-layer buttons today do what the engine can honestly do — they
-    // light by whether there IS anything on air at all, and Clear all does
-    // the real work.
+    //                     overlays / audio / timers, always red-tinted
+    //                     (FreeShow's own MaterialButtons pass `red`
+    //                     unconditionally) but dimmed + inert until that
+    //                     SPECIFIC layer has something on air, matching
+    //                     ClearButtons.svelte's per-layer `disabled` binds
+    //                     exactly, not a shared "anything at all is live" gate.
+    // Background and audio now have a REAL independent clear (clearMedia())
+    // since the engine grew media playback; slide is still the whole-output
+    // stop() (no slide-only clear exists yet); overlays/timers have no
+    // engine-exposed active state at all yet, so they stay honestly dim and
+    // unclickable rather than faking a lit state.
     Rectangle {
         id: toolbar
         visible: root.live || root.inputTaken
@@ -247,26 +251,41 @@ Item {
 
         // A toolbar button — one glyph in a PILL (always-visible rounded
         // chip, like FreeShow's MaterialButton tiles) that brightens on
-        // hover; danger buttons tint red. The pill NEVER dims: a disabled
-        // action (prev on the first slide, the inert lock/transition) dims
-        // its GLYPH only, so every slot keeps its chip and its hover.
+        // hover. FreeShow's own ClearButtons.svelte always tints its
+        // per-layer buttons red (the `red` prop is unconditional) and
+        // instead "comes alive" purely through `disabled` — vivid + clickable
+        // while that layer has something to clear, dimmed + inert the
+        // moment it's empty. Non-danger buttons (transport) keep the plain
+        // enabled/disabled dimming they already had.
         component ToolButton: Item {
             id: toolBtn
             property string icon: ""
             property bool enabled2: true
             property bool danger: false
+            // Lit (red) vs "clickable but currently off" — distinct from
+            // enabled2 (clickability alone) so a toggle-style button (the
+            // scripture clear/resume) can stay clickable while reading as
+            // OFF between a clear and a resume. Every other button never
+            // sets this, so it just mirrors enabled2 — no change for them.
+            property bool active: enabled2
             signal picked()
             width: 36; height: 30
             Rectangle {
                 anchors.fill: parent; radius: 8
                 color: {
+                    if (!toolBtn.enabled2) return "#1c1e29"
                     if (toolBtn.danger)
-                        return toolArea.containsMouse ? "#33ff4d3d" : "#26ff4d3d"
+                        return toolBtn.active
+                            ? (toolArea.containsMouse ? "#33ff4d3d" : "#26ff4d3d")
+                            : (toolArea.containsMouse ? "#262a3a" : "#1c1e29")
                     return toolArea.containsMouse ? "#262a3a" : "#1c1e29"
                 }
                 border.color: {
+                    if (!toolBtn.enabled2) return "#262a3a"
                     if (toolBtn.danger)
-                        return toolArea.containsMouse ? "#66ff4d3d" : "#33ff4d3d"
+                        return toolBtn.active
+                            ? (toolArea.containsMouse ? "#66ff4d3d" : "#33ff4d3d")
+                            : (toolArea.containsMouse ? "#4a3a3a" : "#3a2e2e")
                     return toolArea.containsMouse ? "#39405c" : "#262a3a"
                 }
                 border.width: 1
@@ -275,7 +294,8 @@ Item {
             IconGlyph {
                 anchors.centerIn: parent
                 name: toolBtn.icon
-                color: toolBtn.danger ? "#ff6b61" : (toolBtn.enabled2 ? Theme.textPrimary : Theme.textMuted)
+                color: !toolBtn.enabled2 ? Theme.textMuted
+                     : (toolBtn.danger ? (toolBtn.active ? "#ff6b61" : "#c98f8a") : Theme.textPrimary)
                 width: 15; height: 15; fit: true
                 Behavior on color { ColorAnimation { duration: 100 } }
             }
@@ -292,8 +312,13 @@ Item {
             // ShowActions: [previous next play lock transition] — spread
             // across the full strip (FreeShow's buttons are flex-grow: 1, so
             // every action owns an equal slot instead of huddling mid-bar).
+            // Explicit spacing + width accounting for it (rather than a bare
+            // width/5 with no spacing) so the five pills sit as distinct,
+            // evenly-gapped buttons instead of one edge-to-edge strip.
             Row {
                 width: parent.width
+                spacing: 6
+                readonly property real btnW: (width - spacing * 4) / 5
 
                 // ‹ › (FreeShow's OutputHelper.advanceOutputs): a step within
                 // the on-air set, or — at either end of it — a PASSAGE step:
@@ -302,7 +327,7 @@ Item {
                 // output preview even on a single-verse pick (like the
                 // preview pane's own pills).
                 ToolButton {
-                    width: parent.width / 5; height: 30
+                    width: parent.btnW; height: 30
                     icon: "previous"
                     // Dead only mid-set with nowhere back (a multi-slide pick
                     // already on the first slide): a single-verse pick keeps
@@ -311,14 +336,14 @@ Item {
                     onPicked: LiveOutputService.stepPassage(-1)
                 }
                 ToolButton {
-                    width: parent.width / 5; height: 30
+                    width: parent.btnW; height: 30
                     icon: "next"
                     enabled2: toolbar.onAir && !(toolbar.multiSlide && toolbar.atEnd)
                     onPicked: LiveOutputService.stepPassage(1)
                 }
                 // Play: restart the on-air set from its first slide.
                 ToolButton {
-                    width: parent.width / 5; height: 30
+                    width: parent.btnW; height: 30
                     icon: "play"
                     enabled2: toolbar.onAir
                     onPicked: {
@@ -331,14 +356,14 @@ Item {
                 // button shows the unlocked state and is inert (glyph dimmed,
                 // pill + hover intact).
                 ToolButton {
-                    width: parent.width / 5; height: 30
+                    width: parent.btnW; height: 30
                     icon: "unlocked"
                     enabled2: false
                 }
                 // Transition: FreeShow opens its transition popup; there is
                 // no engine transition editor yet, so the glyph is a marker.
                 ToolButton {
-                    width: parent.width / 5; height: 30
+                    width: parent.btnW; height: 30
                     icon: "transition"
                     enabled2: false
                 }
@@ -375,35 +400,74 @@ Item {
             }
 
             // ClearButtons' per-layer group (image/slide/overlays/audio/timer)
-            // — same equal-slot spreading as the transport row. Until the
-            // engine grows per-layer clear, each button IS the whole-output
-            // clear like Clear all.
+            // — same equal-slot spreading as the transport row. Background
+            // and audio now have a REAL per-layer clear (clearMedia()/
+            // clearInput(), independent of the on-air slide) since the
+            // engine grew media playback; slide still only has the
+            // whole-output stop(). Overlays/timers have no engine-exposed
+            // active state or per-layer clear yet — same honest "stays dim,
+            // stays inert" treatment as the lock/transition transport
+            // buttons above, not a fake lit state or a clear that's really
+            // just Clear All in disguise.
             Row {
                 width: parent.width
+                spacing: 6
+                readonly property real btnW: (width - spacing * 4) / 5
 
-                Repeater {
-                    model: [
-                        { icon: "image", tip: qsTr("Clear background") },
-                        { icon: "scripture", tip: qsTr("Clear slide") },
-                        { icon: "overlays", tip: qsTr("Clear overlays") },
-                        { icon: "audio", tip: qsTr("Clear audio") },
-                        { icon: "timerFill", tip: qsTr("Clear timers") }
-                    ]
-
-                    delegate: ToolButton {
-                        required property var modelData
-                        width: parent.width / 5; height: 30
-                        icon: modelData.icon
-                        onPicked: {
-                            // Same contract as Clear all: the taken input is
-                            // a layer on the output preview — every clear
-                            // action releases it along with the air.
-                            if (LiveOutputService.inputLabel !== "")
-                                LiveOutputService.clearInput()
-                            if (LiveOutputService.live)
-                                LiveOutputService.stop()
-                        }
+                // Background/media: video, image, OR a taken camera/screen
+                // input — whichever one the compositor's background layer
+                // is currently showing.
+                ToolButton {
+                    width: parent.btnW; height: 30
+                    icon: "image"
+                    danger: true
+                    enabled2: (LiveOutputService.mediaOnAir && !LiveOutputService.mediaIsAudio) || root.inputTaken
+                    onPicked: {
+                        if (LiveOutputService.mediaOnAir) LiveOutputService.clearMedia()
+                        if (root.inputTaken) LiveOutputService.clearInput()
                     }
+                }
+                // Slide: the on-air text/scripture/song content — a REAL
+                // toggle, not a one-shot clear: click while on air stops the
+                // output (and the button dims — LiveOutputService.stop() now
+                // resets onAirTotal so toolbar.onAir actually goes false);
+                // click again while off calls resumeSlide(), which replays
+                // whatever last went live (goLive()'s open show, or the last
+                // goLiveWithSlides() scripture/table pick) — bringing it
+                // straight back. `active` (not enabled2) carries the lit-vs-
+                // dim look so the button STAYS clickable between the two.
+                ToolButton {
+                    width: parent.btnW; height: 30
+                    icon: "scripture"
+                    danger: true
+                    enabled2: toolbar.onAir || LiveOutputService.canResumeSlide
+                    active: toolbar.onAir
+                    onPicked: {
+                        if (LiveOutputService.live) LiveOutputService.stop()
+                        else LiveOutputService.resumeSlide()
+                    }
+                }
+                ToolButton {
+                    width: parent.btnW; height: 30
+                    icon: "overlays"
+                    danger: true
+                    enabled2: false
+                }
+                // Audio: the media layer when what's on air is audio-only
+                // (a real, independent clear — clearing it never touches
+                // an on-air slide or a taken camera).
+                ToolButton {
+                    width: parent.btnW; height: 30
+                    icon: "audio"
+                    danger: true
+                    enabled2: LiveOutputService.mediaOnAir && LiveOutputService.mediaIsAudio
+                    onPicked: LiveOutputService.clearMedia()
+                }
+                ToolButton {
+                    width: parent.btnW; height: 30
+                    icon: "timerFill"
+                    danger: true
+                    enabled2: false
                 }
             }
         }

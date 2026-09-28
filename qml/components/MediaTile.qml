@@ -26,10 +26,19 @@ Item {
     readonly property string kindIcon: isVideo ? "camera" : (isAudio ? "music" : "layoutTemplate")
     readonly property bool gridIcon: isVideo || isAudio
     readonly property real previewHeight: Math.round((width - 12) * 9 / 16)
+    // On air? This exact file is on the program mix (video/image: the
+    // monitor wall's compositor layer; audio: the output tile's L/R
+    // meters are the only visible confirmation — it has no frame).
+    readonly property bool onAir: LiveOutputService.mediaOnAir
+                                  && LiveOutputService.mediaPath === root.path
+    readonly property bool takeable: true
 
     // Click: the file on the centre page. Double-click: into the open project. Drag: into a project.
     signal activated()
     signal opened()
+    // The TAKE pill was clicked (or a taken tile's was again — the pane
+    // toggles off air); the pane routes it to LiveOutputService.
+    signal takeToggled()
 
     // The size to ask the engine for (it rounds up to a cache size).
     readonly property int pictureSize: width > 300 ? 500 : 250
@@ -67,8 +76,8 @@ Item {
         radius: 6
         clip: true
         color: "#16171e"
-        border.width: hover.hovered ? 1 : 0
-        border.color: "#4a4d5e"
+        border.width: root.onAir ? 2 : (hover.hovered ? 1 : 0)
+        border.color: root.onAir ? "#6c5ce7" : "#4a4d5e"
 
         // ---- preview ----
         Rectangle {
@@ -145,7 +154,7 @@ Item {
 
             // Marks a video or an audio file (the picture alone looks like a photo).
             Rectangle {
-                visible: (root.isVideo && !root.scrubbing) || root.isAudio
+                visible: (root.isVideo && !root.scrubbing && !hover.hovered) || root.isAudio
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 anchors.margins: 6
@@ -159,6 +168,49 @@ Item {
                     color: "#ffffff"
                     fit: true
                     width: 12; height: 12
+                }
+            }
+
+            // The TAKE pill — hover action on video/image tiles (audio has no
+            // compositor layer). On a taken tile it stays up permanently and
+            // turns into the OFF-AIR control, so the file can always be
+            // taken back down from the grid itself.
+            Rectangle {
+                id: takePill
+                visible: root.takeable
+                         && (root.onAir || hover.hovered)
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.margins: 6
+                width: takeLabel.implicitWidth + 20
+                height: 26
+                radius: 13
+                color: root.onAir ? "#c8321e" : "#b0000000"
+                Behavior on color { ColorAnimation { duration: 120 } }
+                Row {
+                    anchors.centerIn: parent
+                    spacing: 5
+                    IconGlyph {
+                        anchors.verticalCenter: parent.verticalCenter
+                        name: root.onAir ? "stop" : "play"
+                        color: "#ffffff"
+                        fit: true
+                        width: 11; height: 11
+                    }
+                    Text {
+                        id: takeLabel
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.onAir ? "ON AIR — take off" : "TAKE"
+                        color: "#ffffff"
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 11
+                        font.weight: Font.DemiBold
+                    }
+                }
+                PositionHoverArea {
+                    anchors.fill: parent
+                    showCursor: false
+                    onClicked: if (root.takeable) root.takeToggled()
                 }
             }
         }

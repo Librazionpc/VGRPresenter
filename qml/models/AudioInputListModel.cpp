@@ -4,6 +4,8 @@
 #include "services/EngineBridge.h"
 #include "services/SettingsService.h"
 #include "platform/PlatformAccessor.hpp"
+#include "modules/production/ProductionEngine.hpp"
+#include "modules/production/ProductionTypes.hpp"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -295,6 +297,7 @@ void AudioInputListModel::setLevel(int index, qreal level)
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { LevelRole });
     scheduleSave();
+    pushEffectsToGraph(index);   // the fader IS the graph's gainDb
 }
 
 void AudioInputListModel::setMuted(int index, bool muted)
@@ -308,6 +311,93 @@ void AudioInputListModel::setMuted(int index, bool muted)
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { MutedRole });
     scheduleSave();
+    pushEffectsToGraph(index);   // mute is graph VolumeControl::mute
+}
+
+// ---------------------------------------------------------------------------
+// REAL DSP PUSH — the effects rack onto the production graph (docs/specs/27
+// §Processing chains). The rack stops being decoration: each row's enabled
+// effects become ProcessingStages on its "asrc:<id>" SOURCE NODE and its
+// level/mute land in the node's VolumeControl — the SAME nodes the routing
+// board's buses patch from, so anything downstream of the source hears the
+// rack. No-op when the row is unrouted (no node = nothing to process) or the
+// engine is not booted. Values map: UI dB stay dB, ratios (:1) and percents
+// fold into the stage's 0..1 amount, delay ms into seconds.
+void AudioInputListModel::pushEffectsToGraph(int index)
+{
+    if (index < 0 || index >= m_inputs.size())
+        return;
+    if (!EngineBridge::instance().booted())
+        return;   // graph not up yet — the next write after boot pushes again
+
+    const QString nodeQ = BusListModel::audioSourceNodeId(index);
+    if (nodeQ.isEmpty())
+        return;
+    const std::string node = nodeQ.toStdString();
+
+    auto &graph = bps::production::ProductionEngine::Instance().Graph();
+    // Unrouted source: its node is never created (nodes appear with the first
+    // route, BusListModel::toggleAudioRoute) — nothing to push.
+    if (!graph.HasNode(node))
+        return;
+
+    const AudioInputItem &item = m_inputs.at(index);
+
+    // ---- VolumeControl: the row's fader + mute + per-channel gains ---------
+    bps::production::VolumeControl vol;
+    if (auto cur = graph.Volume(node); cur.ok())
+        vol = cur.value();          // keep solo/pan; this model owns gain/mute
+    // UI 0..100 → engine gain, the SAME mapping BusListModel's fader uses
+    // (0 = −60 dB silence, 100 = unity). Local copy of the mapping — the
+    // helper lives in BusListModel.cpp's anonymous namespace.
+    vol.gainDb = -60.0 + (item.level / 100.0) * 60.0;
+    vol.mute = item.muted;
+    (void)graph.SetVolume(node, vol);
+
+    // ---- Processing chain: rebuilt from the rack on every write ------------
+    (void)graph.ClearProcessing(node);
+    using PK = bps::production::ProcessKind;
+    for (const AudioEffect &e : item.effects) {
+        if (!e.enabled)
+            continue;
+        bps::production::ProcessingStage stage;
+        if (e.key == QLatin1String("gain")) {
+            // The rack's Gain is a trim in dB — the SAME domain as the fader.
+            stage.kind = PK::Gain;
+            stage.amount = e.value;
+        } else if (e.key == QLatin1String("eq")) {
+            // Bands 1..5 — the amount carries the band count; tone shaping
+            // per band is a future engine refinement.
+            stage.kind = PK::Eq;
+            stage.amount = e.value / 5.0;
+        } else if (e.key == QLatin1String("compressor")) {
+            // Ratio 1..10:1 — intensity as (ratio-1)/9 so 1:1 = 0, 10:1 = 1.
+            stage.kind = PK::Compressor;
+            stage.amount = std::clamp((e.value - 1.0) / 9.0, 0.0, 1.0);
+        } else if (e.key == QLatin1String("limiter")) {
+            // Ceiling -24..0 dBFS.
+            stage.kind = PK::Limiter;
+            stage.amount = std::clamp((e.value + 24.0) / 24.0, 0.0, 1.0);
+        } else if (e.key == QLatin1String("noiseGate")) {
+            // Threshold -80..0 dBFS.
+            stage.kind = PK::Gate;
+            stage.amount = std::clamp((e.value + 80.0) / 80.0, 0.0, 1.0);
+        } else if (e.key == QLatin1String("delay")) {
+            // 0..500 ms → the stage's seconds domain.
+            stage.kind = PK::Delay;
+            stage.amount = e.value / 1000.0;
+        } else if (e.key == QLatin1String("reverb")) {
+            // No reverb stage in the engine's ProcessKind set — carried as a
+            // named Custom stage so the intent survives the graph (a future
+            // reverb stage claims it without a model change).
+            stage.kind = PK::Custom;
+            stage.custom = "reverb";
+            stage.amount = std::clamp(e.value / 100.0, 0.0, 1.0);
+        } else {
+            continue;
+        }
+        (void)graph.AddProcessing(node, stage);
+    }
 }
 
 void AudioInputListModel::setDelayMs(int index, int delayMs)
@@ -352,6 +442,7 @@ void AudioInputListModel::setChannelGain(int index, int channel, qreal gain)
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { ChannelGainsRole });
     scheduleSave();   // debounced — a dragged knob coalesces into one write
+    pushEffectsToGraph(index);   // per-channel trim rides the node volume
 }
 
 qreal AudioInputListModel::channelGain(int index, int channel) const
@@ -614,6 +705,7 @@ void AudioInputListModel::setEffectEnabled(int index, const QString &key, bool e
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { EffectsRole });
     scheduleSave();
+    pushEffectsToGraph(index);   // the rack IS the graph's processing chain
 }
 
 void AudioInputListModel::setEffectValue(int index, const QString &key, qreal value)
@@ -632,6 +724,7 @@ void AudioInputListModel::setEffectValue(int index, const QString &key, qreal va
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { EffectsRole });
     scheduleSave();
+    pushEffectsToGraph(index);   // re-translate the whole chain (cheap)
 }
 
 QVariantList AudioInputListModel::defaultEffectsTemplate() const

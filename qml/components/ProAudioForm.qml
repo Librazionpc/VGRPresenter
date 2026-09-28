@@ -153,12 +153,21 @@ Column {
     property var sourceOptions: []
     signal sourcePicked(string value)
 
+    // Reuse gates — a consumer that only wants the Channels section (the
+    // video dialogs' Media/NDI audio meter, which already has its own
+    // Name/Kind/Source fields elsewhere in that dialog and no latency
+    // stepper) hides the rows it doesn't need instead of duplicating the
+    // whole channel-row block a third time.
+    property bool showNameSource: true
+    property bool showDelay: true
+
     // (Declared as a Column child set below — see NameRow / SourceRow.)
 
     // ---- NAME row ----------------------------------------------------
     Item {
         width: parent.width
         height: 40
+        visible: root.showNameSource
 
         FormLabel {
             anchors.left: parent.left
@@ -182,6 +191,7 @@ Column {
     Item {
         width: parent.width
         height: 40
+        visible: root.showNameSource
 
         FormLabel {
             anchors.left: parent.left
@@ -205,6 +215,7 @@ Column {
     Item {
         width: parent.width
         height: 36
+        visible: root.showDelay
 
         FormLabel {
             anchors.left: parent.left

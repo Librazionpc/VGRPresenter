@@ -16,7 +16,9 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-find_package(Qt6 6.11 REQUIRED COMPONENTS Quick QuickControls2 QuickShapes)
+# Multimedia: the media-on-air player (LiveOutputService's QMediaPlayer decode
+# of a taken video/image — the engine's render pipeline composites rasters only).
+find_package(Qt6 6.11 REQUIRED COMPONENTS Quick QuickControls2 QuickShapes Multimedia)
 
 qt_standard_project_setup(REQUIRES 6.11)
 
@@ -418,6 +420,10 @@ qt_add_executable(appVGRPresenterUI
     qml/services/SearchService.cpp
     qml/services/include/services/MediaLibraryService.h
     qml/services/MediaLibraryService.cpp
+    qml/services/include/services/RecordingService.h
+    qml/services/RecordingService.cpp
+    qml/services/include/services/FlowService.h
+    qml/services/FlowService.cpp
     qml/services/include/services/MediaThumbnailProvider.h
     qml/services/MediaThumbnailProvider.cpp
     qml/services/include/services/TextFormatService.h
@@ -474,7 +480,7 @@ set_target_properties(appVGRPresenterUI PROPERTIES
 )
 
 target_link_libraries(appVGRPresenterUI
-    PRIVATE Qt6::Quick Qt6::QuickControls2 Qt6::QuickShapes engine_core
+    PRIVATE Qt6::Quick Qt6::QuickControls2 Qt6::QuickShapes Qt6::Multimedia engine_core
 )
 
 # The generated qmltyperegistrations.cpp does `#if __has_include(<SlideListModel.h>)`

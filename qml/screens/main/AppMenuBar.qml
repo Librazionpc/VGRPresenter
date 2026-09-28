@@ -44,6 +44,10 @@ Item {
     signal quickSearchRequested()
     // File > Import: the Import screen (every file format the engine reads).
     signal importRequested()
+    // File > Record…: toggles a REAL RecordingEngine session on the program
+    // bus (the settings screen's transport start/stop, driven from the
+    // menu; the engine's honest refusal toasts either way).
+    signal recordToggled()
     function activateItem(menuName, label) {
         closeMenu()
         if (label === "Settings" || label === "Preferences…")
@@ -60,6 +64,8 @@ Item {
             root.quickSearchRequested()
         else if (label === "Import…")
             root.importRequested()
+        else if (label === "Record…")
+            root.recordToggled()
     }
 
     readonly property var logoMenuItems: [

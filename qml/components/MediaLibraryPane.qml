@@ -314,6 +314,14 @@ Item {
                 kind: modelData.kind
                 onActivated: root.itemActivated({ type: modelData.kind, ref: modelData.path, name: modelData.name })
                 onOpened: root.itemOpened({ type: modelData.kind, ref: modelData.path, name: modelData.name })
+                // The TAKE pill: this file on/off the monitor wall's media
+                // layer (videos + images; audio refuses honestly).
+                onTakeToggled: {
+                    if (LiveOutputService.mediaOnAir && LiveOutputService.mediaPath === modelData.path)
+                        LiveOutputService.clearMedia()
+                    else
+                        LiveOutputService.takeMedia(modelData.path, modelData.name)
+                }
             }
         }
         AppScrollBar {
@@ -500,7 +508,9 @@ Item {
                             // sound-only: there is no output-preview layer to
                             // take — their state window is the live METER.)
                             readonly property bool taken: videoCard && sub !== ""
-                                                          && LiveOutputService.inputLabel === sub
+                                                          && (LiveOutputService.inputLabel === sub
+                                                              || (LiveOutputService.mediaOnAir
+                                                                  && LiveOutputService.mediaPath === sub))
                             // INTERNAL PREVIEW: the ONE-CLICK thumbnail (owner
                             // "card", this card's own state window) — separate
                             // from the output take. Read through inputRev so
@@ -633,8 +643,40 @@ Item {
                                     }
                                 }
                                 onDoubleClicked: {
-                                    if (videoCard)
+                                    if (videoCard) {
                                         root.toggleVideoSourcePreview(index)
+                                    } else if (audioCard) {
+                                        // NOT a real "take to output" — there is no
+                                        // playback engine behind the production
+                                        // graph yet (ProductionEngine.hpp says so
+                                        // itself: "never renders pixels, plays
+                                        // audio"), so nothing routed here reaches
+                                        // real audio hardware. Starting the SAME
+                                        // real WASAPI meter tap a single click
+                                        // starts is the honest interim: the L/R
+                                        // pills genuinely animate off this mic's
+                                        // live levels instead of double-click doing
+                                        // nothing. Revisit once a real mix/playback
+                                        // engine exists to actually route to.
+                                        if (root.meteredLabels.indexOf(sub) < 0)
+                                            root.toggleAudioMeter(sub)
+                                    } else if (busCard) {
+                                        // Same honesty note as audioCard above.
+                                        // busAudioLevel (this delegate's own mix
+                                        // computation) already reads real meter
+                                        // taps on the bus's routed inputs — this
+                                        // just starts those taps so the bus card's
+                                        // live mix actually animates instead of
+                                        // sitting flat until someone separately
+                                        // metered each routed input by hand.
+                                        const b = BusListModel.getBus(index)
+                                        for (const r of b.routedAudioInputs) {
+                                            const data = AudioInputListModel.getInput(r)
+                                            const label = data && data.sublabel !== undefined ? data.sublabel : ""
+                                            if (label !== "" && root.meteredLabels.indexOf(label) < 0)
+                                                root.toggleAudioMeter(label)
+                                        }
+                                    }
                                 }
                             }
 
@@ -1193,6 +1235,21 @@ Item {
         const label = v.sublabel !== undefined ? v.sublabel : ""
         if (label === "")
             return
+        // Media-kind rows go through the real decoder now (takeMedia): a
+        // video/image file plays into the compositor's media layer, same
+        // convention as a taken camera/screen input. takeMedia() itself
+        // refuses anything that isn't a video/image extension — an AUDIO
+        // file has no compositor layer to fill, so that stays untaken
+        // (there's genuinely nothing to preview visually), same honest
+        // refusal the engine gives.
+        if (v.kind === "media") {
+            if (LiveOutputService.mediaOnAir && LiveOutputService.mediaPath === label) {
+                LiveOutputService.clearMedia()
+                return
+            }
+            LiveOutputService.takeMedia(label, v.name !== undefined ? v.name : "")
+            return
+        }
         if (LiveOutputService.inputLabel === label) {
             LiveOutputService.clearInput()
             return

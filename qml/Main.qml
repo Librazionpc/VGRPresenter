@@ -237,12 +237,31 @@ ApplicationWindow {
         onSaveShowRequested: editScreen.saveShow()
         onSaveShowAsRequested: editScreen.saveShowAs()
         onImportRequested: importDialog.open = true
+        // Record…: start/stop the real engine session with the settings
+        // screen's persisted config (the service reads its own blob).
+        onRecordToggled: {
+            if (RecordingService.recording)
+                RecordingService.stopRecording()
+            else
+                RecordingService.startRecording(RecordingService.config)
+        }
     }
 
     // Ctrl+I: File > Import.
     Shortcut {
         sequence: "Ctrl+I"
         onActivated: importDialog.open = true
+    }
+
+    // Ctrl+R: File > Record… — the same toggle.
+    Shortcut {
+        sequence: "Ctrl+R"
+        onActivated: {
+            if (RecordingService.recording)
+                RecordingService.stopRecording()
+            else
+                RecordingService.startRecording(RecordingService.config)
+        }
     }
 
     // Ctrl+N / O / S / Shift+S — the same actions as the File menu.

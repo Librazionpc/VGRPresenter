@@ -93,8 +93,9 @@ Item {
         nameFor = what
         nameTarget = target === undefined ? "" : target
         nameDialog.title = title
-        nameDialog.placeholder = what === "category" ? qsTr("Category name") : qsTr("%1 name").arg(root.noun)
-        nameDialog.confirmLabel = what === "rename" ? qsTr("Rename") : qsTr("Create")
+        nameDialog.placeholder = (what === "category" || what === "renameCategory")
+            ? qsTr("Category name") : qsTr("%1 name").arg(root.noun)
+        nameDialog.confirmLabel = (what === "rename" || what === "renameCategory") ? qsTr("Rename") : qsTr("Create")
         nameDialog.allowEmpty = what === "design"   // an empty name gets "Overlay", "Overlay 2", ...
         nameDialog.open(initial)
     }
@@ -106,8 +107,43 @@ Item {
             service.createDesign(text, root.categorySelected ? root.selection : "")
         } else if (nameFor === "rename") {
             service.renameDesign(nameTarget, text)
+        } else if (nameFor === "renameCategory") {
+            service.renameCategory(nameTarget, text)
         }
     }
+
+    // ---- Category context menu (right-click a sidebar category): Rename
+    // always, Delete only for a removable (non-default) one — the same
+    // restriction its own remove button already honors.
+    property var categoryMenuTarget: null
+    function openCategoryContextMenu(category, removable, source, mx, my) {
+        cardMenu.visible = false
+        const items = [{ label: qsTr("Rename") }]
+        if (removable) items.push({ label: qsTr("Delete"), danger: true })
+        root.categoryMenuTarget = category
+        categoryCtxMenu.model = items
+        categoryCtxMenu.openAt(source, mx, my, root)
+    }
+    DropdownPanel {
+        id: categoryCtxMenu
+        objectName: "selfTestDesignCategoryMenu"
+        visible: false
+        z: 25
+        onItemActivated: (label) => {
+            categoryCtxMenu.visible = false
+            const cat = root.categoryMenuTarget
+            if (!cat) return
+            if (label === qsTr("Rename")) {
+                root.askName("renameCategory", qsTr("Rename category"), cat.name, cat.id)
+            } else if (label === qsTr("Delete")) {
+                root.deleteTarget = cat.id
+                root.deleteName = cat.name
+                root.deletingCategory = true
+                confirm.open()
+            }
+        }
+    }
+    MenuCatcher { menu: categoryCtxMenu }
 
     property string deleteTarget: ""     // a design id, or a category id when deletingCategory
     property bool deletingCategory: false
@@ -201,6 +237,8 @@ Item {
                         removable: !modelData.isDefault
                         selected: root.selection === modelData.id
                         onClicked: root.selection = modelData.id
+                        onContextMenuRequested: (source, mx, my) =>
+                            root.openCategoryContextMenu(modelData, !modelData.isDefault, source, mx, my)
                         onRemoveRequested: {
                             if (modelData.count === 0) {
                                 service.deleteCategory(modelData.id)

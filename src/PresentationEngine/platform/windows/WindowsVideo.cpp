@@ -799,12 +799,34 @@ void WindowsVideo::ScreenPreviewThread(PreviewTap &tap, std::mutex &publishMutex
             std::strtoull(tap.deviceId.c_str() + 4, nullptr, 10)));
     const std::wstring monitor = isWindow ? std::wstring() : win::Wide(tap.deviceId);
     int consecutiveFailures = 0;
+    bool wasMinimized = false;   // one-shot print, not the give-up counter
     while (tap.running.load(std::memory_order_relaxed)) {
         if (isWindow && !IsWindow(hwnd)) {
             std::printf("[screenpreview] window closed: %s\n", tap.deviceId.c_str());
             std::fflush(stdout);
             break;
         }
+        // A minimized window isn't composited by DWM at all — PrintWindow
+        // (even with PW_RENDERFULLCONTENT) doesn't fail, it just returns
+        // TRUE with a black/blank bitmap, which used to publish silently as
+        // a real frame (a live capture that's actually just solid black,
+        // indistinguishable from a genuine capture bug). Wait it out
+        // OUTSIDE the consecutiveFailures/give-up accounting below — a
+        // minimized source can stay that way for minutes and come back;
+        // treating it as a "failed grab" would kill the tap after ~20
+        // strikes (under a second), same mistake the give-up threshold
+        // exists to avoid for a real transient failure.
+        if (isWindow && IsIconic(hwnd)) {
+            if (!wasMinimized) {
+                std::printf("[screenpreview] window minimized, holding last frame: %s\n",
+                            tap.deviceId.c_str());
+                std::fflush(stdout);
+                wasMinimized = true;
+            }
+            Sleep(100);
+            continue;
+        }
+        wasMinimized = false;
         HDC screenDc = nullptr;
         if (!isWindow) {
             // A per-monitor DC: CreateDCW on the GDI device name captures
@@ -845,9 +867,12 @@ void WindowsVideo::ScreenPreviewThread(PreviewTap &tap, std::mutex &publishMutex
             Sleep(66);
             continue;
         }
-        // Downscale to ~640 wide — pane-sized; the dialog Image scales the
-        // rest of the way and GDI+ encodes a fraction of the pixels.
-        const int dstW = std::min(srcW, 640);
+        // Downscale to ~960 wide (was 640) — a text-heavy capture (a chat/
+        // meeting window, small UI text) turned to mush after 640px + a
+        // quality-70 JPEG: fine text needs more source pixels before
+        // compression, not just a higher quality setting, or the encoder
+        // is starting from data that's already lost the detail.
+        const int dstW = std::min(srcW, 960);
         const int dstH = std::max(1, srcH * dstW / srcW);
         BITMAPINFO bi{};
         bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -902,9 +927,11 @@ void WindowsVideo::ScreenPreviewThread(PreviewTap &tap, std::mutex &publishMutex
             }
             if (blitOk) {
                 const UINT32 stride = static_cast<UINT32>(dstW) * 4;
+                // Quality 85 (was 70) — quality-70 JPEG blocking on fine UI
+                // text is what "rumbled up" chat text actually was.
                 std::vector<uint8_t> jpeg = EncodeJpeg(static_cast<const uint8_t *>(bits),
                                                        static_cast<UINT32>(dstW),
-                                                       static_cast<UINT32>(dstH), stride, 70);
+                                                       static_cast<UINT32>(dstH), stride, 85);
                 if (!jpeg.empty()) {
                     const std::lock_guard<std::mutex> lock(publishMutex);
                     tap.latestJpeg = std::move(jpeg);

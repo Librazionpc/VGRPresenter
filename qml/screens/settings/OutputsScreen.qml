@@ -218,6 +218,50 @@ Item {
                                 tint: false
                             }
                         }
+
+                        // NETWORK OUTPUTS — real runtime state, not a label.
+                        // NDI: the live sender's frame counter while the active
+                        // output is sending (the counter only moves when frames
+                        // actually flow). SDI: the DeckLink runtime/device
+                        // truth from the engine.
+                        Row {
+                            spacing: Theme.space2
+                            visible: card.kind === "NDI" || card.kind === "SDI"
+
+                            Rectangle {
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 6; height: 6; radius: 3
+                                visible: card.kind === "NDI"
+                                color: LiveOutputService.ndiSending ? "#3ddc84" : Theme.textMuted
+
+                                SequentialAnimation on opacity {
+                                    running: card.kind === "NDI" && LiveOutputService.ndiSending
+                                    loops: Animation.Infinite
+                                    NumberAnimation { from: 1; to: 0.3; duration: 700 }
+                                    NumberAnimation { from: 0.3; to: 1; duration: 700 }
+                                }
+                            }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: {
+                                    if (card.kind === "NDI")
+                                        return LiveOutputService.ndiSending
+                                            ? "NDI · sending · " + LiveOutputService.ndiFramesSent + " frames"
+                                            : "NDI · " + (EngineBridge.ndiAvailable
+                                                          ? "ready (go live to send)"
+                                                          : "runtime not installed")
+                                    if (card.kind === "SDI")
+                                        return EngineBridge.sdiAvailable
+                                            ? "SDI · " + EngineBridge.sdiDevices.length + " DeckLink device(s)"
+                                            : "SDI · " + EngineBridge.sdiStatus
+                                    return ""
+                                }
+                                color: card.kind === "NDI" && LiveOutputService.ndiSending
+                                           ? "#3ddc84" : Theme.textMuted
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.textXs
+                            }
+                        }
                     }
 
                     // Status pill + on/off toggle, anchored top-right.

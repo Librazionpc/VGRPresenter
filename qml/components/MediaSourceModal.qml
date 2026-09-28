@@ -10,47 +10,67 @@ import QtQuick
 // `applied`/`cancelled` signals, no application state of its own beyond the
 // picker UI itself.
 //
-// `items` is a plain list of { id, name, kind } — kind is "image" or
-// "video" (a video card gets the small play-badge overlay the ground truth
-// shows; there's no real thumbnail rendering here, same placeholder-card
-// situation as the canvas's own camera/media/audio/shape/timer/clock
-// visuals — real thumbnails are future work, not blocking this picker).
+// Reused by Settings · Audio & Video's Media-kind "Browse..." option (an
+// audio/video input's Source field) — the same grid picker instead of a
+// bare native file dialog, restricted to one kind there via `fixedKind`.
+//
+// `items` defaults to the real Media Library (MediaLibraryService.items()),
+// each { id, name, kind, path } — kind is "image" | "video" | "audio" (a
+// video card gets the small play-badge overlay, audio a note badge; there's
+// no real thumbnail rendering here, same placeholder-card situation as the
+// canvas's own camera/media/audio/shape/timer/clock visuals — real
+// thumbnails are future work, not blocking this picker). A consumer that
+// wants a different set can still override `items` directly.
 Item {
     id: root
 
     property bool open: false
 
-    property var items: [
-        { id: "sunday-bg",     name: "sunday-bg.jpg",     kind: "image" },
-        { id: "worship-loop",  name: "worship-loop.mp4",  kind: "video" },
-        { id: "cross-image",   name: "cross-image.png",   kind: "image" },
-        { id: "stage-photo",   name: "stage-photo.jpg",   kind: "image" },
-        { id: "choir-video",   name: "choir-video.mp4",   kind: "video" },
-        { id: "logo-loop",     name: "logo-loop.mp4",     kind: "video" },
-        { id: "sunset-bg",     name: "sunset-bg.jpg",     kind: "image" },
-        { id: "title-card",    name: "title-card.png",    kind: "image" }
-    ]
+    readonly property var libraryItems: {
+        void MediaLibraryService.totalCount
+        const list = MediaLibraryService.items()
+        const out = []
+        for (let i = 0; i < list.length; i++) {
+            const it = list[i]
+            out.push({ id: it.id, name: it.name, kind: it.kind, path: it.path })
+        }
+        return out
+    }
+    property var items: root.libraryItems
 
-    // "all" | "image" | "video" — matches the ground truth's All/Images/
-    // Videos tabs (their "Images"/"Videos" labels are plural UI copy for
-    // the singular `kind` values items are tagged with).
-    property string activeTab: "all"
+    // Single-kind mode — Settings · Audio & Video only ever wants ONE kind
+    // (an audio input's Source can't offer video files). Non-empty hides
+    // the tab row entirely and locks filtering to it.
+    property string fixedKind: ""
+
+    // "all" | "image" | "video" | "audio" — matches the ground truth's All/
+    // Images/Videos tabs (their plural UI copy for the singular `kind`
+    // values items are tagged with), plus Audio for the Settings reuse.
+    property string activeTab: root.fixedKind !== "" ? root.fixedKind : "all"
     property string searchQuery: ""
 
     readonly property var filteredItems: root.items.filter((it) => {
-        if (root.activeTab !== "all" && it.kind !== root.activeTab)
+        const tab = root.fixedKind !== "" ? root.fixedKind : root.activeTab
+        if (tab !== "all" && it.kind !== tab)
             return false
         if (root.searchQuery.length > 0 && !it.name.toLowerCase().includes(root.searchQuery.toLowerCase()))
             return false
         return true
     })
 
-    property string selectedId: root.items.length > 0 ? root.items[0].id : ""
+    property string selectedId: ""
     readonly property var selectedItem: root.items.find((it) => it.id === root.selectedId) ?? null
+    // Reset the pick whenever the modal (re)opens on a fresh item set —
+    // an open with no items yet (async library scan) must not carry the
+    // PREVIOUS session's pick forward as a silently-wrong default.
+    onOpenChanged: if (root.open) root.selectedId = ""
 
     // Fired when "Insert" is clicked, carrying the picked media item.
     signal applied(var item)
     signal cancelled()
+    // "Browse this PC..." clicked — the consumer resolves it (native
+    // picker); this component has no PAL access of its own.
+    signal browseRequested()
 
     anchors.fill: parent
     visible: root.open
@@ -130,7 +150,9 @@ Item {
 
                 Text {
                     width: parent.width
-                    text: qsTr("Choose an image or video to add to this slide")
+                    text: root.fixedKind === "audio" ? qsTr("Choose an audio file for this source")
+                        : root.fixedKind === "video" ? qsTr("Choose a video file for this source")
+                        : qsTr("Choose an image or video to add to this slide")
                     color: "#8a94a6"
                     font.family: "Segoe UI"
                     font.pixelSize: 14
@@ -147,6 +169,7 @@ Item {
                 height: 32
 
                 Row {
+                    visible: root.fixedKind === ""
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: 4
 
@@ -154,7 +177,8 @@ Item {
                         model: [
                             { key: "all", label: qsTr("All") },
                             { key: "image", label: qsTr("Images") },
-                            { key: "video", label: qsTr("Videos") }
+                            { key: "video", label: qsTr("Videos") },
+                            { key: "audio", label: qsTr("Audio") }
                         ]
                         delegate: Rectangle {
                             id: tabBtn
@@ -253,47 +277,102 @@ Item {
                         required property var modelData
                         readonly property bool selected: root.selectedId === mediaCard.modelData.id
                         readonly property bool isVideo: mediaCard.modelData.kind === "video"
+                        readonly property bool isAudio: mediaCard.modelData.kind === "audio"
+                        // Audio has no visual frame to fetch — never even
+                        // asks the engine for one; video/image do, and fall
+                        // back to the icon below while it loads or if the
+                        // engine has no decoder for that file (the provider
+                        // answers with a 1x1 transparent image, matching
+                        // MediaTile.qml's own hasPicture convention).
+                        readonly property bool hasPicture: !mediaCard.isAudio
+                            && still.status === Image.Ready && still.sourceSize.width > 1
 
                         width: (parent.width - 48) / 4
                         height: 110
                         radius: 8
+                        clip: true
                         color: mediaCard.selected ? "#1a2240" : "#161823"
                         border.width: mediaCard.selected ? 1.5 : 1
                         border.color: mediaCard.selected ? "#6c5ce7" : "#262a38"
                         Behavior on border.color { ColorAnimation { duration: 100 } }
                         Behavior on color { ColorAnimation { duration: 100 } }
 
-                        // Play badge for video items — no real thumbnail
-                        // rendering, same placeholder-visual status as the
-                        // canvas's own media/audio/shape/timer/clock items.
+                        // The still — the engine's real first frame for
+                        // video, or the image itself (MediaThumbnailProvider,
+                        // same image://mediathumb URL MediaTile.qml uses for
+                        // the main Media grid). Never requested for audio —
+                        // there is nothing to decode.
+                        Image {
+                            id: still
+                            anchors.fill: parent
+                            visible: mediaCard.hasPicture
+                            asynchronous: true
+                            cache: true
+                            fillMode: Image.PreserveAspectCrop
+                            source: mediaCard.isAudio ? ""
+                                : "image://mediathumb/250/-1/" + encodeURIComponent(mediaCard.modelData.path || "")
+                        }
+
+                        // Placeholder icon — the only visual for audio (it
+                        // has no frame at all), or video/image while the
+                        // engine is still decoding / has no decoder for it.
+                        IconGlyph {
+                            anchors.centerIn: parent
+                            visible: !mediaCard.hasPicture
+                            name: mediaCard.isAudio ? "music" : (mediaCard.isVideo ? "camera" : "layoutTemplate")
+                            color: "#5c6475"
+                            fit: true
+                            width: 16; height: 16
+                            scale: 2
+
+                            // Breathes while the engine is still making the
+                            // picture, so a loading tile doesn't read as "no
+                            // picture" — same convention as MediaTile.qml.
+                            SequentialAnimation on opacity {
+                                running: !mediaCard.isAudio && still.status === Image.Loading
+                                loops: Animation.Infinite
+                                NumberAnimation { from: 1.0; to: 0.3; duration: 700; easing.type: Easing.InOutSine }
+                                NumberAnimation { from: 0.3; to: 1.0; duration: 700; easing.type: Easing.InOutSine }
+                            }
+                        }
+
+                        // Play badge — marks a video even when its still IS
+                        // showing (a poster frame alone looks like a photo).
                         Rectangle {
                             visible: mediaCard.isVideo
-                            anchors.centerIn: parent
-                            anchors.verticalCenterOffset: -8
-                            width: 28
-                            height: 28
-                            radius: 14
-                            color: "#66000000"
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            anchors.margins: 6
+                            width: 24; height: 24
+                            radius: 12
+                            color: "#b0000000"
 
                             Text {
                                 anchors.centerIn: parent
                                 anchors.horizontalCenterOffset: 1
                                 text: "▶"
                                 color: "#ffffff"
-                                font.pixelSize: 13
+                                font.pixelSize: 11
                             }
                         }
 
-                        Text {
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
                             anchors.bottom: parent.bottom
-                            anchors.bottomMargin: 10
-                            width: parent.width
-                            horizontalAlignment: Text.AlignHCenter
-                            text: mediaCard.modelData.name
-                            color: "#c8cdd9"
-                            font.family: "Segoe UI"
-                            font.pixelSize: 12
-                            elide: Text.ElideMiddle
+                            height: 28
+                            color: mediaCard.hasPicture ? "#a0161823" : "transparent"
+
+                            Text {
+                                anchors.centerIn: parent
+                                width: parent.width - 12
+                                horizontalAlignment: Text.AlignHCenter
+                                text: mediaCard.modelData.name
+                                color: "#c8cdd9"
+                                font.family: "Segoe UI"
+                                font.pixelSize: 12
+                                elide: Text.ElideMiddle
+                            }
                         }
 
                         MouseArea {
@@ -306,6 +385,37 @@ Item {
             }
 
             Rectangle { width: parent.width; height: 1; color: "#232530" }
+
+            // Footer — Item, not a Row, so "Browse this PC..." (left) and
+            // Cancel/Insert (right) can sit on opposite edges of the same
+            // band (Row/Column forbid their own children's edge anchors).
+            Item {
+                width: parent.width
+                height: 36
+
+                // The Media Library only covers folders you've added — a
+                // file that isn't indexed yet still needs a way in, so this
+                // opens the native picker instead (browseRequested; the
+                // consumer resolves it — see AudioVideoScreen.qml's
+                // settingsMediaPicker for the Settings reuse).
+                Text {
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("Browse this PC…")
+                    color: browseArea.containsMouse ? "#9b8ff5" : "#8a94a6"
+                    font.family: "Segoe UI"
+                    font.pixelSize: 14
+                    Behavior on color { ColorAnimation { duration: 100 } }
+
+                    MouseArea {
+                        id: browseArea
+                        anchors.fill: parent
+                        anchors.margins: -6
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.browseRequested()
+                    }
+                }
 
             Row {
                 anchors.right: parent.right
@@ -364,6 +474,7 @@ Item {
                         onClicked: root.applied(root.selectedItem)
                     }
                 }
+            }
             }
         }
     }

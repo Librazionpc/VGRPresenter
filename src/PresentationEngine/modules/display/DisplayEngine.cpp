@@ -141,6 +141,14 @@ std::vector<std::string> DisplayEngine::ProviderNames() const {
     return names;
 }
 
+std::shared_ptr<IDisplayProvider> DisplayEngine::Provider(std::string_view name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& p : providers_)
+        if (p->Name() == name)
+            return p;
+    return nullptr;
+}
+
 // ---------------------------------------------------------------------------
 // Devices
 // ---------------------------------------------------------------------------

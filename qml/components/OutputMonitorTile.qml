@@ -77,6 +77,20 @@ Rectangle {
     // (Image status → confirmInputFrame() → inputRev bump → THIS URL) was a
     // binding loop; QML only reads here now.
 
+    // ---- Media-on-air layer (the Media pane's take-to-program) -----------
+    // A taken video/image FILE plays through the service's real decoder and
+    // lands here as one more image layer — under the on-air content, over
+    // the style background, the same convention as the taken input. The two
+    // holds are mutually exclusive (taking media clears a taken input and
+    // vice versa, service-side) — the guard here keeps the LAYER stack
+    // honest even in the transient window before the service's signal lands.
+    readonly property bool mediaOnAir: LiveOutputService.mediaOnAir
+                                       && !root.inputTaken
+    // Audio-only media has no frame to ask the provider for — requesting
+    // one anyway would just be a wasted round-trip that never resolves.
+    readonly property url mediaSource: mediaOnAir && !LiveOutputService.mediaIsAudio
+        ? "image://mediaplay?v=" + LiveOutputService.mediaRev : ""
+
     // This output's own style background ({ color, image, hasImage }) —
     // "for THAT output": the tile the output wears paints ITS style's look,
     // not the active output's. Delivered as the StyleBackground ROLE (per
@@ -120,6 +134,29 @@ Rectangle {
     }
     readonly property bool styled: !isClearColor(root.styleBg.color)
                                    || root.styleBg.hasImage === true
+
+    // FreeShow's clearStyleBackgroundOnText: the style opts its OWN
+    // background image out of the way once this (active/on-air) output
+    // actually has something on it — a slide, a taken input, or media —
+    // so a style whose image carries its own baked-in text doesn't
+    // permanently collide with live text painted over it. Only the IMAGE
+    // steps aside (FreeShow's own semantics); the flat colour still shows.
+    readonly property bool suppressStyleBgImage: root.styleBg.clearOnText === true
+        && root.active
+        && (root.hasSlidePreview || root.mediaOnAir || root.inputTaken)
+
+    // A taken input or on-air media file is a REAL frame sitting directly
+    // under the on-air content in z-order (inputImage/mediaImage draw before
+    // DesignPreview below) — it must always win over ANY background paint
+    // above it, unconditionally (unlike suppressStyleBgImage, which is a
+    // per-style opt-in for the text-vs-baked-image case with no video
+    // involved). Without this, DesignPreview's own opaque fill (the slide's
+    // composed colour, or its own second copy of the style image — see
+    // below) paints straight over the video every time a slide is on air,
+    // even though the text visually sits "on top": the video underneath it
+    // never got through the paint above it.
+    readonly property bool videoUnderneath: root.inputTaken
+        || (root.mediaOnAir && !LiveOutputService.mediaIsAudio)
 
     // Pixel-kind decision: when the on-air slide carries media-like blocks
     // (camera/media/audio/image), DesignPreview could only draw the source's
@@ -189,8 +226,9 @@ Rectangle {
         // cannot, so the tile does (cover-fit, like SceneBuilder's CoverRect).
         Image {
             anchors.fill: parent
-            visible: root.styleBg.hasImage
-            source: root.styleBg.hasImage ? "file:///" + root.styleBg.image : ""
+            visible: root.styleBg.hasImage && !root.suppressStyleBgImage && !root.videoUnderneath
+            source: root.styleBg.hasImage && !root.suppressStyleBgImage && !root.videoUnderneath
+                    ? "file:///" + root.styleBg.image : ""
             fillMode: Image.PreserveAspectCrop
         }
 
@@ -230,6 +268,51 @@ Rectangle {
             }
         }
 
+        // The MEDIA-ON-AIR layer — the taken file's frames (service-owned
+        // decoder, image://mediaplay) with the same warm-up honesty as the
+        // input layer: the provider answers not-yet-decoded requests with a
+        // 1×1 transparent, so the pulsing ring below keeps the seconds
+        // before the first frame honest. AUDIO has no frame at all — never
+        // requested (it would sit "loading" forever, since mediaRev_ never
+        // bumps for it) — its own signal is the output tile's L/R meters
+        // actually moving, not a frame layer.
+        Image {
+            id: mediaImage
+            anchors.fill: parent
+            visible: root.mediaOnAir && !LiveOutputService.mediaIsAudio
+            source: root.mediaSource
+            fillMode: Image.PreserveAspectFit
+            cache: false   // every rev IS a new frame
+            asynchronous: false
+        }
+
+        // Media warm-up: the same pulsing-ring art, keyed on the provider's
+        // own Ready status (a decoded still flips it immediately).
+        Item {
+            anchors.centerIn: parent
+            visible: root.mediaOnAir && !LiveOutputService.mediaIsAudio
+                     && (mediaImage.status !== Image.Ready || mediaImage.sourceSize.width <= 1)
+            width: 48; height: 48
+
+            SequentialAnimation on scale {
+                loops: Animation.Infinite
+                NumberAnimation { from: 0.85; to: 1.1; duration: 700 }
+                NumberAnimation { from: 1.1; to: 0.85; duration: 700 }
+            }
+            Rectangle {
+                anchors.centerIn: parent
+                width: 34; height: 34; radius: 17
+                color: "transparent"
+                border.width: 2.4
+                border.color: "#6c5ce7"
+            }
+            Rectangle {
+                anchors.centerIn: parent
+                width: 10; height: 10; radius: 5
+                color: "#6c5ce7"
+            }
+        }
+
         // Rendered on-air slide: the engine's own blocks through the shared
         // renderer, with its own checkerboard OFF — a clear background here
         // means "the style's colour/image underneath shows through", and the
@@ -240,22 +323,37 @@ Rectangle {
             // Checkers only when NOTHING paints a background here: an
             // unstyled output's clear slide shows the transparency
             // convention, a styled output's clear slide shows the STYLE's
-            // colour/image through (the pane under this item).
-            showCheckerboard: !root.styled
+            // colour/image through (the pane under this item) — and a video
+            // layer underneath must show through instead of checkers too.
+            showCheckerboard: !root.styled && !root.videoUnderneath
             // The style's own image rides the block render (mirrors the
             // engine: the style's colour OR the slide's composed colour,
             // then the style image, then content — a clear slide background
             // leaves the style's colour underneath, exactly as on air).
-            backgroundImage: root.styleBg.hasImage ? root.styleBg.image : ""
+            // Suppressed the same as the outer style-bg Image above (both
+            // paint the identical image — this is DesignPreview's own copy,
+            // under its blocks) so a video layer underneath is never hidden
+            // by it, and clearOnText applies here too.
+            backgroundImage: (root.styleBg.hasImage && !root.suppressStyleBgImage && !root.videoUnderneath)
+                ? root.styleBg.image : ""
             blocks: root.onAirSlide.blocks ?? []
-            background: root.onAirSlide.background ?? "transparent"
+            // The slide's OWN composed colour is just as opaque as the style
+            // image — with a video layer underneath, it must step aside the
+            // same way (the video is the true background; the slide's colour
+            // never applies while a real frame is already there).
+            background: root.videoUnderneath ? "transparent" : (root.onAirSlide.background ?? "transparent")
         }
 
         // The distributed frame: wins when the on-air slide is media content
-        // (a block render would be a name-on-a-tile placeholder).
+        // (a block render would be a name-on-a-tile placeholder) — but NOT
+        // over a taken media/input layer: a live raster feed outranks the
+        // engine's placeholder for the media block (the frame is where that
+        // feed is SUPPOSED to show).
         Image {
             anchors.fill: parent
-            visible: root.framePriority || (root.hasFrame && !root.hasSlidePreview)
+            visible: root.hasFrame
+                     && (root.framePriority && !root.mediaOnAir && !root.inputTaken
+                         || (!root.hasSlidePreview && !root.mediaOnAir && !root.inputTaken))
             source: root.frameSource
             fillMode: Image.Stretch
             asynchronous: false
@@ -265,14 +363,14 @@ Rectangle {
         }
 
         // Transparency checkerboard — ONLY for an unstyled output with
-        // nothing on air AND no taken input (the input layer IS content:
+        // nothing on air AND no taken input/media (the input layer IS content:
         // over an unstyled output the checker painted ON TOP of the feed
         // and the picture read broken/dimmed). A styled output shows its
         // colour/image instead ("black bg + image" looked unstyled before).
         Checkerboard {
             anchors.fill: parent
             visible: !root.hasFrame && !root.hasSlidePreview && !root.styled
-                     && !root.inputTaken
+                     && !root.inputTaken && !root.mediaOnAir
             tileSize: 9
             shadeA: "#3a3c48"
             shadeB: "#25262f"
@@ -446,28 +544,44 @@ Rectangle {
             text: root.name
         }
 
-        // Taken-input marker: purple dot + label, so the layer's presence
-        // reads even when the feed is hidden behind on-air content.
-        Row {
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: 4
-            visible: root.inputTaken
+    // Taken-input marker: purple dot + label, so the layer's presence
+    // reads even when the feed is hidden behind on-air content. The MEDIA
+    // layer gets the same treatment (a play glyph + its name) — a monitor
+    // op must see WHY the output shows a video.
+    Row {
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: 4
+        visible: root.inputTaken || root.mediaOnAir
 
-            Rectangle {
-                anchors.verticalCenter: parent.verticalCenter
-                width: 6; height: 6; radius: 3
-                color: "#6c5ce7"
-            }
-            Text {
-                anchors.verticalCenter: parent.verticalCenter
-                width: Math.min(implicitWidth, 110)
-                elide: Text.ElideRight
-                color: "#9aa0b5"
-                font.family: "Segoe UI"
-                font.pixelSize: 10
-                text: LiveOutputService.inputLabel
+        Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            width: 16; height: 16; radius: 8
+            color: root.mediaOnAir ? "#1d2a4d" : "#2a2450"
+            visible: root.mediaOnAir
+            IconGlyph {
+                anchors.centerIn: parent
+                name: "play"
+                color: "#8fb4ff"
+                fit: true
+                width: 8; height: 8
             }
         }
+        Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            width: 6; height: 6; radius: 3
+            color: "#6c5ce7"
+            visible: root.inputTaken
+        }
+        Text {
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.min(implicitWidth, 110)
+            elide: Text.ElideRight
+            color: "#9aa0b5"
+            font.family: "Segoe UI"
+            font.pixelSize: 10
+            text: root.mediaOnAir ? LiveOutputService.mediaName : LiveOutputService.inputLabel
+        }
+    }
     }
 }

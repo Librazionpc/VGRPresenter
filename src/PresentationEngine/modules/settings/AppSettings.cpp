@@ -167,6 +167,11 @@ std::vector<SettingDef> BuildDefinitions() {
     // SAME contract as the audio key — declared here or every write/read
     // refuses with "there is no setting 'session.videoRoster'".
     d.push_back(Text("session.videoRoster", "session", "Video roster"));
+    // The Recording & Streaming screen's settings (platform, server URL,
+    // stream key, bitrates, container/encoder, screens-to-record), as one
+    // JSON object written by RecordingService — declared here or every
+    // write/read refuses with "there is no setting 'session.recordingConfig'".
+    d.push_back(Text("session.recordingConfig", "session", "Recording config"));
     // The slide grid on the Show screen's centre page (FreeShow's slidesOptions): slides across, and how they are laid out.
     d.push_back(IntRange("session.slideColumns", "session", "Slides across", 4, 2, 10));
     d.push_back(Choice("session.slideView", "session", "Slide view", "grid", {

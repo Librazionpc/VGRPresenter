@@ -131,12 +131,15 @@ public:
     // the source was never routed.
     void cutAudioSourceEdges(const QString &stableId);
     void cutVideoSourceEdges(const QString &stableId);
+    // Stable-id graph node id for a roster row ("asrc:<id>"), public for the
+    // models that push their own state onto that node (the audio board's
+    // effects rack → the node's VolumeControl/ProcessingStages). Empty on a
+    // bad or not-yet-constructed roster.
+    static QString audioSourceNodeId(int rosterRow);
 
 private:
-    // Stable-id graph node id for a roster row; empty on a bad row. Video
-    // additionally gets the node pulled out of any other bus by the 1:1
-    // rule at connect time.
-    static QString audioSourceNodeId(int rosterRow);
+    // Video's stable-id node id; empty on a bad row. The node additionally
+    // gets pulled out of any other bus by the 1:1 rule at connect time.
     static QString videoSourceNodeId(int rosterRow);
 
     QList<BusItem> m_buses;

@@ -556,6 +556,40 @@ void EngineBridge::enumerateDevices()
                 }
             }
         }
+
+        // ---- SDI (DeckLink) — the same honest-runtime treatment as NDI ----
+        // The engine's SDI provider resolves the SDK at runtime; an absent
+        // library/hardware reads unavailable with its reason, never a mock
+        // roster. Enumerating devices costs a COM walk per provider probe —
+        // only when the provider reports available.
+        sdiDevices_.clear();
+        sdiAvailable_ = false;
+        sdiStatus_.clear();
+        auto &broadcast2 = bps::broadcast::BroadcastEngine::Instance();
+        auto sdiProvider = broadcast2.Probe("sdi");
+        if (sdiProvider.ok() && sdiProvider.value() == bps::broadcast::ProviderState::Available) {
+            auto devices = broadcast2.EnumerateSdiDevices();
+            if (devices.ok() && !devices.value().empty()) {
+                sdiAvailable_ = true;
+                for (const auto &d : devices.value()) {
+                    QVariantMap row;
+                    row.insert(QStringLiteral("name"), qstr(d.displayName));
+                    row.insert(QStringLiteral("model"), qstr(d.modelName));
+                    row.insert(QStringLiteral("index"), d.index);
+                    row.insert(QStringLiteral("supportsCapture"), d.supportsCapture);
+                    row.insert(QStringLiteral("supportsOutput"), d.supportsOutput);
+                    sdiDevices_.append(row);
+                }
+            } else if (devices.ok()) {
+                sdiStatus_ = QStringLiteral("No DeckLink device found on this machine.");
+            } else {
+                sdiStatus_ = QString::fromStdString(devices.error().message);
+            }
+        } else if (sdiProvider.ok()) {
+            sdiStatus_ = QStringLiteral("The DeckLink runtime (Desktop Video) isn't installed on this computer.");
+        } else {
+            sdiStatus_ = QString::fromStdString(sdiProvider.error().message);
+        }
     }
     emit devicesChanged();
 }

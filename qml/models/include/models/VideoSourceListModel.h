@@ -96,10 +96,9 @@ public:
     Q_INVOKABLE void renameSource(int index, const QString &name);
     Q_INVOKABLE void setKind(int index, const QString &kind);
     Q_INVOKABLE void setSublabel(int index, const QString &sublabel);
-    // Native video-file picker (mp4/mov/mkv/...) for a Media-kind row's
-    // "Media File" source option; "" when cancelled. Lives here (not QML)
-    // so the engine's dialog service is used, same as every other file
-    // picker in the app (see AudioInputListModel::pickAudioFile).
+    // Native video-file picker (mp4/mov/mkv/...) for the Media-kind Select
+    // Media picker's "Browse this PC..." option — see
+    // AudioInputListModel::pickAudioFile.
     Q_INVOKABLE QString pickVideoFile() const;
     // Capture mode (OBS-style "1080p60"…) — the video dialogs' Resolution
     // picker; empty string = unset.

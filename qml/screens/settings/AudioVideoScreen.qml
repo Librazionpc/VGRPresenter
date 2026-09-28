@@ -184,6 +184,45 @@ Item {
         }
     }
 
+    // ---- Media Library picker — shared by all four Source "Browse..."
+    // spots (Edit/Add × Audio/Video). Reuses the Edit screen's own "Select
+    // Media" grid (MediaSourceModal) instead of jumping straight to a bare
+    // native file dialog, restricted to one kind via fixedKind. Which
+    // dialog's sublabel gets the pick is tracked by mediaPickTarget, since
+    // opening a modal is async — resolveAudioSourcePick/
+    // resolveVideoSourcePick can't just return the answer synchronously
+    // the way the old native-dialog call did.
+    property string mediaPickTarget: ""   // "" | "editAudio" | "addSourceAudio" | "editVideo" | "addSourceVideo"
+    MediaSourceModal {
+        id: settingsMediaPicker
+        z: 60
+        open: root.mediaPickTarget !== ""
+        fixedKind: root.mediaPickTarget === "editVideo" || root.mediaPickTarget === "addSourceVideo"
+                   ? "video" : "audio"
+        onApplied: (item) => {
+            const path = item.path !== undefined ? item.path : item.name
+            if (root.mediaPickTarget === "editAudio") root.editAudioSublabel = path
+            else if (root.mediaPickTarget === "addSourceAudio") root.addSourceSublabel = path
+            else if (root.mediaPickTarget === "editVideo") root.editVideoSublabel = path
+            else if (root.mediaPickTarget === "addSourceVideo") root.addSourceSublabel = path
+            root.mediaPickTarget = ""
+        }
+        onCancelled: root.mediaPickTarget = ""
+        // "Browse this PC..." — the Media Library only covers indexed
+        // folders; a file that isn't in it yet still needs a way in.
+        onBrowseRequested: {
+            const isVideo = root.mediaPickTarget === "editVideo" || root.mediaPickTarget === "addSourceVideo"
+            const file = isVideo ? VideoSourceListModel.pickVideoFile() : AudioInputListModel.pickAudioFile()
+            if (file !== "") {
+                if (root.mediaPickTarget === "editAudio") root.editAudioSublabel = file
+                else if (root.mediaPickTarget === "addSourceAudio") root.addSourceSublabel = file
+                else if (root.mediaPickTarget === "editVideo") root.editVideoSublabel = file
+                else if (root.mediaPickTarget === "addSourceVideo") root.addSourceSublabel = file
+            }
+            root.mediaPickTarget = ""
+        }
+    }
+
     // ---- Edit Audio Input dialog ----
     property int editAudioIndex: -1
     property string editAudioName: ""
@@ -328,30 +367,15 @@ Item {
         { label: qsTr("Media File") },
         { label: qsTr("Stream Capture") }
     ]
-    // AUDIO's own Media-kind source list — real audio tracks the Media
-    // Library has indexed (MediaLibraryService.items(), kind === "audio"),
-    // not the placeholder labels above (those were never wired to
-    // anything: picking one just stored its literal caption as the
-    // sublabel). "Browse for file..." opens the native picker via
-    // AudioInputListModel.pickAudioFile() — see onSourcePicked below.
-    // "Stream Capture" (per-app/stream loopback capture) is dropped here
-    // rather than kept as a still-fake button: there's no spec yet for
-    // what it should capture, and a button that LOOKS wired but does
-    // nothing is worse than one that isn't offered.
-    readonly property var audioMediaSourceOptions: {
-        void MediaLibraryService.totalCount   // reactivity dependency — items()
-                                               // itself is an untracked read
-        const list = []
-        const items = MediaLibraryService.items()
-        for (let i = 0; i < items.length; i++) {
-            if (items[i].kind === "audio")
-                list.push({ label: items[i].name, value: items[i].path })
-        }
-        if (list.length === 0)
-            list.push({ label: qsTr("No audio tracks in the Media Library yet"), disabled: true })
-        list.push({ label: qsTr("Browse for file…"), value: "__browse_audio_file__" })
-        return list
-    }
+    // AUDIO's own Media-kind source list — a single action that opens the
+    // shared Select Media grid (settingsMediaPicker, fixedKind: "audio"),
+    // not a flat list of every track's real filename inline in the
+    // dropdown (that's what the grid itself is for) and not the old
+    // placeholder labels either (those were never wired to anything —
+    // picking one just stored its literal caption as the sublabel).
+    readonly property var audioMediaSourceOptions: [
+        { label: qsTr("Select Playlist…"), value: "__browse_audio_file__" }
+    ]
     readonly property var videoKinds: [
         { key: "camera", label: qsTr("Camera") },
         { key: "screen", label: qsTr("Screen") },
@@ -427,29 +451,20 @@ Item {
     // so both the Edit and Add dialogs' onSourcePicked handlers share the
     // one path. A cancelled picker keeps the previous pick (empty return
     // means "no change", not "clear the source").
-    function resolveAudioSourcePick(picked, previous) {
+    function resolveAudioSourcePick(picked, previous, target) {
         if (picked !== "__browse_audio_file__")
             return picked
-        const file = AudioInputListModel.pickAudioFile()
-        return file !== "" ? file : previous
+        // Async — opens the shared Select Media grid; its applied/cancelled
+        // handler (see settingsMediaPicker) writes the real value later.
+        root.mediaPickTarget = target
+        return previous
     }
-    // VIDEO's own Media-kind source list — real video files the Media
-    // Library has indexed (MediaLibraryService.items(), kind === "video"),
-    // same real-data treatment as audioMediaSourceOptions above (see its
-    // comment for why the old placeholder labels were dropped).
-    readonly property var videoMediaSourceOptions: {
-        void MediaLibraryService.totalCount
-        const list = []
-        const items = MediaLibraryService.items()
-        for (let i = 0; i < items.length; i++) {
-            if (items[i].kind === "video")
-                list.push({ label: items[i].name, value: items[i].path })
-        }
-        if (list.length === 0)
-            list.push({ label: qsTr("No video files in the Media Library yet"), disabled: true })
-        list.push({ label: qsTr("Browse for file…"), value: "__browse_video_file__" })
-        return list
-    }
+    // VIDEO's own Media-kind source list — same single-action treatment as
+    // audioMediaSourceOptions above (opens settingsMediaPicker, fixedKind:
+    // "video", instead of listing every file inline).
+    readonly property var videoMediaSourceOptions: [
+        { label: qsTr("Select Playlist…"), value: "__browse_video_file__" }
+    ]
     function videoSourceOptions(kind) {
         if (kind === "camera") return cameraOptions
         if (kind === "screen") return screenOptions
@@ -459,11 +474,11 @@ Item {
     }
     // Same "Browse for file..." resolution as resolveAudioSourcePick, for
     // the video dialogs' Source field.
-    function resolveVideoSourcePick(picked, previous) {
+    function resolveVideoSourcePick(picked, previous, target) {
         if (picked !== "__browse_video_file__")
             return picked
-        const file = VideoSourceListModel.pickVideoFile()
-        return file !== "" ? file : previous
+        root.mediaPickTarget = target
+        return previous
     }
     // Kinds whose feed carries audio — media files and NDI streams (NDI
     // embeds audio with its video frames). These get the Volume slider and
@@ -1362,10 +1377,10 @@ Item {
                                     const post = mix * (busRow.level / 100)
                                     return busRow.muted ? 0 : Math.min(100, post * 100)
                                 }
-                                // Buses tint by TYPE (categorical), not by
-                                // level — an explicit fixed color.
-                                fixedColor: true
-                                fillColor: busRow.typeColor
+                                // Continuous level gradient, same as every
+                                // other meter now — buses used to tint by
+                                // TYPE (a flat categorical color) instead of
+                                // showing real level.
                             }
 
                             Text {
@@ -2006,7 +2021,7 @@ Item {
                     sourceValue: root.editAudioSublabel
                     sourceOptions: root.audioSourceOptions(root.editAudioKind)
                     onSourcePicked: (v) => {
-                        root.editAudioSublabel = root.resolveAudioSourcePick(v, root.editAudioSublabel)
+                        root.editAudioSublabel = root.resolveAudioSourcePick(v, root.editAudioSublabel, "editAudio")
                         root.syncAudioMeter()   // re-target the tap at the new device
                     }
                     delayMs: root.editAudioDelayMs
@@ -2166,18 +2181,26 @@ Item {
             onModePicked: (m) => root.editVideoMode = m
         }
 
-        // Volume for kinds whose feed carries audio — media files and
-        // NDI streams (NDI embeds audio with its video). A plain line
-        // meter with its value, not the fuller dial + animated-bar
-        // treatment the Edit Audio dialog gets: this is a supplementary
-        // control on a VIDEO dialog, kept simple on purpose.
-        LabeledSlider {
+        // Channels — Media/NDI feeds carry audio, so this reuses
+        // ProAudioForm's own stereo Channel 1/Channel 2 meter (the same
+        // detailed bar + dB scale the Edit Audio dialog and the bus
+        // master strip get), not a bare slider. There's no live audio
+        // TAP for video-tab rows (same honest limitation as the Media
+        // pane's video L/R buttons), so both channels mirror the row's
+        // own stored Volume — a real readout of the stored value, not a
+        // fabricated live signal.
+        ProAudioForm {
             width: parent.width
             visible: root.videoKindHasAudio(root.editVideoKind)
-            label: qsTr("Volume")
-            suffix: "%"
-            value: root.editVideoLevel
-            onMoved: (v) => root.editVideoLevel = v
+            showNameSource: false
+            showDelay: false
+            volume: root.editVideoLevel
+            muted: root.editVideoMuted
+            channels: 2
+            meterLevels: [root.editVideoLevel / 100, root.editVideoLevel / 100]
+            meterLayout: "stereo"
+            onVolumeEdited: (v) => root.editVideoLevel = v
+            onMutedToggled: root.editVideoMuted = !root.editVideoMuted
         }
 
         NdiRuntimeNotice {
@@ -2197,7 +2220,7 @@ Item {
             options: root.videoSourceOptions(root.editVideoKind)
             value: root.editVideoSublabel
             onValuePicked: (v) => {
-                root.editVideoSublabel = root.resolveVideoSourcePick(v, root.editVideoSublabel)
+                root.editVideoSublabel = root.resolveVideoSourcePick(v, root.editVideoSublabel, "editVideo")
                 root.editVideoMode = ""
             }
         }
@@ -2282,6 +2305,15 @@ Item {
             muted: root.editBusMuted
             channels: 2
             meterLevels: {
+                // Explicit reactivity dependencies — busMixLevel's own live
+                // level read happens inside nested function calls
+                // (inputMixLevel → meterSnapshotFor → audioMeterList), and
+                // a plain-function call chain like that has not reliably
+                // propagated as a binding dependency elsewhere in this
+                // file either (see every other "void root.x" in it) —
+                // these rows sat permanently silent without this.
+                void root.audioMeterList
+                void root.modelsRev
                 const lvl = root.editBusIndex >= 0 && !root.editBusMuted
                     ? root.busMixLevel(root.editBusIndex) : 0
                 return [lvl, lvl]
@@ -2507,7 +2539,7 @@ Item {
                     sourceValue: root.addSourceSublabel
                     sourceOptions: root.audioSourceOptions(root.addSourceKind)
                     onSourcePicked: (v) => {
-                        root.addSourceSublabel = root.resolveAudioSourcePick(v, root.addSourceSublabel)
+                        root.addSourceSublabel = root.resolveAudioSourcePick(v, root.addSourceSublabel, "addSourceAudio")
                         root.syncAudioMeter()
                     }
                     delayMs: root.addSourceDelayMs
@@ -2610,7 +2642,7 @@ Item {
                 options: root.videoSourceOptions(root.addSourceKind)
                 value: root.addSourceSublabel
                 onValuePicked: (v) => {
-                    root.addSourceSublabel = root.resolveVideoSourcePick(v, root.addSourceSublabel)
+                    root.addSourceSublabel = root.resolveVideoSourcePick(v, root.addSourceSublabel, "addSourceVideo")
                     // A new device is a new capability set — the old mode
                     // pick may not exist on it.
                     root.addSourceVideoMode = ""
@@ -2636,17 +2668,21 @@ Item {
                 onModePicked: (m) => root.addSourceVideoMode = m
             }
 
-            // Volume for audio-carrying kinds (media, NDI) — a plain
-            // line meter with its value, not the fuller dial +
-            // animated-bar treatment the audio side gets: kept simple
-            // on this video dialog.
-            LabeledSlider {
+            // Channels — same reuse as the Edit Video dialog (see its
+            // comment): Media/NDI kinds get ProAudioForm's own stereo
+            // Channel 1/Channel 2 meter instead of a bare slider.
+            ProAudioForm {
                 width: parent.width
                 visible: root.videoKindHasAudio(root.addSourceKind)
-                label: qsTr("Volume")
-                suffix: "%"
-                value: root.addSourceLevel
-                onMoved: (v) => root.addSourceLevel = v
+                showNameSource: false
+                showDelay: false
+                volume: root.addSourceLevel
+                muted: root.addSourceMuted
+                channels: 2
+                meterLevels: [root.addSourceLevel / 100, root.addSourceLevel / 100]
+                meterLayout: "stereo"
+                onVolumeEdited: (v) => root.addSourceLevel = v
+                onMutedToggled: root.addSourceMuted = !root.addSourceMuted
             }
         }
 

@@ -23,10 +23,11 @@ Rectangle {
         { label: "Scripture", icon: "bookOpen",        pane: "scripture" },
         { label: "The Table", icon: "bookOpen",        pane: "table" },
         { label: "Calendar",  icon: "calendar",        pane: "soon" },
-        { label: "Functions", icon: "wrench",          pane: "soon" }
+        { label: "Functions", icon: "wrench",          pane: "functions" }
     ]
     // Pane key of the current tab (\"shows\" | \"media\" | \"overlays\" |
-    // \"scripture\" | \"table\" | \"soon\") — the host's switcher reads this.
+    // \"scripture\" | \"table\" | \"functions\" | \"soon\") — the host's
+    // switcher reads this.
     readonly property string currentPane: tabs[currentTab].pane
 
     // ---- Search, tied to the active tab ------------------------------------------------
@@ -35,7 +36,9 @@ Rectangle {
     // query as `searches.<pane>` ("" until something is typed). Tabs with nothing to search (the
     // coming-soon ones) get no box.
     property var searches: ({})
-    readonly property bool canSearch: currentPane !== "soon"
+    // The Functions pane drives flows (no search over them yet); the coming-
+    // soon tabs have nothing at all to search.
+    readonly property bool canSearch: currentPane !== "soon" && currentPane !== "functions"
     function setSearch(text) {
         const next = Object.assign({}, root.searches)
         next[root.currentPane] = text

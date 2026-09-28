@@ -138,10 +138,11 @@ public:
     Q_INVOKABLE void renameInput(int index, const QString &name);
     Q_INVOKABLE void setKind(int index, const QString &kind);
     Q_INVOKABLE void setSublabel(int index, const QString &sublabel);
-    // Native audio-file picker (mp3/wav/flac/...) for a Media-kind row's
-    // "Media File" source option; "" when cancelled. Lives here (not QML)
-    // so the engine's dialog service is used, same as every other file
-    // picker in the app (see StyleListModel::pickImageFile).
+    // Native audio-file picker (mp3/wav/flac/...) for the Media-kind Select
+    // Media picker's "Browse this PC..." option — files not (yet) indexed
+    // by the Media Library. "" when cancelled. Lives here (not QML) so the
+    // engine's dialog service is used, same as every other file picker in
+    // the app (see StyleListModel::pickImageFile).
     Q_INVOKABLE QString pickAudioFile() const;
     Q_INVOKABLE void setLevel(int index, qreal level);
     Q_INVOKABLE void setMuted(int index, bool muted);
@@ -187,6 +188,16 @@ public:
     // restore re-links by the same ids).
     Q_INVOKABLE void saveRoster();
     Q_INVOKABLE int restoreRoster();
+
+    // ---- REAL DSP PUSH (the production graph) ---------------------------
+    // The effects rack / level / mute of one row, translated onto that
+    // row's PRODUCTION GRAPH SOURCE NODE ("asrc:<id>") as engine-side
+    // VolumeControl + ProcessingStages — the same stages the routing board's
+    // graph carries (ProductionTypes: Eq/Compressor/Limiter/Gate/Delay/Gain).
+    // No-op when the row is unrouted (its node does not exist — processing on
+    // an unpatched source means nothing) or the engine is not booted. Called
+    // from every effects/level/mute write so the board IS the graph's truth.
+    void pushEffectsToGraph(int index);
 
 private:
     static inline AudioInputListModel *s_instance = nullptr;

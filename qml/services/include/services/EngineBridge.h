@@ -79,6 +79,13 @@ class EngineBridge : public QObject
     Q_PROPERTY(QString ndiState READ ndiState NOTIFY devicesChanged)
     Q_PROPERTY(QString ndiVersion READ ndiVersion NOTIFY devicesChanged)
     Q_PROPERTY(QString ndiDownloadUrl READ ndiDownloadUrl CONSTANT)
+    // SDI (DeckLink): honest runtime status for the Outputs screen. An absent
+    // SDK/hardware reads unavailable with the engine's own reason — never a
+    // mock roster. Entries: { name, model, index, supportsCapture,
+    // supportsOutput }.
+    Q_PROPERTY(bool sdiAvailable READ sdiAvailable NOTIFY devicesChanged)
+    Q_PROPERTY(QString sdiStatus READ sdiStatus NOTIFY devicesChanged)
+    Q_PROPERTY(QVariantList sdiDevices READ sdiDevices NOTIFY devicesChanged)
     // LIVE audio input metering — real per-channel peak/RMS from the PAL's
     // WASAPI capture tap (a roster card's mic/line-in metered end-to-end).
     // Entries: { deviceId, label, channelCount, layout, sampleRateHz,
@@ -245,6 +252,9 @@ public:
     QString ndiState() const { return ndiState_; }
     QString ndiVersion() const { return ndiVersion_; }
     QString ndiDownloadUrl() const;
+    bool sdiAvailable() const { return sdiAvailable_; }
+    QString sdiStatus() const { return sdiStatus_; }
+    QVariantList sdiDevices() const { return sdiDevices_; }
     // Opens the NDI runtime download page in the user's browser.
     Q_INVOKABLE void openNdiDownloadPage();
     // Re-checks for the runtime right now (after the user installed it).
@@ -322,6 +332,9 @@ private:
     QVariantList screenDevices_;
     QVariantList videoDevices_;
     QVariantList ndiSources_;
+    bool sdiAvailable_ = false;
+    QString sdiStatus_;
+    QVariantList sdiDevices_;
 
     // ---- Live input metering state --------------------------------------
     QVariantList inputLevels_;          // the published snapshot set

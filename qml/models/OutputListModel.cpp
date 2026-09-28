@@ -659,12 +659,22 @@ QVariantMap OutputListModel::styleBackground(int index) const
                                       ? m_outputs.at(index).styleId : QString());
     if (row < 0)
         return { { "color", QStringLiteral("transparent") },
-                 { "image", QString() }, { "hasImage", false } };
+                 { "image", QString() }, { "hasImage", false },
+                 { "clearOnText", false } };
     const QVariantMap style = StyleListModel::instance()->getStyle(row);
     const QString image = style.value(QStringLiteral("backgroundImage")).toString();
+    // clearBackgroundOnText (FreeShow's clearStyleBackgroundOnText) already
+    // reaches the ENGINE's own render spec (see pushEngineStyle), which
+    // presumably honors it for the real distributed frame — but this role
+    // feeds the monitor tile's OWN QML-side background Rectangle, drawn
+    // behind a locally-rendered DesignPreview slide (a text/scripture slide
+    // doesn't go through the distributed-frame path — see OutputMonitorTile's
+    // framePriority gate). Without this, a style's own baked-in background
+    // image collided visually with live text on top of it, unconditionally.
     return { { "color", style.value(QStringLiteral("backgroundColor")).toString() },
              { "image", image },
-             { "hasImage", !image.isEmpty() && QFile::exists(image) } };
+             { "hasImage", !image.isEmpty() && QFile::exists(image) },
+             { "clearOnText", style.value(QStringLiteral("clearBackgroundOnText")).toBool() } };
 }
 
 QString OutputListModel::styleIdAt(int row) const

@@ -574,9 +574,205 @@ Item {
         }
     }
 
+    // ---- a video: the live frame + the on-air transport -----------------
+    // Video files preview here (the frame follows playback — play it below
+    // and this moves), with the TAKE ON AIR control and, once on air, the
+    // full transport (play/pause, seek scrubber, position, mute, off-air).
+    // Reads LiveOutputService's media state inside bindings, so the bar
+    // follows the take no matter where it started (grid pill or here).
+    Item {
+        id: mediaView
+        visible: root.type === "media" || root.type === "video"
+        anchors.fill: parent; anchors.margins: 16; anchors.topMargin: 56
+
+        readonly property string filePath: root.item ? String(root.item.ref) : ""
+        readonly property bool onAir: LiveOutputService.mediaOnAir
+                                      && LiveOutputService.mediaPath === filePath
+        readonly property bool isVideoFile: {
+            const e = filePath.substring(filePath.lastIndexOf(".") + 1).toLowerCase()
+            return ["mp4", "mov", "mkv", "avi", "webm", "m4v", "wmv"].indexOf(e) >= 0
+        }
+        // The preview follows the ON-AIR playback when this file IS on air
+        // (image://mediaplay, rev-paced); otherwise a still from the engine's
+        // thumbnail cache (the same middle frame the grid tile shows).
+        readonly property url previewSource: onAir
+            ? "image://mediaplay?v=" + LiveOutputService.mediaRev
+            : "image://mediathumb/500/-1/" + encodeURIComponent(filePath)
+        readonly property bool playing: LiveOutputService.mediaState === "playing"
+
+        Rectangle {
+            id: videoBox
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: parent.top
+            width: Math.min(parent.width, parent.height * 16 / 9)
+            height: Math.round(width * 9 / 16)
+            color: "#000"
+            radius: 4
+            clip: true
+
+            Image {
+                anchors.fill: parent
+                source: mediaView.previewSource
+                fillMode: Image.PreserveAspectFit
+                cache: false
+                asynchronous: true
+            }
+
+            // Not on air: the centre overlay IS the take button.
+            Rectangle {
+                visible: !mediaView.onAir
+                anchors.centerIn: parent
+                width: 64; height: 64; radius: 32
+                color: "#b0000000"
+                border.width: 2
+                border.color: "#6c5ce7"
+                IconGlyph {
+                    anchors.centerIn: parent
+                    name: "play"
+                    color: "#ffffff"
+                    fit: true
+                    width: 26; height: 26
+                }
+                PositionHoverArea {
+                    anchors.fill: parent
+                    showCursor: false
+                    onClicked: {
+                        if (mediaView.isVideoFile)
+                            LiveOutputService.takeMedia(mediaView.filePath, root.item.name)
+                        else
+                            root.editRequested(mediaView.filePath)
+                    }
+                }
+            }
+        }
+
+        // ---- the transport (videos only; an on-air still shows just OFF AIR)
+        Column {
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: videoBox.bottom
+            anchors.topMargin: 12
+            width: Math.min(videoBox.width, 560)
+            spacing: 8
+            visible: mediaView.isVideoFile
+
+            // Seek scrubber + time readout. mediaPosition pulses at the
+            // player's rate while playing — the scrubber tracks it.
+            Item {
+                id: seekBar
+                width: parent.width
+                height: 22
+
+                readonly property real frac: mediaView.onAir && LiveOutputService.mediaDuration > 0
+                    ? Math.max(0, Math.min(1, LiveOutputService.mediaPosition / LiveOutputService.mediaDuration)) : 0
+
+                // Track.
+                Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width
+                    height: 4
+                    radius: 2
+                    color: "#232530"
+                }
+                // Fill + thumb.
+                Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width * seekBar.frac
+                    height: 4
+                    radius: 2
+                    color: "#6c5ce7"
+                }
+                Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    x: Math.max(0, parent.width * seekBar.frac - 6)
+                    width: 12; height: 12; radius: 6
+                    color: "#ffffff"
+                    visible: mediaView.onAir
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: mediaView.onAir
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: (mouse) => LiveOutputService.mediaSeek(mouse.x / width)
+                }
+                Text {
+                    anchors.right: parent.right
+                    anchors.top: parent.bottom
+                    color: "#8a90a5"
+                    font.family: "Segoe UI"; font.pixelSize: 11
+                    text: mediaView.onAir
+                        ? LiveOutputService.formatMediaTime(LiveOutputService.mediaPosition)
+                          + " / " + LiveOutputService.formatMediaTime(LiveOutputService.mediaDuration)
+                        : ""
+                }
+            }
+
+            // Buttons: take/off-air, play/pause, mute.
+            Row {
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: 10
+
+                Rectangle {
+                    width: 34; height: 34; radius: 17
+                    color: mediaView.onAir ? "#c8321e" : "#232530"
+                    Behavior on color { ColorAnimation { duration: 120 } }
+                    IconGlyph {
+                        anchors.centerIn: parent
+                        name: mediaView.onAir ? "stop" : "play"
+                        color: "#ffffff"
+                        fit: true; width: 15; height: 15
+                    }
+                    PositionHoverArea {
+                        anchors.fill: parent
+                        showCursor: false
+                        onClicked: {
+                            if (mediaView.onAir)
+                                LiveOutputService.clearMedia()
+                            else
+                                LiveOutputService.takeMedia(mediaView.filePath, root.item.name)
+                        }
+                    }
+                }
+                Rectangle {
+                    visible: mediaView.onAir
+                    width: 34; height: 34; radius: 17
+                    color: "#232530"
+                    IconGlyph {
+                        anchors.centerIn: parent
+                        name: mediaView.playing ? "pause" : "play"
+                        color: "#e2e8f0"
+                        fit: true; width: 15; height: 15
+                    }
+                    PositionHoverArea {
+                        anchors.fill: parent
+                        showCursor: false
+                        onClicked: LiveOutputService.mediaTogglePlay()
+                    }
+                }
+                Rectangle {
+                    visible: mediaView.onAir
+                    width: 34; height: 34; radius: 17
+                    color: "#232530"
+                    IconGlyph {
+                        anchors.centerIn: parent
+                        name: LiveOutputService.mediaMuted ? "close" : "volume2"
+                        color: LiveOutputService.mediaMuted ? "#ff6b61" : "#e2e8f0"
+                        fit: true; width: 15; height: 15
+                    }
+                    PositionHoverArea {
+                        anchors.fill: parent
+                        showCursor: false
+                        onClicked: LiveOutputService.mediaToggleMuted()
+                    }
+                }
+            }
+        }
+    }
+
     // ---- everything else: what it is ----
     Column {
-        visible: root.item !== null && root.type !== "show" && root.type !== "image" && root.type !== "overlay" && !(root.type === "scripture" && scriptureView.ready)
+        visible: root.item !== null && root.type !== "show" && root.type !== "image" && root.type !== "overlay"
+                 && root.type !== "media" && root.type !== "video"
+                 && !(root.type === "scripture" && scriptureView.ready)
         anchors.centerIn: parent
         spacing: 10
         IconGlyph {

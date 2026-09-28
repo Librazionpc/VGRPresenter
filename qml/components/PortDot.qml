@@ -31,8 +31,14 @@ Rectangle {
     signal connectFinished(real x, real y)
 
     width: 8; height: 8; radius: 4
+    // At rest, a source port used Theme.border (#232530) — nearly the same
+    // value as the dark card it sits on, so the drag handle was effectively
+    // invisible until you were already hovering it (found live: a video
+    // source's port read as "missing" against its card, making the connect
+    // gesture undiscoverable). textMuted keeps the same "not yet connected"
+    // read but is actually visible against the card background.
     color: root.alwaysColored || root.connected || hover.hovered || root.dragActive
-           ? root.accent : Theme.border
+           ? root.accent : Theme.textMuted
     border.color: Theme.surface
     border.width: 1
 

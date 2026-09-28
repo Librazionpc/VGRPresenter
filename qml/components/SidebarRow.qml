@@ -28,6 +28,12 @@ Rectangle {
     signal clicked()
     signal removeRequested()
     signal toggleRequested()
+    // Right-click — a consumer that wants a context menu (Overlays/
+    // Templates' categories: Rename + Delete, the same actions a design
+    // card already gets) wires this; everyone else (Media's plain
+    // folders) simply leaves it unconnected, no behavior change. Same
+    // signature as DesignCard's own contextMenuRequested(source, mx, my).
+    signal contextMenuRequested(var source, real mx, real my)
 
     height: 30
     radius: 6
@@ -99,6 +105,17 @@ Rectangle {
         id: rowHover
         anchors.fill: parent
         onClicked: root.clicked()
+    }
+
+    // ...right-click for a context menu. A separate MouseArea filtered to
+    // RightButton only — it never competes with rowHover's left-click
+    // (PositionHoverArea only accepts the left button), so both coexist
+    // without stealing each other's events.
+    MouseArea {
+        id: contextArea
+        anchors.fill: parent
+        acceptedButtons: Qt.RightButton
+        onClicked: (mouse) => root.contextMenuRequested(contextArea, mouse.x, mouse.y)
     }
 
     // ...except the remove button, which sits above it. (A plain MouseArea, not a PositionHoverArea:

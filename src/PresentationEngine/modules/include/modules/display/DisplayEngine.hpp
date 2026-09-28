@@ -45,6 +45,11 @@ public:
     Result<void> RegisterProvider(std::shared_ptr<IDisplayProvider> provider);
     Result<void> UnregisterProvider(std::string_view name);
     std::vector<std::string> ProviderNames() const;
+    // The named provider ("Ndi", "Virtual", ...) — the seam a higher layer
+    // with its own frame feed (the presentation live loop) uses to push
+    // frames at a provider DIRECTLY (the NDI program sender), bypassing the
+    // output/device routing that physical displays ride. Null when absent.
+    std::shared_ptr<IDisplayProvider> Provider(std::string_view name) const;
 
     // --- Device view (union across providers, refreshed by Probe) ---
     std::vector<DisplayDevice> Devices() const;

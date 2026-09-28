@@ -757,7 +757,20 @@ Rectangle {
                         id: mediaPane
                         objectName: "selfTestMediaPane"
                         onItemActivated: (item) => vGRPresenter_Main_Screen.centerItem = item
-                        onItemOpened: (item) => ProjectService.dropOnProject("media", [{ ref: item.ref, name: item.name }])
+                        // Double-click: drop it on the project (unchanged)
+                        // AND take it to the Main Output — the SAME toggle
+                        // the tile's own hover TAKE pill fires, so
+                        // double-click is a shortcut for it instead of a
+                        // dead gesture (it used to only drop on the
+                        // project, which is invisible with none open —
+                        // "double click does nothing" from the Media grid).
+                        onItemOpened: (item) => {
+                            ProjectService.dropOnProject("media", [{ ref: item.ref, name: item.name }])
+                            if (LiveOutputService.mediaOnAir && LiveOutputService.mediaPath === item.ref)
+                                LiveOutputService.clearMedia()
+                            else
+                                LiveOutputService.takeMedia(item.ref, item.name)
+                        }
                         visible: media_tab_bar.currentPane === "media"
                         filter: media_tab_bar.searches.media !== undefined ? media_tab_bar.searches.media : ""
                         width: parent.width; height: parent.height
@@ -768,7 +781,16 @@ Rectangle {
                         service: OverlayLibraryService
                         noun: "overlay"
                         onDesignActivated: (id, name) => vGRPresenter_Main_Screen.centerItem = { type: "overlay", ref: id, name: name }
-                        onDesignOpened: (id, name) => ProjectService.dropOnProject("overlay", [{ ref: id, name: name }])
+                        // No independent overlay-on-air layer exists in the
+                        // engine yet (unlike media/input, which composite
+                        // straight onto the Main Output) — double-click only
+                        // adds it to the open project. Say so instead of
+                        // leaving it looking like a dead double-click.
+                        onDesignOpened: (id, name) => {
+                            ProjectService.dropOnProject("overlay", [{ ref: id, name: name }])
+                            EventBus.notify(qsTr("Overlays can't go straight to the Main Output yet — added to the project instead."),
+                                            "info", qsTr("Overlays"))
+                        }
                         onDesignOpenRequested: (id) => vGRPresenter_Main_Screen.designEditRequested("overlay", id)
                         filter: media_tab_bar.searches.overlays !== undefined ? media_tab_bar.searches.overlays : ""
                         width: parent.width; height: parent.height
@@ -793,6 +815,13 @@ Rectangle {
                             qsTr("%1 creation isn't wired yet — the pane shell is ready.")
                                 .arg(media_tab_bar.tabs[media_tab_bar.currentTab].label),
                             "info", media_tab_bar.tabs[media_tab_bar.currentTab].label, "library.soon.new")
+                    }
+                    // Functions — the service-flow automation pane (the engine's
+                    // Flow model: load/run/pause/skip/stop whole services).
+                    FunctionsPane {
+                        objectName: "selfTestFunctionsPane"
+                        visible: media_tab_bar.currentPane === "functions"
+                        width: parent.width; height: parent.height
                     }
 
                     // ---- Categories sidebar (Shows tab) ---- the sample's

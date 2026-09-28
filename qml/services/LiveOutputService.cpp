@@ -11,9 +11,21 @@
 #include "modules/rendering/RenderEngine.hpp"
 
 #include "services/EngineBridge.h"
+#include "services/EventBus.h"
+#include "models/OutputListModel.h"
+
+#include "modules/display/DisplayEngine.hpp"
+#include "modules/display/Providers.hpp"
 
 #include <QCoreApplication>
 #include <QTimer>
+#include <QAudioOutput>
+#include <QFile>
+#include <QFileInfo>
+#include <QMediaPlayer>
+#include <QUrl>
+#include <QVideoFrame>
+#include <QVideoSink>
 
 namespace pl = bps::presentation;
 namespace pr = bps::rendering;
@@ -145,13 +157,19 @@ void LiveOutputService::goLive()
 {
     auto r = bps::live::LiveOutputController::Instance().StartFromOpenShow();
     if (!r.ok()) {
-        // Surface the honest reason (no show open / no slides) as a property,
-        // not a silent no-op — the Show screen toasts on it.
+        // Surface the honest reason (no show open / no slides) as a toast —
+        // this used to be qWarning-only, which reads as "GO LIVE does
+        // nothing" from the header button (no console visible to a normal
+        // user) with zero clue why.
+        const QString reason = QString::fromStdString(r.error().message);
         qWarning("LiveOutputService: goLive failed: %s", r.error().message.c_str());
+        EventBus::instance().notify(reason, QStringLiteral("warning"), QStringLiteral("Go Live"));
         emit onAirChanged();
         return;
     }
 
+    lastWasAdHocSlides_ = false;
+    canResumeSlide_ = true;
     if (!live_) {
         live_ = true;
         emit liveChanged();
@@ -178,16 +196,24 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         content.slides.push_back(ShowConverter::slideFromVariant(v.toMap()));
     if (content.slides.empty()) {
         qWarning("LiveOutputService: goLiveWithSlides: no slides in '%s'", name.toUtf8().constData());
+        EventBus::instance().notify(QStringLiteral("Nothing selected to put on air"),
+                                    QStringLiteral("warning"), QStringLiteral("Go Live"));
         emit onAirChanged();
         return;
     }
     auto r = bps::live::LiveOutputController::Instance().StartFromSlides(name.toStdString(),
                                                                          content.slides);
     if (!r.ok()) {
+        const QString reason = QString::fromStdString(r.error().message);
         qWarning("LiveOutputService: goLiveWithSlides failed: %s", r.error().message.c_str());
+        EventBus::instance().notify(reason, QStringLiteral("warning"), QStringLiteral("Go Live"));
         emit onAirChanged();
         return;
     }
+    lastWasAdHocSlides_ = true;
+    lastSlidesName_ = name;
+    lastSlidesRaw_ = slides;
+    canResumeSlide_ = true;
     if (!live_) {
         live_ = true;
         emit liveChanged();
@@ -226,6 +252,10 @@ void LiveOutputService::takeInput(const QString &label, const QString &kind, con
     }
     if (label.isEmpty())
         return;
+
+    // ONE compositor layer: taking an input takes the media file off air
+    // (the two holds are mutually exclusive — the last gesture wins).
+    clearMedia();
 
     // Re-taking while taken: release the previous hold first (one layer).
     if (inputLabel_ == label && inputKind_ == kind) {
@@ -393,6 +423,9 @@ void LiveOutputService::clearInput()
 {
     if (inputLabel_.isEmpty())
         return;
+    // NOTE: media and the input take are separate holds (only one can exist
+    // at a time — takeInput()/takeMedia() clear each other), so clearing the
+    // input never touches media state.
     if (inputKind_ == QLatin1String("screen"))
         EngineBridge::instance().stopScreenPreview(inputLabel_, QStringLiteral("output"));
     else
@@ -525,9 +558,240 @@ void LiveOutputService::stop()
     }
     // Off air: the slide preview goes with it (also on a failed start).
     onAirSlide_ = QVariantMap{};
+    // onAirTitle_/onAirIndex_/onAirTotal_ are ONLY otherwise written by
+    // pollTick(), which stops running the moment live_ flips false (below) —
+    // without this reset they held their last live values forever, so
+    // onAirTotal stayed > 0 after every stop() and any QML gate reading it
+    // (the MonitorWall toolbar's slide-clear button, "is anything on air")
+    // never noticed the output had actually gone dark.
+    onAirTitle_.clear();
+    onAirIndex_ = -1;
+    onAirTotal_ = 0;
     emit onAirChanged();
     if (poll_)
         poll_->stop();
+    // The NDI feed rides the poll — off air it stops with it.
+    stopNdiFeed();
+}
+
+void LiveOutputService::resumeSlide()
+{
+    if (live_ || !canResumeSlide_)
+        return;
+    if (lastWasAdHocSlides_)
+        goLiveWithSlides(lastSlidesName_, lastSlidesRaw_);
+    else
+        goLive();
+}
+
+// ---------------------------------------------------------------------------
+// MEDIA ON AIR — a real decoder (QMediaPlayer → QVideoSink), composited by
+// every monitor tile as one more QML image layer (image://mediaplay) UNDER
+// the on-air content — the SAME layer convention the taken camera input
+// rides. The engine's render pipeline composites rasters only (a "media"
+// slide block draws as a name-on-a-tile placeholder), so the decode happens
+// service-side and the file's AUDIO rides the player's own WASAPI output —
+// the machine's mix, which the program-mix loopback tap already meters.
+// ---------------------------------------------------------------------------
+void LiveOutputService::takeMedia(const QString &path, const QString &name)
+{
+    const QString clean = path.startsWith(QStringLiteral("file:///"))
+        ? QUrl(path).toLocalFile() : path;
+    if (clean.isEmpty() || !QFileInfo::exists(clean)) {
+        qWarning("LiveOutputService: takeMedia: file not found: %s", qUtf8Printable(clean));
+        emit mediaChanged();
+        return;
+    }
+
+    static const char *videoExts[] = { "mp4", "mov", "mkv", "avi", "webm", "m4v", "wmv" };
+    static const char *imageExts[] = { "png", "jpg", "jpeg", "bmp", "gif", "webp" };
+    // Same set MediaLibrary.cpp's own classifier recognizes as audio (see
+    // its ExtToKind) — a file indexed there as "audio" must not turn out
+    // to be refused here.
+    static const char *audioExts[] = { "mp3", "wav", "wave", "flac", "aac", "m4a", "m4b", "ogg", "oga",
+                                       "opus", "wma", "aif", "aiff", "aifc", "mka", "amr", "ac3", "weba" };
+    const QString ext = QFileInfo(clean).suffix().toLower();
+    bool isVideo = false;
+    bool isImage = false;
+    bool isAudio = false;
+    for (const char *e : videoExts)
+        if (ext == QLatin1String(e)) { isVideo = true; break; }
+    for (const char *e : imageExts)
+        if (ext == QLatin1String(e)) { isImage = true; break; }
+    for (const char *e : audioExts)
+        if (ext == QLatin1String(e)) { isAudio = true; break; }
+    if (!isVideo && !isImage && !isAudio) {
+        qWarning("LiveOutputService: takeMedia: '%s' has an unrecognized extension",
+                 qUtf8Printable(clean));
+        emit mediaChanged();
+        return;
+    }
+
+    // ONE compositor layer: taking media releases a held input take (the
+    // two holds are mutually exclusive — the last gesture wins).
+    if (!inputLabel_.isEmpty())
+        clearInput();
+
+    if (!mediaPlayer_) {
+        mediaSink_ = new QVideoSink(this);
+        mediaAudio_ = new QAudioOutput(this);
+        mediaPlayer_ = new QMediaPlayer(this);
+        mediaPlayer_->setAudioOutput(mediaAudio_);
+        mediaPlayer_->setVideoOutput(mediaSink_);
+        connect(mediaPlayer_, &QMediaPlayer::positionChanged, this, [this](qlonglong p) {
+            mediaPosition_ = p;
+            emit mediaTick();          // transport readout AND the tiles' rev bump
+        });
+        connect(mediaPlayer_, &QMediaPlayer::durationChanged, this, [this](qlonglong d) {
+            mediaDuration_ = d;
+            emit mediaChanged();
+        });
+        connect(mediaPlayer_, &QMediaPlayer::playbackStateChanged, this, [this](QMediaPlayer::PlaybackState s) {
+            mediaState_ = s == QMediaPlayer::PlayingState ? QStringLiteral("playing")
+                        : s == QMediaPlayer::PausedState  ? QStringLiteral("paused")
+                                                          : QStringLiteral("stopped");
+            emit mediaChanged();
+        });
+        connect(mediaPlayer_, &QMediaPlayer::errorOccurred, this, [this](QMediaPlayer::Error, const QString &msg) {
+            qWarning("LiveOutputService: media player error: %s", qUtf8Printable(msg));
+            clearMedia();
+        });
+        // End of file: rewind to the head and hold on the last frame — a
+        // countdown/service video parks instead of blinking off air.
+        connect(mediaPlayer_, &QMediaPlayer::mediaStatusChanged, this, [this](QMediaPlayer::MediaStatus st) {
+            if (st == QMediaPlayer::EndOfMedia) {
+                mediaPlayer_->pause();
+                mediaPlayer_->setPosition(0);
+                mediaState_ = QStringLiteral("paused");
+                emit mediaChanged();
+            }
+        });
+        connect(mediaSink_, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame &f) {
+            if (!f.isValid())
+                return;
+            lastMediaFrame_ = f.toImage();
+            if (!lastMediaFrame_.isNull())
+                mediaRev_++;
+            emit mediaTick();
+        });
+    }
+
+    mediaPath_ = clean;
+    mediaName_ = name.isEmpty() ? QFileInfo(clean).completeBaseName() : name;
+    mediaIsVideo_ = isVideo;
+    mediaIsAudio_ = isAudio;
+    lastMediaFrame_ = QImage();   // warm-up: the tiles show their placeholder
+    mediaOnAir_ = true;
+    if (isVideo || isAudio) {
+        // Audio rides the SAME QMediaPlayer/QAudioOutput path video already
+        // uses — it just never feeds mediaSink_ a video frame, so mediaRev_
+        // never bumps and the tiles' frame layer stays honestly empty. The
+        // audio itself plays through the system's default output device,
+        // which is exactly what the output tile's L/R meters already
+        // capture (EngineBridge.outputLevels, a real WASAPI loopback tap on
+        // that same default device) — those bars move on their own once
+        // this actually plays, no separate wiring needed.
+        mediaPlayer_->setSource(QUrl::fromLocalFile(clean));
+        mediaAudio_->setMuted(mediaMuted_);
+        mediaState_ = QStringLiteral("playing");
+        mediaPlayer_->play();
+    } else {
+        // An IMAGE paints through the same provider: decode it once here (GUI
+        // thread, one file, no player involved). A failed decode leaves the
+        // take up but frameless — the tile's placeholder stays honest.
+        lastMediaFrame_ = QImage(clean);
+        if (!lastMediaFrame_.isNull())
+            mediaRev_++;
+        mediaState_ = QStringLiteral("playing");   // a still "plays" forever
+        mediaPosition_ = 0;
+        mediaDuration_ = 0;
+    }
+    qInfo("LiveOutputService: media on air: '%s' (%s)", qUtf8Printable(mediaName_),
+          isVideo ? "video" : (isAudio ? "audio" : "image"));
+    emit mediaChanged();
+    emit mediaTick();
+}
+
+void LiveOutputService::clearMedia()
+{
+    if (!mediaOnAir_)
+        return;
+    if (mediaPlayer_)
+        mediaPlayer_->stop();
+    mediaOnAir_ = false;
+    mediaPath_.clear();
+    mediaName_.clear();
+    mediaState_ = QStringLiteral("stopped");
+    mediaPosition_ = 0;
+    mediaDuration_ = 0;
+    lastMediaFrame_ = QImage();
+    qInfo("LiveOutputService: media taken off air");
+    emit mediaChanged();
+    emit mediaTick();
+}
+
+void LiveOutputService::mediaTogglePlay()
+{
+    // Video and audio both have a real QMediaPlayer transport; an image
+    // has none (mediaPlayer_ is never even pointed at it).
+    if (!mediaOnAir_ || (!mediaIsVideo_ && !mediaIsAudio_) || !mediaPlayer_)
+        return;
+    if (mediaPlayer_->playbackState() == QMediaPlayer::PlayingState)
+        mediaPlayer_->pause();
+    else
+        mediaPlayer_->play();
+}
+
+void LiveOutputService::mediaSeek(qreal fraction)
+{
+    if (!mediaOnAir_ || (!mediaIsVideo_ && !mediaIsAudio_) || !mediaPlayer_ || mediaDuration_ <= 0)
+        return;
+    mediaPlayer_->setPosition(qlonglong(qBound(0.0, fraction, 1.0) * mediaDuration_));
+}
+
+void LiveOutputService::mediaToggleMuted()
+{
+    mediaMuted_ = !mediaMuted_;
+    if (mediaAudio_)
+        mediaAudio_->setMuted(mediaMuted_);
+    emit mediaChanged();
+}
+
+QString LiveOutputService::formatMediaTime(qlonglong ms) const
+{
+    if (ms < 0)
+        ms = 0;
+    const int totalSec = int(ms / 1000);
+    return QStringLiteral("%1:%2").arg(totalSec / 60).arg(totalSec % 60, 2, 10, QLatin1Char('0'));
+}
+
+QImage LiveMediaFrameProvider::requestImage(const QString &id, QSize *size,
+                                            const QSize &requestedSize)
+{
+    Q_UNUSED(id)
+    Q_UNUSED(requestedSize)
+    const QImage &frame = LiveOutputService::instance().lastMediaFrame();
+    if (frame.isNull()) {
+        // Taken but not decoded yet (or off air): 1×1 transparent — the QML
+        // side reads it as "no picture" (no warning spam), the placeholder
+        // stays up.
+        static const QImage empty = [] {
+            QImage e(1, 1, QImage::Format_ARGB32);
+            e.fill(Qt::transparent);
+            return e;
+        }();
+        if (size)
+            *size = QSize(1, 1);
+        return empty;
+    }
+    if (size)
+        *size = frame.size();
+    // Scale-to-request like the other providers (a ~360px pane asking for
+    // 1080p frames every tick would burn the GUI thread on blits).
+    if (requestedSize.isValid() && !requestedSize.isEmpty()
+        && requestedSize != frame.size())
+        return frame.scaled(requestedSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    return frame;
 }
 
 // ---------------------------------------------------------------------------
@@ -637,6 +901,16 @@ void LiveOutputService::pollTick()
         emit frameRevChanged();
     }
 
+    // ---- NDI program sender ------------------------------------------------
+    // When the ACTIVE output's kind is NDI, the live loop's frames also go
+    // to the network: the display engine's NdiDisplayProvider converts each
+    // RGBA frame to UYVY and hands it to the BroadcastEngine (real NDI when
+    // the runtime is installed, the software loopback otherwise). The sender
+    // is the engine's own — this only feeds it from the SAME per-output
+    // buffers the monitor tiles read, so what the network gets is what the
+    // wall shows, at the poll's 10 Hz.
+    pushNdiFrame();
+
     // The engine's loop advances slides itself; mirror the runtime's state.
     auto &pres = pl::PresentationEngine::Instance();
     const pl::Slide *slide = pres.CurrentSlide();
@@ -661,6 +935,87 @@ void LiveOutputService::pollTick()
             onAirSlide_ = next;
             emit onAirChanged();
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The NDI program sender — the display engine's NdiDisplayProvider IS the
+// output ("ndi-program" device, real NDI SDK via the BroadcastEngine with an
+// automatic software-loopback fallback). Nothing fed it before: this reads
+// the active output's frame (its own styled buffer, or the shared preview
+// feed for an unstyled output — the same source the monitor tile shows) and
+// hands it to the provider on every poll while live. The provider creates
+// its sender lazily and converts RGBA→UYVY internally.
+void LiveOutputService::pushNdiFrame()
+{
+    // NDI applies only while the ACTIVE output's kind is NDI.
+    bool want = false;
+    const int active = OutputListModel::instance()->activeIndex();
+    if (active >= 0) {
+        const QVariantMap out = OutputListModel::instance()->getOutput(active);
+        want = out.value("kind").toString() == QLatin1String("NDI");
+    }
+
+    auto *provider = []() -> bps::display::NdiDisplayProvider * {
+        auto p = bps::display::DisplayEngine::Instance().Provider("Ndi");
+        return p ? dynamic_cast<bps::display::NdiDisplayProvider *>(p.get()) : nullptr;
+    }();
+
+    if (!want || !provider) {
+        if (ndiSending_) {
+            ndiSending_ = false;
+            emit ndiChanged();
+        }
+        return;
+    }
+
+    // The frame: the ACTIVE output's own gated buffer when styled, else the
+    // shared preview feed (FrameBufferRole's exact keying).
+    const QString styleId = OutputListModel::instance()->activeStyleId();
+    const std::string buffer = styleId.isEmpty()
+        ? std::string(bps::live::LiveOutputController::kPreviewName)
+        : QStringLiteral("__out_%1__").arg(qHash(OutputListModel::instance()
+                                                     ->getOutput(active)
+                                                     .value("name").toString()))
+              .toStdString();
+    auto out = pr::RenderEngine::Instance().GetOutput(buffer);
+    if (!out.ok()) {
+        if (ndiSending_) {
+            ndiSending_ = false;
+            emit ndiChanged();
+        }
+        return;
+    }
+    auto *fb = dynamic_cast<pr::FrameBufferOutput *>(out.value().get());
+    if (!fb || !fb->Enabled())
+        return;
+    const pr::Frame frame = fb->LastFrame();
+    if (frame.empty())
+        return;
+
+    // The provider owns conversion + send; frames only flow while live
+    // (pollTick gates this call).
+    bps::display::RenderFrameView view;
+    view.width = frame.width;
+    view.height = frame.height;
+    view.pixels = frame.pixels.data();
+    if (provider->SendFrame(view).ok()) {
+        if (!ndiSending_) {
+            ndiSending_ = true;
+            qInfo("LiveOutputService: NDI program sending started (%s)",
+                  provider->SenderName().c_str());
+        }
+        ndiFramesSent_ = provider->FramesSent();
+        emit ndiChanged();
+    }
+}
+
+// Stop the feed when the loop stops (pollTick no longer runs).
+void LiveOutputService::stopNdiFeed()
+{
+    if (ndiSending_) {
+        ndiSending_ = false;
+        emit ndiChanged();
     }
 }
 
