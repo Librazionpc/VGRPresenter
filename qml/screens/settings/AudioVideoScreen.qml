@@ -1493,6 +1493,7 @@ Item {
                                 // (a thumbnail doesn't need 15 fps; 8 reads
                                 // smooth).
                                 Image {
+                                    id: frameImg
                                     anchors.fill: parent
                                     source: vidRow.liveThumb
                                     visible: (vidRow.kind === "camera" || vidRow.kind === "screen")
@@ -1514,6 +1515,12 @@ Item {
                                     (vidRow.kind === "camera" || vidRow.kind === "screen")
                                     && vidRow.sublabel !== ""
                                     && !vidRow.muted
+                                // Frames actually flowing — the warm-up test that
+                                // retires the decorative glyphs (same rule as the
+                                // dialogs' pane): a live thumb must not wear the
+                                // lens/monitor art on top of real pixels.
+                                readonly property bool thumbLive:
+                                    frameImg.status === Image.Ready && frameImg.sourceSize.width > 1
                                 property int thumbNonce: 0
                                 property string activeTapLabel: ""
                                 // The PREVIOUS tap's kind — the stop call must
@@ -1563,10 +1570,10 @@ Item {
                                     function onSublabelChanged() { vidThumb.syncTap() }
                                 }
 
-                                // Camera — a lens ring + center dot.
+                                // Camera — a lens ring + center dot (warm-up only).
                                 Item {
                                     anchors.centerIn: parent
-                                    visible: vidRow.kind === "camera"
+                                    visible: vidRow.kind === "camera" && !vidThumb.thumbLive
 
                                     Rectangle {
                                         anchors.centerIn: parent
@@ -1609,14 +1616,15 @@ Item {
                                     }
                                 }
 
-                                // Screen — a monitor outline + stand. The
-                                // wrapper needs REAL dimensions: children
-                                // anchor to it, and an implicit 0x0 Item
-                                // stacks them at the center point.
+                                // Screen — a monitor outline + stand (warm-up
+                                // only, same as the lens above). The wrapper
+                                // needs REAL dimensions: children anchor to it,
+                                // and an implicit 0x0 Item stacks them at the
+                                // center point.
                                 Item {
                                     anchors.centerIn: parent
                                     width: 22; height: 16
-                                    visible: vidRow.kind === "screen"
+                                    visible: vidRow.kind === "screen" && !vidThumb.thumbLive
 
                                     Rectangle {
                                         anchors.horizontalCenter: parent.horizontalCenter

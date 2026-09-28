@@ -1636,6 +1636,13 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     }();
     struct CodeCand { const TheTableBook* b; const TheTableChapter* ch; int score; };
     std::vector<CodeCand> codeHits;
+    // ONE pointer phase under ONE lock pair: the code gather, the paragraph
+    // walk, the sort, the per-sermon cap and the materialization all store or
+    // read &book/&ch/&verse into books_ — every one of those pointers is only
+    // valid while nobody clears or grows books_, so the pair holds until the
+    // last read (released just before return). Nothing in between blocks.
+    std::lock_guard<std::mutex> scanLock(scanMutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     if (codeShaped) {
         std::string norm;   // "47 - 0412" and "47-0412" are the same code
         for (char c : Lower(std::string(query)))
@@ -1646,7 +1653,6 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         const size_t digitCount = std::count_if(norm.begin(), norm.end(),
                                                 [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
         if (!norm.empty() && (dash || digitCount >= 3)) {
-            std::lock_guard<std::mutex> lock(mutex_);
             for (const TheTableBook& book : books_)
                 for (const TheTableChapter& ch : book.chapters) {
                     const std::string bare = Lower(ch.code.empty() ? CodeFromTitle(ch.title) : ch.code);
@@ -1775,22 +1781,13 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
             }
         }
     };
-    {
-        // scanMutex_ + mutex_ TOGETHER: the scan walks books_ and populates
-        // lowerParagraphs_ while Load() (books_.clear + lowerParagraphs_.clear)
-        // and imports (books_.push_back / lowerParagraphs_.erase) run on other
-        // threads. mutex_ alone did NOT order the scan against Load's two-step
-        // teardown — a scan between Load's lock scopes walked freed book
-        // vectors (the heap-corruption crash the symbolizer kept landing in
-        // IndexStorage::Upsert's neighbor containers). One lock pair for the
-        // whole walk; nothing inside blocks.
-        std::lock_guard<std::mutex> scanLock(scanMutex_);
-        std::lock_guard<std::mutex> lock(mutex_);
-        int rank = 0;
-        for (const TheTableBook& book : books_)
-            for (const TheTableChapter& ch : book.chapters)
-                scanChapter(book, ch, rank++);
-    }
+    // (Still inside the pointer-phase pair opened above the code gather —
+    // the walk's original separate scope is what left the sort/cap/materialize
+    // reading dangling pointers after an import or Load slipped in between.)
+    int rank = 0;
+    for (const TheTableBook& book : books_)
+        for (const TheTableChapter& ch : book.chapters)
+            scanChapter(book, ch, rank++);
     // ONE order for both paths: score first (verbatim-phrase bonus > scattered
     // words), the engine's candidate order as the sermon-level tiebreak, then
     // reading order. Then the per-sermon variety cap — a long sermon matching a
@@ -1896,6 +1893,8 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         }
         out.insert(out.begin(), leading.begin(), leading.end());
     }
+    // The pointer-phase pair (declared above the code gather) releases here at
+    // function exit — every Acc/CodeCand pointer is already materialized.
     return out;
 }
 

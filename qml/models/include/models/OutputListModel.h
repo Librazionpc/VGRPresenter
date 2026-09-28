@@ -99,6 +99,11 @@ public:
         // activeStyleBackground()) is opaque to the QML engine, so the binding
         // captured its value once at creation and never moved again.
         StyleBackgroundRole,
+        // This output's own gated frame-buffer name ("__out_<hash>__" when
+        // the output wears a style, "" otherwise) — the monitor tile reads
+        // image://livepreview/<name> so a live output shows ITS OWN gated
+        // pass (its style's content rules), not the shared preview feed.
+        FrameBufferRole,
     };
     Q_ENUM(Role)
 
@@ -199,6 +204,9 @@ private:
     // renders the template as the style's layout. Legacy preset keys and
     // unknown ids bake nothing (the engine keeps its plain-layout fallback).
     void bakeTemplateBlocks(bps::presentation::OutputStyleSpec &spec);
+    // Bakes each per-family template design's blocks into the spec's
+    // familyTemplateBlocks slots (no-op for ""/preset family keys).
+    void bakeFamilyTemplateBlocks(bps::presentation::OutputStyleSpec &spec);
     // Re-pushes the ACTIVE output's style (the one entry point every "the
     // on-air look changed" relay funnels into). No-op before the roster is
     // adopted.

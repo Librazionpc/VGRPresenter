@@ -286,6 +286,15 @@ struct OutputStyleSpec {
     bool showMedia = true;
     bool showScripture = true;
     bool showTable = true;
+    // PER-FAMILY TEMPLATE KEYS ("" = inherit templateKey): one style renders
+    // Shows, Media, Scripture and The Table EACH through its own template —
+    // SceneBuilder picks by the slide's content family. Index order =
+    // shows | media | scripture | table (the show* gates' order).
+    std::string familyTemplateKeys[4];
+    // BAKED BLOCKS per family (same transient bake as templateBlocks: the UI
+    // copies the family design's blocks in at push time; empty vector = the
+    // family inherits templateBlocks / the legacy LayoutFor layout).
+    std::vector<ContentBlock> familyTemplateBlocks[4];
     // Shows-only category label (diagnostic display for now).
     std::string category;
     // BAKED TEMPLATE LAYOUT (Settings · Styles ← the Template library): when

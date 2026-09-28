@@ -33,14 +33,31 @@ Item {
     // ---- what is selected ----------------------------------------------------
     property string selection: "all"   // "all" | "unlabeled" | a category's id
     readonly property bool categorySelected: selection !== "all" && selection !== "unlabeled"
-    readonly property string listFilter: selection === "all" ? ""
-                                       : (selection === "unlabeled" ? service.unlabeledFilter : selection)
-
 
     property var gridItems: []
-    function reload() { gridItems = service.designs(listFilter, query) }
+    function reload() {
+        // The filter is derived HERE from the fresh selection — a dependent
+        // binding read inside onSelectionChanged hands designs() the
+        // PREVIOUS selection's value (the handler runs before QML
+        // re-evaluates the binding), which showed every category's cards
+        // one click late and made "All" render Unlabeled's empty roster.
+        const filter = selection === "all" ? ""
+                     : (selection === "unlabeled" ? service.unlabeledFilter : selection)
+        gridItems = service.designs(filter, query)
+    }
     onSelectionChanged: reload()
     onQueryChanged: reload()
+    // The grid's refresh trigger as a PROPERTY BINDING, not just a signal:
+    // the singletons are created when QML first touches them, which can be
+    // before engine boot — and a changed() fired while this pane is still
+    // being constructed would never reach the Connections below (a signal
+    // with no receiver yet is gone). The binding re-reads on any count
+    // movement (load, add/remove, re-file); the Connections stays for
+    // renames, which don't move counts.
+    readonly property int serviceRevision: (service ? service.totalCount : 0)
+                                         + (service ? service.unlabeledCount : 0)
+                                         + (service ? service.categories.length : 0)
+    onServiceRevisionChanged: reload()
     Component.onCompleted: reload()
 
     function categoryExists(id) {
@@ -221,7 +238,9 @@ Item {
             anchors.fill: parent
             anchors.margins: 4
             anchors.rightMargin: 10   // room for the scrollbar
-            anchors.bottomMargin: 64  // and for the floating button
+            // No bottom reserve: the "New <design>" pill FLOATS over the
+            // grid (the old 64px lane cleared a solid-looking footer strip
+            // behind it), so cards scroll beneath it like under any FAB.
             clip: true
             boundsBehavior: Flickable.StopAtBounds
             model: root.gridItems
@@ -258,7 +277,7 @@ Item {
         AppScrollBar {
             anchors.right: parent.right
             anchors.rightMargin: 3
-            height: parent.height - 64
+            height: parent.height - 8   // tracks the grid, which now runs to the bottom
             flickable: grid
         }
 
@@ -266,7 +285,7 @@ Item {
         Column {
             visible: root.gridItems.length === 0
             anchors.horizontalCenter: parent.horizontalCenter
-            y: (parent.height - 64 - height) / 2
+            y: (parent.height - height) / 2
             spacing: 12
             width: Math.min(parent.width - 40, 380)
 
@@ -288,7 +307,9 @@ Item {
 
         // (Restore what ships lives in Settings · General · Libraries.)
 
-        // The floating "New <design>" button.
+        // The floating "New <design>" button — a true FAB: it hovers OVER
+        // the grid (which scrolls beneath it), lifted by the app's stacked-
+        // rect soft shadow (same idiom as ProjectsPanel's + button).
         Rectangle {
             id: newDesign
             objectName: "selfTestDesignNew"
@@ -300,6 +321,10 @@ Item {
             width: newRow.width + 32
             radius: 18
             color: newHover.hovered ? "#e5484d" : Theme.danger
+
+            // the soft shadow (drawn first, so it sits under the pill)
+            Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 3; width: parent.width + 6; height: parent.height + 4; radius: 20; color: "#26000000" }
+            Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 2; width: parent.width + 2; height: parent.height + 2; radius: 19; color: "#33000000" }
 
             Row {
                 id: newRow
@@ -413,8 +438,14 @@ Item {
     // Any click or scroll outside the menu closes it. The menu floats at WINDOW level (DropdownPanel lifts itself there), so its
     // catcher has to cover the whole window too - a pane-sized one left the menu hanging over other screens.
     MenuCatcher { menu: cardMenu }
-    // ...and it goes when this tab does.
-    onVisibleChanged: if (!visible) cardMenu.visible = false
+    // ...and it goes when this tab does; a RE-SHOWN tab re-reads the grid
+    // (the roster's order may have moved under it).
+    onVisibleChanged: {
+        if (!visible)
+            cardMenu.visible = false
+        else
+            root.reload()
+    }
     DropdownPanel {
         id: cardMenu
         objectName: "selfTestDesignCardMenu"

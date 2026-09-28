@@ -5,6 +5,8 @@
 #include <QVariantMap>
 #include <qqml.h>
 
+class QTimer;
+
 // One video source available for routing — a camera, a screen capture, a
 // plain media file, or an NDI network feed. Settings · Audio & Video's
 // right column ("VIDEO
@@ -106,6 +108,18 @@ public:
 private:
     static inline VideoSourceListModel *s_instance = nullptr;
 
+    // ---- Roster persistence (session.videoRoster via the settings store,
+    // the SAME contract as AudioInputListModel's session.audioRoster): every
+    // mutation schedules a debounced write; the constructor retries the
+    // restore until the settings singleton is reachable. Ids persist WITH
+    // the rows, so bus routing (vsrc:<id> nodes) survives a restart too.
+    void scheduleSave();
+    QString serializeRoster() const;
+    void queueRosterWrite();
+    void saveRosterNow();
+    int restoreRoster();
+    QTimer *saveTimer_ = nullptr;
+
     QList<VideoSourceItem> m_sources;
-    int m_nextId = 1;   // stable-id counter ("v<n>"): unique for the whole session; restarts each launch (rosters aren't persisted)
+    int m_nextId = 1;   // stable-id counter ("v<n>"): renumbered past the restored max at restore time
 };

@@ -95,6 +95,17 @@ void TestAppSettings() {
     { st::AppSettings partial(file); CHECK(partial.Load().ok());
       CHECK(partial.GetString("appearance.accent") == "purple" && partial.GetInt("smart.gpuBudgetPct") == 55); }
 
+    // ---- the video board's roster rides the SAME registered-key contract as the audio one ----
+    // (an unregistered key refuses every write — the old undeclared session.videoRoster toasted
+    // "there is no setting 'session.videoRoster'" from Settings · Audio & Video)
+    CHECK(s.Set("session.videoRoster", J::String(R"([{\"label\":\"Cam\",\"kind\":\"ndi\"}])")).ok());
+    CHECK(!s.Set("session.notASetting", J::String("x")).ok());
+    {
+        st::AppSettings again(file);
+        CHECK(again.Load().ok());
+        CHECK(again.GetString("session.videoRoster") == R"([{\"label\":\"Cam\",\"kind\":\"ndi\"}])");
+    }
+
     // ---- ResetAll: back to the defaults, remembering where the user was ----
     CHECK(s.Set("smart.mode", J::String("manual")).ok());
     const size_t changed = s.ResetAll();

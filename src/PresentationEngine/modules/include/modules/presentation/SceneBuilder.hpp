@@ -63,6 +63,19 @@ public:
                                         rendering::RenderEngine& engine,
                                         rendering::Size size = rendering::Size(1920, 1080));
 
+    // GATE-AWARE build — the per-output rule pass: the slide's content family
+    // is checked against the spec's show* gates and a REFUSED family renders
+    // the style's background ONLY (colour + image, no content, no text) — the
+    // output wearing this style shows its look, never the forbidden content.
+    // Allowed families render exactly like BuildSlideScene. Scene ids carry a
+    // "gated" marker so the gated and ungated versions of one slide coexist
+    // in the render cache (different outputs, different rules, same slide).
+    Result<std::string> BuildGatedSlideScene(const Presentation& presentation,
+                                             const Slide& slide,
+                                             const OutputStyleSpec& style,
+                                             rendering::RenderEngine& engine,
+                                             rendering::Size size = rendering::Size(1920, 1080));
+
     // Deterministic scene id for a slide ("pres:<presentationId>:<slideId>").
     static std::string SceneIdFor(const Presentation& p, const Slide& s);
     // Style-fingerprinted scene id: "<baseId>@s:<bg>-<key>-<clear>" — a change

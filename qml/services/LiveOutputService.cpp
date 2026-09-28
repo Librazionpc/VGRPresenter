@@ -354,14 +354,20 @@ void LiveOutputService::pollTick()
 QImage LivePreviewProvider::requestImage(const QString &id, QSize *size,
                                          const QSize &requestedSize)
 {
-    Q_UNUSED(id)   // only the cache-busting query matters
-
-    // The engine-side Preview output holds the last distributed frame (the
-    // same frame the real outputs received). Grab the output by name.
-    static const char *kPreviewName = "__live_preview__";
+    // `id` is the URL path: "" = the shared PREVIEW feed (every tile's
+    // default), "__out_<hash>__" = ONE output's own gated buffer (the
+    // per-output pass the engine renders for that output's style). Strip the
+    // ?query, resolve the buffer, read its last frame.
+    QString name = id;
+    const int q = name.indexOf(QLatin1Char('?'));
+    if (q >= 0)
+        name.truncate(q);
     QImage out;
 
-    if (auto o = pr::RenderEngine::Instance().GetOutput(kPreviewName); o.ok()) {
+    const std::string bufferName = name.isEmpty()
+        ? std::string("__live_preview__")
+        : name.toStdString();
+    if (auto o = pr::RenderEngine::Instance().GetOutput(bufferName); o.ok()) {
         if (auto *fb = dynamic_cast<pr::FrameBufferOutput *>(o.value().get())) {
             const pr::Frame frame = fb->LastFrame();
             if (!frame.empty()) {

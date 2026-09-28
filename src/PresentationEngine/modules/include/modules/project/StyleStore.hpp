@@ -38,7 +38,20 @@ struct StoredStyle {
     // Scripture, Table each with its own template). A tab whose toggle is OFF
     // greys out — its content is NOT meant to show on the output wearing this
     // style, and go-live refuses it with a clear message.
-    bool showTemplates[4] = {true, true, true, true};   // shows | media | scripture | table
+    // The four content gates (shows | media | scripture | table). DEFAULT
+    // FALSE for a freshly built struct (a new style starts with everything
+    // inactive — an explicit user choice, not four pre-ticked boxes); the
+    // JSON read still defaults MISSING keys to true, so older saved rosters
+    // keep their all-allowed behaviour.
+    bool showTemplates[4] = {false, false, false, false};
+    // PER-CONTENT-TYPE TEMPLATE KEYS (FreeShow: one style carries a template
+    // PER content type — the Shows tab renders with the style's Shows
+    // template, Scripture with its Scripture template, ...). Index order =
+    // showTemplates' (shows | media | scripture | table). EMPTY string = the
+    // family has no template of its own and inherits the style's whole-style
+    // templateKey (the pre-family behaviour — every older saved roster reads
+    // back as empty and keeps rendering exactly as before).
+    std::string templateKeys[4];                        // shows | media | scripture | table
     // Shows-only category label (free text; FreeShow styles name a category).
     std::string category;
 };

@@ -29,11 +29,23 @@ Rectangle {
     required property var model
 
     // The distributed frame (image://livepreview re-fetched on every frameRev
-    // bump). One provider serves the PREVIEW output's last frame — every tile
-    // mirrors it (single-pipeline software renderer: the frame the preview
-    // output received IS what the real outputs got).
+    // bump). An output wearing a STYLE reads ITS OWN gated buffer
+    // (frameBuffer role → its per-output pass under its own content rules);
+    // an unstyled output mirrors the shared PREVIEW feed (single-pipeline
+    // software renderer: the frame the preview output received IS what the
+    // real outputs got). frameRev pulses on every main-pass frame; the
+    // per-output passes run right after it in the same loop iteration, so
+    // one rev serves both.
+    readonly property string ownBuffer: (root.model !== null && root.model !== undefined)
+                                        ? String(root.model.frameBuffer ?? "") : ""
     readonly property bool hasFrame: LiveOutputService.live && LiveOutputService.frameRev > 0
-    readonly property url frameSource: hasFrame ? "image://livepreview?v=" + LiveOutputService.frameRev : ""
+    readonly property url frameSource: {
+        if (!hasFrame)
+            return ""
+        return ownBuffer !== ""
+            ? "image://livepreview/" + ownBuffer + "?v=" + LiveOutputService.frameRev
+            : "image://livepreview?v=" + LiveOutputService.frameRev
+    }
 
     // The on-air slide AS DESIGN BLOCKS — the same data the preview pane's
     // DesignPreview draws, straight from the runtime's current slide (no

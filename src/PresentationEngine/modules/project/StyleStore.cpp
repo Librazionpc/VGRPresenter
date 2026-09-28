@@ -66,6 +66,13 @@ json::Value StyleStore::StyleToJson(const StoredStyle& s) {
     tmpl["scripture"] = json::Value::Bool(s.showTemplates[2]);
     tmpl["table"] = json::Value::Bool(s.showTemplates[3]);
     o["showTemplates"] = json::Value(std::move(tmpl));
+    // Per-family template keys ("" = inherit the whole-style templateKey).
+    json::Value::Object famKeys;
+    famKeys["shows"] = json::Value::String(s.templateKeys[0]);
+    famKeys["media"] = json::Value::String(s.templateKeys[1]);
+    famKeys["scripture"] = json::Value::String(s.templateKeys[2]);
+    famKeys["table"] = json::Value::String(s.templateKeys[3]);
+    o["templateKeys"] = json::Value(std::move(famKeys));
     o["category"] = json::Value::String(s.category);
     return json::Value(std::move(o));
 }
@@ -109,6 +116,17 @@ Result<StoredStyle> StyleStore::StyleFromJson(const json::Value& v) {
         s.showTemplates[1] = tflag("media", true);
         s.showTemplates[2] = tflag("scripture", true);
         s.showTemplates[3] = tflag("table", true);
+    }
+    if (const json::Value* famKeys = v.Find("templateKeys"); famKeys && famKeys->asObject()) {
+        const auto fkey = [famKeys](std::string_view key) {
+            if (const json::Value* f = famKeys->Find(key))
+                return std::string(f->asString());
+            return std::string();
+        };
+        s.templateKeys[0] = fkey("shows");
+        s.templateKeys[1] = fkey("media");
+        s.templateKeys[2] = fkey("scripture");
+        s.templateKeys[3] = fkey("table");
     }
     s.category = str("category");
     // An entry without an id (hand-edited file, partial write) is skipped by

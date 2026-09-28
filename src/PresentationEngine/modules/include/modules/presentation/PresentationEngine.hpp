@@ -95,6 +95,20 @@ public:
     // served). Thread-safe: the live loop runs on its own thread.
     Result<void> SetActiveOutputStyle(const OutputStyleSpec& style);
     OutputStyleSpec ActiveOutputStyle() const;
+    // PER-OUTPUT STYLE SET: the distinct specs of every output that will
+    // receive live frames (the UI pushes one entry per style-wearing live
+    // output, plus the active one). The live loop renders ONE EXTRA PASS per
+    // entry into that output's own frame buffer, so two live outputs with
+    // opposite content rules each get frames composed under their OWN spec
+    // (the main pass still feeds the active output + preview feed). Empty
+    // entries (or a singleton set equal to the active style) render nothing
+    // extra — the zero-overhead case every single-output setup is.
+    Result<void> SetLiveOutputStyles(const std::vector<OutputStyleSpec>& styles,
+                                     const std::vector<std::string>& bufferNames);
+    // The loop's read side: the specs plus (when outBuffers != nullptr) the
+    // parallel buffer names. Copy under the lock — the loop thread must not
+    // hold mutex_ while rendering.
+    std::vector<OutputStyleSpec> LiveOutputStyles(std::vector<std::string> *outBuffers = nullptr) const;
     // The scene builder, for the live loop's style rebuilds (RebuildScenes
     // runs on the loop thread; the builder itself is stateless per call).
     SceneBuilder& Builder() const { return *builder_; }
@@ -154,6 +168,11 @@ private:
     // The on-air output's style (Set/Active below). Guarded by mutex_, read
     // every frame by PresentationEngine::Prepare's builder call path.
     OutputStyleSpec activeStyle_;
+    // The per-output pass set (SetLiveOutputStyles): parallel vectors of the
+    // extra specs and the frame-buffer output names each renders into.
+    // Guarded by mutex_; consumed by the live loop.
+    std::vector<OutputStyleSpec> liveOutputStyles_;
+    std::vector<std::string> liveOutputBuffers_;
     std::shared_ptr<PresentationCompiler> compiler_;
     std::shared_ptr<SceneBuilder> builder_;
     // The "presentation" document handler (open/save the working show as .vgr),

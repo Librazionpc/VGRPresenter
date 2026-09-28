@@ -197,7 +197,7 @@ void OutputListModel::connectToStyleRoster()
         // StyleBackgroundRole rides along: a Save Changes on a style any
         // output wears (colour or background image) must repaint that
         // output's monitor tile the moment the dialog closes.
-        emit dataChanged(first, last, { StyleIdRole, StyleNameRole, StyleBackgroundRole });
+        emit dataChanged(first, last, { StyleIdRole, StyleNameRole, StyleBackgroundRole, FrameBufferRole });
         // Save Changes on a style that is ON AIR must reach the engine NOW
         // (FreeShow's reactive output.style — the live render loop picks the
         // new spec up within a frame). pushEngineStyle only ran on output
@@ -264,6 +264,13 @@ QVariant OutputListModel::data(const QModelIndex &index, int role) const
     }
     case StyleBackgroundRole:
         return styleBackground(index.row());
+    case FrameBufferRole:
+        // Keyed exactly like the engine-side buffer push (saveRoster's id
+        // keying): a styled output has its own gated buffer, an unstyled one
+        // mirrors the shared preview feed.
+        return item.styleId.isEmpty()
+                   ? QString()
+                   : QStringLiteral("__out_%1__").arg(qHash(item.name));
     default: return {};
     }
 }
@@ -285,6 +292,7 @@ QHash<int, QByteArray> OutputListModel::roleNames() const
         { StyleNameRole, "styleName" },
         { ContentRole, "content" },
         { StyleBackgroundRole, "styleBackground" },
+        { FrameBufferRole, "frameBuffer" },
     };
 }
 
@@ -498,7 +506,7 @@ void OutputListModel::setStyle(int index, const QString &styleId)
 
     m_outputs[index].styleId = normalized;
     const QModelIndex changed = this->index(index);
-    emit dataChanged(changed, changed, { StyleIdRole, StyleNameRole, StyleBackgroundRole });
+    emit dataChanged(changed, changed, { StyleIdRole, StyleNameRole, StyleBackgroundRole, FrameBufferRole });
     saveRoster();
 
     // Restyling the output that is on air takes effect immediately —
@@ -712,11 +720,57 @@ void OutputListModel::pushEngineStyle(const QString &styleId)
         spec.showMedia = style.value(QStringLiteral("showMedia")).toBool();
         spec.showScripture = style.value(QStringLiteral("showScripture")).toBool();
         spec.showTable = style.value(QStringLiteral("showTable")).toBool();
+        // PER-FAMILY template picks — the family keys ride the spec; the
+        // bake below fills each family's blocks when the key names a design.
+        spec.familyTemplateKeys[0] = style.value(QStringLiteral("familyTemplateShows")).toString().toStdString();
+        spec.familyTemplateKeys[1] = style.value(QStringLiteral("familyTemplateMedia")).toString().toStdString();
+        spec.familyTemplateKeys[2] = style.value(QStringLiteral("familyTemplateScripture")).toString().toStdString();
+        spec.familyTemplateKeys[3] = style.value(QStringLiteral("familyTemplateTable")).toString().toStdString();
         spec.category = style.value(QStringLiteral("category")).toString().toStdString();
         bakeTemplateBlocks(spec);
+        bakeFamilyTemplateBlocks(spec);
     }
     if (SettingsService *settings = SettingsService::instancePtr())
         settings->setActiveOutputStyle(spec);
+    // THE OTHER LIVE OUTPUTS: push the per-output style set so the engine's
+    // loop renders one gated pass per style-wearing live output. EVERY live
+    // output is included (the active one too — its entry is the same spec,
+    // the loop renders it into its own named buffer for the tile); outputs
+    // without a style push nothing (their tile mirrors the main pass).
+    std::vector<bps::presentation::OutputStyleSpec> specs;
+    std::vector<std::string> buffers;
+    for (int i = 0; i < m_outputs.size(); ++i) {
+        const OutputItem &item = m_outputs.at(i);
+        if (!item.isEnabled || !item.styleId.isEmpty()) {
+            const int styleRow = styleRowForId(item.styleId);
+            if (styleRow >= 0) {
+                bps::presentation::OutputStyleSpec outSpec;
+                const QVariantMap outStyle = StyleListModel::instance()->getStyle(styleRow);
+                outSpec.name = outStyle.value(QStringLiteral("name")).toString().toStdString();
+                outSpec.contentType = outStyle.value(QStringLiteral("contentType")).toString().toStdString();
+                outSpec.templateKey = outStyle.value(QStringLiteral("templateKey")).toString().toStdString();
+                outSpec.backgroundColor = outStyle.value(QStringLiteral("backgroundColor")).toString().toStdString();
+                outSpec.backgroundImage = outStyle.value(QStringLiteral("backgroundImage")).toString().toStdString();
+                outSpec.clearBackgroundOnText = outStyle.value(QStringLiteral("clearBackgroundOnText")).toBool();
+                outSpec.showShows = outStyle.value(QStringLiteral("showShows")).toBool();
+                outSpec.showMedia = outStyle.value(QStringLiteral("showMedia")).toBool();
+                outSpec.showScripture = outStyle.value(QStringLiteral("showScripture")).toBool();
+                outSpec.showTable = outStyle.value(QStringLiteral("showTable")).toBool();
+                outSpec.familyTemplateKeys[0] = outStyle.value(QStringLiteral("familyTemplateShows")).toString().toStdString();
+                outSpec.familyTemplateKeys[1] = outStyle.value(QStringLiteral("familyTemplateMedia")).toString().toStdString();
+                outSpec.familyTemplateKeys[2] = outStyle.value(QStringLiteral("familyTemplateScripture")).toString().toStdString();
+                outSpec.familyTemplateKeys[3] = outStyle.value(QStringLiteral("familyTemplateTable")).toString().toStdString();
+                bakeTemplateBlocks(outSpec);
+                bakeFamilyTemplateBlocks(outSpec);
+                // Buffer name keyed by output identity (qHash(name) — the same
+                // keying saveRoster uses for StoredOutput ids).
+                specs.push_back(std::move(outSpec));
+                buffers.push_back(QStringLiteral("__out_%1__").arg(qHash(item.name)).toStdString());
+            }
+        }
+    }
+    if (SettingsService *settings2 = SettingsService::instancePtr())
+        settings2->setLiveOutputStyles(specs, buffers);
 }
 
 void OutputListModel::bakeTemplateBlocks(bps::presentation::OutputStyleSpec &spec)
@@ -738,6 +792,24 @@ void OutputListModel::bakeTemplateBlocks(bps::presentation::OutputStyleSpec &spe
     spec.templateBlocks.reserve(blocks.size());
     for (const QVariant &b : blocks)
         spec.templateBlocks.push_back(ShowConverter::blockFromVariant(b.toMap()));
+}
+
+// NOTE: bakeTemplateBlocks bakes ONLY the whole-style template. The
+// per-family slots bake here (their keys are already in spec.familyTemplateKeys).
+void OutputListModel::bakeFamilyTemplateBlocks(bps::presentation::OutputStyleSpec &spec)
+{
+    for (size_t i = 0; i < 4; ++i) {
+        const QString famKey = QString::fromStdString(spec.familyTemplateKeys[i]);
+        if (famKey.isEmpty() || famKey.startsWith(QLatin1String("tpl-")) == false)
+            continue;   // "" = inherit; a preset key rides LayoutFor — no bake
+        const QVariantMap design = TemplateLibraryService::instance().design(famKey);
+        const QVariantList blocks = design.value(QStringLiteral("blocks")).toList();
+        if (blocks.isEmpty())
+            continue;   // unknown/deleted id: the family falls back per SceneBuilder
+        spec.familyTemplateBlocks[i].reserve(blocks.size());
+        for (const QVariant &b : blocks)
+            spec.familyTemplateBlocks[i].push_back(ShowConverter::blockFromVariant(b.toMap()));
+    }
 }
 
 // One push for the CURRENT active output's style — the single entry point
@@ -780,7 +852,7 @@ void OutputListModel::detachStyleEverywhere(const QString &styleId)
             continue;
         m_outputs[i].styleId = QString();
         const QModelIndex changed = index(i);
-        emit dataChanged(changed, changed, { StyleIdRole, StyleNameRole, StyleBackgroundRole });
+        emit dataChanged(changed, changed, { StyleIdRole, StyleNameRole, StyleBackgroundRole, FrameBufferRole });
         touched = true;
     }
     if (touched)

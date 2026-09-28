@@ -92,6 +92,11 @@ public:
     // (PresentationEngine::SetActiveOutputStyle). Safe to call before boot —
     // a not-yet-running engine simply has nothing to push to.
     void setActiveOutputStyle(const bps::presentation::OutputStyleSpec &spec);
+    // The per-output pass set (one gated render per style-wearing output —
+    // PresentationEngine::SetLiveOutputStyles). Safe before boot, like the
+    // single-spec push above.
+    void setLiveOutputStyles(const std::vector<bps::presentation::OutputStyleSpec> &specs,
+                             const std::vector<std::string> &bufferNames);
 
     // Whether a file is there (the last show may have been moved or deleted since the app was closed).
     Q_INVOKABLE bool fileExists(const QString &path) const;

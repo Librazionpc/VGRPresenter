@@ -78,6 +78,21 @@ Item {
         return ai >= 0 && styleId !== "" && OutputListModel.getOutput(ai).styleId === styleId
     }
 
+    // One shared FAMILY map — the style cards' content pills AND the Edit
+    // dialog's content chips read the same labels/accents from here, so the
+    // two surfaces can't drift. `bg` values are pre-tinted 8-digit ARGB
+    // literals (plain JS strings — QML `color` values have no .r/.g/.b to
+    // read for compositing).
+    readonly property var familyInfo: ({
+        shows:     { label: qsTr("Shows"),     color: "#9b8ff5", bg: "#2e6c5ce7" },
+        media:     { label: qsTr("Media"),     color: "#5eead4", bg: "#2e14b8a6" },
+        scripture: { label: qsTr("Scripture"), color: "#fbbf24", bg: "#2ef39c12" },
+        table:     { label: qsTr("The Table"), color: "#4ae0b0", bg: "#2e4ae0b0" }
+    })
+    function familyInfoFor(key) {
+        return root.familyInfo[key] ?? { label: String(key), color: Theme.textMuted, bg: Theme.chip }
+    }
+
     // ---- Edit Style dialog ----
     // Editable copies loaded when the dialog opens — the model is only
     // written on Save, matching every other dialog's Cancel/Save contract
@@ -89,16 +104,38 @@ Item {
     property string editStyleBackgroundColor: "transparent"
     property string editStyleBackgroundImage: ""
     property bool editStyleClearOnText: false
-    // The four content pills (shows/media/scripture/table) — grey = that
-    // tab's content is NOT meant for an output wearing this style.
-    property bool editShowShows: true
-    property bool editShowMedia: true
-    property bool editShowScripture: true
-    property bool editShowTable: true
+    // The four content chips (shows/media/scripture/table) — buffer the
+    // EDITED flags, loaded from the row on open. The dialog starts them
+    // INACTIVE so a brand-new style's chips read as an empty slate (the row
+    // itself carries the same default; the open overwrites these anyway).
+    property bool editShowShows: false
+    property bool editShowMedia: false
+    property bool editShowScripture: false
+    property bool editShowTable: false
+    // PER-FAMILY template picks — each active content type can carry its OWN
+    // template; "" = that family inherits the whole-style Template below.
+    property string editFamilyShows: ""
+    property string editFamilyMedia: ""
+    property string editFamilyScripture: ""
+    property string editFamilyTable: ""
+    // The family the Template row edits (chips switch it; defaults to the
+    // style's whole-style family).
+    property string editTemplateFamily: "shows"
     // Shows-only category (free text).
     property string editStyleCategory: ""
+    // The picked family's template key: its own pick when it has one, else
+    // the whole-style key (what the Template row shows and edits).
+    readonly property string editActiveFamilyKey: {
+        if (root.editTemplateFamily === "shows" && root.editFamilyShows !== "") return root.editFamilyShows
+        if (root.editTemplateFamily === "media" && root.editFamilyMedia !== "") return root.editFamilyMedia
+        if (root.editTemplateFamily === "scripture" && root.editFamilyScripture !== "") return root.editFamilyScripture
+        if (root.editTemplateFamily === "table" && root.editFamilyTable !== "") return root.editFamilyTable
+        return root.editStyleTemplateKey
+    }
+    readonly property bool editActiveFamilyOverridden:
+        root.editActiveFamilyKey !== root.editStyleTemplateKey
 
-    function openEditStyle(index) {
+    function openEditStyle(index, family) {
         const data = StyleListModel.getStyle(index)
         root.editStyleIndex = index
         root.editStyleName = data.name
@@ -111,6 +148,12 @@ Item {
         root.editShowMedia = data.showMedia
         root.editShowScripture = data.showScripture
         root.editShowTable = data.showTable
+        root.editFamilyShows = data.familyTemplateShows
+        root.editFamilyMedia = data.familyTemplateMedia
+        root.editFamilyScripture = data.familyTemplateScripture
+        root.editFamilyTable = data.familyTemplateTable
+        // A clicked card pill pre-targets ITS family in the dialog.
+        root.editTemplateFamily = family || data.contentType || "shows"
         root.editStyleCategory = data.category
     }
 
@@ -127,6 +170,10 @@ Item {
         StyleListModel.setShowTemplate(root.editStyleIndex, "media", root.editShowMedia)
         StyleListModel.setShowTemplate(root.editStyleIndex, "scripture", root.editShowScripture)
         StyleListModel.setShowTemplate(root.editStyleIndex, "table", root.editShowTable)
+        StyleListModel.setFamilyTemplateKey(root.editStyleIndex, "shows", root.editFamilyShows)
+        StyleListModel.setFamilyTemplateKey(root.editStyleIndex, "media", root.editFamilyMedia)
+        StyleListModel.setFamilyTemplateKey(root.editStyleIndex, "scripture", root.editFamilyScripture)
+        StyleListModel.setFamilyTemplateKey(root.editStyleIndex, "table", root.editFamilyTable)
         StyleListModel.setCategory(root.editStyleIndex, root.editStyleCategory)
         root.editStyleIndex = -1
     }
@@ -260,17 +307,9 @@ Item {
                             // role values arrive as strings, not color) — the
                             // string comparison is correct here.
                             readonly property bool isTransparent: styleRow.backgroundColor === "transparent"
-                            // `bg` is a pre-tinted 8-digit ARGB hex literal,
-                            // not computed via Qt.rgba(color.r, ...) — the
-                            // map's `color` values here are plain JS
-                            // strings (not QML `color` values), which have
-                            // no .r/.g/.b to read.
-                            readonly property var contentTypeInfo: ({
-                                shows: { label: qsTr("Shows"), color: "#9b8ff5", bg: "#2e6c5ce7" },
-                                media: { label: qsTr("Media"), color: "#5eead4", bg: "#2e14b8a6" },
-                                scripture: { label: qsTr("Scripture"), color: "#fbbf24", bg: "#2ef39c12" },
-                                table: { label: qsTr("The Table"), color: "#4ae0b0", bg: "#2e4ae0b0" }
-                            }[styleRow.contentType] ?? { label: styleRow.contentType, color: Theme.textMuted, bg: Theme.chip })
+                            // The row's content-type chip wears the SHARED
+                            // family map (the pills below use the same one).
+                            readonly property var contentTypeInfo: root.familyInfoFor(styleRow.contentType)
                             // The four template pills (greyed = off) + image chip,
                             // right on the row — the Edit dialog state at a glance.
                             readonly property bool rowShowShows: showShows
@@ -419,38 +458,86 @@ Item {
                                         }
                                     }
 
-                                    // Mini content pills — grey = that tab is
-                                    // switched off for this style.
+                                    // Content pills — one per family, FULL
+                                    // names in each family's own accent:
+                                    // coloured = the style serves that tab,
+                                    // dimmed = off. A family with its OWN
+                                    // template spells it out on the pill
+                                    // ("Scripture · Lower Third 2"), so the
+                                    // per-family overrides read right on the
+                                    // card instead of hiding in the Edit
+                                    // dialog. Clicking an active pill opens
+                                    // the dialog pre-targeted to that family.
                                     Row {
                                         anchors.verticalCenter: parent.verticalCenter
                                         spacing: 4
 
                                         Repeater {
-                                            model: [
-                                                { key: "shows", label: qsTr("Sh"), on: styleRow.rowShowShows },
-                                                { key: "media", label: qsTr("Me"), on: styleRow.rowShowMedia },
-                                                { key: "scripture", label: qsTr("Sc"), on: styleRow.rowShowScripture },
-                                                { key: "table", label: qsTr("Ta"), on: styleRow.rowShowTable }
-                                            ]
+                                            // Override names ride the model so a
+                                            // template pick/rename re-renders the
+                                            // pills (modelsRev + the catalog rev
+                                            // are the honest dependencies).
+                                            model: {
+                                                root.modelsRev
+                                                root.templateCatalogRev
+                                                const data = StyleListModel.getStyle(styleRow.index)
+                                                return [
+                                                    { key: "shows", on: styleRow.rowShowShows,
+                                                      overrideName: data.familyTemplateShows !== "" ? root.templateNameFor(data.familyTemplateShows) : "" },
+                                                    { key: "media", on: styleRow.rowShowMedia,
+                                                      overrideName: data.familyTemplateMedia !== "" ? root.templateNameFor(data.familyTemplateMedia) : "" },
+                                                    { key: "scripture", on: styleRow.rowShowScripture,
+                                                      overrideName: data.familyTemplateScripture !== "" ? root.templateNameFor(data.familyTemplateScripture) : "" },
+                                                    { key: "table", on: styleRow.rowShowTable,
+                                                      overrideName: data.familyTemplateTable !== "" ? root.templateNameFor(data.familyTemplateTable) : "" }
+                                                ]
+                                            }
                                             delegate: Rectangle {
+                                                id: familyPill
                                                 required property var modelData
+                                                readonly property var info: root.familyInfoFor(modelData.key)
+                                                readonly property bool overridden: modelData.overrideName !== ""
                                                 anchors.verticalCenter: parent.verticalCenter
-                                                width: miniLabel.implicitWidth + 8
-                                                height: 15
-                                                radius: 7
-                                                color: modelData.on ? "#2e34404d" : "transparent"
-                                                border.color: modelData.on ? "#4a5064" : "#2a2c38"
+                                                height: 18
+                                                width: pillContent.implicitWidth + 12
+                                                radius: 4
+                                                color: modelData.on ? info.bg : "transparent"
+                                                border.color: pillHover.containsMouse && modelData.on ? "#5a6076"
+                                                    : (modelData.on ? "#4a5064" : "#2a2c38")
                                                 border.width: 1
-                                                opacity: modelData.on ? 1 : 0.4
+                                                opacity: modelData.on ? 1 : 0.45
 
-                                                Text {
-                                                    id: miniLabel
+                                                Row {
+                                                    id: pillContent
                                                     anchors.centerIn: parent
-                                                    text: parent.modelData.label
-                                                    color: parent.modelData.on ? Theme.textPrimary : Theme.textMuted
-                                                    font.family: Theme.fontFamily
-                                                    font.pixelSize: 9
-                                                    font.bold: parent.modelData.on
+                                                    spacing: 4
+
+                                                    Text {
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        text: familyPill.info.label
+                                                        color: familyPill.modelData.on ? familyPill.info.color : Theme.textMuted
+                                                        font.family: Theme.fontFamily
+                                                        font.pixelSize: 10
+                                                        font.weight: Font.Bold
+                                                    }
+                                                    Text {
+                                                        visible: familyPill.overridden
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        width: Math.min(implicitWidth, 110)
+                                                        elide: Text.ElideRight
+                                                        text: "·  " + familyPill.modelData.overrideName
+                                                        color: familyPill.modelData.on ? familyPill.info.color : Theme.textMuted
+                                                        font.family: Theme.fontFamily
+                                                        font.pixelSize: 9
+                                                    }
+                                                }
+                                                MouseArea {
+                                                    id: pillHover
+                                                    anchors.fill: parent
+                                                    hoverEnabled: true
+                                                    enabled: familyPill.modelData.on
+                                                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                                    onClicked: root.openEditStyle(styleRow.index, familyPill.modelData.key)
                                                 }
                                             }
                                         }
@@ -688,13 +775,15 @@ Item {
                             else if (modelData.key === "scripture") root.editShowScripture = next
                             else root.editShowTable = next
                             // The template family must stay on an ACTIVE
-                            // type: picking a chip targets it; switching one
-                            // OFF moves the family to another still-active
-                            // chip (unchanged when it wasn't the family or
-                            // when nothing else is active).
+                            // type: picking a chip targets it (the Template
+                            // row edits THAT family now); switching one OFF
+                            // moves the target to another still-active chip
+                            // (unchanged when it wasn't the target or when
+                            // nothing else is active).
                             if (next) {
                                 root.editStyleContentType = modelData.key
-                            } else if (root.editStyleContentType === modelData.key) {
+                                root.editTemplateFamily = modelData.key
+                            } else if (root.editTemplateFamily === modelData.key) {
                                 const others = ["shows", "media", "scripture", "table"]
                                     .filter((k) => k !== modelData.key
                                             && (k === "shows" ? root.editShowShows
@@ -702,7 +791,7 @@ Item {
                                                 : k === "scripture" ? root.editShowScripture
                                                 : root.editShowTable))
                                 if (others.length > 0)
-                                    root.editStyleContentType = others[0]
+                                    root.editTemplateFamily = others[0]
                             }
                         }
                     }
@@ -763,12 +852,20 @@ Item {
             }
         }
 
+        // TEMPLATE — PER CONTENT TYPE: the row edits the family picked by the
+        // chips above. A family with its own pick shows its template name and
+        // an "inherits" chip appears to reset it back to the whole-style
+        // template; a family without one shows the whole-style template and
+        // picking one here sets the family's OWN override.
         Column {
             width: parent.width
             spacing: Theme.space2
 
             Text {
-                text: qsTr("Template")
+                text: qsTr("Template for ") + ({
+                    "shows": qsTr("Shows"), "media": qsTr("Media"),
+                    "scripture": qsTr("Scripture"), "table": qsTr("The Table")
+                }[root.editTemplateFamily] ?? qsTr("Shows"))
                 color: Theme.textSecondary
                 font.family: Theme.fontFamily
                 font.pixelSize: Theme.textXs
@@ -783,13 +880,58 @@ Item {
                 Text {
                     x: 14
                     anchors.verticalCenter: parent.verticalCenter
-                    text: root.templateNameFor(root.editStyleTemplateKey)
-                    color: Theme.textPrimary
+                    width: parent.width - resetFamilyTemplate.width - changeTemplate.width - 60
+                    elide: Text.ElideRight
+                    text: root.templateNameFor(root.editActiveFamilyKey)
+                          + (root.editActiveFamilyOverridden ? "" : qsTr("  ·  inherited"))
+                    color: root.editActiveFamilyOverridden ? Theme.textPrimary : Theme.textSecondary
                     font.family: Theme.fontFamily
                     font.pixelSize: Theme.textSm
                 }
 
+                // INHERIT/RESET chip: visible when the picked family carries
+                // its OWN template; clicking clears it back to the whole-style
+                // template. Clicking Change while inherited SETS the family's
+                // own pick (the override begins).
                 Rectangle {
+                    id: resetFamilyTemplate
+                    anchors.right: changeTemplate.left
+                    anchors.rightMargin: 8
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: root.editActiveFamilyOverridden
+                    height: 26
+                    width: resetFamilyTemplateLabel.implicitWidth + 22
+                    radius: 13
+                    color: resetFamilyTemplateArea.containsMouse ? Theme.chip : "transparent"
+                    border.color: Theme.border
+                    border.width: 1
+                    Behavior on color { ColorAnimation { duration: 100 } }
+
+                    Text {
+                        id: resetFamilyTemplateLabel
+                        anchors.centerIn: parent
+                        text: qsTr("Inherit")
+                        color: Theme.textMuted
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.textXs
+                    }
+
+                    MouseArea {
+                        id: resetFamilyTemplateArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            if (root.editTemplateFamily === "shows") root.editFamilyShows = ""
+                            else if (root.editTemplateFamily === "media") root.editFamilyMedia = ""
+                            else if (root.editTemplateFamily === "scripture") root.editFamilyScripture = ""
+                            else root.editFamilyTable = ""
+                        }
+                    }
+                }
+
+                Rectangle {
+                    id: changeTemplate   // referenced by the row's label width + the Inherit chip's anchor
                     anchors.right: parent.right
                     anchors.rightMargin: 12
                     anchors.verticalCenter: parent.verticalCenter
@@ -817,11 +959,14 @@ Item {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
-                            templatePicker.contentType = root.editStyleContentType
+                            // The picker targets the PICKED FAMILY: its pick
+                            // lands in that family's own slot (an override
+                            // begins), not the whole-style key.
+                            templatePicker.contentType = root.editTemplateFamily
                             templatePicker.contentTypeLabel = {
                                 "shows": qsTr("Shows"), "media": qsTr("Media"), "scripture": qsTr("Scripture"),
                                 "table": qsTr("The Table")
-                            }[root.editStyleContentType] ?? qsTr("Shows")
+                            }[root.editTemplateFamily] ?? qsTr("Shows")
                             // The ENGINE's template catalog — the same Template library the
                             // Templates tab edits — for EVERY content type (ReferencePane's
                             // mapping, category filter included). The style saves the design's
@@ -837,7 +982,7 @@ Item {
                                 category: t.category,
                                 categoryName: t.category ? (categoryNames[t.category] ?? t.category) : qsTr("Unlabeled")
                             }))
-                            templatePicker.selectedKey = root.editStyleTemplateKey
+                            templatePicker.selectedKey = root.editActiveFamilyKey
                             templatePicker.open = true
                         }
                     }
@@ -1075,7 +1220,13 @@ Item {
     TemplatePickerModal {
         id: templatePicker
         onApplied: (tpl) => {
-            root.editStyleTemplateKey = tpl.key
+            // The pick lands in the PICKED FAMILY's own slot (a per-type
+            // override); only a family-less default routes to the whole-style
+            // key. "Inherit" on the row is the way back to the shared one.
+            if (root.editTemplateFamily === "shows") root.editFamilyShows = tpl.key
+            else if (root.editTemplateFamily === "media") root.editFamilyMedia = tpl.key
+            else if (root.editTemplateFamily === "scripture") root.editFamilyScripture = tpl.key
+            else root.editFamilyTable = tpl.key
             templatePicker.open = false
         }
         onCancelled: templatePicker.open = false

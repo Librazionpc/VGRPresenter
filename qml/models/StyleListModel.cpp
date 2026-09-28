@@ -48,6 +48,10 @@ StyleListModel::StyleListModel(QObject *parent)
         item.showMedia = s.showTemplates[1];
         item.showScripture = s.showTemplates[2];
         item.showTable = s.showTemplates[3];
+        item.familyTemplateKeys[0] = QString::fromStdString(s.templateKeys[0]);
+        item.familyTemplateKeys[1] = QString::fromStdString(s.templateKeys[1]);
+        item.familyTemplateKeys[2] = QString::fromStdString(s.templateKeys[2]);
+        item.familyTemplateKeys[3] = QString::fromStdString(s.templateKeys[3]);
         item.category = QString::fromStdString(s.category);
         m_styles.append(item);
     }
@@ -144,6 +148,10 @@ void StyleListModel::save()
         s.showTemplates[1] = item.showMedia;
         s.showTemplates[2] = item.showScripture;
         s.showTemplates[3] = item.showTable;
+        s.templateKeys[0] = item.familyTemplateKeys[0].toStdString();
+        s.templateKeys[1] = item.familyTemplateKeys[1].toStdString();
+        s.templateKeys[2] = item.familyTemplateKeys[2].toStdString();
+        s.templateKeys[3] = item.familyTemplateKeys[3].toStdString();
         s.category = item.category.toStdString();
         stored.append(s);
     }
@@ -314,6 +322,23 @@ void StyleListModel::setShowTemplate(int index, const QString &contentType, bool
     save();
 }
 
+void StyleListModel::setFamilyTemplateKey(int index, const QString &contentType,
+                                           const QString &templateKey)
+{
+    if (index < 0 || index >= m_styles.size())
+        return;
+    QString *key = contentType == QLatin1String("shows")     ? &m_styles[index].familyTemplateKeys[0]
+                 : contentType == QLatin1String("media")     ? &m_styles[index].familyTemplateKeys[1]
+                 : contentType == QLatin1String("scripture") ? &m_styles[index].familyTemplateKeys[2]
+                 : contentType == QLatin1String("table")     ? &m_styles[index].familyTemplateKeys[3]
+                 : nullptr;
+    if (!key || *key == templateKey.trimmed())
+        return;
+
+    *key = templateKey.trimmed();
+    save();
+}
+
 void StyleListModel::setCategory(int index, const QString &category)
 {
     if (index < 0 || index >= m_styles.size())
@@ -347,6 +372,10 @@ QVariantMap StyleListModel::getStyle(int index) const
         { "showMedia", item.showMedia },
         { "showScripture", item.showScripture },
         { "showTable", item.showTable },
+        { "familyTemplateShows", item.familyTemplateKeys[0] },
+        { "familyTemplateMedia", item.familyTemplateKeys[1] },
+        { "familyTemplateScripture", item.familyTemplateKeys[2] },
+        { "familyTemplateTable", item.familyTemplateKeys[3] },
         { "category", item.category },
     };
 }

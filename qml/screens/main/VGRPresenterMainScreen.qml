@@ -509,93 +509,93 @@ Rectangle {
                             onClicked: vGRPresenter_Main_Screen.newShowRequested()
                         }
 
-                        Rectangle {
-                            id: presentation_1
+                        // CENTERED CONTENT ROW: icon + gap + label + chevron as
+                        // one Row, centered in the button (the old hardcoded
+                        // x-offsets put the label off-centre whenever the text
+                        // width didn't match the Figma export's assumption).
+                        Row {
+                            anchors.centerIn: parent
+                            spacing: 8
 
-                            x: 20
-                            y: 11
+                            Rectangle {
+                                id: presentation_1
 
-                            height: 14
-                            width: 14
+                                anchors.verticalCenter: parent.verticalCenter
 
-                            clip: true
-                            color: "transparent"
+                                height: 15
+                                width: 15
 
-                            Shape {
-                                id: _vector_20
+                                clip: true
+                                color: "transparent"
 
-                                x: 1.17
-                                y: 1.75
+                                Shape {
+                                    id: _vector_20
 
-                                height: 10.50
-                                width: 11.67
+                                    anchors.centerIn: parent
 
-                                ShapePath {
-                                    id: _vector_20_ShapePath0
+                                    height: 10.50
+                                    width: 11.67
 
-                                    fillColor: "#00000000"
-                                    strokeColor: "#6c5ce7"
-                                    strokeWidth: 2
+                                    ShapePath {
+                                        id: _vector_20_ShapePath0
 
-                                    PathSvg {
-                                        id: _vector_20_ShapePath0_PathSvg0
+                                        fillColor: "#00000000"
+                                        strokeColor: "#6c5ce7"
+                                        strokeWidth: 2
 
-                                        path: "M 0 0 L 11.667600631713867 0 M 11.084220600128175 0 L 11.084220600128175 6.416666666666667 C 11.084220600128175 6.726085916161537 10.961294218155647 7.02283191929261 10.74248426689028 7.241624355316163 C 10.523674315624913 7.460416791339716 10.226904556745712 7.583333333333334 9.917460536956789 7.583333333333334 L 1.7501400947570802 7.583333333333334 C 1.440696074968156 7.583333333333334 1.1439260379116805 7.460416791339716 0.9251160866463125 7.241624355316163 C 0.7063061353809446 7.02283191929261 0.5833800315856936 6.726085916161537 0.5833800315856934 6.416666666666667 L 0.5833800315856934 0 M 2.916900157928467 10.5 L 5.833800315856934 7.583333333333334 L 8.7507004737854 10.5"
+                                        PathSvg {
+                                            id: _vector_20_ShapePath0_PathSvg0
+
+                                            path: "M 0 0 L 11.667600631713867 0 M 11.084220600128175 0 L 11.084220600128175 6.416666666666667 C 11.084220600128175 6.726085916161537 10.961294218155647 7.02283191929261 10.74248426689028 7.241624355316163 C 10.523674315624913 7.460416791339716 10.226904556745712 7.583333333333334 9.917460536956789 7.583333333333334 L 1.7501400947570802 7.583333333333334 C 1.440696074968156 7.583333333333334 1.1439260379116805 7.460416791339716 0.9251160866463125 7.241624355316163 C 0.7063061353809446 7.02283191929261 0.5833800315856936 6.726085916161537 0.5833800315856934 6.416666666666667 L 0.5833800315856934 0 M 2.916900157928467 10.5 L 5.833800315856934 7.583333333333334 L 8.7507004737854 10.5"
+                                        }
                                     }
                                 }
                             }
-                        }
-                        Text {
-                            id: new_show
+                            Text {
+                                id: new_show
 
-                            x: 42
-                            y: 10
+                                anchors.verticalCenter: parent.verticalCenter
 
-                            height: 16
-                            width: 159
+                                height: 16
 
-                            color: "#e2e8f0"
-                            font.family: "Segoe UI"
-                            font.pixelSize: 15
-                            font.weight: Font.Medium
-                            horizontalAlignment: Text.AlignLeft
-                            text: qsTr("New show")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignVCenter   // (see quick_search: glyph/icon alignment)
-                            wrapMode: Text.Wrap
-                        }
-                        Rectangle {
-                            id: chevron_right_2
+                                color: "#e2e8f0"
+                                font.family: "Segoe UI"
+                                font.pixelSize: 15
+                                font.weight: Font.Medium
+                                text: qsTr("New show")
+                                textFormat: Text.PlainText
+                            }
+                            Rectangle {
+                                id: chevron_right_2
 
-                            x: 208
-                            y: 12
+                                anchors.verticalCenter: parent.verticalCenter
 
-                            height: 12
-                            width: 12
+                                height: 12
+                                width: 12
 
-                            clip: true
-                            color: "transparent"
+                                clip: true
+                                color: "transparent"
 
-                            Shape {
-                                id: _vector_21
+                                Shape {
+                                    id: _vector_21
 
-                                x: 4.50
-                                y: 3
+                                    anchors.centerIn: parent
 
-                                height: 6
-                                width: 3
+                                    height: 6
+                                    width: 3
 
-                                ShapePath {
-                                    id: _vector_21_ShapePath0
+                                    ShapePath {
+                                        id: _vector_21_ShapePath0
 
-                                    fillColor: "#00000000"
-                                    strokeColor: "#5c6475"
-                                    strokeWidth: 2
+                                        fillColor: "#00000000"
+                                        strokeColor: "#5c6475"
+                                        strokeWidth: 2
 
-                                    PathSvg {
-                                        id: _vector_21_ShapePath0_PathSvg0
+                                        PathSvg {
+                                            id: _vector_21_ShapePath0_PathSvg0
 
-                                        path: "M 0 6 L 3 3 L 0 0"
+                                            path: "M 0 6 L 3 3 L 0 0"
+                                        }
                                     }
                                 }
                             }
@@ -980,11 +980,15 @@ Rectangle {
                                         cursorShape: Qt.PointingHandCursor
                                         onClicked: media_table.addCategory()
                                     }
-                                    Text {
+                                    // A drawn cross (PlusGlyph), not a "+" TEXT
+                                    // glyph: fonts sit the + off the optical
+                                    // center of its box, which read as misaligned
+                                    // inside the round chip (the user report).
+                                    PlusGlyph {
                                         anchors.centerIn: parent
-                                        text: "+"
-                                        color: "#ffffff"
-                                        font.family: "Segoe UI"; font.pixelSize: 18; font.weight: Font.Medium
+                                        size: 11; thickness: 1.8; color: "#ffffff"
+                                        rotation: addCatMouse.containsMouse ? 90 : 0
+                                        Behavior on rotation { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
                                     }
                                 }
                             }
@@ -1435,29 +1439,42 @@ Rectangle {
                             onClicked: vGRPresenter_Main_Screen.newShowRequested()
                         }
 
-                            Text {
+                            // CENTERED + OPTICALLY MATCHED: the drawn cross is
+                            // sized to the text's cap height (a font "+" sits low
+                            // and small next to bold text — the misalignment
+                            // report) and the pair is one centered Row.
+                            Row {
                                 id: new_show_1
 
-                                x: 16
-                                y: 6
+                                anchors.centerIn: parent
+                                spacing: 6
 
-                                height: 15
-                                width: 88
+                                PlusGlyph {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    // Optical cap-band alignment (same measurement as the
+                                    // clock CTA): Segoe UI caps sit ~1px above the line-box
+                                    // center, so box-centered glyphs read a touch high.
+                                    anchors.verticalCenterOffset: 1
+                                    size: 11; thickness: 2; color: "#ffffff"
+                                }
+                                Text {
+                                    id: new_show_1_label
 
-                                // Was black text on this dark maroon pill - unreadable (barely more than the pill's own shadow).
-                                // White and bolder, matching FreeShow's own "+ New show" pill.
-                                color: "#ffffff"
-                                font.family: "Segoe UI"
-                                font.pixelSize: 14
-                                font.weight: Font.Bold
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("+ New show")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
+                                    anchors.verticalCenter: parent.verticalCenter
+
+                                    // Was black text on this dark maroon pill - unreadable (barely more than the pill's own shadow).
+                                    // White and bolder, matching FreeShow's own "+ New show" pill.
+                                    color: "#ffffff"
+                                    font.family: "Segoe UI"
+                                    font.pixelSize: 14
+                                    font.weight: Font.Bold
+                                    text: qsTr("New show")
+                                    textFormat: Text.PlainText
+                                }
                             }
-                        }
-                    }
-                }
+                    }   // new_show_dock_btn
+                }   // dock_footer
+                }   // dock band (host container of the dock + clock panel)
                 Rectangle {
                     id: clock_panel
 
@@ -1564,61 +1581,48 @@ Rectangle {
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: vGRPresenter_Main_Screen.newShowRequested()
-                            }
+                            }                            // CENTERED CONTENT ROW, OPTICALLY MATCHED: the
+                            // drawn + is sized to the text's cap height (a font
+                            // "+" glyph or an undersized cross reads as a speck
+                            // beside bold text — the misalignment report) and
+                            // the pair sits as one centered Row.
+                            Row {
+                                anchors.centerIn: parent
+                                spacing: 7
 
-                            Rectangle {
-                                id: plus_1
+                                PlusGlyph {
+                                    id: plus_1
 
-                                x: 46
-                                y: 11
+                                    anchors.verticalCenter: parent.verticalCenter
 
-                                height: 14
-                                width: 14
+                                    // Cap-band alignment, natural line box: the label has
+                                    // no clipped height, so its ~20px Segoe UI box centers on
+                                    // the Row and the CAP glyphs' center lands ~1px BELOW that
+                                    // (ascent-heavy font). +1 puts the cross on the cap band —
+                                    // the same calibration as the dock pill's cross.
+                                    anchors.verticalCenterOffset: 1
 
-                                clip: true
-                                color: "transparent"
-
-                                Shape {
-                                    id: _vector_37
-
-                                    x: 2.92
-                                    y: 2.92
-
-                                    height: 8.17
-                                    width: 8.17
-
-                                    ShapePath {
-                                        id: _vector_37_ShapePath0
-
-                                        fillColor: "#00000000"
-                                        strokeColor: "#ffffff"
-                                        strokeWidth: 2
-
-                                        PathSvg {
-                                            id: _vector_37_ShapePath0_PathSvg0
-
-                                            path: "M 0 4.083800315856934 L 8.167600631713867 4.083800315856934 M 4.083800315856934 0 L 4.083800315856934 8.167600631713867"
-                                        }
-                                    }
+                                    size: 12; thickness: 2; color: "#ffffff"
                                 }
-                            }
-                            Text {
-                                id: new_show_2
 
-                                x: 68
-                                y: 10
+                                Text {
+                                    id: new_show_2
 
-                                height: 16
-                                width: 67
+                                    anchors.verticalCenter: parent.verticalCenter
 
-                                color: "#ffffff"
-                                font.family: "Segoe UI"
-                                font.pixelSize: 15
-                                font.weight: Font.Bold
-                                horizontalAlignment: Text.AlignLeft
-                                text: qsTr("New show")
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignTop
+                                    // No hard height: a 15px Segoe UI line box is
+                                    // ~20px tall, and clipping it to 16 with the
+                                    // default top alignment shoved the glyph mass
+                                    // ~3px below the Row's center line — the real
+                                    // source of the remaining misalignment.
+
+                                    color: "#ffffff"
+                                    font.family: "Segoe UI"
+                                    font.pixelSize: 15
+                                    font.weight: Font.Bold
+                                    text: qsTr("New show")
+                                    textFormat: Text.PlainText
+                                }
                             }
                         }
                         Text {

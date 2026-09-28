@@ -213,6 +213,17 @@ std::string slideContentType(const Slide& slide) {
     return {};
 }
 
+// The OutputStyleSpec::familyTemplateKeys/blocks slot a content family maps
+// to (shows | media | scripture | table, in the show* gates' order); 4 =
+// untagged or unknown family — those slides always use the whole-style pick.
+size_t FamilyTemplateIndexFor(const std::string& contentType) {
+    if (contentType == "shows")    return 0;
+    if (contentType == "media")    return 1;
+    if (contentType == "scripture") return 2;
+    if (contentType == "table")    return 3;
+    return 4;
+}
+
 // Fills every bound text block of a baked template from `slide` — the same
 // contract SlideResolver uses for show templates, narrowed to the plain
 // slides this path serves: "text" takes the slide's CONTENT (see
@@ -363,12 +374,27 @@ std::string SceneBuilder::StyledSceneIdFor(const Presentation& p, const Slide& s
     // only — not fingerprinted. The BAKED template blocks are: editing the
     // template design re-pushes a spec whose blocks differ, and the hash is
     // what turns that into a rebuild instead of a stale cache hit.
-    return SceneIdFor(p, s) + std::format("@s:{}_{}_{}_{}_{:016x}",
+    //
+    // PER-FAMILY TEMPLATES join the fingerprint: the family this slide
+    // belongs to picks familyTemplateKeys/familyTemplateBlocks, so a family
+    // re-pick (or a block edit under it) must re-key THIS slide's scenes —
+    // but only the relevant family's slot (an unrelated family's edit must
+    // not churn every cached scene). Each family hashes only its own pair;
+    // a family with no custom template contributes just its 0 marker.
+    size_t familyIdx = FamilyTemplateIndexFor(slideContentType(s));
+    const std::string &famKey = familyIdx < 4 ? style.familyTemplateKeys[familyIdx]
+                                              : std::string();
+    const uint64_t famHash = familyIdx < 4 && !style.familyTemplateBlocks[familyIdx].empty()
+                                 ? HashBlocks(style.familyTemplateBlocks[familyIdx])
+                                 : 0;
+    return SceneIdFor(p, s) + std::format("@s:{}_{}_{}_{}_{:016x}_{}_{:016x}",
                                           style.backgroundColor,
                                           style.templateKey,
                                           style.clearBackgroundOnText ? 1 : 0,
                                           style.backgroundImage,
-                                          HashBlocks(style.templateBlocks));
+                                          HashBlocks(style.templateBlocks),
+                                          famKey,
+                                          famHash);
 }
 
 Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentation,
@@ -376,6 +402,72 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
                                                   rendering::RenderEngine& engine,
                                                   rendering::Size size) {
     return BuildSlideScene(presentation, slide, OutputStyleSpec{}, engine, size);
+}
+
+// The gate check behind BuildGatedSlideScene: does this spec's show* gates
+// admit the slide's content family? Untagged/unknown families are always
+// admitted (they belong to no gated tab).
+bool StyleAdmitsSlide(const OutputStyleSpec& style, const Slide& slide) {
+    const std::string fam = slideContentType(slide);
+    if (fam.empty())    return true;
+    if (fam == "shows")    return style.showShows;
+    if (fam == "media")    return style.showMedia;
+    if (fam == "scripture") return style.showScripture;
+    if (fam == "table")    return style.showTable;
+    return true;
+}
+
+Result<std::string> SceneBuilder::BuildGatedSlideScene(const Presentation& presentation,
+                                                       const Slide& slide,
+                                                       const OutputStyleSpec& style,
+                                                       rendering::RenderEngine& engine,
+                                                       rendering::Size size) {
+    if (StyleAdmitsSlide(style, slide))
+        return BuildSlideScene(presentation, slide, style, engine, size);
+
+    // REFUSED: a background-only variant of the styled scene. Id carries a
+    // "gated" tag + the same style fingerprint, so (a) it never collides
+    // with the ungated scene of the same slide (another output may show it),
+    // and (b) a gate flip or style edit re-keys it like any styled scene.
+    const std::string sceneId =
+        SceneIdFor(presentation, slide)
+        + "@gated" + StyledSceneIdFor(presentation, slide, style).substr(SceneIdFor(presentation, slide).size());
+
+    if (engine.GetScene(sceneId).ok()) return sceneId;
+    auto scene = engine.CreateScene(sceneId, slide.title, size);
+    if (!scene.ok()) return scene.error();
+    (void)engine.AddLayer(sceneId, rendering::Layer("bg", "Background",
+                                                    rendering::LayerKind::Background, 0));
+
+    // The SAME background composition BuildSlideScene runs (colour, then the
+    // style image, the slide's own colour still winning under the same
+    // clear-on-text rule) — the refused output keeps its look, minus content.
+    rendering::Color bg = rendering::Color(0.06f, 0.07f, 0.09f, 1.0f);
+    const bool slideOwnsBackground = !slide.background.empty() && slide.background != "transparent";
+    const rendering::Color styleBg = StyleBuilder::ParseColor(style.backgroundColor);
+    if (styleBg.a > 0.0f && !(style.clearBackgroundOnText && slideOwnsBackground))
+        bg = styleBg;
+    else if (slideOwnsBackground) {
+        if (rendering::Color parsed = StyleBuilder::ParseColor(slide.background); parsed.a > 0.0f)
+            bg = parsed;
+    }
+    auto bgObj = std::make_shared<rendering::BackgroundObject>("bg", "Background", bg);
+    bgObj->SetBounds(rendering::Rect(0, 0, size.width, size.height));
+    bgObj->SetLayer("bg");
+    (void)engine.AddObject(sceneId, bgObj, "bg");
+    if (!style.backgroundImage.empty()) {
+        const rendering::RgbaImage img = LoadImageCached(style.backgroundImage);
+        if (!img.empty()) {
+            auto imageObj = std::make_shared<rendering::ImageObject>("stylebg", "StyleBackground");
+            imageObj->SetImage(img, "stylebg:" + style.backgroundImage);
+            imageObj->SetBounds(CoverRect(img.width, img.height, size));
+            imageObj->SetLayer("bg");
+            (void)engine.AddObject(sceneId, imageObj, "bg");
+        }
+    }
+    Logger::Instance().Debug(std::format("Gated scene built: {} (family refused by style '{}')",
+                                        sceneId, style.name), "SceneBuilder");
+    return sceneId;
 }
 
 Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentation,
@@ -463,11 +555,56 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
     const bool styleTemplateApplies = !style.templateBlocks.empty()
         && (style.contentType.empty() || slideContentType(slide).empty()
             || slideContentType(slide) == style.contentType);
+    // PER-FAMILY TEMPLATE: a slide whose family carries its own template key
+    // renders through THAT family's baked blocks — the whole-style template
+    // only covers families without their own pick (FreeShow's per-type
+    // templates; untagged/unknown slides always follow the whole-style pick).
+    // Blocks come from the family slot when it carries a bake; a family key
+    // naming a legacy preset (no bake) degrades to LayoutFor below with that
+    // key, exactly like the whole-style pick does.
+    const size_t familyIdx = FamilyTemplateIndexFor(slideContentType(slide));
+    const bool familyTemplateApplies = familyIdx < 4
+        && !style.familyTemplateKeys[familyIdx].empty()
+        && !style.familyTemplateBlocks[familyIdx].empty();
+    if (familyTemplateApplies) {
+        const int n = AddStageBlocks(engine, sceneId,
+                                     BindTemplateBlocks(style.familyTemplateBlocks[familyIdx], slide),
+                                     size, "tplf");
+        Logger::Instance().Debug(std::format("Scene built: {} (style '{}', family {} template {} blocks)", sceneId, style.name, familyIdx, n),
+                                 "SceneBuilder");
+        return sceneId;
+    }
     if (styleTemplateApplies) {
         const int n = AddStageBlocks(engine, sceneId,
                                      BindTemplateBlocks(style.templateBlocks, slide),
                                      size, "tpl");
         Logger::Instance().Debug(std::format("Scene built: {} (style '{}', template {} blocks)", sceneId, style.name, n),
+                                 "SceneBuilder");
+        return sceneId;
+    }
+    // Family key without a bake (legacy preset per family): LayoutFor with
+    // THAT key — a family can ride a built-in preset while other families
+    // wear engine designs. The preset owns the composition (style > slide,
+    // same rule as the baked templates above), so slide blocks step aside.
+    if (familyIdx < 4 && !style.familyTemplateKeys[familyIdx].empty()
+        && style.familyTemplateBlocks[familyIdx].empty()) {
+        const StyleBuilder::Layout famLayout = StyleBuilder::LayoutFor(style.familyTemplateKeys[familyIdx]);
+        const rendering::Rect titleRect = Scaled(famLayout.title, size);
+        const rendering::Rect bodyRect = Scaled(famLayout.body, size);
+        if (!slide.title.empty() && famLayout.showTitle) {
+            auto title = std::make_shared<rendering::TextObject>("title", "Title", slide.title);
+            title->SetBounds(titleRect);
+            title->SetLayer("text");
+            (void)engine.AddObject(sceneId, title, "text");
+        }
+        if (!slide.text.empty()) {
+            auto body = std::make_shared<rendering::TextObject>("body", "Body", slide.text);
+            body->SetBounds(bodyRect);
+            body->SetLayer("text");
+            (void)engine.AddObject(sceneId, body, "text");
+        }
+        Logger::Instance().Debug(std::format("Scene built: {} (style '{}', family {} preset '{}')", sceneId, style.name, familyIdx,
+                                            style.familyTemplateKeys[familyIdx]),
                                  "SceneBuilder");
         return sceneId;
     }

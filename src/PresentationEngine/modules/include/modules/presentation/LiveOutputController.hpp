@@ -117,6 +117,15 @@ private:
     // while the working show is on air (StartFromOpenShow).
     presentation::Presentation liveContent_;
     std::shared_ptr<rendering::FrameBufferOutput> preview_;   // the QML feed
+
+    // PER-OUTPUT PASSES: every frame, RenderOnce renders ONE EXTRA PASS per
+    // entry of PresentationEngine's live-output style set — each into its own
+    // named FrameBufferOutput, each composed under THAT output's spec (its
+    // gates decide which families render content vs background-only). The
+    // monitor tiles read their output's buffer; the main pass keeps feeding
+    // the active output + preview. Buffers register on first use and are
+    // re-resolved by name every frame (a push can add/rename entries).
+    void RenderPerOutputPasses();
 };
 
 } // namespace bps::live

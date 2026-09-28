@@ -24,6 +24,10 @@ Item {
     // more room than a simple confirm-style dialog before things start
     // getting clipped or squeezed.
     property real cardWidth: 560
+    // Corner radius of the card itself — 0 gives a sharp RECTANGULAR card
+    // (the Media pane's video-preview modal) while every other dialog keeps
+    // the rounded Theme.radiusLg default.
+    property real cardRadius: Theme.radiusLg
     property bool showFooter: true
     property bool showSave: true
     property string saveText: "Save"
@@ -98,7 +102,7 @@ Item {
                          Theme.space6 * 2 + headerItem.height + Theme.space4
                          + flick.height + root.footerHeight)
         anchors.centerIn: parent
-        radius: Theme.radiusLg
+        radius: root.cardRadius
         color: Theme.surface
         border.color: Theme.border
         border.width: 1

@@ -450,6 +450,15 @@ Item {
                                 id: cardHover
                                 anchors.fill: parent
                                 showCursor: false
+                                // CLICK = PREVIEW: a video source's card
+                                // sends the source to the output preview
+                                // (the monitor wall), the same take-live
+                                // path the video board's rows use. Audio/bus
+                                // cards have no video feed — inert, as before.
+                                onClicked: {
+                                    if (kind === "video")
+                                        root.takeVideoSourceLive(index)
+                                }
                             }
                         }
                     }

@@ -411,7 +411,60 @@ Result<void> LiveOutputController::RenderOnce() {
         lastRenderedScene_ = sceneId;
         lastStyleRevision_ = styleRev;
     }
+
+    // THE OTHER LIVE OUTPUTS: one gated pass per entry of the engine's
+    // live-output style set (best-effort — a failure in one pass never
+    // kills the main deck's frame).
+    RenderPerOutputPasses();
     return Ok();
+}
+
+void LiveOutputController::RenderPerOutputPasses() {
+    if (!pres_) return;
+    std::vector<std::string> buffers;
+    const std::vector<presentation::OutputStyleSpec> specs = pres_->LiveOutputStyles(&buffers);
+    const presentation::Presentation* active = pres_->Runtime().ActivePresentation();
+    const presentation::Slide* slide = pres_->CurrentSlide();
+    if (!active || !slide) return;
+
+    rendering::RenderEngine &engine = rendering::RenderEngine::Instance();
+    for (size_t i = 0; i < specs.size() && i < buffers.size(); ++i) {
+        auto out = engine.GetOutput(buffers[i]);
+        if (!out.ok()) {
+            // Register on first use (named per-output frame buffer, preview-
+            // sized; the QML tile scales whatever it reads).
+            auto created = std::make_shared<rendering::FrameBufferOutput>(
+                rendering::OutputKind::Audience, buffers[i],
+                rendering::Size(960, 540));
+            if (!engine.AddOutput(created).ok()) continue;
+            out = engine.GetOutput(buffers[i]);
+            if (!out.ok()) continue;
+        }
+        auto *fb = dynamic_cast<rendering::FrameBufferOutput *>(out.value().get());
+        if (!fb || !fb->Enabled()) continue;
+
+        // Build (or reuse) the GATED scene for THIS spec — each output's own
+        // rules decide content vs background-only. Style-fingerprinted ids
+        // keep the cache honest across edits and gate flips.
+        auto sceneId = pres_->Builder().BuildGatedSlideScene(*active, *slide, specs[i], engine);
+        if (!sceneId.ok()) continue;
+        // Raster WITHOUT distributing (the main pass already fed every output
+        // — a second distribute would double-feed), then hand the pixels
+        // straight to this output's buffer. The buffer scales to its target.
+        rendering::RenderOptions passOpts;
+        passOpts.distribute = false;
+        passOpts.capture = true;
+        if (auto img = engine.Render(sceneId.value(), passOpts); img.ok() && !img.value().empty()) {
+            rendering::Frame f;
+            f.sceneId = sceneId.value();
+            f.width = img.value().width;
+            f.height = img.value().height;
+            f.pixels = std::move(img.value().pixels);
+            f.timestampMs = std::chrono::duration<double, std::milli>(
+                                std::chrono::system_clock::now().time_since_epoch()).count();
+            (void)fb->Present(f);
+        }
+    }
 }
 
 } // namespace bps::live

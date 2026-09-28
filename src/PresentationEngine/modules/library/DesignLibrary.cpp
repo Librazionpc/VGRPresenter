@@ -411,7 +411,27 @@ std::vector<Design> DesignLibrary::Designs(std::string_view filter, std::string_
             if (filter.empty() || (filter == kUnlabeled ? d.category.empty() : d.category == filter))
                 out.push_back(d);
     }
-    std::stable_sort(out.begin(), out.end(), [](const Design& a, const Design& b) { return NaturalLess(a.name, b.name); });
+    // GROUPED ORDER: category first (the sidebar's order — shipped families
+    // first, then the user's, in creation order), natural name order inside
+    // each group, unlabeled designs last. A flat name sort interleaved the
+    // families in the All view ("Small, Small Bold, Table, Text, Trendy
+    // Curved" from three different categories in a row) and read as a mess;
+    // grouped, every category's block stays together and each single-
+    // category view keeps its name order (same comparator outcome when all
+    // hits share one category — which is what the filtered tests assert).
+    std::map<std::string, size_t> categoryRank;
+    for (size_t i = 0; i < categories_.size(); ++i)
+        categoryRank[categories_[i].id] = i;
+    const auto rankOf = [&categoryRank](const Design& d) {
+        if (d.category.empty()) return categoryRank.size() + 1;   // unlabeled last
+        const auto it = categoryRank.find(d.category);
+        return it != categoryRank.end() ? it->second : categoryRank.size();
+    };
+    std::stable_sort(out.begin(), out.end(), [&rankOf](const Design& a, const Design& b) {
+        const size_t ra = rankOf(a), rb = rankOf(b);
+        if (ra != rb) return ra < rb;
+        return NaturalLess(a.name, b.name);
+    });
 
     const std::vector<std::string> words = Words(query);
     if (words.empty()) return out;

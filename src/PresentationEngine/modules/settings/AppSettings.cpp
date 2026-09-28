@@ -162,6 +162,11 @@ std::vector<SettingDef> BuildDefinitions() {
     // JSON array written by AudioInputListModel (debounced) so the board
     // comes back between runs instead of starting empty every launch.
     d.push_back(Text("session.audioRoster", "session", "Audio roster"));
+    // The video board's roster (the camera/ndi sources the user added on
+    // Settings · Audio & Video), written by VideoSourceListModel under the
+    // SAME contract as the audio key — declared here or every write/read
+    // refuses with "there is no setting 'session.videoRoster'".
+    d.push_back(Text("session.videoRoster", "session", "Video roster"));
     // The slide grid on the Show screen's centre page (FreeShow's slidesOptions): slides across, and how they are laid out.
     d.push_back(IntRange("session.slideColumns", "session", "Slides across", 4, 2, 10));
     d.push_back(Choice("session.slideView", "session", "Slide view", "grid", {

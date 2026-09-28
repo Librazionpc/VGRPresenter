@@ -397,3 +397,11 @@ void SettingsService::setActiveOutputStyle(const bps::presentation::OutputStyleS
     if (EngineBridge::instance().booted())
         (void)bps::presentation::PresentationEngine::Instance().SetActiveOutputStyle(spec);
 }
+
+void SettingsService::setLiveOutputStyles(
+    const std::vector<bps::presentation::OutputStyleSpec> &specs,
+    const std::vector<std::string> &bufferNames)
+{
+    if (EngineBridge::instance().booted())
+        (void)bps::presentation::PresentationEngine::Instance().SetLiveOutputStyles(specs, bufferNames);
+}

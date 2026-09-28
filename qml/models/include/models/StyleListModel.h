@@ -39,13 +39,19 @@ struct StyleItem
     // FreeShow's clearStyleBackgroundOnText: when the slide itself carries a
     // background colour, the style's background steps aside for it.
     bool clearBackgroundOnText = false;
-    // Per-content-type templates (FreeShow: a style carries one template PER
-    // content type). A tab toggled OFF greys out — its content is not meant
-    // for the output wearing this style.
-    bool showShows = true;
-    bool showMedia = true;
-    bool showScripture = true;
-    bool showTable = true;
+    // Per-content-type gates: a chip ON means an output wearing this style
+    // ALLOWS that content type. NEW styles start with everything INACTIVE —
+    // the user activates exactly what the style serves (an intuitive explicit
+    // choice, not four pre-ticked boxes); existing rosters keep their saved
+    // flags (the JSON read defaults missing keys to true).
+    bool showShows = false;
+    bool showMedia = false;
+    bool showScripture = false;
+    bool showTable = false;
+    // PER-FAMILY TEMPLATE KEYS ("" = inherit templateKey — the whole-style
+    // pick). The style renders each content family through its OWN template:
+    // shows/media/scripture/table, index order matching the show* flags.
+    QString familyTemplateKeys[4];
     // Shows-only category label (free text).
     QString category;
 };
@@ -108,6 +114,10 @@ public:
     Q_INVOKABLE void setBackgroundImage(int index, const QString &path);
     Q_INVOKABLE void setClearBackgroundOnText(int index, bool on);
     Q_INVOKABLE void setShowTemplate(int index, const QString &contentType, bool on);
+    // The per-family template pick ("" clears the family back to the
+    // whole-style templateKey). contentType: "shows"|"media"|"scripture"|"table".
+    Q_INVOKABLE void setFamilyTemplateKey(int index, const QString &contentType,
+                                           const QString &templateKey);
     Q_INVOKABLE void setCategory(int index, const QString &category);
 
     // Native image-file picker (png/jpg/webp/...) for the style background

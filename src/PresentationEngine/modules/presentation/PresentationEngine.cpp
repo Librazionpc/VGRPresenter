@@ -406,7 +406,14 @@ Result<void> PresentationEngine::SetActiveOutputStyle(const OutputStyleSpec& sty
             || activeStyle_.showMedia != style.showMedia
             || activeStyle_.showScripture != style.showScripture
             || activeStyle_.showTable != style.showTable
-            || activeStyle_.templateBlocks != style.templateBlocks;
+            || activeStyle_.templateBlocks != style.templateBlocks
+            // PER-FAMILY templates: a family re-pick (or a template design
+            // edit under a family key) re-pushes with different per-family
+            // keys/blocks — that must rebuild scenes, not no-op.
+            || !std::equal(std::begin(activeStyle_.familyTemplateKeys), std::end(activeStyle_.familyTemplateKeys),
+                           std::begin(style.familyTemplateKeys))
+            || !std::equal(std::begin(activeStyle_.familyTemplateBlocks), std::end(activeStyle_.familyTemplateBlocks),
+                           std::begin(style.familyTemplateBlocks));
         activeStyle_ = style;
     }
     if (!changed)
@@ -426,6 +433,30 @@ Result<void> PresentationEngine::SetActiveOutputStyle(const OutputStyleSpec& sty
 OutputStyleSpec PresentationEngine::ActiveOutputStyle() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return activeStyle_;
+}
+
+Result<void> PresentationEngine::SetLiveOutputStyles(const std::vector<OutputStyleSpec>& styles,
+                                                     const std::vector<std::string>& bufferNames) {
+    if (styles.size() != bufferNames.size())
+        return Error::Make(Err::InvalidArgument, "PresentationEngine",
+                           "live style/buffer count mismatch");
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        liveOutputStyles_ = styles;
+        liveOutputBuffers_ = bufferNames;
+    }
+    // The live loop re-reads the set every frame and re-keys its passes on a
+    // hash of the set — a push lands within a frame, no revision bump needed
+    // (the main deck's scenes are unaffected).
+    return Ok();
+}
+
+std::vector<OutputStyleSpec> PresentationEngine::LiveOutputStyles(
+    std::vector<std::string> *outBuffers) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (outBuffers)
+        *outBuffers = liveOutputBuffers_;
+    return liveOutputStyles_;
 }
 
 // ---------------------------------------------------------------------------
