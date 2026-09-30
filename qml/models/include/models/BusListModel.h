@@ -95,6 +95,12 @@ public:
     Q_INVOKABLE void setMuted(int index, bool muted);
     Q_INVOKABLE void toggleAudioRoute(int busIndex, int inputIndex);
     Q_INVOKABLE void toggleVideoRoute(int busIndex, int sourceIndex);
+    // THE engine's one validity answer for optimistic drop feedback: the
+    // QML board no longer keeps its own copy of the routing rules. `kind`
+    // is "audio"|"video" (the drag's payload); a bus video plane is full
+    // unless the tested edge IS its existing route — the same 1:1 policy
+    // the graph's CanConnect enforces, so the two can never drift.
+    Q_INVOKABLE bool canConnect(const QString &kind, int sourceRow, int busIndex) const;
 
     // Snapshot for the Edit Bus dialog — routedAudioInputs/routedVideoSources
     // surfaced as QVariantList so QML can read them directly.

@@ -189,6 +189,14 @@ public:
     Q_INVOKABLE bool createLibraryCategory(const QString &name);
     Q_INVOKABLE bool renameLibraryCategory(const QString &from, const QString &to);
     Q_INVOKABLE bool removeLibraryCategory(const QString &name);              // only when empty
+    // Moves every show in `name` to the recoverable .deleted bin (a re-import
+    // calls this to replace the previous batch). True when the folder is clear.
+    Q_INVOKABLE bool clearLibraryCategory(const QString &name);
+    // Same clear WITHOUT republishing the QML-facing lists — for calls from a
+    // worker thread (the async import sweep). publishLibrary() writes the
+    // service's QList members and emits, which must stay on the GUI thread;
+    // the import ends with one refreshLibrary() there anyway.
+    bool clearLibraryCategoryNoPublish(const QString &name);
     // Moves a show file into `category` ("" = out of every category); returns its
     // new path, or "" on failure (toast explains).
     Q_INVOKABLE QString moveShowToCategory(const QString &path, const QString &category);
@@ -203,6 +211,20 @@ public:
     // A free .vgr path for a new show called `name` in `category` — sanitised
     // file name, never an existing file. "" on failure.
     Q_INVOKABLE QString newLibraryShowPath(const QString &category, const QString &name);
+
+    // Live-edit autosave for the Show screen's lyrics view (FreeShow's own
+    // TextEditor.svelte behavior): `text` is the WHOLE show's lyrics as one
+    // blank-line-separated block (same convention Quick Lyrics uses) — this
+    // re-splits it into sections/slides via the engine's own song-text
+    // splitter and OVERWRITES the show's slides with the result, keeping
+    // its name/category/other metadata untouched, then saves straight to
+    // its own file (no open-document/editing-session involved, so it can't
+    // collide with whatever the Edit screen has open elsewhere) and emits
+    // showChanged() so any preview reading this path picks it up. Slide ids
+    // regenerate on every edit (no FreeShow-style per-slide diffing yet) —
+    // fine for lyrics text; per-slide custom styling would not survive a
+    // re-edit today. Returns false (and toasts why) on failure.
+    Q_INVOKABLE bool rewriteShowFromText(const QString &path, const QString &text);
 
 signals:
     void showChanged();

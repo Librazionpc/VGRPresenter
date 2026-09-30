@@ -46,8 +46,19 @@ Item {
     }
 
     function finish(answer) {
+        // importFiles returns { ok, started } immediately and reports the real
+        // outcome later via ImportService.finished — the dialog stays up with
+        // a progress overlay while the sweep runs, closing on success.
+        if (answer.started) return
         if (answer.ok)
             root.closed()
+    }
+
+    Connections {
+        target: ImportService
+        function onFinished(answer) {
+            if (answer.ok) root.closed()
+        }
     }
 
     Platform.FileDialog {
@@ -286,6 +297,60 @@ Item {
                 flickable: importFlick
                 anchors.top: parent.top; anchors.bottom: parent.bottom
                 anchors.right: parent.right; anchors.rightMargin: 3
+            }
+        }
+    }
+
+    // The async import's progress overlay: the window would otherwise sit
+    // silent (or frozen, in the pre-thread era) for a large batch. Declared
+    // LAST (a sibling of dialogCard, after it) — QML paints later siblings
+    // on top, and dialogCard's own opaque background was hiding this
+    // completely even while ImportService.busy was genuinely true: the
+    // sweep visibly ran (progress/status updated, the log showed it), but
+    // nothing on screen said so, which is exactly what read as a hang.
+    Rectangle {
+        anchors.fill: parent
+        visible: ImportService.busy
+        color: "#e60d0f18"
+
+        MouseArea { anchors.fill: parent }   // block interaction while importing
+
+        Rectangle {
+            width: 320; height: 108
+            anchors.centerIn: parent
+            radius: 10
+            color: "#161821"
+            border.color: "#3a3f55"
+            border.width: 1
+
+            Column {
+                anchors.fill: parent
+                anchors.margins: 18
+                spacing: 12
+                Text {
+                    width: parent.width
+                    text: qsTr("Importing…")
+                    color: "#e2e8f0"
+                    font.family: "Segoe UI"; font.pixelSize: 15; font.weight: Font.DemiBold
+                }
+                Text {
+                    width: parent.width
+                    text: ImportService.status
+                    color: "#5c6475"
+                    elide: Text.ElideRight
+                    font.family: "Segoe UI"; font.pixelSize: 13
+                }
+                Rectangle {
+                    width: parent.width; height: 6; radius: 3
+                    color: "#232633"
+                    Rectangle {
+                        width: Math.max(parent.width * ImportService.progress, 6)
+                        height: parent.height
+                        radius: 3
+                        color: "#9b8ff5"
+                        Behavior on width { NumberAnimation { duration: 120 } }
+                    }
+                }
             }
         }
     }

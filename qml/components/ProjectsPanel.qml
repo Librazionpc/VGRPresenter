@@ -340,8 +340,11 @@ Item {
                                     label: treeRow.modelData.name
                                     onActivated: treeRow.isFolder ? root.toggleFolder(treeRow.modelData.id) : ProjectService.openProject(treeRow.modelData.id)
                                     onOpened: if (!treeRow.isFolder) ProjectService.openProject(treeRow.modelData.id)
+                                    // Same duplicate-right-click-handler fix as the item row
+                                    // below — DragSource's own contextRequested replaces the
+                                    // separate TapHandler that used to race it.
+                                    onContextRequested: (x, y) => root.openMenu("tree", treeRow.modelData, treeRow, x, y)
                                 }
-                                TapHandler { acceptedButtons: Qt.RightButton; onTapped: (p) => root.openMenu("tree", treeRow.modelData, treeRow, p.position.x, p.position.y) }
 
                                 // a project or folder dragged onto this row goes into it (onto a project: next to it)
                                 DropArea {
@@ -476,8 +479,18 @@ Item {
                                         label: itemRow.modelData.name
                                         onActivated: { ProjectService.selectItem(itemRow.modelData.index); root.itemActivated(itemRow.modelData) }
                                         onOpened: root.itemOpened(itemRow.modelData)
+                                        // DragSource already owns right-click (its own internal
+                                        // TapHandler, contextRequested) — a SEPARATE TapHandler
+                                        // used to sit here too, right-click-only, covering the
+                                        // same full row: two Pointer Handlers racing for the same
+                                        // tap, which is exactly the kind of flaky "menu doesn't
+                                        // open / remove doesn't work" symptom reported live.
+                                        // Wiring the signal DragSource already emits (same
+                                        // pattern the show table's own row menu already uses)
+                                        // removes the duplicate instead of adding a second one.
+                                        onContextRequested: (x, y) => root.openMenu("item",
+                                            { index: itemRow.modelData.index, name: itemRow.modelData.name }, itemRow, x, y)
                                     }
-                                    TapHandler { acceptedButtons: Qt.RightButton; onTapped: (p) => root.openMenu("item", { index: itemRow.modelData.index, name: itemRow.modelData.name }, itemRow, p.position.x, p.position.y) }
                                 }
                             }
                         }

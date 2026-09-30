@@ -50,8 +50,14 @@ Rectangle {
     // The on-air slide AS DESIGN BLOCKS — the same data the preview pane's
     // DesignPreview draws, straight from the runtime's current slide (no
     // re-resolving the on-air title through a service, so every content kind
-    // works: scripture, The Table, shows).
-    readonly property var onAirSlide: LiveOutputService.onAirSlide
+    // works: scripture, The Table, shows). While NOT live, falls back to
+    // stagedSlide (a double-click in ShowCenter) so the Main Output tile
+    // still shows what was picked — WITHOUT that pick having gone live on
+    // any real output (this tile's own hasFrame/frameSource stay gated on
+    // LiveOutputService.live regardless, so a real bound-screen output
+    // window never sees a staged-only pick, only this in-app tile does).
+    readonly property var onAirSlide: LiveOutputService.live
+        ? LiveOutputService.onAirSlide : LiveOutputService.stagedSlide
     readonly property bool hasSlidePreview: onAirSlide.valid === true
                                             && onAirSlide.blocks
                                             && onAirSlide.blocks.length > 0
@@ -313,6 +319,25 @@ Rectangle {
             }
         }
 
+        // Overlays on air, UNDER-SLIDE group (OverlayLibraryService's own
+        // per-design placeUnderSlide flag) — a lower-third-behind-the-text
+        // kind of layer: above the video/media layer, below the slide's own
+        // text. See LiveOutputService.activeOverlays for the on/off state
+        // (multiple can be live, stacked in take order) and the OVER-SLIDE
+        // group further down for the (more common) above-text placement.
+        Repeater {
+            model: LiveOutputService.activeOverlays
+            delegate: DesignPreview {
+                required property var modelData
+                readonly property var design: OverlayLibraryService.design(modelData.id)
+                anchors.fill: parent
+                visible: design.placeUnderSlide === true
+                showCheckerboard: false
+                blocks: design.blocks ?? []
+                background: design.background ?? "transparent"
+            }
+        }
+
         // Rendered on-air slide: the engine's own blocks through the shared
         // renderer, with its own checkerboard OFF — a clear background here
         // means "the style's colour/image underneath shows through", and the
@@ -320,6 +345,12 @@ Rectangle {
         DesignPreview {
             anchors.fill: parent
             visible: root.hasSlidePreview && !root.framePriority
+            // This IS on-air content, never a template/library card — a
+            // bound field with nothing to show renders blank, not the raw
+            // "{bind}" placeholder syntax (go-live-with-nothing bakes in
+            // the style's own template, whose bound field then has no real
+            // slide text to resolve).
+            showBindPlaceholders: false
             // Checkers only when NOTHING paints a background here: an
             // unstyled output's clear slide shows the transparency
             // convention, a styled output's clear slide shows the STYLE's
@@ -360,6 +391,23 @@ Rectangle {
             cache: false
             // The provider hands back an ARGB32 of the exact requested size;
             // stretch keeps the mapping 1:1 with the pane.
+        }
+
+        // Overlays on air, OVER-SLIDE group — above everything, including
+        // the slide's own text (FreeShow's own overlays-above-text order;
+        // matches the MonitorWall toolbar's clear-button z-order comment).
+        // Same model/lookup as the UNDER-SLIDE group above.
+        Repeater {
+            model: LiveOutputService.activeOverlays
+            delegate: DesignPreview {
+                required property var modelData
+                readonly property var design: OverlayLibraryService.design(modelData.id)
+                anchors.fill: parent
+                visible: design.placeUnderSlide !== true
+                showCheckerboard: false
+                blocks: design.blocks ?? []
+                background: design.background ?? "transparent"
+            }
         }
 
         // Transparency checkerboard — ONLY for an unstyled output with
@@ -403,14 +451,50 @@ Rectangle {
         y: previewPane.y + 4
         width: 4
         height: previewPane.height - 8
-        visible: root.isEnabled && EngineBridge.anyAudioMetering
+        // Was gated on EngineBridge.anyAudioMetering (a metering tap
+        // actually running somewhere) — meant the whole strip vanished
+        // outside GO LIVE instead of sitting at its own "ghost" resting
+        // state (which the gradient below already draws for exactly this:
+        // a readable scale even at silence). Always present chrome now;
+        // it only animates once a real tap feeds rawLevel.
+        visible: root.isEnabled
 
         readonly property real rawLevel: {
+            // Real program-mix signal (the loopback tap) always wins when
+            // it's actually showing something. GATING on outputMetering
+            // (whether the tap is merely RUNNING) was the bug: it runs
+            // continuously the whole time a tile is active/live regardless
+            // of whether there is any real audio, so that branch was taken
+            // — and returned a flat 0 — permanently, and the input-tap
+            // fallback below was never reached during the one case anyone
+            // actually cares about (the show IS live). Comparing the real
+            // NUMBERS instead means whichever source is genuinely louder
+            // wins, every time.
+            let level = 0
             const s = EngineBridge.outputLevels
-            if (!s || s.peaks === undefined || s.peaks.length < 1)
-                return 0
-            const idx = Math.min(bar.channelIndex, s.peaks.length - 1)
-            return Math.max(0, Math.min(1, s.peaks[idx]))
+            if (s && s.peaks !== undefined && s.peaks.length >= 1) {
+                const idx = Math.min(bar.channelIndex, s.peaks.length - 1)
+                level = Math.max(0, Math.min(1, s.peaks[idx]))
+            }
+            if (level > 0)
+                return level
+            // No real program signal: fall back to the loudest currently-
+            // tapped INPUT device (the Media pane's audio/bus card double-
+            // click — see MediaLibraryPane.qml's onDoubleClicked comment;
+            // there is no real path from a routed input to program output
+            // yet). Not real program signal, but an honest confirmation the
+            // gesture is doing something instead of the bars sitting dead.
+            const list = EngineBridge.inputLevels
+            let loudest = 0
+            for (let i = 0; i < list.length; ++i) {
+                const snap = list[i]
+                if (!snap || snap.peaks === undefined || snap.peaks.length < 1)
+                    continue
+                const idx = Math.min(bar.channelIndex, snap.peaks.length - 1)
+                const v = Math.max(0, Math.min(1, snap.peaks[idx]))
+                if (v > loudest) loudest = v
+            }
+            return loudest
         }
 
         // Fast attack (jumps up immediately), slow release — the exact easing
@@ -422,16 +506,9 @@ Rectangle {
         readonly property bool active: rawLevel > 0.01
 
         // `smoothed`/`peakValue` are raw LINEAR amplitude (0..1) — the WASAPI
-        // tap's own domain, kept for the envelope math. Normal program levels
-        // sit around -60..-6 dBFS (linear ~0.001..0.5), which pins a linear-
-        // height fill near the bottom for virtually all real audio — reads
-        // as dead. Meters read in dB, so the drawn height uses this -60..0 dB
-        // mapping instead of raw amplitude.
-        function dbPct(linear) {
-            if (linear <= 0.0005) return 0   // ≈ -66 dBFS floor → silence
-            const db = 20 * Math.log10(linear)
-            return Math.max(0, Math.min(1, (db + 60) / 60))
-        }
+        // tap's own domain, kept for the envelope math. The drawn height uses
+        // the shared -60..0 dB mapping (Db.dbPct) instead of raw amplitude —
+        // one copy of the formula, not three.
 
         Timer {
             interval: 33
@@ -479,7 +556,7 @@ Rectangle {
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: parent.bottom
-            height: parent.height * bar.dbPct(bar.smoothed)
+            height: parent.height * Db.dbPct(bar.smoothed)
             clip: true
 
             Rectangle {
@@ -497,7 +574,7 @@ Rectangle {
             anchors.left: parent.left
             anchors.right: parent.right
             height: 2
-            y: parent.height * (1 - bar.dbPct(bar.peakValue)) - 1
+            y: parent.height * (1 - Db.dbPct(bar.peakValue)) - 1
             color: "#ffffff"
             opacity: 0.55
         }

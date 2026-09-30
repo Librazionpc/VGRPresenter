@@ -34,6 +34,18 @@ struct StoredOutput {
     std::string testPattern = "none";
     std::string screenName;
     bool boundsLocked = false;
+    // Whether this output's REAL destination window (a physical/HDMI
+    // screen, not the small in-app preview tile) stays above other
+    // windows. Off by default — an always-on-top borderless window with
+    // no dismiss affordance was found to bury the app itself when testing
+    // without a dedicated second monitor.
+    bool stayOnTop = false;
+    // Whether the real destination window covers its whole bound screen
+    // (a real projector/HDMI output's actual job) or starts at half-size,
+    // centered and movable (safe for testing on a single dev monitor,
+    // where a fullscreen always-on-top window would bury the app itself).
+    // On by default — the half-size start is the exception, not the norm.
+    bool fullscreenOutput = true;
     bool active = false;
     bool enabled = true;
     std::string styleId;                       // "" = no style

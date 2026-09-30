@@ -727,6 +727,62 @@ Item {
     function updateDragConnect(fromItem, mx, my) {
         root.dragConnectPos = fromItem.mapToItem(board, mx, my)
     }
+    // Bus-initiated drag: the SAME gesture, reversed — press a bus's own
+    // port and drag out to a source card instead of only source-to-bus.
+    // Shares dragConnectActive/dragConnectPos/dragConnectStart (the drawn
+    // line reads those regardless of which end started the drag);
+    // dragConnectFromBus (-1 = not a bus-originated drag) is the only new
+    // piece of state, keeping dropAllowed/disconnectRoute's kind+srcIndex+
+    // busIndex contract identical either direction.
+    property int dragConnectFromBus: -1
+    function startDragConnectFromBus(kindName, busIndex, fromItem, mx, my) {
+        root.dragConnectFrom = kindName
+        root.dragConnectFromBus = busIndex
+        root.dragConnectStart = fromItem.mapToItem(board, mx, my)
+        root.dragConnectPos = root.dragConnectStart
+        root.dragConnectActive = true
+    }
+    function finishDragConnectFromBus(kindName, busIndex, fromItem, mx, my) {
+        root.dragConnectActive = false
+        root.dragConnectFromBus = -1
+        const p = fromItem.mapToItem(board, mx, my)
+        const s = root.sourceIndexAt(kindName, p)
+        if (s < 0)
+            return
+        if (!root.dropAllowed(kindName, s, busIndex)) {
+            root.flashBus(busIndex, false)
+            return
+        }
+        const routes = kindName === "audio"
+                       ? BusListModel.getBus(busIndex).routedAudioInputs
+                       : BusListModel.getBus(busIndex).routedVideoSources
+        if (routes.indexOf(s) >= 0) {
+            root.flashBus(busIndex, true)
+            return
+        }
+        root.flashBus(busIndex, true)
+        Qt.callLater(() => root.disconnectRoute(kindName, busIndex, s))
+    }
+    // Which source card (if any) a board-space point lands on, for the kind
+    // being dragged — the inverse of busIndexAt, same geometry contract
+    // (the column's own x-range, row rhythm, row count).
+    function sourceIndexAt(kindName, p) {
+        const isAudio = kindName === "audio"
+        const colX = isAudio ? board.audioX : board.videoX
+        const colW = isAudio ? board.colW : board.vidColW
+        const rowH = isAudio ? board.rowH : board.vidRowH
+        const count = isAudio ? AudioInputListModel.rowCount() : VideoSourceListModel.rowCount()
+        if (p.x < colX - 8 || p.x > colX + colW + 8)
+            return -1
+        const relY = p.y - board.headerH
+        if (relY < 0)
+            return -1
+        const row = Math.floor(relY / (rowH + board.rowGap))
+        const bottom = relY - row * (rowH + board.rowGap)
+        if (row >= count || bottom > rowH)
+            return -1
+        return row
+    }
     // One place for the route-toggle branch — called synchronously from
     // the line hit-layer (which no model rebuild can destroy) and deferred
     // from finishDragConnect (which runs inside the port's release
@@ -835,8 +891,16 @@ Item {
             return -1
         return row
     }
+    // Only meaningful for a SOURCE-originated drag (dragConnectFromBus < 0)
+    // — a bus-originated drag hovers the SOURCE column instead, see
+    // dragConnectHoverSource below.
     readonly property int dragConnectHoverBus:
-        root.dragConnectActive ? root.busIndexAt(root.dragConnectPos) : -1
+        root.dragConnectActive && root.dragConnectFromBus < 0
+            ? root.busIndexAt(root.dragConnectPos) : -1
+    // The inverse, for a bus-originated drag.
+    readonly property int dragConnectHoverSource:
+        root.dragConnectActive && root.dragConnectFromBus >= 0
+            ? root.sourceIndexAt(root.dragConnectFrom, root.dragConnectPos) : -1
     // The one compatibility rule, shared by the drag-connect hover
     // highlight and the drop handler so they can never disagree: AUDIO
     // fits every bus (mixing is frame-free — embedded with the feed on
@@ -845,16 +909,21 @@ Item {
     // already holds a different source refuses the drop (red hover + red
     // flash): two sources on one output would be two frames competing to
     // render it.
+    // THE ONE RULE lives in the engine (ProductionGraph::CanConnect via
+    // BusListModel.canConnect): type compatibility, cycles, and the video
+    // 1:1 bus capacity. The board only asks — it never keeps its own copy
+    // of the policy (two hand-maintained copies are how the "video bus
+    // refuses" drift happened).
     function dropAllowed(kindName, srcIndex, busIndex) {
-        const bus = BusListModel.getBus(busIndex)
-        if (kindName === "audio")
-            return true
-        if (bus.type === "audio")
-            return false
-        const routes = bus.routedVideoSources
-        return routes.length === 0 || (routes.length === 1 && routes[0] === srcIndex)
+        return BusListModel.canConnect(kindName, srcIndex, busIndex)
     }
     readonly property bool dragConnectCompat: {
+        if (root.dragConnectFromBus >= 0) {
+            if (root.dragConnectHoverSource < 0)
+                return false
+            return root.dropAllowed(root.dragConnectFrom, root.dragConnectHoverSource,
+                                    root.dragConnectFromBus)
+        }
         if (root.dragConnectHoverBus < 0)
             return false
         return root.dropAllowed(root.dragConnectFrom, root.dragConnectIndex,
@@ -1256,6 +1325,12 @@ Item {
                         }
                     }
 
+                    // The manual "Engine audio on/off" toggle that used to sit
+                    // here was removed by request (a better-integrated trigger
+                    // is planned) — EngineBridge.setAudioRender()/
+                    // audioRenderActive still exist and work, just nothing in
+                    // this screen calls them anymore.
+
                     Repeater {
                         model: BusListModel
 
@@ -1407,25 +1482,33 @@ Item {
                             // side). Audio fits EVERY bus (embedded with the
                             // feed on video buses — see sourceFitsBus), so
                             // the audio port is always present; only a pure
-                            // audio bus hides the video port. Bus ports are
-                            // drop decorations, not drag sources —
-                            // interactive: false.
+                            // audio bus hides the video port. Both are ALSO
+                            // drag sources now (press-drag out to a source
+                            // card) — the reverse of the source-to-bus drag,
+                            // sharing the same dropAllowed/disconnectRoute
+                            // contract via startDragConnectFromBus.
                             PortDot {
+                                id: busAudioPortDot
                                 anchors.left: parent.left
                                 anchors.leftMargin: -4
                                 anchors.verticalCenter: parent.verticalCenter
                                 accent: Theme.success
-                                interactive: false
                                 alwaysColored: true
+                                onConnectStarted: (x, y) => root.startDragConnectFromBus("audio", busRow.index, busAudioPortDot, x, y)
+                                onConnectMoved: (x, y) => root.updateDragConnect(busAudioPortDot, x, y)
+                                onConnectFinished: (x, y) => root.finishDragConnectFromBus("audio", busRow.index, busAudioPortDot, x, y)
                             }
                             PortDot {
+                                id: busVideoPortDot
                                 visible: busRow.type !== "audio"
                                 anchors.right: parent.right
                                 anchors.rightMargin: -4
                                 anchors.verticalCenter: parent.verticalCenter
                                 accent: Theme.info
-                                interactive: false
                                 alwaysColored: true
+                                onConnectStarted: (x, y) => root.startDragConnectFromBus("video", busRow.index, busVideoPortDot, x, y)
+                                onConnectMoved: (x, y) => root.updateDragConnect(busVideoPortDot, x, y)
+                                onConnectFinished: (x, y) => root.finishDragConnectFromBus("video", busRow.index, busVideoPortDot, x, y)
                             }
                         }
                     }

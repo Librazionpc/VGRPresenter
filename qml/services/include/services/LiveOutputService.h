@@ -37,6 +37,17 @@ class LiveOutputService : public QObject {
 
     // On air? (the engine loop is running)
     Q_PROPERTY(bool live READ live NOTIFY liveChanged)
+    // A slide STAGED via stageSlides() but not yet pushed live — same
+    // { valid, title, blocks, background } shape as onAirSlide, so the
+    // Main Output tile can draw it with the identical DesignPreview path.
+    // Empty once live (onAirSlide takes over) or once nothing is staged.
+    // The whole point: double-clicking a slide used to go live immediately
+    // (goLiveWithSlides), which flipped the top GO LIVE/STOP button and (if
+    // an Output is bound to a real screen) put content on it too — with NO
+    // explicit go-live action from the user. Staging decouples "what the
+    // tile shows" from "what's actually pushed to real outputs": GO LIVE
+    // is now the only thing that commits a stage.
+    Q_PROPERTY(QVariantMap stagedSlide READ stagedSlide NOTIFY stagedChanged)
     // Bumped on every new preview frame; QML Image source appends it.
     Q_PROPERTY(qulonglong frameRev READ frameRev NOTIFY frameRevChanged)
     // Frames the loop has rendered this run (diagnostics).
@@ -78,6 +89,16 @@ class LiveOutputService : public QObject {
     // True while a taken input's tap is producing (warm-up honest: false
     // until the provider's first frame decodes).
     Q_PROPERTY(bool inputLive READ inputLive NOTIFY inputChanged)
+    // ---- OVERLAYS ON AIR (the Overlays pane's double-click take) ---------
+    // MULTIPLE overlays can be live at once, stacked (last taken = topmost),
+    // independent of the on-air slide/taken input/media — same "keeps
+    // showing regardless of live_" convention those already use. Each entry
+    // is { id, name }; the actual design blocks/background come from
+    // OverlayLibraryService::design(id) when a tile draws them — this list
+    // only owns WHICH ones are on. placeUnderSlide (that service's own
+    // per-design flag) decides whether a given overlay draws below or above
+    // the on-air slide's own DesignPreview — the tile reads that per entry.
+    Q_PROPERTY(QVariantList activeOverlays READ activeOverlays NOTIFY overlaysChanged)
     // ---- MEDIA ON AIR (the Media pane's take-to-program) ----------------
     // A video/image FILE playing into the compositor: the service owns a real
     // decoder (QMediaPlayer → QVideoSink), frames go through a dedicated
@@ -123,11 +144,13 @@ public:
     int onAirTotal() const { return onAirTotal_; }
     QVariantMap onAirSlide() const { return onAirSlide_; }
     bool canResumeSlide() const { return canResumeSlide_; }
+    QVariantMap stagedSlide() const { return stagedSlide_; }
 
     QString inputLabel() const { return inputLabel_; }
     QString inputKind() const { return inputKind_; }
     qulonglong inputRev() const { return inputRev_; }
     bool inputLive() const { return inputLive_; }
+    QVariantList activeOverlays() const { return activeOverlays_; }
     bool mediaOnAir() const { return mediaOnAir_; }
     QString mediaPath() const { return mediaPath_; }
     QString mediaName() const { return mediaName_; }
@@ -159,6 +182,16 @@ public:
     // service detects frames itself — see inputLive). Harmless no-op for a
     // non-taken or already-live input.
     Q_INVOKABLE void confirmInputFrame(const QString &label);
+
+    // ---- OVERLAYS ON AIR (multiple, stacked) -----------------------------
+    // takeOverlay: appends {id,name} if not already on (no-op if it is —
+    // callers toggle via overlayIsOnAir). clearOverlay: drops one by id.
+    // clearAllOverlays: the whole layer off (the MonitorWall toolbar's
+    // overlays clear button).
+    Q_INVOKABLE void takeOverlay(const QString &id, const QString &name);
+    Q_INVOKABLE void clearOverlay(const QString &id);
+    Q_INVOKABLE void clearAllOverlays();
+    Q_INVOKABLE bool overlayIsOnAir(const QString &id) const;
 
     // ---- INTERNAL CARD PREVIEWS (the Media pane's one-click thumbnails) ---
     // ONE click starts a small owner-"card" tap whose frames feed the card's
@@ -205,6 +238,21 @@ public:
     // through the same pipeline. Answers via liveChanged either way — callers
     // can read live() to see whether it took.
     Q_INVOKABLE void goLiveWithSlides(const QString &name, const QVariantList &slides);
+    // Sets stagedSlide WITHOUT going live — a click (e.g. double-clicking a
+    // slide in ShowCenter) that should update the Main Output tile's
+    // preview but must never by itself flip the top GO LIVE/STOP button or
+    // reach a real bound-screen output window. goLive() commits whatever is
+    // staged the next time it runs (the top button's own GO LIVE click);
+    // stageSlides() itself never touches live_.
+    Q_INVOKABLE void stageSlides(const QString &name, const QVariantList &slides);
+    // Wipes a pending stage without touching live_/onAirSlide_ — stop()
+    // alone never did this (staging and live are independent: a NEXT pick
+    // can sit staged while the CURRENT one is still live), which is
+    // exactly why "Clear all" — the "wipe everything, start fresh" action
+    // — stayed stuck showing an old staged pick: it only ever called
+    // stop(), gated on live_, so with nothing live yet (only staged)
+    // Clear All did nothing at all to the tile.
+    Q_INVOKABLE void clearStaged();
     Q_INVOKABLE void stop();
     // Replays the last successful go-live (goLive()'s open show, or the last
     // goLiveWithSlides() ad-hoc pick, whichever happened last) — the
@@ -230,6 +278,13 @@ public:
     // so the index is a VISIBLE index, matching onAirIndex).
     Q_INVOKABLE QVariantMap onAirSlideAt(int index) const;
 
+    // ANY slide (not just on-air/staged) through the SAME active-output-
+    // style template composition onAirSlide/stagedSlide already apply —
+    // for a library preview (ShowCenter's grid/list thumbnails) to show
+    // what a slide will ACTUALLY look like on air, not just its own raw
+    // blocks. `slide` is the QML block shape (peekShow's own slide maps).
+    Q_INVOKABLE QVariantMap previewWithActiveStyle(const QVariantMap &slide) const;
+
     // The last preview frame for the image provider (scaled to the request).
     QImage previewFrame(const QSize &requested);
 
@@ -241,7 +296,9 @@ signals:
     void liveChanged();
     void frameRevChanged();
     void onAirChanged();
+    void stagedChanged();
     void inputChanged();
+    void overlaysChanged();
     // NDI program-sender state (started/stopped, frame counter refresh).
     void ndiChanged();
     // Media-on-air state changes (take/clear/play-pause/mute/end-of-file)
@@ -277,6 +334,11 @@ private:
     int onAirTotal_ = 0;
     QVariantMap onAirSlide_;
 
+    // ---- stageSlides() — see the header comment on stagedSlide ----
+    QString stagedName_;
+    QVariantList stagedSlidesRaw_;
+    QVariantMap stagedSlide_;
+
     // ---- resumeSlide() snapshot ----
     bool canResumeSlide_ = false;
     bool lastWasAdHocSlides_ = false;   // goLiveWithSlides() vs plain goLive()
@@ -284,6 +346,10 @@ private:
     QVariantList lastSlidesRaw_;
     QTimer *poll_ = nullptr;   // while live: onAir/frames refresh at 10Hz
     std::unique_ptr<LivePreviewProvider> provider_;
+
+    // ---- overlays-on-air state ----
+    // {id,name} maps, insertion order = z-order (last taken = topmost).
+    QVariantList activeOverlays_;
 
     // The NDI program sender: the active output (kind NDI) gets the live
     // loop's frames pushed at the poll's rate while live.

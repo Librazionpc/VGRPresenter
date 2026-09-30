@@ -31,6 +31,13 @@ Rectangle {
     MouseArea {
         anchors.fill: parent
         acceptedButtons: Qt.AllButtons
+        // Without this, the scrim only ever claimed clicks/wheel — plain
+        // mouse MOVEMENT (no button held) fell straight through to
+        // whatever sat behind it, so buttons and rows under an open modal
+        // kept lighting up on hover as if the modal weren't even there.
+        // hoverEnabled makes this MouseArea the hit-test stop for hover
+        // too, the same way it already was for clicks.
+        hoverEnabled: true
         onClicked: if (root.clickToDismiss) root.dismissed()
 
         // Accept (the default for an implemented handler) — the empty body

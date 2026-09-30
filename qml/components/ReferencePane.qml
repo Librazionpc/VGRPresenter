@@ -96,6 +96,88 @@ Item {
     // ask the engine again notice.
     property int engineRevision: 0
 
+    // ---- User data (notes & highlights, docs/specs/24 §User Data) -----------
+    // Bumped whenever a note or highlight landed in the engine, so the per-row
+    // bindings re-ask the adapter. All user data is optional adapter surface
+    // (an adapter without it simply shows no stars, no pencils, no drawer).
+    property int userRevision: 0
+    readonly property var userApi: (root.adapter && root.adapter.userData) ? root.adapter.userData : null
+    readonly property bool hasUserData: !!(root.userApi && root.userApi.chapterUserData && root.userApi.notes)
+    // THE batched read: one adapter call per open chapter, re-asked whenever a
+    // note/highlight lands or the chapter changes — the rows consult this map
+    // instead of each re-resolving a reference through the engine per repaint.
+    readonly property var chapterMarks: {
+        root.userRevision
+        if (!root.hasUserData || !root.book)
+            return ({}).valueOf()
+        return root.userApi.chapterUserData(root.sourceId, root.book.id, root.chapterNumber) || ({}).valueOf()
+    }
+    function markFor(v) {
+        const m = root.chapterMarks[String(v)]
+        return m ? m : ({}).valueOf()
+    }
+    property bool notesOpen: false
+    property var notesRows: []
+    // The verse whose note editor is open (0 = none) — the editor is an inline
+    // row under its verse; one at a time.
+    property int noteVerse: 0
+    // Where we are, as one string: leaving the chapter closes an open note editor.
+    readonly property string chapterStamp: root.sourceId + "|" + (root.book ? root.book.id : "") + "|" + root.chapterNumber
+    onChapterStampChanged: root.noteVerse = 0
+
+    function refOfVerse(v) { return root.book ? root.adapter.reference(root.book.name, root.chapterNumber, [v]) : "" }
+
+    function refreshNotesRows() {
+        root.notesRows = root.hasUserData ? root.userApi.notes() : []
+    }
+
+    function toggleHighlight(v) {
+        if (!root.hasUserData || !root.book)
+            return
+        // The engine's SetHighlight is idempotent — write the inverted state
+        // straight from the batched map, no read-then-write race window.
+        root.userApi.setHighlighted(root.refOfVerse(v), !root.markFor(v).highlight)
+    }
+
+    function openNoteEditor(v) {
+        if (!root.hasUserData || !root.book)
+            return
+        root.noteVerse = v
+        noteInput.text = root.markFor(v).note || ""
+        if (root.notesOpen)
+            root.refreshNotesRows()
+    }
+
+    function saveNoteDraft() {
+        if (!root.hasUserData || root.noteVerse <= 0) {
+            root.noteVerse = 0
+            return
+        }
+        root.userApi.setNote(root.refOfVerse(root.noteVerse), noteInput.text)
+        if (root.notesOpen)
+            root.refreshNotesRows()
+        root.noteVerse = 0
+    }
+
+    // A drawer row was clicked: open the passage the note sits on and pick its paragraph.
+    function jumpToNote(n) {
+        if (!n)
+            return
+        root.goTo({ bookId: n.bookId, chapter: n.chapter, verseStart: n.verse, verseEnd: n.verse })
+        root.notesOpen = false
+    }
+
+    // The wrapper bumps its adapter's userDataRevision when the service signals
+    // a note/highlight landing; every per-row re-read hangs off userRevision.
+    Connections {
+        target: root.adapter
+        function onUserDataRevisionChanged() {
+            root.userRevision++
+            if (root.notesOpen)
+                root.refreshNotesRows()
+        }
+    }
+
     readonly property var book: root.books.length > root.bookIndex ? root.books[root.bookIndex] : null
     readonly property var sources: {
         root.engineRevision   // re-checked whenever the engine's side changes (e.g. a folder import just finished)
@@ -986,7 +1068,14 @@ Item {
                         // for). A verse spanning several of the sermon's own blank-line paragraphs still carries their break as a literal
                         // "\n" in its text - elide alone does not collapse a real line break, so it is flattened to a space here too.
                         readonly property string oneLine: verseRow.modelData.text.replace(/\s*\n+\s*/g, " ")
-                        width: versesList.width; height: 38
+                        // The user's marks, re-asked whenever one lands (root.userRevision) —
+                        // the verse number wears gold while the verse carries either.
+                        // The user's marks, from the ONE batched chapter read
+                        // (root.chapterMarks) — no per-row engine calls.
+                        readonly property bool marked: root.hasUserData && root.markFor(verseRow.modelData.number).highlight === true
+                        readonly property bool hasNote: (root.markFor(verseRow.modelData.number).note || "") !== ""
+                        // The open note editor stretches this one row to make room for itself.
+                        width: versesList.width; height: root.noteVerse === verseRow.modelData.number ? 122 : 38
                         Rectangle {
                             anchors.fill: parent; anchors.margins: 1; radius: 4
                             // Position-truth hover (PositionHoverArea), not DragSource's
@@ -1002,15 +1091,17 @@ Item {
                             anchors.fill: parent
                             checkAncestors: false   // (rows inside a Flickable; no hover-gated visibility in the chain)
                         }
+                        // The verse number: the usual red, gold while the user has
+                        // marked this verse with a highlight or a note.
                         Text {
                             x: 10; anchors.verticalCenter: parent.verticalCenter
                             width: 40; horizontalAlignment: Text.AlignRight
                             text: verseRow.modelData.number
-                            color: Theme.danger
+                            color: verseRow.marked ? "#f5c542" : Theme.danger
                             font.family: Theme.fontFamily; font.pixelSize: 16; font.bold: true
                         }
                         Text {
-                            x: 60; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 70
+                            x: 60; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 106
                             // While a search (or citation filter) is showing, the typed
                             // words light up yellow in the visible text — the same obvious
                             // chip Quick search uses.
@@ -1036,6 +1127,50 @@ Item {
                             onOpened: {
                                 root.selectVerse(verseRow.modelData.number, false, false)
                                 root.playPicked()
+                            }
+                        }
+                        // The note affordance: a pencil on hover, persistent while a note
+                        // exists or the editor is open (gold then). Click opens the inline
+                        // editor; Enter saves, Esc discards.
+                        Item {
+                            id: noteBtn
+                            readonly property bool editing: root.noteVerse === verseRow.modelData.number
+                            visible: root.hasUserData && (verseHover.hovered || verseRow.hasNote || editing)
+                            x: parent.width - 34; y: 7
+                            width: 24; height: 24
+                            Rectangle { anchors.fill: parent; radius: 5; color: noteBtn.editing || noteHover.hovered ? "#22242e" : "transparent" }
+                            IconGlyph {
+                                anchors.centerIn: parent
+                                name: "pencil"
+                                color: noteBtn.editing || verseRow.hasNote ? "#f5c542" : Theme.textSecondary
+                                width: 11; height: 11
+                            }
+                            HoverHandler { id: noteHover; cursorShape: Qt.PointingHandCursor }
+                            TapHandler { onTapped: root.openNoteEditor(verseRow.modelData.number) }
+                        }
+                        // The note editor, open under its verse (one at a time).
+                        Rectangle {
+                            visible: root.noteVerse === verseRow.modelData.number
+                            x: 4; y: 40
+                            width: parent.width - 8; height: 76
+                            radius: 6
+                            color: "#14151d"
+                            border.color: Theme.border
+                            TextInput {
+                                id: noteInput
+                                anchors.fill: parent; anchors.margins: 8
+                                color: Theme.textPrimary
+                                font.family: Theme.fontFamily; font.pixelSize: 13
+                                wrapMode: TextInput.Wrap
+                                clip: true
+                                Keys.onEscapePressed: root.noteVerse = 0
+                                Keys.onReturnPressed: root.saveNoteDraft()
+                            }
+                            Text {
+                                anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 6
+                                text: qsTr("Enter to save · Esc to close")
+                                color: Theme.textMuted
+                                font.family: Theme.fontFamily; font.pixelSize: 10
                             }
                         }
                     }
@@ -1391,6 +1526,32 @@ Item {
                     TapHandler { onTapped: parent.isOurs ? LiveOutputService.stop() : root.playPicked() }
                 }
 
+                // The highlight toggle for the picked passage (the drawer's other half):
+                // gold star while verse 1 of the pick is marked — the star marks the
+                // FIRST picked verse, per-verse stars live on the rows themselves.
+                Item {
+                    visible: !root.searching && root.hasUserData
+                    width: 28; height: 26
+                    readonly property bool marked: root.hasUserData && root.selected.length > 0
+                                                   && root.markFor(root.selected[0]).highlight === true
+                    Rectangle { anchors.fill: parent; radius: 13; color: starHover.hovered || parent.marked ? "#22242e" : "transparent" }
+                    IconGlyph {
+                        anchors.centerIn: parent
+                        name: "star"
+                        color: parent.marked ? "#f5c542" : Theme.textPrimary
+                        width: 13; height: 13
+                        fit: true
+                    }
+                    HoverHandler { id: starHover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler {
+                        onTapped: {
+                            if (!root.book || root.selected.length === 0)
+                                return
+                            root.toggleHighlight(root.selected[0])
+                        }
+                    }
+                }
+
                 Rectangle { visible: !root.searching; width: 1; height: 16; color: Theme.border; anchors.verticalCenter: parent.verticalCenter }
 
                 Item {
@@ -1414,6 +1575,95 @@ Item {
                         }
                     }
                 }
+            }
+        }
+
+        // ---- Notes & highlights drawer (docs/specs/24 §User Data) — the pane's
+        // own written-work ledger: every note in the source, most recently
+        // touched first; a click jumps the picker straight to its passage.
+        Rectangle {
+            id: notesDrawer
+            visible: root.notesOpen && root.hasUserData
+            x: 10; y: 10
+            width: Math.min(340, parent.width - 20); height: parent.height - 20
+            radius: 8
+            color: "#12131a"
+            border.color: Theme.border
+
+            Item {
+                id: drawerHead
+                x: 12; y: 10; width: parent.width - 24; height: 20
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: (root.adapter ? root.adapter.tabLabel : qsTr("Library")) + qsTr(" — notes")
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily; font.pixelSize: 14; font.bold: true
+                }
+                Item {
+                    id: drawerClose
+                    anchors.right: parent.right; width: 20; height: 20
+                    Rectangle { anchors.fill: parent; radius: 10; color: closeHover.hovered ? "#22242e" : "transparent" }
+                    IconGlyph { anchors.centerIn: parent; name: "ban"; color: Theme.textSecondary; width: 10; height: 10 }
+                    HoverHandler { id: closeHover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: root.notesOpen = false }
+                }
+            }
+
+            Flickable {
+                id: drawerFlick
+                x: 12; y: 38; width: parent.width - 24; height: parent.height - 50
+                clip: true
+                contentHeight: drawerList.height
+                boundsBehavior: Flickable.StopAtBounds
+
+                Column {
+                    id: drawerList
+                    width: parent.width
+                    spacing: 4
+
+                    Repeater {
+                        model: root.notesRows
+                        delegate: Item {
+                            id: noteRowItem
+                            required property var modelData
+                            width: drawerList.width; height: noteText.implicitHeight + 26
+                            Rectangle {
+                                anchors.fill: parent; radius: 6
+                                color: noteRowHover.hovered ? "#1a1b23" : "transparent"
+                            }
+                            Text {
+                                id: noteText
+                                x: 8; y: 8; width: parent.width - 16
+                                text: noteRowItem.modelData.text
+                                color: Theme.textPrimary
+                                wrapMode: Text.Wrap
+                                font.family: Theme.fontFamily; font.pixelSize: 13
+                            }
+                            Text {
+                                x: 8; anchors.bottom: parent.bottom; anchors.bottomMargin: 6
+                                text: noteRowItem.modelData.reference
+                                color: "#f5c542"
+                                font.family: Theme.fontFamily; font.pixelSize: 11
+                            }
+                            HoverHandler { id: noteRowHover; cursorShape: Qt.PointingHandCursor }
+                            TapHandler { onTapped: root.jumpToNote(noteRowItem.modelData) }
+                        }
+                    }
+
+                    Text {
+                        visible: root.notesRows.length === 0
+                        width: parent.width
+                        text: qsTr("No notes yet.\n\nHover a verse and press the pencil to write one; the star in the pill marks a passage.")
+                        color: Theme.textMuted
+                        wrapMode: Text.Wrap
+                        font.family: Theme.fontFamily; font.pixelSize: 12
+                    }
+                }
+            }
+            AppScrollBar {
+                flickable: drawerFlick
+                anchors.top: drawerFlick.top; anchors.bottom: drawerFlick.bottom
+                anchors.right: parent.right; anchors.rightMargin: 2
             }
         }
     }

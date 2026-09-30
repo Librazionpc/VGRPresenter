@@ -66,6 +66,8 @@ json::Value OutputStore::OutputToJson(const StoredOutput& o) {
     obj["testPattern"] = json::Value::String(o.testPattern);
     obj["screenName"] = json::Value::String(o.screenName);
     obj["boundsLocked"] = json::Value::Bool(o.boundsLocked);
+    obj["stayOnTop"] = json::Value::Bool(o.stayOnTop);
+    obj["fullscreenOutput"] = json::Value::Bool(o.fullscreenOutput);
     obj["active"] = json::Value::Bool(o.active);
     obj["enabled"] = json::Value::Bool(o.enabled);
     obj["styleId"] = json::Value::String(o.styleId);
@@ -103,6 +105,8 @@ Result<StoredOutput> OutputStore::OutputFromJson(const json::Value& v) {
     out.testPattern = str("testPattern", "none");
     out.screenName = str("screenName");
     out.boundsLocked = flag("boundsLocked", false);
+    out.stayOnTop = flag("stayOnTop", false);
+    out.fullscreenOutput = flag("fullscreenOutput", true);
     out.active = flag("active", false);
     out.enabled = flag("enabled", true);
     out.styleId = str("styleId");

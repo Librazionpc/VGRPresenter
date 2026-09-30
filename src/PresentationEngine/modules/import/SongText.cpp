@@ -359,6 +359,14 @@ std::vector<std::string> FindPatterns(std::vector<std::string>& sections, bool a
     return indexes;
 }
 
+} // namespace
+
+std::vector<std::string> AutoGroupSections(std::vector<std::string>& sections, bool autoGroups) {
+    return FindPatterns(sections, autoGroups);
+}
+
+namespace {
+
 // A section that ends with "x3" (or a header line "Chorus: x3") is played that many times.
 std::vector<Labeled> CheckRepeats(const std::vector<Labeled>& labeled) {
     static const std::regex marker(std::string("(?:\\n|^[^\\n]+?)\\s*(?:x|X|") + kCyrillicX + ")([0-9]+)\\s*(?:\\n|$)");

@@ -2,16 +2,20 @@
 
 #include "core/logging/Logger.hpp"
 #include "core/config/Json.hpp"
+#include "modules/presentation/CompositorState.hpp"
 #include "modules/presentation/PresentationTemplates.hpp"
 #include "modules/rendering/RenderEngine.hpp"
 #include "modules/rendering/RenderObject.hpp"
 #include "modules/rendering/Scene.hpp"
 #include "modules/rendering/TextEngine.hpp"
+#include "platform/IVideo.hpp"
+#include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <format>
 #include <map>
@@ -204,8 +208,9 @@ std::string SlideContentText(const Slide& slide) {
 }
 
 // The content family the slide belongs to ("scripture", "table", …) — the
-// frontend tags it in the slide's meta (ShowConverter). Empty = untagged
-// (shows and other content): a style's template then applies, as before.
+// frontend tags it in the slide's meta (ShowConverter). Empty = untagged =
+// SHOWS content (imported shows, Quick Lyrics): it follows the shows family
+// slot via FamilyTemplateIndexFor.
 std::string slideContentType(const Slide& slide) {
     if (auto meta = json::Parse(slide.metaJson); meta.ok())
         if (const json::Value* v = meta.value().Find("contentType"); v && v->type() == json::Value::Type::String)
@@ -214,14 +219,16 @@ std::string slideContentType(const Slide& slide) {
 }
 
 // The OutputStyleSpec::familyTemplateKeys/blocks slot a content family maps
-// to (shows | media | scripture | table, in the show* gates' order); 4 =
-// untagged or unknown family — those slides always use the whole-style pick.
+// to (shows | media | scripture | table, in the show* gates' order). Slides
+// without a family tag are SHOWS content (imported and Quick-Lyrics slides
+// carry no tag) — they follow the shows slot, so the Styles screen's shows
+// pick (or its Bible fallback) styles them. Only an unknown tag returns 4,
+// where a slide keeps its own layout.
 size_t FamilyTemplateIndexFor(const std::string& contentType) {
-    if (contentType == "shows")    return 0;
-    if (contentType == "media")    return 1;
+    if (contentType == "media")     return 1;
     if (contentType == "scripture") return 2;
-    if (contentType == "table")    return 3;
-    return 4;
+    if (contentType == "table")     return 3;
+    return 0;   // "shows" — and untagged slides, which are shows content
 }
 
 // Fills every bound text block of a baked template from `slide` — the same
@@ -258,14 +265,19 @@ std::vector<ContentBlock> BindTemplateBlocks(const std::vector<ContentBlock>& tm
 }
 
 // Renders positioned stage blocks (the 754×428 Edit-stage grid template
-// designs and slides share) into the scene's text layer: text blocks become
-// styled TextObjects, box/shape blocks ShapeObjects; other kinds (clock,
-// timer, media...) are not part of this pass. `tag` prefixes object ids so a
+// designs and slides share) into a scene layer: text blocks become styled
+// TextObjects, box/shape blocks ShapeObjects; other kinds (clock, timer,
+// media...) are not part of this pass. `tag` prefixes object ids so a
 // slide-block render and a template-block render can never collide within a
-// scene. Returns the number of blocks seen (for the scene log line).
+// scene. `layer` defaults to "text" (every pre-existing caller here targets
+// the slide's own text layer); AddCompositorLayers below is the one caller
+// that passes "media"/"overlay" instead, for an active overlay's own blocks
+// (placeUnderSlide decides which). Returns the number of blocks seen (for
+// the scene log line).
 int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                    const std::vector<ContentBlock>& blocks,
-                   const rendering::Size& size, std::string_view tag) {
+                   const rendering::Size& size, std::string_view tag,
+                   std::string_view layer = "text") {
     constexpr double kBlockStageW = 754.0, kBlockStageH = 428.0;
     int n = 0;
     for (const ContentBlock& block : blocks) {
@@ -287,11 +299,23 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             styleComp->style.align = ParseAlign(MetaString(block.metaJson, "align"));
             styleComp->style.valign = ParseVAlign(MetaString(block.metaJson, "verticalAlign"));
             styleComp->style.bold = MetaBool(block.metaJson, "bold");
+            // fontId: the real system font TextEngine's GDI+ backend tries
+            // first (RenderEngine::DrawTextObject / GlyphAtlas), degrading
+            // to the builtin bitmap font only when it can't resolve — the
+            // block's own fontFamily when the canvas set one, else the
+            // app's own UI default so plain/legacy blocks with no family
+            // still get real typography instead of reading as "no font
+            // chosen, so no real font" and falling all the way back.
+            {
+                const std::string family = MetaString(block.metaJson, "fontFamily");
+                styleComp->style.fontId = family.empty() ? "Segoe UI" : family;
+            }
+            styleComp->style.italic = MetaBool(block.metaJson, "italic");
             styleComp->style.wrap = true;
             styleComp->style.wrapWidth = text->Bounds().width;
             text->AddComponent(styleComp);
-            text->SetLayer("text");
-            (void)engine.AddObject(sceneId, text, "text");
+            text->SetLayer(std::string(layer));
+            (void)engine.AddObject(sceneId, text, std::string(layer));
         } else if (block.kind == "box" || block.kind == "shape" || block.kind == "rectangle") {
             auto shape = std::make_shared<rendering::ShapeObject>(objId, objId);
             shape->SetRectangle(StyleBuilder::ParseColor(
@@ -302,11 +326,150 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                 static_cast<float>(block.y / kBlockStageH * size.height),
                 static_cast<float>(block.width / kBlockStageW * size.width),
                 static_cast<float>(block.height / kBlockStageH * size.height)));
-            shape->SetLayer("text");
-            (void)engine.AddObject(sceneId, shape, "text");
+            shape->SetLayer(std::string(layer));
+            (void)engine.AddObject(sceneId, shape, std::string(layer));
         }
     }
     return n;
+}
+
+// Raw RGBA8 bytes (row-major, top-down — CompositorState's and
+// IVideo::DecodedFrame's shared convention) -> RgbaImage. A straight memcpy
+// is correct here: RgbaImage::pixels is Color::Pack() format (0xAABBGGRR on
+// a little-endian machine, i.e. bytes R,G,B,A in memory) — bit-for-bit the
+// SAME layout as the RGBA8 bytes already are, the identical trick
+// LivePreviewProvider::requestImage relies on in the other direction.
+rendering::RgbaImage ToRgbaImage(uint32_t w, uint32_t h, const std::vector<uint8_t>& rgba) {
+    rendering::RgbaImage img;
+    if (w == 0 || h == 0 || rgba.size() < static_cast<size_t>(w) * h * 4)
+        return img;
+    img.width = static_cast<int>(w);
+    img.height = static_cast<int>(h);
+    img.pixels.resize(static_cast<size_t>(w) * h);
+    std::memcpy(img.pixels.data(), rgba.data(), img.pixels.size() * sizeof(uint32_t));
+    return img;
+}
+
+// Upserts a single VideoObject by a WELL-KNOWN fixed id ("takeninput" /
+// "mediaonair" — exactly 0 or 1 instance of each ever exists): mutates the
+// EXISTING object's frame in place when the scene is a cache hit (scenes
+// are fingerprinted/cached by SLIDE+STYLE content — SceneBuilder's own
+// cache, see BuildSlideScene's "already built" early return — so a
+// continuously-updating video feed must refresh THROUGH that cache, not
+// rebuild around it), otherwise creates it fresh. An empty image clears the
+// existing object's frame (VideoObject::HasFrame() false → the rasterizer's
+// `if (!v->HasFrame()) break;` already makes it invisible) rather than
+// removing the node — cheaper, and this id is reused every time this layer
+// has content again anyway.
+void UpsertVideoLayer(rendering::RenderEngine& engine, const std::string& sceneId,
+                      const std::string& objId, const rendering::RgbaImage& img,
+                      const rendering::Rect& bounds) {
+    auto existing = engine.GetObject(sceneId, objId);
+    if (existing.ok()) {
+        if (auto* v = dynamic_cast<rendering::VideoObject*>(existing.value())) {
+            v->SetFrame(img);
+            v->SetBounds(bounds);
+        }
+        return;
+    }
+    if (img.empty())
+        return;   // nothing to show and nothing existed — stay absent
+    auto videoObj = std::make_shared<rendering::VideoObject>(objId, objId);
+    videoObj->SetFrame(img);
+    videoObj->SetBounds(bounds);
+    videoObj->SetLayer("media");
+    (void)engine.AddObject(sceneId, videoObj, "media");
+}
+
+// Per-sceneId memory of which object ids AddCompositorLayers added for
+// overlays last call, and the take-order signature (comma-joined ids) that
+// produced them — so a call that finds the SAME signature again (the
+// overwhelmingly common case: a slide re-rendering at 60Hz while nothing
+// about its overlays changed) skips straight past the expensive part
+// (re-running AddStageBlocks' text-layout work for every block of every
+// overlay) instead of redoing it every single frame. A changed signature
+// removes the previous call's objects first — AddObject has no upsert
+// semantics (see its own definition), so leaving them would just pile up
+// duplicates each time an overlay is taken/cleared mid-slide.
+struct OverlaySceneCache {
+    std::string signature;
+    std::vector<std::string> objectIds;
+};
+std::mutex g_overlayCacheMutex;
+std::map<std::string, OverlaySceneCache> g_overlayCache;
+
+// The three compositor layers OWNED BY THE UI (LiveOutputService — the real
+// PAL video taps, the real QMediaPlayer decoder, the overlay pane's take/
+// clear gestures) rather than by any slide's own content: a taken camera/
+// screen input, a playing media file, and any active overlays. Independent
+// of the slide's own content family — present even in a gated/"refused"
+// scene (BuildGatedSlideScene), same rule the QML preview tile already
+// follows (OutputMonitorTile.qml's inputTaken/mediaOnAir never depend on
+// whether the on-air TEXT content passed an output style's gates). Reads
+// CompositorState (populated by LiveOutputService whenever this state
+// changes) — this function, and everything it calls, never reaches back
+// into a QML service itself. MUST be called on every BuildSlideScene/
+// BuildGatedSlideScene invocation, INCLUDING cache hits (see UpsertVideoLayer's
+// comment) — never gated behind the "already built" early return.
+void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sceneId,
+                         const rendering::Size& size) {
+    // Taken camera/screen input: pulled straight from the PAL's own
+    // thread-safe tap (this runs on SceneBuilder's own worker thread) —
+    // CompositorState only mirrors WHICH device, not its pixels, so a live
+    // feed never goes stale waiting on a push from the UI thread.
+    const auto taken = presentation::CompositorState::Instance().GetTakenInput();
+    rendering::RgbaImage takenImg;
+    if (!taken.deviceId.empty() && bps::platform::PlatformAccessor::Installed()) {
+        const auto frame = bps::platform::PlatformAccessor::Get().Video()
+                               .PreviewFramePixels(taken.deviceId);
+        takenImg = ToRgbaImage(frame.width, frame.height, frame.rgba);
+    }
+    UpsertVideoLayer(engine, sceneId, "takeninput", takenImg,
+                     rendering::Rect(0, 0, size.width, size.height));
+
+    // Media file on air: already-decoded pixels LiveOutputService pushed
+    // (it owns the real QMediaPlayer/QVideoSink decoder — no second decode
+    // here). CoverRect (this file's own style-background-image fit) rather
+    // than a letterboxed fit — a reasonable first cut, not a pixel-match of
+    // the QML tile's PreserveAspectFit.
+    const auto media = presentation::CompositorState::Instance().GetMediaFrame();
+    const rendering::RgbaImage mediaImg = ToRgbaImage(media.width, media.height, media.rgba);
+    UpsertVideoLayer(engine, sceneId, "mediaonair", mediaImg,
+                     mediaImg.empty() ? rendering::Rect(0, 0, size.width, size.height)
+                                      : CoverRect(mediaImg.width, mediaImg.height, size));
+
+    // Overlays: the SAME block-rendering pass the slide's own content uses
+    // (AddStageBlocks), once per active overlay, in take order — id-tagged
+    // so overlays can never collide with each other or the slide's own
+    // objects. placeUnderSlide routes into "media" (below the slide's
+    // text — a lower-third-BEHIND-text kind of layer) or "overlay" (above
+    // everything, the more common placement) — the exact two groups
+    // OutputMonitorTile.qml's own two Repeaters already split on.
+    const std::vector<presentation::CompositorState::ActiveOverlay> overlays =
+        presentation::CompositorState::Instance().GetActiveOverlays();
+    std::string signature;
+    for (const auto& ov : overlays)
+        signature += ov.id + (ov.placeUnderSlide ? "u," : "o,");
+
+    std::lock_guard<std::mutex> lock(g_overlayCacheMutex);
+    OverlaySceneCache& cache = g_overlayCache[sceneId];
+    if (cache.signature == signature)
+        return;   // unchanged since last call — the objects already in the scene are still current
+
+    for (const std::string& objId : cache.objectIds)
+        (void)engine.RemoveObject(sceneId, objId);
+    cache.objectIds.clear();
+    cache.signature = signature;
+
+    int overlayIdx = 0;
+    for (const auto& ov : overlays) {
+        ++overlayIdx;
+        const std::string layer = ov.placeUnderSlide ? "media" : "overlay";
+        const std::string tag = std::format("ov{}_", overlayIdx);
+        AddStageBlocks(engine, sceneId, ov.blocks, size, tag, layer);
+        for (size_t i = 0; i < ov.blocks.size(); ++i)
+            cache.objectIds.push_back(std::format("{}{}", tag, i + 1));
+    }
 }
 
 } // namespace
@@ -433,11 +596,23 @@ Result<std::string> SceneBuilder::BuildGatedSlideScene(const Presentation& prese
         SceneIdFor(presentation, slide)
         + "@gated" + StyledSceneIdFor(presentation, slide, style).substr(SceneIdFor(presentation, slide).size());
 
-    if (engine.GetScene(sceneId).ok()) return sceneId;
+    if (engine.GetScene(sceneId).ok()) {
+        AddCompositorLayers(engine, sceneId, size);   // same cache-hit refresh as BuildSlideScene
+        return sceneId;
+    }
     auto scene = engine.CreateScene(sceneId, slide.title, size);
     if (!scene.ok()) return scene.error();
     (void)engine.AddLayer(sceneId, rendering::Layer("bg", "Background",
                                                     rendering::LayerKind::Background, 0));
+    // "media"/"overlay" (no "text" — that's the whole point of "refused"):
+    // a taken camera/screen input, a playing media file, and any active
+    // overlays are their OWN compositor layers, independent of whether this
+    // output's style gates the slide's TEXT content family — see
+    // AddCompositorLayers' own comment for why.
+    (void)engine.AddLayer(sceneId, rendering::Layer("media", "Media",
+                                                    rendering::LayerKind::Video, 1));
+    (void)engine.AddLayer(sceneId, rendering::Layer("overlay", "Overlay",
+                                                    rendering::LayerKind::Overlay, 3));
 
     // The SAME background composition BuildSlideScene runs (colour, then the
     // style image, the slide's own colour still winning under the same
@@ -455,7 +630,8 @@ Result<std::string> SceneBuilder::BuildGatedSlideScene(const Presentation& prese
     bgObj->SetBounds(rendering::Rect(0, 0, size.width, size.height));
     bgObj->SetLayer("bg");
     (void)engine.AddObject(sceneId, bgObj, "bg");
-    if (!style.backgroundImage.empty()) {
+    // Same clearBackgroundOnText gate as BuildSlideScene — see its comment.
+    if (!style.backgroundImage.empty() && !style.clearBackgroundOnText) {
         const rendering::RgbaImage img = LoadImageCached(style.backgroundImage);
         if (!img.empty()) {
             auto imageObj = std::make_shared<rendering::ImageObject>("stylebg", "StyleBackground");
@@ -465,6 +641,7 @@ Result<std::string> SceneBuilder::BuildGatedSlideScene(const Presentation& prese
             (void)engine.AddObject(sceneId, imageObj, "bg");
         }
     }
+    AddCompositorLayers(engine, sceneId, size);
     Logger::Instance().Debug(std::format("Gated scene built: {} (family refused by style '{}')",
                                         sceneId, style.name), "SceneBuilder");
     return sceneId;
@@ -477,8 +654,18 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
                                                   rendering::Size size) {
     const std::string sceneId = StyledSceneIdFor(presentation, slide, style);
 
-    // Already built (cache hit) — return it.
-    if (engine.GetScene(sceneId).ok()) return sceneId;
+    // Already built (cache hit) — the STRUCTURE (which text/shape objects
+    // exist for this slide+style) is reused as-is, but the compositor
+    // layers (a taken camera/screen input, a playing media file, active
+    // overlays) are dynamic, continuously-updating state that lives OUTSIDE
+    // this fingerprint — they must still refresh on every call, cache hit
+    // or not, or a taken camera/media freezes on whatever frame existed the
+    // moment this scene was first built (see AddCompositorLayers/
+    // UpsertVideoLayer's own comments).
+    if (engine.GetScene(sceneId).ok()) {
+        AddCompositorLayers(engine, sceneId, size);
+        return sceneId;
+    }
 
     auto scene = engine.CreateScene(sceneId, slide.title, size);
     if (!scene.ok()) return scene.error();
@@ -517,8 +704,14 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
 
     // Style background IMAGE — painted over the colour, under everything else
     // (FreeShow's style backgroundImage, cover-fit). Fingerprinted into the
-    // scene id, so a new image always lands as a rebuild.
-    if (!style.backgroundImage.empty()) {
+    // scene id, so a new image always lands as a rebuild. clearBackgroundOnText
+    // hides it outright while a slide is on air (FreeShow's Output.svelte:
+    // styleBackground is "" whenever clearStyleBackgroundOnText && (slide ||
+    // background) — unconditional on the slide's OWN background, unlike the
+    // colour precedence a few lines up). Mirrors OutputMonitorTile.qml's own
+    // suppressStyleBgImage gate, which already got this right on the preview
+    // side — a busy branded background must never fight with live text.
+    if (!style.backgroundImage.empty() && !style.clearBackgroundOnText) {
         const rendering::RgbaImage img = LoadImageCached(style.backgroundImage);
         if (!img.empty()) {
             auto imageObj = std::make_shared<rendering::ImageObject>("stylebg", "StyleBackground");
@@ -532,6 +725,12 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
                 "SceneBuilder");
         }
     }
+
+    // Taken camera/screen input, media file on air, active overlays — see
+    // AddCompositorLayers' own comment. Runs ONCE here, before every content
+    // branch below (each returns early after its own content), so every
+    // path gets these layers regardless of which one executes.
+    AddCompositorLayers(engine, sceneId, size);
 
     // ---- Content blocks ---------------------------------------------------
     // The on-air layout when the style wears an ENGINE TEMPLATE: the baked
@@ -555,16 +754,15 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
     const bool styleTemplateApplies = !style.templateBlocks.empty()
         && (style.contentType.empty() || slideContentType(slide).empty()
             || slideContentType(slide) == style.contentType);
-    // PER-FAMILY TEMPLATE: a slide whose family carries its own template key
-    // renders through THAT family's baked blocks — the whole-style template
-    // only covers families without their own pick (FreeShow's per-type
-    // templates; untagged/unknown slides always follow the whole-style pick).
-    // Blocks come from the family slot when it carries a bake; a family key
-    // naming a legacy preset (no bake) degrades to LayoutFor below with that
-    // key, exactly like the whole-style pick does.
+    // PER-FAMILY TEMPLATE: a slide renders through ITS family's baked blocks
+    // when the slot carries any — the Styles screen's explicit per-type pick
+    // (no inherit; the UI bakes the Bible template into the shows slot as
+    // the fallback when nothing is picked). Untagged slides are SHOWS
+    // content: they follow the shows slot. A family key naming a legacy
+    // preset (no bake) degrades to LayoutFor below with that key, exactly
+    // like the whole-style pick does.
     const size_t familyIdx = FamilyTemplateIndexFor(slideContentType(slide));
     const bool familyTemplateApplies = familyIdx < 4
-        && !style.familyTemplateKeys[familyIdx].empty()
         && !style.familyTemplateBlocks[familyIdx].empty();
     if (familyTemplateApplies) {
         const int n = AddStageBlocks(engine, sceneId,

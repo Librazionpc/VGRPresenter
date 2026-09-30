@@ -8,9 +8,13 @@
 
 // One effect slot in an input's effects rack (reference:
 // VGRPresenter_Settings_Audio_Video_Add_Compressor.qml's rack — Gain /
-// Equalizer / Compressor / Reverb / Limiter / Noise Gate / Delay). A stored
-// value, not a live DSP parameter: there is no audio engine anywhere in this
-// app, same mock-backend convention as level/muted.
+// Equalizer / Compressor / Reverb / Limiter / Noise Gate / Delay).
+// HALF-REAL today, by design: `enabled`/`value` are pushed onto REAL
+// production-graph processing stages (AudioInputListModel::pushEffectsToGraph
+// — the graph is the engine's routing/DSP state), while the rack's stored
+// numbers are still cosmetic UI state, not live DSP parameters read by a
+// playback device. Don't add "there is no engine" claims here without
+// checking pushEffectsToGraph first — this struct is mid-migration.
 struct AudioEffect
 {
     // "gain" | "eq" | "compressor" | "reverb" | "limiter" | "noiseGate" | "delay"

@@ -95,11 +95,18 @@ public:
     Result<std::string> Format(std::string_view bibleId, const PassageRef& ref,
                                const FormatOptions& options = {}) const;
 
-    // --- User data (stored separately from Scripture) ---
+    // --- User data (stored separately from Scripture; persisted in the store) ---
     Result<void> AddNote(std::string_view bibleId, const PassageRef& ref,
                          const std::string& text);
+    // A note removed is a note that never happened. Removing one that was
+    // never stored is a benign Ok (idempotent, like SetHighlight off).
+    Result<void> RemoveNote(std::string_view bibleId, const PassageRef& ref);
     Result<std::vector<UserNote>> Notes(std::string_view bibleId,
                                         const PassageRef& ref) const;
+    // The WHOLE Bible's notes, every reference at once — the notes drawer
+    // must not sweep the highlights roster to find notes that carry no
+    // highlight. Sorted most-recently-modified first.
+    Result<std::vector<UserNote>> Notes(std::string_view bibleId) const;
     Result<void> SetHighlight(std::string_view bibleId, const PassageRef& ref, bool on);
     Result<std::vector<PassageRef>> Highlights(std::string_view bibleId) const;
     Result<void> AddCollection(std::string_view name);
@@ -137,6 +144,14 @@ private:
     // JSON (de)serialization of one bible (metadata + books + chapters).
     json::Value BibleToJsonLocked(const BibleVersion& bible) const;
     BibleVersion BibleFromJsonLocked(const json::Value& node) const;
+    // User-data persistence (docs/specs/24 §User Data): notes, highlights, and
+    // collections ride in the SAME store file as the bibles (schema 2) and pay
+    // the same write-per-change budget. Mutex-HELD by contract (they touch
+    // RefKey and the user-data maps only). WriteUserDataLocked appends the
+    // user-data arrays into the store's root OBJECT (the JSON lib exposes
+    // operator[] on the object map, never on Value).
+    void WriteUserDataLocked(json::Value::Object& root);
+    void ReadUserDataLocked(const json::Value& root);
     // RESTORE of the flattened verse list from the stored chapters: the store
     // keeps only the canonical shape (GetChapter/Outline read `chapters`), so
     // rebuild `verses` in book order — Import()'s own shape — never a per-read
@@ -145,6 +160,12 @@ private:
 
     // Canonical reference key for user-data stores ("JHN 3:16").
     static std::string RefKey(const PassageRef& ref);
+    // One reference <-> JSON object for the user-data arrays (single place).
+    static json::Value RefToJson(const PassageRef& ref);
+    static PassageRef RefFromJson(const json::Value& node);
+    // Re-write the store with the current user data (mutex HELD; no-op without
+    // a store path — the unit-test default keeps everything in memory).
+    Result<void> SaveUserDataLocked();
 
     // Books for resolution: the target Bible's table, or the first installed
     // Bible's table when bibleId is empty.
@@ -157,8 +178,10 @@ private:
     std::thread reindexThread_;
     std::vector<std::shared_ptr<IBibleProvider>> providers_;
     std::map<std::string, BibleVersion, std::less<>> bibles_;
-    // Where imported bibles persist ("" = persistence off — unit tests). Set
-    // by the Kernel boot before Initialize()'s restore reads it.
+    // Where the store lives: imported bibles AND user data (notes, highlights,
+    // collections — one JSON, one write-per-change). "" = persistence off
+    // (unit tests). Set by the Kernel boot before Initialize()'s restore
+    // reads it.
     std::string storePath_;
     // User data — never inside Scripture (docs/specs/24 §User Data).
     std::map<std::string, std::vector<UserNote>, std::less<>> notes_;       // bible|ref

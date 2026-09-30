@@ -34,6 +34,22 @@ Item {
     // actions are the wall-side way to release it (the Media pane's click
     // is the take side).
     readonly property bool inputTaken: LiveOutputService.inputLabel !== ""
+    // ANYTHING landing on the Main Output tile engages the toolbar, not
+    // just GO LIVE/a taken input — media-on-air, a live overlay, or an
+    // audio meter tap (the Media pane's audio/bus double-click) each put
+    // something on the tile just as visibly, so Clear all / ‹ › / the
+    // per-layer buttons must be reachable for those too, not stay hidden
+    // until GO LIVE is separately pressed.
+    // A STAGED pick (stageSlides() — a double-clicked slide, not yet
+    // committed by GO LIVE) also lands visibly on the tile now, same as
+    // everything else in this list — live report: the whole toolbar
+    // (including the ▶ button that's now the explicit way to commit a
+    // stage) vanished the moment something was staged instead of truly
+    // live, so there was nothing left to click to go live WITH.
+    readonly property bool staged: LiveOutputService.stagedSlide.valid === true
+    readonly property bool anythingOnAir: root.live || root.inputTaken || root.staged
+        || LiveOutputService.mediaOnAir || LiveOutputService.activeOverlays.length > 0
+        || EngineBridge.anyAudioMetering
 
     // External contract: hosts position content under the wall and drive
     // the page dots from these.
@@ -230,7 +246,7 @@ Item {
     // unclickable rather than faking a lit state.
     Rectangle {
         id: toolbar
-        visible: root.live || root.inputTaken
+        visible: root.anythingOnAir
         anchors.horizontalCenter: parent.horizontalCenter
         y: wall.y + wall.height + (wall.pageCount > 1 ? 22 : 8)
         width: 376
@@ -341,13 +357,20 @@ Item {
                     enabled2: toolbar.onAir && !(toolbar.multiSlide && toolbar.atEnd)
                     onPicked: LiveOutputService.stepPassage(1)
                 }
-                // Play: restart the on-air set from its first slide.
+                // Play: the explicit GO LIVE trigger while nothing is on
+                // air yet (commits whatever's staged — see
+                // LiveOutputService.goLive's staged-pick precedence — or
+                // falls back to the open show); once live, its job changes
+                // to restarting the on-air set from its first slide. Always
+                // enabled: it IS the control for deciding when go-live
+                // actually activates, not something only usable after it
+                // already has.
                 ToolButton {
                     width: parent.btnW; height: 30
                     icon: "play"
-                    enabled2: toolbar.onAir
+                    enabled2: true
                     onPicked: {
-                        if (!LiveOutputService.live) return
+                        if (!LiveOutputService.live) { LiveOutputService.goLive(); return }
                         LiveOutputService.jumpTo(0)
                     }
                 }
@@ -393,8 +416,16 @@ Item {
                         // wall for the Media pane) is the discoverable path.
                         if (LiveOutputService.inputLabel !== "")
                             LiveOutputService.clearInput()
+                        if (LiveOutputService.activeOverlays.length > 0)
+                            LiveOutputService.clearAllOverlays()
                         if (LiveOutputService.live)
                             LiveOutputService.stop()
+                        // A STAGED pick (double-clicked, not yet committed
+                        // by GO LIVE) is independent of live_ — stop() above
+                        // never touches it, so it kept showing in the tile
+                        // after Clear All with nothing live yet to stop.
+                        if (root.staged)
+                            LiveOutputService.clearStaged()
                     }
                 }
             }
@@ -436,32 +467,52 @@ Item {
                 // goLiveWithSlides() scripture/table pick) — bringing it
                 // straight back. `active` (not enabled2) carries the lit-vs-
                 // dim look so the button STAYS clickable between the two.
+                // A STAGED pick (not yet committed by GO LIVE) also lights
+                // it — it IS occupying the tile's slide layer, same as live
+                // content, just not pushed to a real output yet — and
+                // clicking it while only staged clears the stage instead of
+                // wrongly resuming whatever was live before it.
                 ToolButton {
                     width: parent.btnW; height: 30
                     icon: "scripture"
                     danger: true
-                    enabled2: toolbar.onAir || LiveOutputService.canResumeSlide
-                    active: toolbar.onAir
+                    enabled2: toolbar.onAir || root.staged || LiveOutputService.canResumeSlide
+                    active: toolbar.onAir || root.staged
                     onPicked: {
                         if (LiveOutputService.live) LiveOutputService.stop()
+                        else if (root.staged) LiveOutputService.clearStaged()
                         else LiveOutputService.resumeSlide()
                     }
                 }
+                // Overlays: the whole stacked layer off at once (no
+                // per-overlay button in this 5-slot row — LiveOutputService
+                // now genuinely tracks which overlays are live).
                 ToolButton {
                     width: parent.btnW; height: 30
                     icon: "overlays"
                     danger: true
-                    enabled2: false
+                    enabled2: LiveOutputService.activeOverlays.length > 0
+                    onPicked: LiveOutputService.clearAllOverlays()
                 }
-                // Audio: the media layer when what's on air is audio-only
-                // (a real, independent clear — clearing it never touches
-                // an on-air slide or a taken camera).
+                // Audio: a taken audio FILE (real program audio) OR a live
+                // input/bus meter tap (the Media pane's audio/bus double-
+                // click interim — see MediaLibraryPane.qml's onDoubleClicked
+                // comment; it's what's actually moving the tile's L/R
+                // meters in that case). anyInputMetering, not the broader
+                // anyAudioMetering: that also covers the program-mix tap
+                // every active/live tile runs automatically regardless of
+                // whether there is any real audio, which would light this
+                // button up any time the show is simply live.
                 ToolButton {
                     width: parent.btnW; height: 30
                     icon: "audio"
                     danger: true
-                    enabled2: LiveOutputService.mediaOnAir && LiveOutputService.mediaIsAudio
-                    onPicked: LiveOutputService.clearMedia()
+                    enabled2: (LiveOutputService.mediaOnAir && LiveOutputService.mediaIsAudio)
+                              || EngineBridge.anyInputMetering
+                    onPicked: {
+                        if (LiveOutputService.mediaOnAir) LiveOutputService.clearMedia()
+                        EngineBridge.stopAllInputMeters()
+                    }
                 }
                 ToolButton {
                     width: parent.btnW; height: 30

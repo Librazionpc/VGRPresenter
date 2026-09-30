@@ -19,7 +19,7 @@ Item {
     // such as folder or search: their natural size is not a 24 grid.)
     property bool fit: false
     // The glyphs drawn on the Lucide 24-unit grid (the ones `fit` can scale). The others are hand-sized.
-    readonly property bool grid24: ["camera", "mic", "micOff", "volume2", "clock", "play", "bookOpen", "wrench", "music", "star", "info", "cash", "lock", "sliders", "zoomIn", "gridView", "listView", "textLines", "download", "pencil", "flag", "link", "typeCase", "blend", "ban", "copy", "trash", "alignLeft", "alignCenter", "alignRight", "alignJustify", "alignTop", "alignMiddle", "alignBottom", "listBullets", "transition", "locked", "unlocked", "image", "overlays", "audio", "slide", "scripture", "timerFill"].indexOf(name) >= 0
+    readonly property bool grid24: ["camera", "mic", "micOff", "volume2", "clock", "play", "bookOpen", "wrench", "music", "star", "info", "cash", "lock", "sliders", "zoomIn", "gridView", "listView", "textLines", "download", "pencil", "flag", "link", "typeCase", "blend", "ban", "copy", "trash", "alignLeft", "alignCenter", "alignRight", "alignJustify", "alignTop", "alignMiddle", "alignBottom", "listBullets", "transition", "locked", "unlocked", "image", "overlays", "audio", "slide", "scripture", "timerFill", "previous", "next"].indexOf(name) >= 0
     implicitWidth: 14
     implicitHeight: 14
 

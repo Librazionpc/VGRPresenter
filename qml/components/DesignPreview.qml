@@ -44,6 +44,15 @@ Item {
     property date now: new Date()
     // Checkerboard tile size in stage units - a strip of many small slides passes a bigger one to keep them cheap.
     property int checkerSize: 16
+    // A bound text block with no literal text shows "{bind}" as a stand-in —
+    // correct for a library card or the Edit canvas (it reads as "this is a
+    // template field," not broken text), wrong for REAL on-air content (the
+    // Main Output tile, a real bound-screen output window): going live with
+    // nothing queued composited the style's own template, whose bound field
+    // had nothing to resolve, and the raw placeholder syntax leaked onto the
+    // live picture as literal text. Hosts rendering actual on-air/staged
+    // content turn this off; every editor/library surface keeps it on.
+    property bool showBindPlaceholders: true
 
     readonly property real stageW: 754
     readonly property real stageH: 428
@@ -188,7 +197,7 @@ Item {
                     leftPadding: el.style.padding ?? 0; rightPadding: el.style.padding ?? 0
                     // (a block from the canvas may carry no text at all)
                     text: TextFormatService.applyList((el.modelData.text ?? "") !== "" ? el.modelData.text
-                        : ((el.modelData.bind ?? "") !== "" ? "{" + el.modelData.bind + "}" : ""), el.meta.list ?? "")
+                        : ((root.showBindPlaceholders && (el.modelData.bind ?? "") !== "") ? "{" + el.modelData.bind + "}" : ""), el.meta.list ?? "")
                     color: el.meta.color ?? "#f2f4fa"
                     font.family: el.meta.fontFamily ?? Theme.fontFamily
                     // Always the solver's answer: grow fills the box, shrink/none render

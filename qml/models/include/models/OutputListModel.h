@@ -44,6 +44,15 @@ struct OutputItem
     // FreeShow's boundsLocked: a locked output keeps its display assignment;
     // the form's map greys out and the picker refuses reassignment.
     bool boundsLocked = false;
+    // Whether this output's REAL destination window (OutputWindow.qml, a
+    // physical/HDMI screen — not the small in-app preview tile) stays above
+    // other windows. Off by default (see OutputStore.hpp's field).
+    bool stayOnTop = false;
+    // Whether this output's REAL destination window covers its whole bound
+    // screen (on by default — a real projector/HDMI output's actual job)
+    // or starts at half-size, centered and movable (a safe test mode for
+    // a single dev monitor). See OutputStore.hpp's field.
+    bool fullscreenOutput = true;
     bool active = false;
     // User-level on/off — a disabled screen is dimmed everywhere and can't
     // go live. Named for the role; QML's Item already owns "enabled".
@@ -86,6 +95,8 @@ public:
         TestPatternRole,
         ScreenNameRole,
         BoundsLockedRole,
+        StayOnTopRole,
+        FullscreenOutputRole,
         ActiveRole,
         EnabledRole,
         StyleIdRole,
@@ -157,6 +168,8 @@ public:
     // display, like FreeShow's outputLabel).
     Q_INVOKABLE void setScreenName(int index, const QString &screenName);
     Q_INVOKABLE void setBoundsLocked(int index, bool locked);
+    Q_INVOKABLE void setStayOnTop(int index, bool stayOnTop);
+    Q_INVOKABLE void setFullscreenOutput(int index, bool fullscreen);
 
     // Model-side entry point for StyleListModel::removeStyle — re-points
     // every output that used the removed id to "None" without a save/emit

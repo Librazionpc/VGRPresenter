@@ -402,11 +402,25 @@ Result<std::vector<std::string>> ProjectLibrary::AddItems(std::string_view proje
         if (i.ref.empty() && i.type != "section") return Invalid(std::format("a {} item needs to say what it is", i.type));
     }
 
+    // Skip anything already in the project (same type + ref) — a repeat
+    // click/drop of the same overlay/show/media used to pile up duplicate
+    // rows (e.g. "Clock (Analog)" added four times over) instead of doing
+    // nothing the second time. Sections have no ref and no natural identity
+    // to dedupe on, so they stay exempt — a project can hold several.
+    std::vector<ProjectItem> deduped;
+    for (const ProjectItem& i : items) {
+        if (i.ref.empty()) { deduped.push_back(i); continue; }
+        const bool alreadyThere = std::any_of(project->items.begin(), project->items.end(),
+            [&i](const ProjectItem& existing) { return existing.type == i.type && existing.ref == i.ref; });
+        if (!alreadyThere) deduped.push_back(i);
+    }
+    if (deduped.empty()) return std::vector<std::string>{};
+
     long long next = 0;
     for (const ProjectItem& i : project->items)
         if (i.id.rfind("pi-", 0) == 0) { try { next = std::max(next, std::stoll(i.id.substr(3))); } catch (...) {} }
 
-    std::vector<ProjectItem> added = items;
+    std::vector<ProjectItem> added = deduped;
     std::vector<std::string> ids;
     for (ProjectItem& i : added) {
         i.id = std::format("pi-{}", ++next);

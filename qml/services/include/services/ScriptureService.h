@@ -82,6 +82,10 @@ public:
     Q_INVOKABLE QVariantList notes(const QString &bibleId) const;
     // Highlight on/off (a re-toggle removes it).
     Q_INVOKABLE bool setHighlighted(const QString &bibleId, const QString &reference, bool on);
+    // ONE call per open chapter: { "16": { highlight: true, note: "..." } } —
+    // the verse rows read this instead of each re-resolving a reference.
+    Q_INVOKABLE QVariantMap chapterUserData(const QString &bibleId, const QString &bookId,
+                                            int chapter) const;
     Q_INVOKABLE bool isHighlighted(const QString &bibleId, const QString &reference) const;
     // Every highlighted reference: ["JHN 3:16", ...] (the engine's canonical form).
     Q_INVOKABLE QVariantList highlights(const QString &bibleId) const;

@@ -284,6 +284,25 @@ std::optional<bb::PassageRef> resolvedRef(const QString &bibleId, const QString 
     return ref.value();
 }
 
+// The id-shaped counterpart: the pane knows the book's id ("JHN"), chapter
+// and verse — building a display reference in QML just so the service can
+// re-parse it re-implemented the engine's reference grammar in JavaScript.
+std::optional<bb::PassageRef> resolvedRefForBookId(const QString &bibleId, const QString &bookId,
+                                                   int chapter, int verse)
+{
+    if (!EngineBridge::instance().booted() || chapter <= 0 || verse <= 0)
+        return std::nullopt;
+    bb::PassageRef ref;
+    ref.bookId = bookId.toStdString();
+    ref.bookName = bookId.toStdString();
+    ref.chapter = chapter;
+    ref.verseStart = verse;
+    ref.verseEnd = verse;
+    if (!ref.Valid())
+        return std::nullopt;
+    return ref;
+}
+
 QVariantMap noteToVariant(const bb::UserNote &n)
 {
     return QVariantMap{
@@ -305,8 +324,11 @@ bool ScriptureService::setNote(const QString &bibleId, const QString &reference,
     auto ref = resolvedRef(bibleId, reference);
     if (!ref)
         return false;
-    auto r = bb::BibleEngine::Instance().AddNote(bibleId.toStdString(), ref.value(),
-                                                 text.toStdString());
+    // An empty text REMOVES the note (the delete gesture), not a zero-length one.
+    auto r = text.trimmed().isEmpty()
+                 ? bb::BibleEngine::Instance().RemoveNote(bibleId.toStdString(), ref.value())
+                 : bb::BibleEngine::Instance().AddNote(bibleId.toStdString(), ref.value(),
+                                                       text.toStdString());
     if (!r.ok())
         return false;
     emit userDataChanged();
@@ -329,19 +351,14 @@ QVariantList ScriptureService::notes(const QString &bibleId) const
     QVariantList out;
     if (!EngineBridge::instance().booted())
         return out;
-    // A whole-Bible sweep: Notes() is reference-scoped, so the drawer reads
-    // the highlights roster (which IS whole-Bible) and lifts each one's note.
-    auto marks = bb::BibleEngine::Instance().Highlights(bibleId.toStdString());
-    if (!marks.ok())
+    // The engine's whole-Bible sweep (sorted most-recently-modified first):
+    // the old highlights-roster walk dropped every note that carried no
+    // highlight of its own.
+    auto all = bb::BibleEngine::Instance().Notes(bibleId.toStdString());
+    if (!all.ok())
         return out;
-    auto &engine = bb::BibleEngine::Instance();
-    for (const bb::PassageRef &ref : marks.value()) {
-        auto ns = engine.Notes(bibleId.toStdString(), ref);
-        if (!ns.ok())
-            continue;
-        for (const bb::UserNote &n : ns.value())
-            out.append(noteToVariant(n));
-    }
+    for (const bb::UserNote &n : all.value())
+        out.append(noteToVariant(n));
     std::sort(out.begin(), out.end(), [](const QVariant &a, const QVariant &b) {
         return a.toMap().value(QStringLiteral("modifiedMs")).toLongLong()
              > b.toMap().value(QStringLiteral("modifiedMs")).toLongLong();
@@ -359,6 +376,44 @@ bool ScriptureService::setHighlighted(const QString &bibleId, const QString &ref
         return false;
     emit userDataChanged();
     return true;
+}
+
+QVariantMap ScriptureService::chapterUserData(const QString &bibleId, const QString &bookId,
+                                              int chapter) const
+{
+    QVariantMap out;
+    if (!EngineBridge::instance().booted() || chapter <= 0)
+        return out;
+    // ONE engine sweep for the chapter: highlights (a whole-Bible roster to
+    // filter — cheap) and the note keys directly ("bible|book:ch:v-start").
+    // The verse rows read this map; no per-row reference resolution.
+    auto &engine = bb::BibleEngine::Instance();
+    auto marks = engine.Highlights(bibleId.toStdString());
+    if (marks.ok()) {
+        for (const bb::PassageRef &m : marks.value()) {
+            if (m.bookId != bookId.toStdString() || m.chapter != chapter || m.verseStart <= 0)
+                continue;
+            const QString key = QString::number(m.verseStart);
+            QVariantMap mark = out.value(key).toMap();   // QVariant: merge explicitly
+            mark[QStringLiteral("highlight")] = true;
+            out[key] = mark;
+        }
+    }
+    auto notes = engine.Notes(bibleId.toStdString());
+    if (notes.ok()) {
+        // Notes(bibleId) only ever returns THIS bible's notes, so the ref's
+        // own fields are the whole test — no key parsing needed.
+        for (const bb::UserNote &n : notes.value()) {
+            if (n.ref.bookId != bookId.toStdString() || n.ref.chapter != chapter
+                || n.ref.verseStart <= 0)
+                continue;
+            const QString key = QString::number(n.ref.verseStart);
+            QVariantMap mark = out.value(key).toMap();
+            mark[QStringLiteral("note")] = qstr(n.text);
+            out[key] = mark;
+        }
+    }
+    return out;
 }
 
 bool ScriptureService::isHighlighted(const QString &bibleId, const QString &reference) const

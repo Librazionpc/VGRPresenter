@@ -110,9 +110,34 @@ Result<const RenderCache::AtlasEntry*> RenderCache::GlyphAtlas(float sizePx) {
     return raw;
 }
 
+Result<const RenderCache::AtlasEntry*> RenderCache::GlyphAtlas(const TextStyle& style,
+                                                                const FontManager& fonts) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const FontAtlasKey key{style.fontId, static_cast<int>(style.size + 0.5f),
+                           style.bold, style.italic};
+    auto it = fontAtlases_.find(key);
+    if (it != fontAtlases_.end()) return it->second.get();
+
+    auto entry = std::make_unique<AtlasEntry>();
+    // Real font first; an empty result (family unresolved, or "builtin"/""
+    // fontId — the common case for every style that never named a real
+    // font at all) falls back to the SAME builtin atlas every other caller
+    // already gets, so a style with no real font behaves exactly as before
+    // this cache existed.
+    if (!style.fontId.empty() && style.fontId != "builtin" && fonts.HasSystemFont(style.fontId))
+        entry->atlas = fonts.BuildSystemAtlas(style.fontId, style.size, style.bold,
+                                              style.italic, entry->glyphs);
+    if (entry->atlas.empty())
+        entry->atlas = fonts.BuildAtlas(style.size, entry->glyphs);
+    auto* raw = entry.get();
+    fontAtlases_[key] = std::move(entry);
+    return raw;
+}
+
 void RenderCache::InvalidateGlyphAtlas() {
     std::lock_guard<std::mutex> lock(mutex_);
     atlases_.clear();
+    fontAtlases_.clear();
 }
 
 Result<TextLayoutResult> RenderCache::Layout(const std::string& text,
@@ -145,12 +170,13 @@ size_t RenderCache::LayoutCount() const {
 
 size_t RenderCache::AtlasCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return atlases_.size();
+    return atlases_.size() + fontAtlases_.size();
 }
 
 void RenderCache::Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     atlases_.clear();
+    fontAtlases_.clear();
     layouts_.clear();
 }
 

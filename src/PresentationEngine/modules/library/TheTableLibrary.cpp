@@ -8,6 +8,7 @@
 #include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -1276,6 +1277,124 @@ bool ChapterReadable(const TheTableChapter& ch) {
 
 } // namespace
 
+bool TheTableLibrary::VerseKnownLocked(std::string_view bookId, int chapter, int verse) const {
+    for (const TheTableBook& b : books_) {
+        if (b.id != bookId) continue;
+        for (const TheTableChapter& c : b.chapters) {
+            if (c.number != chapter) continue;
+            for (const TheTableVerse& v : c.verses)
+                if (v.number == verse) return true;
+            return false;
+        }
+        return false;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// User data (notes and highlights) — the Bible module's user-data section,
+// keyed the table way: "bookId:chapter:verse". Persisted with the library
+// JSON (Persist writes it, Load reads it back), never inside the sermon text.
+// ---------------------------------------------------------------------------
+namespace {
+std::string NoteKey(std::string_view bookId, int chapter, int verse) {
+    return std::format("{}:{}:{}", bookId, chapter, verse);
+}
+
+int64_t NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+} // namespace
+
+Result<void> TheTableLibrary::AddNote(std::string_view bookId, int chapter, int verse,
+                                      const std::string& text) {
+    if (text.empty())
+        return Error::Make(Err::InvalidArgument, kModule, "note text is empty");
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!VerseKnownLocked(bookId, chapter, verse))
+            return Error::Make(Err::NotFound, kModule, "no such paragraph");
+
+        TableNote note;
+        note.id = std::format("note-{}", NowMs());
+        note.ref = CitationLocked(bookId, chapter, verse);
+        note.bookId = std::string(bookId);
+        note.chapter = chapter;
+        note.verse = verse;
+        note.text = text;
+        // Monotonic stamp: two notes in the same wall-clock millisecond must
+        // not tie (the drawer sorts most-recent-first, and a tie makes the
+        // order ambiguous — the round-trip test caught exactly that).
+        note.createdMs = note.modifiedMs = std::max(NowMs(), lastNoteMs_ + 1);
+        lastNoteMs_ = note.modifiedMs;
+        notes_[NoteKey(bookId, chapter, verse)] = std::move(note);
+    }
+    return Save();
+}
+
+Result<void> TheTableLibrary::RemoveNote(std::string_view bookId, int chapter, int verse) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (notes_.erase(NoteKey(bookId, chapter, verse)) == 0)
+            return Ok();   // nothing stored: already gone, nothing to write
+    }
+    return Save();
+}
+
+Result<std::vector<TableNote>> TheTableLibrary::Notes(std::string_view bookId, int chapter,
+                                                      int verse) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = notes_.find(NoteKey(bookId, chapter, verse));
+    if (it == notes_.end())
+        return std::vector<TableNote>{};
+    return std::vector<TableNote>{ it->second };
+}
+
+Result<std::vector<TableNote>> TheTableLibrary::Notes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<TableNote> out;
+    out.reserve(notes_.size());
+    for (const auto& [key, note] : notes_) {
+        (void)key;
+        out.push_back(note);
+    }
+    std::sort(out.begin(), out.end(),
+              [](const TableNote& a, const TableNote& b) { return a.modifiedMs > b.modifiedMs; });
+    return out;
+}
+
+Result<void> TheTableLibrary::SetHighlight(std::string_view bookId, int chapter, int verse, bool on) {
+    if (on) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!VerseKnownLocked(bookId, chapter, verse))
+            return Error::Make(Err::NotFound, kModule, "no such paragraph");
+        highlights_[NoteKey(bookId, chapter, verse)] = true;
+    } else {
+        std::lock_guard<std::mutex> lock(mutex_);
+        highlights_.erase(NoteKey(bookId, chapter, verse));
+    }
+    return Save();
+}
+
+Result<std::vector<std::string>> TheTableLibrary::Highlights() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::string> out;
+    out.reserve(highlights_.size());
+    for (const auto& [key, on] : highlights_) {
+        (void)on;
+        out.push_back(key);
+    }
+    return out;
+}
+
+Result<bool> TheTableLibrary::IsHighlighted(std::string_view bookId, int chapter, int verse) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = highlights_.find(NoteKey(bookId, chapter, verse));
+    return it != highlights_.end() && it->second;
+}
+
 // ---------------------------------------------------------------------------
 // Construction / persistence
 // ---------------------------------------------------------------------------
@@ -1327,6 +1446,30 @@ Result<void> TheTableLibrary::Persist(const std::vector<TheTableBook>& books) co
         booksArr.push_back(J(std::move(b)));
     }
     root["books"] = J(std::move(booksArr));
+
+    // User notes and highlights ride the same document: a note survives an
+    // import, a re-save, everything short of deleting the file.
+    J::Array notesArr;
+    for (const auto& [key, note] : notes_) {
+        (void)key;
+        J::Object n;
+        n["id"] = J::String(note.id);
+        n["ref"] = J::String(note.ref);
+        n["bookId"] = J::String(note.bookId);
+        n["chapter"] = J::Number(note.chapter);
+        n["verse"] = J::Number(note.verse);
+        n["text"] = J::String(note.text);
+        n["createdMs"] = J::Number(static_cast<double>(note.createdMs));
+        n["modifiedMs"] = J::Number(static_cast<double>(note.modifiedMs));
+        notesArr.push_back(J(std::move(n)));
+    }
+    root["notes"] = J(std::move(notesArr));
+    J::Array hlArr;
+    for (const auto& [key, on] : highlights_) {
+        (void)on;
+        hlArr.push_back(J::String(key));
+    }
+    root["highlights"] = J(std::move(hlArr));
 
     auto& platform = platform::PlatformAccessor::Get();
     // Ensure the file's own parent exists (the library may live anywhere —
@@ -1386,6 +1529,32 @@ Result<void> TheTableLibrary::Load() {
     }
     std::sort(books_.begin(), books_.end(),
               [](const TheTableBook& a, const TheTableBook& b) { return a.order < b.order; });
+
+    // User data (older files carry none — both sections stay empty then).
+    notes_.clear();
+    highlights_.clear();
+    if (const J* notesArr = root.Find("notes"); notesArr && notesArr->asArray()) {
+        for (const J& nv : *notesArr->asArray()) {
+            TableNote note;
+            note.id = std::string(nv.Find("id") ? nv.Find("id")->asString() : "");
+            note.ref = std::string(nv.Find("ref") ? nv.Find("ref")->asString() : "");
+            note.bookId = std::string(nv.Find("bookId") ? nv.Find("bookId")->asString() : "");
+            note.chapter = static_cast<int>(nv.Find("chapter") ? nv.Find("chapter")->asInt() : 0);
+            note.verse = static_cast<int>(nv.Find("verse") ? nv.Find("verse")->asInt() : 0);
+            note.text = std::string(nv.Find("text") ? nv.Find("text")->asString() : "");
+            note.createdMs = static_cast<int64_t>(nv.Find("createdMs") ? nv.Find("createdMs")->asNumber() : 0.0);
+            note.modifiedMs = static_cast<int64_t>(nv.Find("modifiedMs") ? nv.Find("modifiedMs")->asNumber() : 0.0);
+            if (note.bookId.empty() || note.text.empty())
+                continue;   // skip a damaged entry, keep the rest
+            notes_[NoteKey(note.bookId, note.chapter, note.verse)] = std::move(note);
+        }
+    }
+    if (const J* hlArr = root.Find("highlights"); hlArr && hlArr->asArray()) {
+        for (const J& hv : *hlArr->asArray()) {
+            std::string key(hv.asString());
+            if (!key.empty()) highlights_[key] = true;
+        }
+    }
     return Ok();
 }
 
@@ -1528,6 +1697,10 @@ Result<TheTableChapter> TheTableLibrary::GetChapter(std::string_view bookId, int
 
 std::string TheTableLibrary::Citation(std::string_view bookId, int chapter, int verse) const {
     std::lock_guard<std::mutex> lock(mutex_);
+    return CitationLocked(bookId, chapter, verse);
+}
+
+std::string TheTableLibrary::CitationLocked(std::string_view bookId, int chapter, int verse) const {
     for (const TheTableBook& book : books_) {
         if (book.id != bookId) continue;
         for (const TheTableChapter& ch : book.chapters)

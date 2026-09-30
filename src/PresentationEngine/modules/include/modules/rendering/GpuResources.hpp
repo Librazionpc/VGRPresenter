@@ -67,6 +67,14 @@ public:
         TextureId texture;
     };
     Result<const AtlasEntry*> GlyphAtlas(float sizePx);
+    // Font-identity-aware form: builds via FontManager::BuildSystemAtlas
+    // when style.fontId names a real, resolvable font, else falls back to
+    // the plain builtin atlas above (same cache, same key space — a style
+    // whose font isn't available reads exactly as "builtin" always has).
+    // Kept as a SEPARATE overload rather than changing GlyphAtlas(float)'s
+    // own signature: every existing caller (including the unit tests) that
+    // only ever wanted the builtin font keeps working unchanged.
+    Result<const AtlasEntry*> GlyphAtlas(const TextStyle& style, const FontManager& fonts);
     void InvalidateGlyphAtlas();
 
     // Text layout cache (per text + style).
@@ -81,6 +89,22 @@ public:
 private:
     mutable std::mutex mutex_;
     std::map<int, std::unique_ptr<AtlasEntry>> atlases_;   // keyed by px size
+    // Font-identity-aware atlases (GlyphAtlas(style, fonts)) — a SEPARATE
+    // map from atlases_ above: that one is always the builtin font, keyed
+    // by size alone, and every pre-existing caller keeps using it unchanged.
+    struct FontAtlasKey {
+        std::string fontId;
+        int sizePx = 0;
+        bool bold = false;
+        bool italic = false;
+        bool operator<(const FontAtlasKey& o) const {
+            if (fontId != o.fontId) return fontId < o.fontId;
+            if (sizePx != o.sizePx) return sizePx < o.sizePx;
+            if (bold != o.bold) return bold < o.bold;
+            return italic < o.italic;
+        }
+    };
+    std::map<FontAtlasKey, std::unique_ptr<AtlasEntry>> fontAtlases_;
     struct LayoutKey {
         std::string text;
         std::string font;

@@ -4,6 +4,8 @@
 #include "services/EventBus.h"
 #include "services/ShowConverter.h"
 
+#include "modules/import/ImportEngine.hpp"
+#include "modules/import/SongText.hpp"
 #include "modules/presentation/PresentationEngine.hpp"
 #include "modules/presentation/PresentationTemplates.hpp"
 #include "modules/presentation/ShowEditor.hpp"
@@ -849,6 +851,32 @@ bool ShowService::removeLibraryCategory(const QString &name)
     return true;
 }
 
+bool ShowService::clearLibraryCategory(const QString &name)
+{
+    auto *lib = library();
+    if (!lib) return false;
+    auto r = lib->ClearCategory(name.toStdString());
+    if (!r.ok()) {
+        reportError(QStringLiteral("Couldn't clear the category"), message(r.error()));
+        return false;
+    }
+    publishLibrary();
+    return true;
+}
+
+bool ShowService::clearLibraryCategoryNoPublish(const QString &name)
+{
+    auto *lib = library();
+    if (!lib) return false;
+    auto r = lib->ClearCategory(name.toStdString());
+    if (!r.ok()) {
+        // EventBus marshals cross-thread calls onto the GUI thread itself.
+        reportError(QStringLiteral("Couldn't clear the category"), message(r.error()));
+        return false;
+    }
+    return true;
+}
+
 QString ShowService::moveShowToCategory(const QString &path, const QString &category)
 {
     auto *lib = library();
@@ -886,6 +914,54 @@ QString ShowService::duplicateShow(const QString &path, const QString &newName)
     }
     publishLibrary();
     return QString::fromStdString(r.value());
+}
+
+bool ShowService::rewriteShowFromText(const QString &path, const QString &text)
+{
+    if (!EngineBridge::instance().booted())
+        return false;
+    const std::string p = vgrPath(path);
+
+    // A fresh, LOCAL document — never the shared "open document" the Edit
+    // screen/GO LIVE use, so an inline lyrics edit here can never collide
+    // with whatever that session has unsaved (the same isolation
+    // ImportService's own save sweep relies on).
+    bp::PresentationDocument doc;
+    if (auto opened = doc.Open(p); !opened.ok()) {
+        reportError(QStringLiteral("Couldn't open the show"), message(opened.error()));
+        return false;
+    }
+    bp::Presentation show = doc.Snapshot();
+
+    bps::import::ImportedShow imported = bps::import::ParseSongText(text.toStdString());
+    if (imported.sections.empty()) {
+        reportError(QStringLiteral("Couldn't save the edit"), QStringLiteral("There is no text."));
+        return false;
+    }
+
+    // The rebuilt slides look like whatever the show's own first slide
+    // already looked like (its own template blocks), not a fresh import's
+    // default layout — an edit should not restyle the show.
+    bps::import::ShowBuildOptions options;
+    if (!show.slides.empty()) {
+        options.background = show.slides.front().background;
+        options.templateBlocks = show.slides.front().blocks;
+    }
+    bp::Presentation rebuilt = bps::import::ShowFromImported(imported, options);
+
+    const std::string categoryId = show.categories.empty() ? "" : show.categories.front().id;
+    for (bp::Slide &slide : rebuilt.slides)
+        slide.categoryId = categoryId;
+    show.slides = std::move(rebuilt.slides);
+
+    doc.Replace(std::move(show));
+    if (auto saved = doc.Save(p); !saved.ok()) {
+        reportError(QStringLiteral("Couldn't save the edit"), message(saved.error()));
+        return false;
+    }
+    publishLibrary();
+    emit showChanged();
+    return true;
 }
 
 QString ShowService::deleteShow(const QString &path)

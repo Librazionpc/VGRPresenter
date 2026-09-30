@@ -82,10 +82,7 @@ ApplicationWindow {
         anchors.fill: parent
         anchors.topMargin: window.headerExtra
         visible: window.currentView === "show"
-        onNewShowRequested: {
-            editScreen.newShow()
-            window.currentView = "edit"
-        }
+        onNewShowRequested: newShowDialog.open()
         // Row click in the shows library: open that .vgr (unsaved-changes
         // guarded) and go to the Edit screen.
         onOpenShowRequested: (path) => {
@@ -157,6 +154,18 @@ ApplicationWindow {
         anchors.right: parent.right
         activeTab: window.currentView
         onTabSelected: (tab) => {
+            // Edit means "edit what I'm looking at": a show clicked open in
+            // the Show screen's centre preview (ShowCenter) is what Edit
+            // should load — switching the tab alone used to leave the Edit
+            // screen on whatever it already had (often nothing), ignoring
+            // the show right there on screen. Only reload when it's a
+            // DIFFERENT show than what's already open, so flipping back and
+            // forth while actively editing doesn't reset undo history.
+            if (tab === "edit") {
+                const item = showScreen.centerItem
+                if (item && item.type === "show" && item.ref !== "" && item.ref !== ShowService.showPath)
+                    editScreen.openShowPath(item.ref)
+            }
             if (tab === "show" || tab === "edit") window.currentView = tab
         }
         onSettingsClicked: window.openSettings("general")
@@ -174,8 +183,12 @@ ApplicationWindow {
     function openSearchResult(r) {
         switch (r.kind) {
         case "show":
-            editScreen.openShowPath(r.path)
-            window.currentView = "edit"
+            // Same landing as clicking the row in the library: the centre
+            // preview, not straight into Edit (this used to jump the
+            // search result directly into editing, unlike every other way
+            // of reaching a show).
+            showScreen.centerItem = { type: "show", ref: r.path, name: r.title, layout: "" }
+            window.currentView = "show"
             break
         case "slide":
             editScreen.closeDesign()
@@ -224,10 +237,7 @@ ApplicationWindow {
         onSettingsRequested: (section) => window.openSettings(section)
         // "New show" from either menu = the same deck reset as the Show
         // screen's buttons.
-        onNewShowRequested: {
-            editScreen.newShow()
-            window.currentView = "edit"
-        }
+        onNewShowRequested: newShowDialog.open()
         // Show files: the engine reads/writes the .vgr (see ShowSession.qml).
         onOpenShowRequested: {
             window.currentView = "edit"
@@ -342,7 +352,7 @@ ApplicationWindow {
     // so the crashing step names itself in the output.
     Timer {
         id: selfTestStage1
-        running: typeof SelfTest !== "undefined"
+        running: false   // TEMP: yielded to selfTestTextDiag below
         interval: 1500
         onTriggered: {
             console.log("[SELFTEST] stage 1: open Quick search (Ctrl+K flow)")
@@ -626,7 +636,30 @@ ApplicationWindow {
         interval: 9999999
     }
 
-
+    // ---- TEMP: reproduce "text missing on the real output window, bg image
+    // shows fine" — go live on a real text slide and let a few real frames
+    // render so DrawTextObject's TEMPDIAG logging fires, then quit.
+    Timer {
+        id: selfTestTextDiag
+        running: typeof SelfTest !== "undefined"
+        interval: 1500
+        onTriggered: {
+            const peeked = ShowService.peekShow("C:/Users/znwaj/OneDrive/Documents/VGR Presenter/Shows/FreeShow/1088-WE ARE TRAVELLING ON THE RIGHT ROAD.vgr")
+            console.log("[SELFTEST-TEXTDIAG] peek ok=" + peeked.ok)
+            const slide0 = peeked.show && peeked.show.slides && peeked.show.slides.length > 0 ? peeked.show.slides[0] : null
+            if (slide0)
+                LiveOutputService.goLiveWithSlides("1088-WE ARE TRAVELLING ON THE RIGHT ROAD", [slide0])
+            selfTestTextDiag2.restart()
+        }
+    }
+    Timer {
+        id: selfTestTextDiag2
+        interval: 2500
+        onTriggered: {
+            console.log("[SELFTEST-TEXTDIAG] done waiting for frames")
+            SelfTest.quit()
+        }
+    }
 
 
 
@@ -854,10 +887,32 @@ ApplicationWindow {
         id: dragLayerItem
     }
 
+    // GO LIVE's real destination(s) — a borderless window per Output bound
+    // to a physical/HDMI screen in Settings > Outputs. Top-level Windows,
+    // not part of this window's visual tree (Instantiator, not a visible
+    // child item) — see OutputWindowManager.qml.
+    OutputWindowManager {}
+
     // File > Import: every format the engine reads (FreeShow's Import screen). Above the screens and the Settings overlay, below the toasts.
     ImportDialog {
         id: importDialog
         onClosed: importDialog.open = false
+    }
+
+    // "New show" — FreeShow's own New-show popup (Name, Category, Quick
+    // lyrics/Web search/Empty show). "New show" from the Show screen's CTAs
+    // and the File menu both open this instead of resetting straight to a
+    // blank canvas.
+    NewShowDialog {
+        id: newShowDialog
+        onShowCreated: (path) => {
+            editScreen.openShowPath(path)
+            window.currentView = "edit"
+        }
+        onEmptyShowRequested: (name, category) => {
+            editScreen.newShow()
+            window.currentView = "edit"
+        }
     }
 
     // Declared LAST (after the Settings overlay) so a crash/error toast

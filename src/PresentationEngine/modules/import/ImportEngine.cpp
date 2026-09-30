@@ -248,40 +248,80 @@ Result<ImportedShow> ParseFreeShowFile(const ImportFile& file) {
     if (layout)
         if (const J* n = layout->Find("notes")) show.notes = std::string(n->asString());
 
+    // A group string that carries no real information: absent, or some
+    // exporters (not FreeShow itself — whatever produced this file) write a
+    // bare running number ("1", "2", "3"...) instead of a real verse/chorus
+    // tag. Using that verbatim is where "1, 2, 3..." slide titles instead of
+    // "Verse 1, Chorus, Verse 2..." came from — a real, reported bug, not a
+    // hypothetical: this app's own OWN sample songs that carry that pattern.
+    auto isMeaninglessGroup = [](const std::string& g) {
+        if (g.empty()) return true;
+        return std::all_of(g.begin(), g.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
+    };
+
     auto slideOf = [&](const std::string& id) -> const J* { return slides->asObject() ? slides->Find(id) : nullptr; };
-    auto addSection = [&](const std::string& id) {
+    auto textOf = [&](const J& s) {
+        ImportedSlide out;
+        if (const J* items = s.Find("items")) out.text = ItemsText(*items);
+        if (const J* notes = s.Find("notes")) out.notes = std::string(notes->asString());
+        return out;
+    };
+
+    // Pass 1: every section in order, its raw group string, and its own
+    // (parent-slide) text — nothing labeled yet. Sections with a genuinely
+    // meaningless group are earmarked for content-based auto-detection,
+    // exactly like a header-less stanza pasted as plain text.
+    struct RawSection { std::string id; std::string group; std::vector<ImportedSlide> slides; bool needsAutoGroup = false; };
+    std::vector<RawSection> raw;
+    auto collect = [&](const std::string& id) {
         const J* slide = slideOf(id);
         if (!slide || !slide->asObject()) return;
-        ImportedSection section;
-        std::string group;
-        if (const J* g = slide->Find("group"); g && g->type() == J::Type::String) group = std::string(g->asString());
-        const std::string match = FindGroupMatch(group);
-        section.group = match.empty() ? (group.empty() ? "verse" : Lower(group)) : match;
-        section.label = match.empty() ? (group.empty() ? "Verse" : group) : GroupLabel(match);
-        auto text = [&](const J& s) {
-            ImportedSlide out;
-            if (const J* items = s.Find("items")) out.text = ItemsText(*items);
-            if (const J* notes = s.Find("notes")) out.notes = std::string(notes->asString());
-            return out;
-        };
-        section.slides.push_back(text(*slide));
+        RawSection r;
+        r.id = id;
+        if (const J* g = slide->Find("group"); g && g->type() == J::Type::String) r.group = std::string(g->asString());
+        r.needsAutoGroup = isMeaninglessGroup(r.group);
+        r.slides.push_back(textOf(*slide));
         if (const J* kids = slide->Find("children"); kids && kids->asArray())
             for (const J& child : *kids->asArray())
-                if (const J* cs = slideOf(std::string(child.asString()))) section.slides.push_back(text(*cs));
-        show.sections.push_back(std::move(section));
+                if (const J* cs = slideOf(std::string(child.asString()))) r.slides.push_back(textOf(*cs));
+        raw.push_back(std::move(r));
     };
 
     if (layout && layout->Find("slides") && layout->Find("slides")->asArray()) {
         for (const J& entry : *layout->Find("slides")->asArray()) {
             const J* disabled = entry.Find("disabled");
             if (disabled && disabled->asBool()) continue;
-            if (const J* id = entry.Find("id")) addSection(std::string(id->asString()));
+            if (const J* id = entry.Find("id")) collect(std::string(id->asString()));
         }
     } else if (slides->asObject()) {
         for (const auto& [id, s] : *slides->asObject()) {
             const J* g = s.Find("group");
-            if (g && g->type() == J::Type::String) addSection(id);   // children (group null) hang from their parents
+            if (g && g->type() == J::Type::String) collect(id);   // children (group null) hang from their parents
         }
+    }
+
+    // Pass 2: guess real groups for every earmarked section, comparing them
+    // against EACH OTHER (a repeated one reads as a chorus/bridge) the same
+    // way ParseSongText's own auto-detection does for unlabeled stanzas.
+    std::vector<std::string> guessInput;
+    std::vector<size_t> guessTargets;
+    for (size_t i = 0; i < raw.size(); ++i)
+        if (raw[i].needsAutoGroup) {
+            guessTargets.push_back(i);
+            guessInput.push_back(raw[i].slides.empty() ? std::string() : raw[i].slides.front().text);
+        }
+    const std::vector<std::string> guessed = guessInput.empty() ? std::vector<std::string>() : AutoGroupSections(guessInput);
+    for (size_t k = 0; k < guessTargets.size(); ++k)
+        raw[guessTargets[k]].group = k < guessed.size() ? guessed[k] : "verse";
+
+    // Pass 3: build the real sections with their final group + display label.
+    for (RawSection& r : raw) {
+        ImportedSection section;
+        const std::string match = FindGroupMatch(r.group);
+        section.group = match.empty() ? (r.group.empty() ? "verse" : Lower(r.group)) : match;
+        section.label = match.empty() ? (r.group.empty() ? "Verse" : r.group) : GroupLabel(match);
+        section.slides = std::move(r.slides);
+        show.sections.push_back(std::move(section));
     }
     return show;
 }

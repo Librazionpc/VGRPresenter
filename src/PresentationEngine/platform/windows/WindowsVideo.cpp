@@ -309,11 +309,21 @@ namespace {
 // guaranteed reentrant. GDI+ IS multi-thread-safe once started, so one
 // process-wide init from the first tap thread + per-encode token
 // scope (the documented contract) is the safe shape.
-std::vector<uint8_t> EncodeJpeg(const uint8_t *bgra, UINT32 w, UINT32 h, UINT32 stride, UINT32 quality)
+// GDI+ boot-once-per-process, shared by EncodeJpeg and DecodeJpeg below
+// (each DRAIN THREAD calls this before its first encode; SceneBuilder's
+// worker thread calls it before its first decode — GDI+ is documented
+// multi-thread-safe once started, so one shared token serves every caller).
+//
+// START ONCE PER PROCESS, NEVER SHUTDOWN: an earlier per-call
+// Startup/Shutdown cycle crashed the process seconds into a live stream
+// (GDI+ keeps background worker threads that outlive each cycle). One
+// deliberate init kept for the process lifetime is the standard pattern
+// for long-lived GDI+ hosts.
+bool EnsureGdiplusStarted()
 {
     // The real GdiplusStartup signature: (token*, input*, output*).
     using GdiplusBoot = LONG (__stdcall *)(ULONG_PTR *, void *, void *);
-    static HMODULE gdipModule = nullptr;   // written once by the first tap thread
+    static HMODULE gdipModule = nullptr;
     static GdiplusBoot gdipStartup = nullptr;
     static std::once_flag gdipOnce;
     std::call_once(gdipOnce, [] {
@@ -322,21 +332,21 @@ std::vector<uint8_t> EncodeJpeg(const uint8_t *bgra, UINT32 w, UINT32 h, UINT32 
             gdipStartup = win::ProcAddress<GdiplusBoot>(gdipModule, "GdiplusStartup");
     });
     if (!gdipStartup)
-        return {};
+        return false;
 
-    // START ONCE PER PROCESS, NEVER SHUTDOWN: the earlier per-encode
-    // Startup/Shutdown cycle crashed the process seconds into a live
-    // stream (GDI+ keeps background worker threads that outlive each
-    // cycle). One deliberate init kept for the process lifetime is the
-    // standard pattern for long-lived GDI+ hosts.
     static ULONG_PTR token = 0;
     static std::once_flag tokenOnce;
     std::call_once(tokenOnce, [] {
         Gdiplus::GdiplusStartupInput input;
         if (gdipStartup(&token, &input, nullptr) != Gdiplus::Ok)
-            token = 0;   // encoder unavailable — publishes stay empty
+            token = 0;   // unavailable — callers stay empty
     });
-    if (token == 0)
+    return token != 0;
+}
+
+std::vector<uint8_t> EncodeJpeg(const uint8_t *bgra, UINT32 w, UINT32 h, UINT32 stride, UINT32 quality)
+{
+    if (!EnsureGdiplusStarted())
         return {};
 
     std::vector<uint8_t> out;
@@ -375,6 +385,62 @@ std::vector<uint8_t> EncodeJpeg(const uint8_t *bgra, UINT32 w, UINT32 h, UINT32 
         }
     }
     // (No GdiplusShutdown — see the start-once note above.)
+    return out;
+}
+
+// Decode JPEG bytes into tightly-packed top-down RGBA8 via GDI+ — the
+// inverse of EncodeJpeg, same shared boot-once. Empty on any failure (a
+// corrupt/partial frame, or GDI+ unavailable) — the caller just skips that
+// render rather than compositing garbage.
+struct RawRgba { UINT32 width = 0; UINT32 height = 0; std::vector<uint8_t> rgba; };
+
+RawRgba DecodeJpeg(const uint8_t *jpeg, size_t size)
+{
+    RawRgba out;
+    if (!jpeg || size == 0 || !EnsureGdiplusStarted())
+        return out;
+
+    IStream *stream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &stream)) || !stream)
+        return out;
+    ULONG written = 0;
+    stream->Write(jpeg, static_cast<ULONG>(size), &written);
+    LARGE_INTEGER zero{};
+    stream->Seek(zero, STREAM_SEEK_SET, nullptr);
+
+    Gdiplus::Bitmap bmp(stream);
+    if (bmp.GetLastStatus() == Gdiplus::Ok) {
+        const UINT w = bmp.GetWidth();
+        const UINT h = bmp.GetHeight();
+        if (w > 0 && h > 0) {
+            Gdiplus::BitmapData data{};
+            Gdiplus::Rect rect(0, 0, static_cast<INT>(w), static_cast<INT>(h));
+            if (bmp.LockBits(&rect, Gdiplus::ImageLockModeRead,
+                             PixelFormat32bppARGB, &data) == Gdiplus::Ok) {
+                out.width = w;
+                out.height = h;
+                out.rgba.resize(static_cast<size_t>(w) * h * 4);
+                const auto *base = static_cast<const uint8_t *>(data.Scan0);
+                for (UINT y = 0; y < h; ++y) {
+                    const uint8_t *row = base + static_cast<size_t>(y) * data.Stride;
+                    for (UINT x = 0; x < w; ++x) {
+                        // GDI+'s ARGB32 is byte order B,G,R,A — the engine's
+                        // RGBA8 convention (SceneBuilder's own Picture->
+                        // RgbaImage conversion, LoadImageCached above) wants
+                        // R,G,B,A.
+                        const uint8_t *px = row + static_cast<size_t>(x) * 4;
+                        uint8_t *dst = &out.rgba[(static_cast<size_t>(y) * w + x) * 4];
+                        dst[0] = px[2];
+                        dst[1] = px[1];
+                        dst[2] = px[0];
+                        dst[3] = px[3];
+                    }
+                }
+                bmp.UnlockBits(&data);
+            }
+        }
+    }
+    stream->Release();
     return out;
 }
 
@@ -1098,6 +1164,26 @@ std::vector<uint8_t> WindowsVideo::PreviewFrame(const std::string &deviceId)
     if (it == previews_->taps.end())
         return {};
     return it->second->latestJpeg;   // copy under the lock — the worker swaps wholesale
+}
+
+IVideo::DecodedFrame WindowsVideo::PreviewFramePixels(const std::string &deviceId)
+{
+    std::vector<uint8_t> jpeg;
+    {
+        const std::lock_guard<std::mutex> lock(previews_->mutex);
+        auto it = previews_->taps.find(deviceId);
+        if (it == previews_->taps.end())
+            return {};
+        jpeg = it->second->latestJpeg;   // copy under lock, decode outside it
+    }
+    if (jpeg.empty())
+        return {};
+    RawRgba raw = DecodeJpeg(jpeg.data(), jpeg.size());
+    IVideo::DecodedFrame out;
+    out.width = raw.width;
+    out.height = raw.height;
+    out.rgba = std::move(raw.rgba);
+    return out;
 }
 
 std::vector<std::string> WindowsVideo::ActivePreviews() const

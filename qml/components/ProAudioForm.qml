@@ -556,18 +556,10 @@ Column {
                     GradientStop { position: 1.0; color: "#c80000" }
                 }
 
-                // `chRow.smoothed`/`peakValue` are raw LINEAR amplitude (0..1) — the
-                // WASAPI tap's own domain, kept for the envelope math. Real speech/
-                // ambient levels sit around -60..-20 dBFS (linear ~0.001..0.1), which
-                // pins a linear-width fill in the leftmost few percent for virtually
-                // all real audio — reads as dead. Meters read in dB, so the FILL and
-                // peak tick are positioned on the same -60..0 dB scale as the ticks
-                // below (dbScale), not raw amplitude.
-                function dbPct(linear) {
-                    if (linear <= 0.0005) return 0   // ≈ -66 dBFS floor → silence
-                    const db = 20 * Math.log10(linear)
-                    return Math.max(0, Math.min(1, (db + 60) / 60))
-                }
+                // The dB scale the ticks/bars/needle all read from is the shared
+                // -60..0 dB mapping (Db.dbPct) — was a private copy here, in
+                // LevelTrack and OutputMonitorTile; three copies, three ways to
+                // drift.
 
                 // The bar itself — a CONTINUOUS gradient reveal (FreeShow's real design),
                 // not discrete LED dots. Stretches across the free width between the
@@ -595,7 +587,7 @@ Column {
                         anchors.left: parent.left
                         anchors.top: parent.top
                         anchors.bottom: parent.bottom
-                        width: parent.width * chRow.dbPct(chRow.smoothed)
+                        width: parent.width * Db.dbPct(chRow.smoothed)
                         clip: true
 
                         Rectangle {
@@ -611,7 +603,7 @@ Column {
                         anchors.top: parent.top
                         anchors.bottom: parent.bottom
                         width: 2
-                        x: parent.width * chRow.dbPct(chRow.peakValue) - 1
+                        x: parent.width * Db.dbPct(chRow.peakValue) - 1
                         color: "#ffffff"
                         opacity: 0.6
                     }
@@ -680,10 +672,10 @@ Column {
                     // for fine trims, fast enough to sweep 0..1 quickly.
                     readonly property real angle: -135 + gain * 270
                     readonly property bool atUnity: Math.abs(gain - 1.0) < 0.005
-                    // The needle's own sweep — LIVE level (same dbPct/smoothed the bar
+                    // The needle's own sweep — LIVE level (same Db.dbPct/smoothed the bar
                     // uses), not gain. A glowing ring alone still read as "not moving";
                     // this is the actual speedometer-style needle motion that was missing.
-                    readonly property real liveAngle: -135 + chRow.dbPct(chRow.smoothed) * 270
+                    readonly property real liveAngle: -135 + Db.dbPct(chRow.smoothed) * 270
 
                     function setGain(g) {
                         gain = Math.max(0, Math.min(1, g))
@@ -703,7 +695,7 @@ Column {
                         color: "transparent"
                         border.width: 2
                         border.color: "#00c8c8"
-                        opacity: Math.min(0.85, chRow.dbPct(chRow.smoothed))
+                        opacity: Math.min(0.85, Db.dbPct(chRow.smoothed))
                         Behavior on opacity { NumberAnimation { duration: 80 } }
                     }
 

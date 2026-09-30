@@ -135,7 +135,14 @@ Rectangle {
                     width: 256
 
                     onItemActivated: (item) => vGRPresenter_Main_Screen.centerItem = item
-                    onItemOpened: (item) => { if (item.type === "show") vGRPresenter_Main_Screen.openShowRequested(item.ref) }
+                    // Double-click here used to jump straight to Edit — the
+                    // same "everything else lands on the centre preview,
+                    // only a right-click edits" rule this session settled on
+                    // for the show library applies to the project sidebar
+                    // too, so double-click is now a no-op beyond the single
+                    // click's own centerItem (edit still reachable via the
+                    // centre preview's own right-click / Edit tab).
+                    onItemOpened: {}
                     onImportRequested: vGRPresenter_Main_Screen.importRequested()
                     onSearchRequested: vGRPresenter_Main_Screen.searchRequested()
                     onDockTabRequested: (tab) => {
@@ -781,15 +788,19 @@ Rectangle {
                         service: OverlayLibraryService
                         noun: "overlay"
                         onDesignActivated: (id, name) => vGRPresenter_Main_Screen.centerItem = { type: "overlay", ref: id, name: name }
-                        // No independent overlay-on-air layer exists in the
-                        // engine yet (unlike media/input, which composite
-                        // straight onto the Main Output) — double-click only
-                        // adds it to the open project. Say so instead of
-                        // leaving it looking like a dead double-click.
+                        // Double-click: drop it on the project (unchanged)
+                        // AND toggle it on the Main Output — multiple
+                        // overlays can be live at once, stacked in take
+                        // order (LiveOutputService.activeOverlays); a
+                        // second double-click on an already-live one takes
+                        // it back off, same re-click-to-release convention
+                        // media/input use.
                         onDesignOpened: (id, name) => {
                             ProjectService.dropOnProject("overlay", [{ ref: id, name: name }])
-                            EventBus.notify(qsTr("Overlays can't go straight to the Main Output yet — added to the project instead."),
-                                            "info", qsTr("Overlays"))
+                            if (LiveOutputService.overlayIsOnAir(id))
+                                LiveOutputService.clearOverlay(id)
+                            else
+                                LiveOutputService.takeOverlay(id, name)
                         }
                         onDesignOpenRequested: (id) => vGRPresenter_Main_Screen.designEditRequested("overlay", id)
                         filter: media_tab_bar.searches.overlays !== undefined ? media_tab_bar.searches.overlays : ""
@@ -842,12 +853,27 @@ Rectangle {
                     // pane level (below), positioned over the clicked row.
                     property int menuIndex: -1
                     function openCatMenu(i, x, y) {
+                        // Only one popup menu at a time — opening this one
+                        // closes whatever else was open (right-clicking a
+                        // second row used to leave both menus up at once).
+                        closeShowMenu()
                         menuIndex = i
                         // Clamp inside the pane so the menu never pokes out.
                         catContextMenu.x = Math.min(x, width - catContextMenu.width - 4)
                         catContextMenu.y = Math.min(y, height - catContextMenu.height - 4)
                     }
                     function closeCatMenu() { menuIndex = -1 }
+
+                    // Show row context menu (right-click) — Rename/Duplicate/
+                    // Delete, the same pattern as the category menu above.
+                    property int showMenuIndex: -1
+                    function openShowMenu(i, x, y) {
+                        closeCatMenu()
+                        showMenuIndex = i
+                        showContextMenu.x = Math.min(x, width - showContextMenu.width - 4)
+                        showContextMenu.y = Math.min(y, height - showContextMenu.height - 4)
+                    }
+                    function closeShowMenu() { showMenuIndex = -1 }
 
                     // Engine is the source of truth — no UI-side roster.
                     readonly property var showCategories: {
@@ -1127,6 +1153,15 @@ Rectangle {
                                             onActiveFocusChanged: if (!activeFocus && visible)
                                                 media_table.renameCategory(index, text)
                                             Keys.onEscapePressed: media_table.renamingIndex = -1
+                                            // The menu's Rename entry only sets renamingIndex — this
+                                            // id lives inside a Repeater delegate, out of scope for
+                                            // that menu (a stray catNameEdit.forceActiveFocus() there
+                                            // threw a silent ReferenceError and never focused it, so
+                                            // the box opened with no caret/selection to type into).
+                                            onVisibleChanged: if (visible) {
+                                                forceActiveFocus()
+                                                selectAll()
+                                            }
                                         }
                                         Text {
                                             anchors.right: parent.right
@@ -1227,8 +1262,6 @@ Rectangle {
                                     onClicked: {
                                         media_table.renamingIndex = media_table.menuIndex
                                         media_table.closeCatMenu()
-                                        catNameEdit.forceActiveFocus()
-                                        catNameEdit.selectAll()
                                     }
                                 }
                             }
@@ -1266,6 +1299,167 @@ Rectangle {
                         enabled: media_table.menuIndex !== -1
                         z: 50
                         onClicked: media_table.closeCatMenu()
+                    }
+
+                    // ---- Show row context menu (right-click) ---- Rename/
+                    // Duplicate/Delete for one show, same shape as the
+                    // category menu above. Declared LAST so it paints above
+                    // the table.
+                    Rectangle {
+                        id: showContextMenu
+
+                        readonly property var targetShow: media_table.showMenuIndex >= 0
+                            && media_table.showMenuIndex < table_body.shownShows.length
+                            ? table_body.shownShows[media_table.showMenuIndex] : null
+
+                        visible: media_table.showMenuIndex !== -1
+                        x: 0; y: 0
+                        width: 148
+                        height: 108
+                        z: 60
+
+                        radius: 8
+                        color: "#1e1f28"
+                        border.color: "#3a3d4d"
+                        border.width: 1
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: (mouse) => { mouse.accepted = true }
+                        }
+
+                        Column {
+                            anchors.fill: parent
+                            anchors.margins: 4
+
+                            Item {
+                                width: parent.width; height: 32
+                                Rectangle {
+                                    anchors.fill: parent
+                                    anchors.margins: 2
+                                    radius: 5
+                                    color: showMenuRenameMouse.containsMouse ? "#2c2f3c" : "transparent"
+                                }
+                                Text {
+                                    x: 12
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: qsTr("Rename")
+                                    color: "#e2e8f0"
+                                    font.family: "Segoe UI"; font.pixelSize: 15
+                                }
+                                MouseArea {
+                                    id: showMenuRenameMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        const show = showContextMenu.targetShow
+                                        media_table.closeShowMenu()
+                                        if (show) {
+                                            showRenameDialog.targetPath = show.path
+                                            showRenameDialog.open(show.name)
+                                        }
+                                    }
+                                }
+                            }
+                            Item {
+                                width: parent.width; height: 32
+                                Rectangle {
+                                    anchors.fill: parent
+                                    anchors.margins: 2
+                                    radius: 5
+                                    color: showMenuDuplicateMouse.containsMouse ? "#2c2f3c" : "transparent"
+                                }
+                                Text {
+                                    x: 12
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: qsTr("Duplicate")
+                                    color: "#e2e8f0"
+                                    font.family: "Segoe UI"; font.pixelSize: 15
+                                }
+                                MouseArea {
+                                    id: showMenuDuplicateMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        const show = showContextMenu.targetShow
+                                        media_table.closeShowMenu()
+                                        if (show) {
+                                            const newPath = ShowService.duplicateShow(show.path)
+                                            if (newPath) ShowService.refreshLibrary()
+                                        }
+                                    }
+                                }
+                            }
+                            Item {
+                                width: parent.width; height: 32
+                                Rectangle {
+                                    anchors.fill: parent
+                                    anchors.margins: 2
+                                    radius: 5
+                                    color: showMenuDeleteMouse.containsMouse ? "#2c2f3c" : "transparent"
+                                }
+                                Text {
+                                    x: 12
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: qsTr("Delete")
+                                    color: "#ff6b61"
+                                    font.family: "Segoe UI"; font.pixelSize: 15
+                                }
+                                MouseArea {
+                                    id: showMenuDeleteMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        const show = showContextMenu.targetShow
+                                        media_table.closeShowMenu()
+                                        if (show) {
+                                            showDeleteConfirm.targetPath = show.path
+                                            showDeleteConfirm.title = qsTr("Delete show")
+                                            showDeleteConfirm.message = qsTr("Delete “%1”? This can be recovered from the library's .deleted bin.").arg(show.name)
+                                            showDeleteConfirm.open()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Click-outside catcher for the show menu.
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: media_table.showMenuIndex !== -1
+                        z: 50
+                        onClicked: media_table.closeShowMenu()
+                    }
+
+                    NameDialog {
+                        id: showRenameDialog
+                        anchors.fill: parent
+                        property string targetPath: ""
+                        title: qsTr("Rename show")
+                        confirmLabel: qsTr("Rename")
+                        onAccepted: (text) => {
+                            if (showRenameDialog.targetPath && text.trim() !== "") {
+                                ShowService.renameShow(showRenameDialog.targetPath, text.trim())
+                                ShowService.refreshLibrary()
+                            }
+                        }
+                    }
+
+                    ConfirmDialog {
+                        id: showDeleteConfirm
+                        anchors.fill: parent
+                        property string targetPath: ""
+                        confirmLabel: qsTr("Delete")
+                        confirmVariant: "danger"
+                        onConfirmed: {
+                            if (showDeleteConfirm.targetPath) {
+                                ShowService.deleteShow(showDeleteConfirm.targetPath)
+                                ShowService.refreshLibrary()
+                            }
+                        }
                     }
 
                     // The original shows table — visible only on the Shows
@@ -1329,23 +1523,18 @@ Rectangle {
                         x: categories_sidebar.width + 12
                         y: 35
 
-                        // Grows with the pane; the footer (bound below)
-                        // stays pinned to the bottom.
-                        height: parent.height - 98
+                        // No bottom reserve: the "+ New show" pill FLOATS
+                        // over the table (same idiom as DesignLibraryPane's
+                        // FAB) instead of the old fixed footer band, whose
+                        // hardcoded clearance (98 here vs the button's own
+                        // 61+31) left only ~2px of gap — the button visibly
+                        // touching the last row.
+                        height: parent.height - y
                         width: parent.width - categories_sidebar.width - 24
 
                         clip: true
                         color: "transparent"
 
-                        // ---- Shows rows — ENGINE-FED -------------------
-                        // One Repeater over ShowService.libraryShows (real
-                        // .vgr files, newest first); "All" lists every show,
-                        // a selected category filters to its sub-folder. Rows
-                        // are click-to-open: the path goes up through
-                        // openShowRequested → Main.qml → the engine, with the
-                        // unsaved-changes guard. Hover = cursor-driven lift;
-                        // the stale-containsMouse lesson applied from day one
-                        // via a pointer-position tracker like the sidebar's.
                         readonly property var shownShows: {
                             media_table.libRev   // re-read on engine republish
                             const cat = media_table.currentCategory
@@ -1360,6 +1549,28 @@ Rectangle {
                             inCategory.forEach((s) => { inScope[s.path] = true })
                             return wanted.filter((s) => inScope[s.path] === true)
                         }
+
+                        // The rows live in a Flickable: the library outgrew
+                        // one pane's worth of rows long ago, so everything
+                        // below the header scrolls, with the shared
+                        // AppScrollBar on the right (same pattern as
+                        // ShowCenter's slide grid).
+                        Flickable {
+                            id: table_scroll
+                            anchors.fill: parent
+                            clip: true
+                            boundsBehavior: Flickable.StopAtBounds
+                            contentHeight: table_body.shownShows.length * 32
+
+                        // ---- Shows rows — ENGINE-FED -------------------
+                        // One Repeater over ShowService.libraryShows (real
+                        // .vgr files, newest first); "All" lists every show,
+                        // a selected category filters to its sub-folder. Rows
+                        // are click-to-open: the path goes up through
+                        // openShowRequested → Main.qml → the engine, with the
+                        // unsaved-changes guard. Hover = cursor-driven lift;
+                        // the stale-containsMouse lesson applied from day one
+                        // via a pointer-position tracker like the sidebar's.
                         Repeater {
                             model: table_body.shownShows
                             delegate: Rectangle {
@@ -1401,7 +1612,8 @@ Rectangle {
                                     textFormat: Text.PlainText
                                     verticalAlignment: Text.AlignTop
                                 }
-                                // Click: the show on the centre page. Double-click: into the open project. Drag: into a project.
+                                // Click: the show on the centre page. Double-click: into the open project.
+                                // Right-click: Rename/Duplicate/Delete. Drag: into a project.
                                 DragSource {
                                     id: rowMouse
                                     anchors.fill: parent
@@ -1409,11 +1621,19 @@ Rectangle {
                                     label: modelData.name
                                     onActivated: vGRPresenter_Main_Screen.centerItem = { type: "show", ref: modelData.path, name: modelData.name, layout: "" }
                                     onOpened: ProjectService.dropOnProject("show_drawer", [{ ref: modelData.path, name: modelData.name }])
+                                    onContextRequested: (x, y) => {
+                                        const p = rowMouse.mapToItem(media_table, x, y)
+                                        media_table.openShowMenu(index, p.x, p.y)
+                                    }
                                 }
                             }
                         }
+                        }   // Flickable table_scroll
+
                         // Cursor-position hover tracker for the rows (same
-                        // scroll-proof pattern as the category list).
+                        // scroll-proof pattern as the category list). It sits
+                        // on the VIEWPORT (not the scrolling content), so the
+                        // hovered row index must add the scroll offset back in.
                         MouseArea {
                             id: showRowsHover
                             anchors.fill: parent
@@ -1423,40 +1643,45 @@ Rectangle {
                             z: 1
                             readonly property int hoveredIdx: {
                                 if (!containsMouse || table_body.shownShows.length === 0) return -1
-                                const i = Math.floor(mouseY / 32)
+                                const i = Math.floor((mouseY + table_scroll.contentY) / 32)
                                 return (i >= 0 && i < table_body.shownShows.length) ? i : -1
                             }
                         }
 
+                        // A real draggable bar for the now-scrolling table
+                        // (auto-hides when every row already fits).
+                        AppScrollBar {
+                            flickable: table_scroll
+                            anchors.top: parent.top; anchors.bottom: parent.bottom
+                            anchors.right: parent.right; anchors.rightMargin: 3
+                        }
+
                     }
-                    Rectangle {
-                        id: dock_footer
-
-                        visible: media_tab_bar.currentPane === "shows"
-                        x: categories_sidebar.width + 12
-                        y: parent.height - 61
-
-                        height: 31
-                        width: parent.width - categories_sidebar.width - 24
-
-                        color: "transparent"
-
+                    // A true FAB (DesignLibraryPane's "New <design>" pill is
+                    // the reference this now matches): no border, no footer
+                    // band behind it — it floats OVER the table on its own
+                    // stacked-rect soft shadow, with the table scrolling
+                    // freely beneath it. Replaces the old dock_footer band,
+                    // whose fixed 31px lane left the button flush against
+                    // the last row with no visible gap.
                     Rectangle {
                         id: new_show_dock_btn
 
+                        visible: media_tab_bar.currentPane === "shows"
                         anchors.right: parent.right
-                        anchors.rightMargin: 12
-                        y: 4
+                        anchors.rightMargin: 22
+                        anchors.bottom: parent.bottom
+                        anchors.bottomMargin: 16
 
-                        height: 27
-                        width: 104
-
-                        border.color: "#ff4d3d"
-                        border.width: 1
-                        color: newShowDockMouse.pressed ? "#701f19"
-                             : (newShowDockMouse.containsMouse ? "#a03a30" : "#85261f")
-                        radius: 100
+                        height: 36
+                        width: new_show_1.width + 32
+                        radius: 18
+                        color: newShowDockMouse.pressed ? "#e5484d" : "#ff4d3d"
                         Behavior on color { ColorAnimation { duration: 100 } }
+
+                        // the soft shadow (drawn first, so it sits under the pill)
+                        Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 3; width: parent.width + 6; height: parent.height + 4; radius: 20; color: "#26000000" }
+                        Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 2; width: parent.width + 2; height: parent.height + 2; radius: 19; color: "#33000000" }
 
                         // The second dead "New show" chrome button, now
                         // live with the same reset action.
@@ -1468,41 +1693,38 @@ Rectangle {
                             onClicked: vGRPresenter_Main_Screen.newShowRequested()
                         }
 
-                            // CENTERED + OPTICALLY MATCHED: the drawn cross is
-                            // sized to the text's cap height (a font "+" sits low
-                            // and small next to bold text — the misalignment
-                            // report) and the pair is one centered Row.
-                            Row {
-                                id: new_show_1
+                        // CENTERED + OPTICALLY MATCHED: the drawn cross is
+                        // sized to the text's cap height (a font "+" sits low
+                        // and small next to bold text — the misalignment
+                        // report) and the pair is one centered Row.
+                        Row {
+                            id: new_show_1
 
-                                anchors.centerIn: parent
-                                spacing: 6
+                            anchors.centerIn: parent
+                            spacing: 8
 
-                                PlusGlyph {
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    // Optical cap-band alignment (same measurement as the
-                                    // clock CTA): Segoe UI caps sit ~1px above the line-box
-                                    // center, so box-centered glyphs read a touch high.
-                                    anchors.verticalCenterOffset: 1
-                                    size: 11; thickness: 2; color: "#ffffff"
-                                }
-                                Text {
-                                    id: new_show_1_label
-
-                                    anchors.verticalCenter: parent.verticalCenter
-
-                                    // Was black text on this dark maroon pill - unreadable (barely more than the pill's own shadow).
-                                    // White and bolder, matching FreeShow's own "+ New show" pill.
-                                    color: "#ffffff"
-                                    font.family: "Segoe UI"
-                                    font.pixelSize: 14
-                                    font.weight: Font.Bold
-                                    text: qsTr("New show")
-                                    textFormat: Text.PlainText
-                                }
+                            PlusGlyph {
+                                anchors.verticalCenter: parent.verticalCenter
+                                // Optical cap-band alignment (same measurement as the
+                                // clock CTA): Segoe UI caps sit ~1px above the line-box
+                                // center, so box-centered glyphs read a touch high.
+                                anchors.verticalCenterOffset: 1
+                                size: 11; thickness: 2; color: "#ffffff"
                             }
+                            Text {
+                                id: new_show_1_label
+
+                                anchors.verticalCenter: parent.verticalCenter
+
+                                color: "#ffffff"
+                                font.family: "Segoe UI"
+                                font.pixelSize: 14
+                                font.weight: Font.Bold
+                                text: qsTr("New show")
+                                textFormat: Text.PlainText
+                            }
+                        }
                     }   // new_show_dock_btn
-                }   // dock_footer
                 }   // dock band (host container of the dock + clock panel)
                 Rectangle {
                     id: clock_panel

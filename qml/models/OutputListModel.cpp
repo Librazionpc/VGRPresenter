@@ -57,6 +57,8 @@ OutputListModel::OutputListModel(QObject *parent)
         item.testPattern = QString::fromStdString(so.testPattern);
         item.screenName = QString::fromStdString(so.screenName);
         item.boundsLocked = so.boundsLocked;
+        item.stayOnTop = so.stayOnTop;
+        item.fullscreenOutput = so.fullscreenOutput;
         item.isEnabled = so.enabled;
         item.styleId = QString::fromStdString(so.styleId);
         item.content = content;   // the six defaults, then the persisted toggles on top
@@ -147,6 +149,8 @@ void OutputListModel::saveRoster()
         so.testPattern = item.testPattern.toStdString();
         so.screenName = item.screenName.toStdString();
         so.boundsLocked = item.boundsLocked;
+        so.stayOnTop = item.stayOnTop;
+        so.fullscreenOutput = item.fullscreenOutput;
         so.active = item.active;
         so.enabled = item.isEnabled;
         so.styleId = item.styleId.toStdString();
@@ -169,15 +173,30 @@ void OutputListModel::connectToEngineBoot()
     // booting when the singleShot(0) runs (pushes are dropped pre-boot by
     // SettingsService), and SettingsService::setActiveOutputStyle guards on
     // booted() itself — so this retries on bootedChanged and pushes once.
+    //
+    // A THIRD trap (found live: a family template picked in Settings never
+    // rendered until the style was reassigned): bakeFamilyTemplateBlocks
+    // needs TemplateLibraryService's catalog loaded, but that library ALSO
+    // only adopts on this same bootedChanged signal (DesignLibraryService::
+    // open), via a connection whose relative ORDER against this one is
+    // undefined — a push that races ahead of the still-empty catalog bakes
+    // nothing and nothing ever re-pushes afterward (the catalog's own
+    // adoption emits changed(), but only once, before OutputListModel's
+    // matching connectToTemplateLibrary() connection may even exist yet).
+    // Deferring the push itself by one event-loop tick (QTimer::singleShot
+    // (0, ...), not calling it straight from the signal) lets every other
+    // DIRECT bootedChanged listener — including the template library's own
+    // — run first within the same synchronous emit, so by the time this
+    // fires the catalog is guaranteed populated.
     if (engineBootConnected_)
         return;
     engineBootConnected_ = true;
     connect(&EngineBridge::instance(), &EngineBridge::bootedChanged, this, [this]() {
         if (EngineBridge::instance().booted())
-            pushActiveEngineStyle();
+            QTimer::singleShot(200, this, [this]() { pushActiveEngineStyle(); });
     });
     if (EngineBridge::instance().booted())
-        pushActiveEngineStyle();
+        QTimer::singleShot(200, this, [this]() { pushActiveEngineStyle(); });
 }
 
 void OutputListModel::connectToStyleRoster()
@@ -245,6 +264,8 @@ QVariant OutputListModel::data(const QModelIndex &index, int role) const
     case TestPatternRole: return item.testPattern;
     case ScreenNameRole: return item.screenName;
     case BoundsLockedRole: return item.boundsLocked;
+    case StayOnTopRole: return item.stayOnTop;
+    case FullscreenOutputRole: return item.fullscreenOutput;
     case ActiveRole: return item.active;
     case EnabledRole: return item.isEnabled;
     case StyleIdRole: return item.styleId;
@@ -286,6 +307,8 @@ QHash<int, QByteArray> OutputListModel::roleNames() const
         { TestPatternRole, "testPattern" },
         { ScreenNameRole, "screenName" },
         { BoundsLockedRole, "boundsLocked" },
+        { StayOnTopRole, "stayOnTop" },
+        { FullscreenOutputRole, "fullscreenOutput" },
         { ActiveRole, "active" },
         { EnabledRole, "isEnabled" },
         { StyleIdRole, "styleId" },
@@ -628,6 +651,32 @@ void OutputListModel::setBoundsLocked(int index, bool locked)
     saveRoster();
 }
 
+void OutputListModel::setStayOnTop(int index, bool stayOnTop)
+{
+    if (index < 0 || index >= m_outputs.size())
+        return;
+    if (m_outputs[index].stayOnTop == stayOnTop)
+        return;
+
+    m_outputs[index].stayOnTop = stayOnTop;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { StayOnTopRole });
+    saveRoster();
+}
+
+void OutputListModel::setFullscreenOutput(int index, bool fullscreen)
+{
+    if (index < 0 || index >= m_outputs.size())
+        return;
+    if (m_outputs[index].fullscreenOutput == fullscreen)
+        return;
+
+    m_outputs[index].fullscreenOutput = fullscreen;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { FullscreenOutputRole });
+    saveRoster();
+}
+
 // ---------------------------------------------------------------------------
 // Style plumbing
 // ---------------------------------------------------------------------------
@@ -806,12 +855,18 @@ void OutputListModel::bakeTemplateBlocks(bps::presentation::OutputStyleSpec &spe
 
 // NOTE: bakeTemplateBlocks bakes ONLY the whole-style template. The
 // per-family slots bake here (their keys are already in spec.familyTemplateKeys).
+// NO INHERIT: a family with no explicit pick gets nothing baked — except
+// SHOWS, whose fallback is the BIBLE template (the Scripture design): show
+// content (imported shows, Quick Lyrics — slides carry no family tag) must
+// never silently fall back to the old plain layout. The fallback fires only
+// when BOTH the shows pick and the whole-style template are unset/non-design
+// (an empty or legacy-preset templateKey); an explicit pick always wins.
 void OutputListModel::bakeFamilyTemplateBlocks(bps::presentation::OutputStyleSpec &spec)
 {
     for (size_t i = 0; i < 4; ++i) {
         const QString famKey = QString::fromStdString(spec.familyTemplateKeys[i]);
         if (famKey.isEmpty() || famKey.startsWith(QLatin1String("tpl-")) == false)
-            continue;   // "" = inherit; a preset key rides LayoutFor — no bake
+            continue;   // "" = none for this family; a preset key rides LayoutFor — no bake
         const QVariantMap design = TemplateLibraryService::instance().design(famKey);
         const QVariantList blocks = design.value(QStringLiteral("blocks")).toList();
         if (blocks.isEmpty())
@@ -819,6 +874,21 @@ void OutputListModel::bakeFamilyTemplateBlocks(bps::presentation::OutputStyleSpe
         spec.familyTemplateBlocks[i].reserve(blocks.size());
         for (const QVariant &b : blocks)
             spec.familyTemplateBlocks[i].push_back(ShowConverter::blockFromVariant(b.toMap()));
+    }
+    // The Bible fallback for show content (see the function comment): the
+    // baked blocks alone gate the engine's family branch — the shows key
+    // stays "" so the roster still reads "None".
+    const QString wholeKey = QString::fromStdString(spec.templateKey);
+    if (spec.familyTemplateBlocks[0].empty()
+        && QString::fromStdString(spec.familyTemplateKeys[0]).isEmpty()
+        && !wholeKey.startsWith(QLatin1String("tpl-"))) {
+        const QVariantMap design = TemplateLibraryService::instance().design(QStringLiteral("tpl-scripture"));
+        const QVariantList blocks = design.value(QStringLiteral("blocks")).toList();
+        if (!blocks.isEmpty()) {
+            spec.familyTemplateBlocks[0].reserve(blocks.size());
+            for (const QVariant &b : blocks)
+                spec.familyTemplateBlocks[0].push_back(ShowConverter::blockFromVariant(b.toMap()));
+        }
     }
 }
 
@@ -898,6 +968,8 @@ QVariantMap OutputListModel::getOutput(int index) const
         { "testPattern", item.testPattern },
         { "screenName", item.screenName },
         { "boundsLocked", item.boundsLocked },
+        { "stayOnTop", item.stayOnTop },
+        { "fullscreenOutput", item.fullscreenOutput },
         { "active", item.active },
         { "isEnabled", item.isEnabled },
         { "styleId", item.styleId },

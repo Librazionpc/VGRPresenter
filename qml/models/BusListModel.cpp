@@ -6,6 +6,7 @@
 
 #include <QDebug>
 #include <QSet>
+#include <cstdio>
 #include <utility>
 
 #include "modules/production/ProductionEngine.hpp"
@@ -684,6 +685,22 @@ void BusListModel::toggleVideoRoute(int busIndex, int sourceIndex)
         const QModelIndex changed = this->index(b);
         emit dataChanged(changed, changed, { RoutedVideoSourcesRole });
     }
+}
+
+bool BusListModel::canConnect(const QString &kind, int sourceRow, int busIndex) const
+{
+    if (busIndex < 0 || busIndex >= m_buses.size() || sourceRow < 0)
+        return false;
+    const bool audio = (kind == QStringLiteral("audio"));
+    const QString srcQ = audio ? audioSourceNodeId(sourceRow) : videoSourceNodeId(sourceRow);
+    if (srcQ.isEmpty())
+        return false;   // a bad/vanished roster row has no node to route
+    const BusItem &bus = m_buses.at(busIndex);
+    const std::string plane = (audio ? bus.engineId : bus.engineIdVideo).toStdString();
+    const bool ok = graph().CanConnect(srcQ.toStdString(), plane,
+                                       audio ? bps::production::SignalType::Audio
+                                             : bps::production::SignalType::Video);
+    return ok;
 }
 
 QVariantMap BusListModel::getBus(int index) const

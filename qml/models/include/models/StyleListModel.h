@@ -48,9 +48,11 @@ struct StyleItem
     bool showMedia = false;
     bool showScripture = false;
     bool showTable = false;
-    // PER-FAMILY TEMPLATE KEYS ("" = inherit templateKey — the whole-style
-    // pick). The style renders each content family through its OWN template:
-    // shows/media/scripture/table, index order matching the show* flags.
+    // PER-FAMILY TEMPLATE KEYS ("" = no template for that family — NO
+    // inherit; the family renders plain, and SHOWS alone falls back to the
+    // Bible template, baked engine-side). The style renders each content
+    // family through its OWN template: shows/media/scripture/table, index
+    // order matching the show* flags.
     QString familyTemplateKeys[4];
     // Shows-only category label (free text).
     QString category;
@@ -114,8 +116,9 @@ public:
     Q_INVOKABLE void setBackgroundImage(int index, const QString &path);
     Q_INVOKABLE void setClearBackgroundOnText(int index, bool on);
     Q_INVOKABLE void setShowTemplate(int index, const QString &contentType, bool on);
-    // The per-family template pick ("" clears the family back to the
-    // whole-style templateKey). contentType: "shows"|"media"|"scripture"|"table".
+    // The per-family template pick ("" clears the family to no template —
+    // Shows then falls back to the Bible template). contentType:
+    // "shows"|"media"|"scripture"|"table".
     Q_INVOKABLE void setFamilyTemplateKey(int index, const QString &contentType,
                                            const QString &templateKey);
     Q_INVOKABLE void setCategory(int index, const QString &category);

@@ -82,6 +82,17 @@ public:
     // disabled output receives nothing — empty frames before go-live are
     // fine); the frontend's image provider reads its last frame.
     static constexpr const char *kPreviewName = "__live_preview__";
+    // Every FrameBufferOutput (the shared preview AND every per-output
+    // buffer) renders at this size — was 960x540 (fine for the small
+    // in-app preview tile), but a real per-output window
+    // (qml/components/OutputWindow.qml, a borderless window covering a
+    // real physical/HDMI screen) stretches this to full screen size, where
+    // 960x540 reads visibly soft. 1080p is the practical ceiling most
+    // presentation displays run at; a specific output wanting sharper than
+    // that is a real per-output resolution feature, not scope for this
+    // constant.
+    static constexpr int kFrameBufferWidth = 1920;
+    static constexpr int kFrameBufferHeight = 1080;
 
 private:
     LiveOutputController() = default;

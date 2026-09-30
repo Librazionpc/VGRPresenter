@@ -234,11 +234,26 @@ public:
     // tile's OVERLAID LED strips read this: audio clicked → meters on.
     Q_PROPERTY(bool anyAudioMetering READ anyAudioMetering NOTIFY audioMeteringChanged)
     bool anyAudioMetering() const { return outputMetering_ || !requestedMeters_.isEmpty(); }
+    // True while at least one INPUT tap specifically is held (an audio/bus
+    // card double-clicked in the Media pane) — NOT the program-mix tap,
+    // which runs automatically the whole time an output is live/active
+    // regardless of whether there is any real audio content. The
+    // MonitorWall toolbar's "audio" clear button reads this (plus
+    // mediaOnAir&&mediaIsAudio) instead of anyAudioMetering, which would
+    // otherwise light it up any time the show is simply live.
+    Q_PROPERTY(bool anyInputMetering READ anyInputMetering NOTIFY audioMeteringChanged)
+    // THE ENGINE'S AUDIO OUT: on = the WASAPI render client is live and the
+    // mixer is summing the graph's buses (the first real playout path).
+    Q_PROPERTY(bool audioRenderActive READ audioRenderActive NOTIFY audioRenderChanged)
+    bool anyInputMetering() const { return !requestedMeters_.isEmpty(); }
     // Each entry: { id, label, value } — value mirrors label because the AV
     // board stores the human-readable sublabel on its rows; ids ride along
     // for the future capture-graph plumbing.
     QVariantList audioDevices() const { return audioDevices_; }
     QVariantList inputLevels() const { return inputLevels_; }
+    bool audioRenderActive() const;
+    // Start/stop the real render stream + the graph-driven mixer.
+    Q_INVOKABLE void setAudioRender(bool on);
     QVariantList screenDevices() const { return screenDevices_; }
     QVariantList videoDevices() const { return videoDevices_; }
     QVariantList ndiSources() const { return ndiSources_; }
@@ -247,6 +262,12 @@ public:
     // detect first frames itself, instead of QML confirming back (a write
     // into the tile's own URL binding = binding loop).
     QImage previewFrameFor(const QString &label);
+    // The SAME label→engine-id resolution previewFrameFor uses, exposed
+    // standalone: LiveOutputService::takeInput needs the resolved PAL device
+    // id (not the roster label) to tell the engine's CompositorState which
+    // tap SceneBuilder should pull real pixels from — "" if the label never
+    // resolved (tap never started, or resolution failed).
+    QString resolvedPreviewDeviceId(const QString &label) const { return previewIds_.value(label.trimmed()); }
     bool ndiAvailable() const { return ndiAvailable_; }
     QString ndiStatus() const { return ndiStatus_; }
     QString ndiState() const { return ndiState_; }
@@ -283,6 +304,8 @@ public:
     Q_INVOKABLE void clearHistory();
 
 signals:
+    // The engine's playout state flipped (see audioRenderActive).
+    void audioRenderChanged();
     void stackChanged();
     void bootedChanged();
     // Fired for every ENGINE-side event relayed into the UI process — kernel
@@ -338,6 +361,12 @@ private:
 
     // ---- Live input metering state --------------------------------------
     QVariantList inputLevels_;          // the published snapshot set
+    // The engine's playout: the mixer consuming the production graph + the
+    // WASAPI render client. Created on first start; lives for the bridge.
+    // void* keeps the engine header out of this one (same convention as
+    // TheTableService's library_); the .cpp casts it.
+    void *audioMixer_ = nullptr;         // bps::production::AudioMixer*
+    void feedMixerLevels();              // the meter pump's mixer-publish step
     // Output (program-mix) meter state: the loopback tap's id + the single
     // published snapshot (the default render endpoint's L/R).
     bool outputMetering_ = false;

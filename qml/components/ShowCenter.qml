@@ -78,6 +78,21 @@ Item {
         return (slide.blocks ?? []).filter((b) => (b.kind ?? "text") === "text" && (b.text ?? "") !== "").map((b) => b.text).join("\n")
     }
 
+    // A double-click on a slide STAGES it into the Main Output tile — it
+    // used to go live immediately (goLiveWithSlides), which flipped the top
+    // GO LIVE/STOP button (and, with an Output bound to a real screen, put
+    // content there too) with no explicit go-live action from the user.
+    // stageSlides only updates the tile; the top GO LIVE button is what
+    // actually commits it. This pane stays a read-only PREVIEW of the
+    // show's file (peekShow), not the editor, either way — staging must not
+    // open the show for editing or touch the engine's shared "open
+    // document" (that would risk discarding whatever the Edit screen has
+    // unsaved).
+    function takeSlideLive(index, slide) {
+        root.selectedSlide = index
+        LiveOutputService.stageSlides(root.item ? root.item.name : "", [slide])
+    }
+
     // The show on this page can be the one open in the editor: read it again when it changes, and when this page comes back into view.
     Connections {
         target: ShowService
@@ -182,6 +197,13 @@ Item {
                     required property int index
                     readonly property bool selected: root.selectedSlide === index
                     readonly property color group: root.groupColor(modelData) !== "" ? root.groupColor(modelData) : root.cDarkest
+                    // The active output style's template (Settings > Styles'
+                    // "Template for Shows" pick), applied the SAME way
+                    // onAirSlide/stagedSlide already do — so the thumbnail
+                    // shows what the slide will actually look like on air,
+                    // not just its own raw blocks. root.reload keys this
+                    // to StylesScreen edits too (see the Connections below).
+                    readonly property var styled: { void root.reload; return LiveOutputService.previewWithActiveStyle(cell.modelData) }
                     width: root.cellWidth
                     height: body.height + 4              // (FreeShow: a cell has 2px of padding)
 
@@ -198,8 +220,9 @@ Item {
                             color: "#000000"; clip: true
                             DesignPreview {
                                 width: parent.width
-                                blocks: cell.modelData.blocks ?? []
-                                background: cell.modelData.background ?? "transparent"
+                                showBindPlaceholders: false
+                                blocks: cell.styled.blocks ?? []
+                                background: cell.styled.background ?? "transparent"
                                 checkerSize: 32
                             }
                             Rectangle { anchors.fill: parent; color: "#0dffffff"; visible: cellHover.hovered }      // the hover veil
@@ -230,9 +253,19 @@ Item {
                         Rectangle { anchors.fill: parent; color: "transparent"; border.width: cell.selected ? 2 : 0; border.color: root.cSecondary }
                     }
                     HoverHandler { id: cellHover; cursorShape: Qt.PointingHandCursor }
+                    // Single click selects only (a double-click's first tap
+                    // still fires this — harmless, it's a no-op re-select).
+                    // Double-click takes it live; right-click opens Edit —
+                    // simple, and it separates "look" from "go live" so a
+                    // single click can never accidentally put something on air.
                     TapHandler {
+                        acceptedButtons: Qt.LeftButton
                         onTapped: root.selectedSlide = cell.index
-                        onDoubleTapped: root.editRequested(root.item.ref)
+                        onDoubleTapped: root.takeSlideLive(cell.index, cell.modelData)
+                    }
+                    TapHandler {
+                        acceptedButtons: Qt.RightButton
+                        onTapped: root.editRequested(root.item.ref)
                     }
                 }
             }
@@ -251,70 +284,132 @@ Item {
                     required property var modelData
                     required property int index
                     readonly property bool selected: root.selectedSlide === index
-                    width: listCol.width; height: 84; radius: 6
+                    // Same active-style-template composition as the grid
+                    // cell's own `styled` — see its comment.
+                    readonly property var styled: { void root.reload; return LiveOutputService.previewWithActiveStyle(listRow.modelData) }
+                    // Grows to fit the WHOLE lyric text — was fixed at 104px
+                    // with a 3-line ellipsis, which cut real content off
+                    // (a 4+ line verse just lost its last line behind "…").
+                    // No cap now: the row is exactly as tall as its text
+                    // needs, never less than tall enough for the thumbnail.
+                    width: listCol.width
+                    height: Math.max(80, lyricText.y + lyricText.implicitHeight + 10)
+                    radius: 6
                     color: selected ? "#1a1b23" : (listHover.hovered ? "#15161d" : "#12131a")
                     border.color: selected ? "#ff4d3d" : "#1d1f2a"
                     Rectangle {
                         x: 10; y: 10; width: 106; height: Math.round(width * 428 / 754); color: "#000"; radius: 3; clip: true
                         DesignPreview {
                             width: parent.width
-                            blocks: listRow.modelData.blocks ?? []
-                            background: listRow.modelData.background ?? "transparent"
+                            showBindPlaceholders: false
+                            blocks: listRow.styled.blocks ?? []
+                            background: listRow.styled.background ?? "transparent"
                             checkerSize: 24
                         }
                     }
                     Text { x: 130; y: 10; text: (listRow.index + 1) + "  " + (listRow.modelData.title ?? "") + ((listRow.modelData.nextTimer ?? 0) > 0 ? "  ·  " + root.formatTime(listRow.modelData.nextTimer) : ""); color: "#e2e8f0"; font.family: "Segoe UI"; font.pixelSize: 14; font.weight: Font.DemiBold }
-                    Text {
-                        x: 130; y: 30; width: parent.width - 146
+                    // EDITABLE — same live-autosave mechanism as the "lyrics"
+                    // view (ShowService.rewriteShowFromText), just presented
+                    // per row instead of one big text block: a row's own
+                    // words are what's edited here, everyone else's are
+                    // read back from root.slides unchanged and rejoined
+                    // around it. `ready` skips the autosave the binding's
+                    // OWN initial assignment would otherwise fire.
+                    TextEdit {
+                        id: lyricText
+                        x: 130; y: 32; width: parent.width - 146
                         text: root.slideText(listRow.modelData)
-                        color: "#8a94a6"; wrapMode: Text.Wrap; elide: Text.ElideRight; maximumLineCount: 3
+                        color: "#8a94a6"; wrapMode: TextEdit.Wrap
+                        selectByMouse: true
                         font.family: "Segoe UI"; font.pixelSize: 14
+
+                        property bool ready: false
+                        Component.onCompleted: lyricText.ready = true
+                        onTextChanged: if (lyricText.ready) rowSaveTimer.restart()
+                        onActiveFocusChanged: if (!activeFocus && rowSaveTimer.running) {
+                            rowSaveTimer.stop()
+                            listRow.flushEdit()
+                        }
+                    }
+                    Timer {
+                        id: rowSaveTimer
+                        interval: 700
+                        onTriggered: listRow.flushEdit()
+                    }
+                    function flushEdit() {
+                        if (!root.item) return
+                        const full = root.slides.map((s, i) =>
+                            i === listRow.index ? lyricText.text : root.slideText(s)).join("\n\n")
+                        ShowService.rewriteShowFromText(root.item.ref, full)
                     }
                     HoverHandler { id: listHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler {
+                        acceptedButtons: Qt.LeftButton
                         onTapped: root.selectedSlide = listRow.index
-                        onDoubleTapped: root.editRequested(root.item.ref)
+                        onDoubleTapped: root.takeSlideLive(listRow.index, listRow.modelData)
+                    }
+                    TapHandler {
+                        acceptedButtons: Qt.RightButton
+                        onTapped: root.editRequested(root.item.ref)
                     }
                 }
             }
         }
 
-        // the words only, group by group
+        // the words — EDITABLE (FreeShow's own Lyrics/Text-editor view,
+        // TextEditor.svelte): one continuous text block for the whole show,
+        // blank-line-separated the same way Quick Lyrics splits one — not a
+        // read-only per-slide list. Edits autosave (700ms settle, this
+        // app's usual debounce) via ShowService.rewriteShowFromText, which
+        // re-splits the text into slides and saves straight to the show's
+        // own file — isolated from the Edit screen's own editing session,
+        // so it can't collide with unsaved work open there.
         Column {
             id: lyricsCol
             visible: root.viewMode === "lyrics"
             x: Math.max(0, (parent.width - width) / 2)
             width: Math.min(parent.width, 760)
-            spacing: 4
-            Repeater {
-                model: root.viewMode === "lyrics" ? root.slides : []
-                delegate: Rectangle {
-                    id: lyricRow
-                    required property var modelData
-                    required property int index
-                    readonly property bool selected: root.selectedSlide === index
-                    width: lyricsCol.width; height: lyricText.height + lyricTitle.height + 24; radius: 6
-                    color: selected ? "#1a1b23" : (lyricHover.hovered ? "#13141b" : "transparent")
-                    Text {
-                        id: lyricTitle
-                        x: 14; y: 8
-                        text: (lyricRow.modelData.title ?? "") !== "" ? lyricRow.modelData.title : qsTr("Slide %1").arg(lyricRow.index + 1)
-                        color: "#ff4d3d"; font.capitalization: Font.AllUppercase
-                        Component.onCompleted: if ((lyricRow.modelData.nextTimer ?? 0) > 0) text += "  ·  " + root.formatTime(lyricRow.modelData.nextTimer)
-                        font.family: "Segoe UI"; font.pixelSize: 12; font.weight: Font.Bold; font.letterSpacing: 1
-                    }
-                    Text {
-                        id: lyricText
-                        x: 14; y: lyricTitle.y + lyricTitle.height + 4; width: parent.width - 28
-                        text: root.slideText(lyricRow.modelData)
-                        color: "#e2e8f0"; wrapMode: Text.Wrap
-                        font.family: "Segoe UI"; font.pixelSize: 17; lineHeight: 1.25
-                    }
-                    HoverHandler { id: lyricHover; cursorShape: Qt.PointingHandCursor }
-                    TapHandler {
-                        onTapped: root.selectedSlide = lyricRow.index
-                        onDoubleTapped: root.editRequested(root.item.ref)
-                    }
+
+            // Which show's text is currently loaded (captured at load time —
+            // root.item may already have moved on by the time a pending
+            // autosave needs to flush against the RIGHT file).
+            property string editingPath: ""
+            property bool loaded: false
+
+            function flushPending() {
+                if (autosaveTimer.running && lyricsCol.editingPath !== "") {
+                    autosaveTimer.stop()
+                    ShowService.rewriteShowFromText(lyricsCol.editingPath, lyricsEditor.text)
+                }
+            }
+            function loadText() {
+                lyricsCol.flushPending()
+                lyricsEditor.text = root.slides.map((s) => root.slideText(s)).join("\n\n")
+                lyricsCol.editingPath = root.item ? root.item.ref : ""
+                lyricsCol.loaded = true
+            }
+            onVisibleChanged: if (visible) lyricsCol.loadText(); else lyricsCol.flushPending()
+            Connections {
+                target: root
+                function onItemChanged() { if (lyricsCol.visible && root.type === "show") lyricsCol.loadText() }
+            }
+
+            TextEdit {
+                id: lyricsEditor
+                width: lyricsCol.width
+                wrapMode: TextEdit.Wrap
+                color: "#e2e8f0"
+                font.family: "Segoe UI"; font.pixelSize: 17
+                selectByMouse: true
+                onTextChanged: if (lyricsCol.loaded) autosaveTimer.restart()
+            }
+
+            Timer {
+                id: autosaveTimer
+                interval: 700
+                onTriggered: {
+                    if (lyricsCol.editingPath !== "")
+                        ShowService.rewriteShowFromText(lyricsCol.editingPath, lyricsEditor.text)
                 }
             }
         }
@@ -381,6 +476,12 @@ Item {
                     x: parent.width - width + 1; y: -height - 8
                     width: 252; height: timerPanel.height + 28
                     radius: 12; color: "#f018192a"; border.color: root.cLighter
+                    // Swallows any click that lands on the popover's own
+                    // padding/gaps (not one of its controls below) — those
+                    // had nothing to consume them, so the click fell through
+                    // to whatever slide sits underneath the popover's visual
+                    // position and selected it instead.
+                    MouseArea { anchors.fill: parent; onClicked: (mouse) => { mouse.accepted = true } }
                     Column {
                         id: timerPanel
                         x: 16; y: 14; width: parent.width - 32
@@ -472,6 +573,9 @@ Item {
                     // (rounded top only: the bottom sits flat on the button)
                     Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 20; color: parent.color }
                     Rectangle { anchors.bottom: parent.bottom; anchors.bottomMargin: -1; x: parent.border.width; width: parent.width - 2; height: 2; color: parent.color }
+                    // Same click-through fix as the timer popover: swallow
+                    // clicks on the popover's own padding/gaps.
+                    MouseArea { anchors.fill: parent; onClicked: (mouse) => { mouse.accepted = true } }
                     Column {
                         anchors.fill: parent; anchors.topMargin: 1
                         Item {
@@ -517,6 +621,17 @@ Item {
                 TapHandler { onTapped: root.nextView() }
             }
         }
+    }
+
+    // Click-outside catcher for the timer/zoom popovers — below floatingBar's
+    // own z (5) so the popovers (its descendants) stay clickable, above
+    // everything else so a click anywhere else in the pane dismisses them
+    // (they used to only close on Escape or a successful "To all slides").
+    MouseArea {
+        anchors.fill: parent
+        z: 4
+        enabled: root.timerOpen || root.zoomOpen
+        onClicked: { root.timerOpen = false; root.zoomOpen = false }
     }
 
     Text {

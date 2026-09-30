@@ -21,6 +21,7 @@
 #include <QStringList>
 #include <QThread>
 
+#include <optional>
 #include <thread>
 
 namespace bl = bps::library;
@@ -660,4 +661,188 @@ void TheTableService::reindex()
 {
     if (library_ && EngineBridge::instance().booted())
         (void)tableLibrary(library_)->IndexWithSearchEngine();
+}
+
+// ---------------------------------------------------------------------------
+// User data — the ENGINE's notes and highlights (bps::library::TheTableLibrary,
+// persisted in the library JSON), the ScriptureService calls so ONE pane UI
+// serves both tabs. Every entry point resolves the reference through the
+// service's own resolve() (year/paragraph shapes AND citation lines); a bad
+// reference is a false/empty answer, never a crash.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct ResolvedSpot
+{
+    QString bookId;
+    int chapter = 0;
+    int verse = 0;
+};
+
+// The reference as a paragraph spot, or nullopt when it doesn't land on one.
+std::optional<ResolvedSpot> resolvedSpot(const QString &reference)
+{
+    if (!EngineBridge::instance().booted())
+        return std::nullopt;
+    const QVariantMap ref = TheTableService::instance().resolve(reference);
+    if (ref.isEmpty() || !ref.contains(QStringLiteral("bookId")))
+        return std::nullopt;
+    ResolvedSpot spot;
+    spot.bookId = ref.value(QStringLiteral("bookId")).toString();
+    spot.chapter = ref.value(QStringLiteral("chapter")).toInt();
+    spot.verse = ref.value(QStringLiteral("verseStart")).toInt();
+    if (spot.verse <= 0)   // sermon-level: notes live on paragraphs
+        return std::nullopt;
+    return spot;
+}
+
+QVariantMap noteToVariant(const bl::TableNote &n)
+{
+    return QVariantMap{
+        { QStringLiteral("reference"), qstr(n.ref) },
+        { QStringLiteral("bookId"), qstr(n.bookId) },
+        { QStringLiteral("chapter"), n.chapter },
+        { QStringLiteral("verse"), n.verse },
+        { QStringLiteral("text"), qstr(n.text) },
+        { QStringLiteral("modifiedMs"), qint64(n.modifiedMs) },
+    };
+}
+
+} // namespace
+
+bool TheTableService::setNote(const QString &reference, const QString &text)
+{
+    auto spot = resolvedSpot(reference);
+    if (!spot)
+        return false;
+    // An empty text REMOVES the note (the delete gesture).
+    auto r = text.trimmed().isEmpty()
+                 ? tableLibrary(library_)->RemoveNote(spot->bookId.toStdString(), spot->chapter,
+                                                      spot->verse)
+                 : tableLibrary(library_)->AddNote(spot->bookId.toStdString(), spot->chapter,
+                                                   spot->verse, text.toStdString());
+    if (!r.ok())
+        return false;
+    emit userDataChanged();
+    emit changed();
+    return true;
+}
+
+QString TheTableService::note(const QString &reference) const
+{
+    auto spot = resolvedSpot(reference);
+    if (!spot)
+        return {};
+    auto r = tableLibrary(library_)->Notes(spot->bookId.toStdString(), spot->chapter, spot->verse);
+    if (!r.ok() || r.value().empty())
+        return {};
+    return qstr(r.value().front().text);
+}
+
+QVariantList TheTableService::notes() const
+{
+    QVariantList out;
+    if (!library_ || !EngineBridge::instance().booted())
+        return out;
+    auto r = tableLibrary(library_)->Notes();
+    if (!r.ok())
+        return out;
+    for (const bl::TableNote &n : r.value())
+        out.append(noteToVariant(n));
+    return out;
+}
+
+bool TheTableService::setHighlighted(const QString &reference, bool on)
+{
+    auto spot = resolvedSpot(reference);
+    if (!spot)
+        return false;
+    auto r = tableLibrary(library_)->SetHighlight(spot->bookId.toStdString(), spot->chapter,
+                                                  spot->verse, on);
+    if (!r.ok())
+        return false;
+    emit userDataChanged();
+    emit changed();
+    return true;
+}
+
+bool TheTableService::isHighlighted(const QString &reference) const
+{
+    auto spot = resolvedSpot(reference);
+    if (!spot)
+        return false;
+    auto r = tableLibrary(library_)->IsHighlighted(spot->bookId.toStdString(), spot->chapter,
+                                                   spot->verse);
+    return r.ok() && r.value();
+}
+
+QVariantList TheTableService::highlights() const
+{
+    QVariantList out;
+    if (!library_ || !EngineBridge::instance().booted())
+        return out;
+    auto r = tableLibrary(library_)->Highlights();
+    if (!r.ok())
+        return out;
+    for (const std::string &key : r.value())
+        out.append(qstr(key));
+    return out;
+}
+
+// ---- id-shaped reads -------------------------------------------------------
+// The pane knows the book's engine id ("Y1953") and the paragraph number —
+// no reference synthesis in QML (the year-book grammar lives HERE, once).
+
+bool TheTableService::isVerseHighlighted(const QString &bookId, int chapter, int verse) const
+{
+    if (!library_ || !EngineBridge::instance().booted())
+        return false;
+    auto r = tableLibrary(library_)->IsHighlighted(bookId.toStdString(), chapter, verse);
+    return r.ok() && r.value();
+}
+
+QString TheTableService::verseNote(const QString &bookId, int chapter, int verse) const
+{
+    if (!library_ || !EngineBridge::instance().booted())
+        return {};
+    auto r = tableLibrary(library_)->Notes(bookId.toStdString(), chapter, verse);
+    if (!r.ok() || r.value().empty())
+        return {};
+    return qstr(r.value().front().text);
+}
+
+QVariantMap TheTableService::chapterUserData(const QString &bookId, int chapter) const
+{
+    QVariantMap out;
+    if (!library_ || !EngineBridge::instance().booted())
+        return out;
+    // ONE engine sweep per open sermon: every note and highlight landing on
+    // this chapter's paragraphs, keyed "<verse>" for the rows.
+    const std::string prefix = bookId.toStdString() + ":" + std::to_string(chapter) + ":";
+    auto marks = tableLibrary(library_)->Highlights();
+    if (marks.ok()) {
+        for (const std::string &key : marks.value()) {
+            if (key.rfind(prefix, 0) != 0)
+                continue;
+            const int verse = std::atoi(key.c_str() + prefix.size());
+            if (verse <= 0)
+                continue;
+            const QString qkey = QString::number(verse);
+            QVariantMap mark = out.value(qkey).toMap();   // QVariant: merge explicitly
+            mark[QStringLiteral("highlight")] = true;
+            out[qkey] = mark;
+        }
+    }
+    auto all = tableLibrary(library_)->Notes();
+    if (all.ok()) {
+        for (const bl::TableNote &n : all.value()) {
+            if (n.bookId != bookId.toStdString() || n.chapter != chapter || n.verse <= 0)
+                continue;
+            const QString qkey = QString::number(n.verse);
+            QVariantMap mark = out.value(qkey).toMap();
+            mark[QStringLiteral("note")] = qstr(n.text);
+            out[qkey] = mark;
+        }
+    }
+    return out;
 }

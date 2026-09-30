@@ -106,6 +106,36 @@ public:
     RgbaImage BuildAtlas(float sizePx,
                          std::map<uint8_t, FontGlyph>& outGlyphs) const;
 
+    // REAL system font backend (Windows GDI+, docs/specs/17's own "TrueType/
+    // OpenType backends plug in behind the same interface"). `family` names
+    // an installed font ("Segoe UI"...); ASCII 32..126, antialiased, with
+    // REAL measured per-glyph advances — not the builtin font's uniform
+    // cellWidth-ratio estimate — so wrapping and drawing agree on width.
+    // Returns an empty atlas on non-Windows or if the family/GDI+ can't be
+    // resolved; every caller falls back to BuildAtlas (the builtin font)
+    // when this comes back empty, so a missing font never blanks a slide.
+    RgbaImage BuildSystemAtlas(const std::string& family, float sizePx, bool bold, bool italic,
+                               std::map<uint8_t, FontGlyph>& outGlyphs) const;
+    // True if `family` is usable as a system font on this platform right
+    // now (GDI+ available and the family resolves) — callers branch on
+    // this rather than trying BuildSystemAtlas and inspecting for empty,
+    // since an empty atlas can also legitimately mean "no glyphs fit".
+    bool HasSystemFont(const std::string& family) const;
+    // Real measured advance width (px) for ONE character in the named
+    // system font — what TextLayout::Measure/MeasureLine call per
+    // character when the style names a real font, instead of the builtin
+    // font's uniform estimate. 0 if the family can't be resolved.
+    float SystemCharAdvance(const std::string& family, float sizePx, bool bold, bool italic,
+                            uint8_t codepoint) const;
+    // Batch form — TextLayout::Measure's own word-wrap loop needs many
+    // characters' widths per call; this builds ONE GDI+ Font/Graphics
+    // context for the whole string instead of SystemCharAdvance's
+    // per-call setup cost repeated per character. One entry per character
+    // of `text`, same order; empty if the family doesn't resolve (the
+    // caller falls back to the builtin estimate for the whole string).
+    std::vector<float> SystemCharAdvances(const std::string& family, float sizePx, bool bold,
+                                          bool italic, const std::string& text) const;
+
 private:
     std::map<std::string, Font, std::less<>> fonts_;
     bool builtinRegistered_ = false;

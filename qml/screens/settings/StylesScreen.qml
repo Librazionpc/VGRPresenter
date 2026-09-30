@@ -112,8 +112,10 @@ Item {
     property bool editShowMedia: false
     property bool editShowScripture: false
     property bool editShowTable: false
-    // PER-FAMILY template picks — each active content type can carry its OWN
-    // template; "" = that family inherits the whole-style Template below.
+    // PER-FAMILY template picks — each active content type carries its OWN
+    // template ("" = none for that family). NO INHERIT: a family only ever
+    // renders a template picked for IT (Shows alone falls back to the Bible
+    // template, baked engine-side).
     property string editFamilyShows: ""
     property string editFamilyMedia: ""
     property string editFamilyScripture: ""
@@ -125,15 +127,15 @@ Item {
     property string editStyleCategory: ""
     // The picked family's template key: its own pick when it has one, else
     // the whole-style key (what the Template row shows and edits).
+    // The picked family's OWN template key ("" = no template for it — the
+    // row shows None). No inherit: a family never falls back to the
+    // whole-style key.
     readonly property string editActiveFamilyKey: {
-        if (root.editTemplateFamily === "shows" && root.editFamilyShows !== "") return root.editFamilyShows
-        if (root.editTemplateFamily === "media" && root.editFamilyMedia !== "") return root.editFamilyMedia
-        if (root.editTemplateFamily === "scripture" && root.editFamilyScripture !== "") return root.editFamilyScripture
-        if (root.editTemplateFamily === "table" && root.editFamilyTable !== "") return root.editFamilyTable
-        return root.editStyleTemplateKey
+        if (root.editTemplateFamily === "shows") return root.editFamilyShows
+        if (root.editTemplateFamily === "media") return root.editFamilyMedia
+        if (root.editTemplateFamily === "scripture") return root.editFamilyScripture
+        return root.editFamilyTable
     }
-    readonly property bool editActiveFamilyOverridden:
-        root.editActiveFamilyKey !== root.editStyleTemplateKey
 
     function openEditStyle(index, family) {
         const data = StyleListModel.getStyle(index)
@@ -800,7 +802,7 @@ Item {
 
             Text {
                 width: parent.width
-                text: qsTr("An unselected type is not allowed on an output wearing this style — its content is refused on air. The Template below belongs to the picked type.")
+                text: qsTr("An unselected type is not allowed on an output wearing this style — its content is refused on air. The Template below belongs to the picked type; a type with none set renders plain (Shows falls back to the Bible template).")
                 color: Theme.textMuted
                 font.family: Theme.fontFamily
                 font.pixelSize: Theme.textXs
@@ -808,55 +810,25 @@ Item {
             }
         }
 
-        // SHOWS-ONLY CATEGORY (free text label — filed under in the shows
-        // library; only meaningful when the Shows pill is on).
-        Column {
+        // SHOWS-ONLY CATEGORY — a dropdown over the shows library's own
+        // categories (was free text: a typo silently filed a style under a
+        // category that never matched any real show). "None" clears it.
+        SelectField {
             width: parent.width
-            spacing: Theme.space2
             visible: root.editShowShows
-
-            Text {
-                text: qsTr("Category (Shows only)")
-                color: Theme.textSecondary
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textXs
-            }
-
-            Rectangle {
-                width: parent.width
-                height: 40
-                radius: Theme.radiusMd
-                color: Theme.inset
-
-                TextInput {
-                    anchors.fill: parent
-                    anchors.margins: 12
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: root.editStyleCategory
-                    color: Theme.textPrimary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
-                    selectByMouse: true
-                    clip: true
-                    onTextEdited: (t) => root.editStyleCategory = t
-                }
-                Text {
-                    visible: root.editStyleCategory === ""
-                    x: 12
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: qsTr("e.g. Worship")
-                    color: Theme.textMuted
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
-                }
-            }
+            label: qsTr("Category (Shows only)")
+            placeholder: qsTr("None")
+            value: root.editStyleCategory
+            options: [{ label: qsTr("None"), value: "" }].concat(
+                ShowService.libraryCategories.map((c) => ({ label: c, value: c })))
+            onValuePicked: (v) => root.editStyleCategory = v
         }
 
         // TEMPLATE — PER CONTENT TYPE: the row edits the family picked by the
-        // chips above. A family with its own pick shows its template name and
-        // an "inherits" chip appears to reset it back to the whole-style
-        // template; a family without one shows the whole-style template and
-        // picking one here sets the family's OWN override.
+        // chips above and shows THAT family's own pick (None when it has
+        // none). Picking sets the family's own template; the None chip
+        // clears it back to no template (Shows then falls back to the Bible
+        // template).
         Column {
             width: parent.width
             spacing: Theme.space2
@@ -882,23 +854,23 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     width: parent.width - resetFamilyTemplate.width - changeTemplate.width - 60
                     elide: Text.ElideRight
-                    text: root.templateNameFor(root.editActiveFamilyKey)
-                          + (root.editActiveFamilyOverridden ? "" : qsTr("  ·  inherited"))
-                    color: root.editActiveFamilyOverridden ? Theme.textPrimary : Theme.textSecondary
+                    text: root.editActiveFamilyKey === ""
+                          ? qsTr("None") : root.templateNameFor(root.editActiveFamilyKey)
+                    color: root.editActiveFamilyKey === "" ? Theme.textMuted : Theme.textPrimary
                     font.family: Theme.fontFamily
                     font.pixelSize: Theme.textSm
                 }
 
-                // INHERIT/RESET chip: visible when the picked family carries
-                // its OWN template; clicking clears it back to the whole-style
-                // template. Clicking Change while inherited SETS the family's
-                // own pick (the override begins).
+                // NONE chip: visible when the picked family carries its own
+                // template; clicking clears it to no template. Picking via
+                // Change sets the family's own pick. Every styling choice is
+                // explicit — nothing is inherited.
                 Rectangle {
                     id: resetFamilyTemplate
                     anchors.right: changeTemplate.left
                     anchors.rightMargin: 8
                     anchors.verticalCenter: parent.verticalCenter
-                    visible: root.editActiveFamilyOverridden
+                    visible: root.editActiveFamilyKey !== ""
                     height: 26
                     width: resetFamilyTemplateLabel.implicitWidth + 22
                     radius: 13
@@ -910,7 +882,7 @@ Item {
                     Text {
                         id: resetFamilyTemplateLabel
                         anchors.centerIn: parent
-                        text: qsTr("Inherit")
+                        text: qsTr("None")
                         color: Theme.textMuted
                         font.family: Theme.fontFamily
                         font.pixelSize: Theme.textXs
@@ -931,7 +903,7 @@ Item {
                 }
 
                 Rectangle {
-                    id: changeTemplate   // referenced by the row's label width + the Inherit chip's anchor
+                    id: changeTemplate   // referenced by the row's label width + the None chip's anchor
                     anchors.right: parent.right
                     anchors.rightMargin: 12
                     anchors.verticalCenter: parent.verticalCenter
@@ -1220,9 +1192,8 @@ Item {
     TemplatePickerModal {
         id: templatePicker
         onApplied: (tpl) => {
-            // The pick lands in the PICKED FAMILY's own slot (a per-type
-            // override); only a family-less default routes to the whole-style
-            // key. "Inherit" on the row is the way back to the shared one.
+            // The pick lands in the PICKED FAMILY's own slot — the only place
+            // a template choice lives (no inherit).
             if (root.editTemplateFamily === "shows") root.editFamilyShows = tpl.key
             else if (root.editTemplateFamily === "media") root.editFamilyMedia = tpl.key
             else if (root.editTemplateFamily === "scripture") root.editFamilyScripture = tpl.key

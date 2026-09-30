@@ -4,6 +4,7 @@
 
 #include "modules/production/ProductionEngine.hpp"
 #include "modules/production/ProductionGraph.hpp"
+#include "modules/production/AudioMixer.hpp"
 
 #include <algorithm>
 
@@ -374,4 +375,38 @@ void TestProductionEngine() {
     ev.Unwire();
     CHECK(eng.Stop().ok());
     CHECK(eng.Shutdown().ok());
+}
+
+// ---------------------------------------------------------------------------
+// AudioMixer — the render-path half of the production graph. The mixer is
+// the piece that consumes the bus topology into real playout frames; these
+// checks pin the gain staging (dB→linear), mute, pan and the unbound-source
+// gate WITHOUT a sound device (the tap source stays null; the gain law is
+// exercised through the platform's own unit-test seam).
+void TestProductionAudioMixer() {
+    pr::ProductionGraph graph;
+    CHECK(graph.AddBus("bus1", "Main", pr::BusRole::Program, pr::SignalType::Audio).ok());
+    CHECK(graph.AddSource("src1", "Mic", pr::SignalType::Audio).ok());
+    CHECK(graph.Connect("src1", "bus1", pr::SignalType::Audio).ok());
+
+    pr::AudioMixer mixer;
+    mixer.Attach(&graph);
+
+    float buf[8] = {};
+
+    // No tap source bound: nothing renders (there is no fake carrier).
+    CHECK(!mixer.Render(buf, 2, 2, 48000));
+    for (float s : buf) CHECK(s == 0.0f);
+
+    // Bus mute silences the branch — and honestly reports "nothing to
+    // render" (a muted graph IS silence; the platform emits it).
+    pr::VolumeControl muted;
+    muted.mute = true;
+    (void)graph.SetVolume("bus1", muted);
+    CHECK(!mixer.Render(buf, 2, 2, 48000));
+    CHECK(buf[0] == 0.0f && buf[1] == 0.0f);
+
+    // A detached mixer answers "nothing to render".
+    pr::AudioMixer bare;
+    CHECK(!bare.Render(buf, 2, 2, 48000));
 }

@@ -99,6 +99,25 @@ public:
     // Devices with a live preview tap (drives any future frame pump).
     virtual std::vector<std::string> ActivePreviews() const { return {}; }
 
+    // The SAME tap's newest frame, decoded — for an engine-side compositor
+    // consumer (SceneBuilder painting a taken camera/screen input into a
+    // real Frame) rather than a QML thumbnail pane, which wants the raw
+    // PreviewFrame() JPEG bytes instead (its own Qt-side decode). Deliberately
+    // a plain PAL-local struct, not modules/rendering's RgbaImage or
+    // modules/media's Picture — platform/ stays a leaf layer with no
+    // dependency upward into modules/. Empty = no tap or no frame yet.
+    struct DecodedFrame {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        std::vector<uint8_t> rgba;   // tightly packed RGBA8, row 0 at the top
+        bool empty() const { return width == 0 || height == 0 || rgba.empty(); }
+    };
+    virtual DecodedFrame PreviewFramePixels(const std::string &deviceId)
+    {
+        (void)deviceId;
+        return {};
+    }
+
     // ---- Screen-capture taps (monitor id = IMonitor's "\\\.\DISPLAY1") ----
     // Same pane contract as the camera taps: Start → ~15 fps JPEG via
     // PreviewFrame, Stop, idempotent. The Windows backend grabs the monitor

@@ -73,6 +73,14 @@ public:
                                     std::string_view layerId);
     Result<RenderObject*> GetObject(std::string_view sceneId, std::string_view objId) const;
     std::vector<RenderObject*> CollectObjects(std::string_view sceneId) const;
+    // Detaches objId from sceneId's scene graph (SceneNode::RemoveChild
+    // under the hood). For a CACHED scene whose object set can change
+    // between renders without the scene itself being rebuilt (e.g.
+    // SceneBuilder's compositor layers — a taken input/media frame updates
+    // via GetObject+mutate-in-place instead, but an overlay taken/cleared
+    // mid-slide needs an object actually gone, not just re-added on top of
+    // a stale one AddObject would otherwise duplicate).
+    Result<void> RemoveObject(std::string_view sceneId, std::string_view objId);
 
     // --- Layers ---
     Result<void> AddLayer(std::string_view sceneId, const Layer& layer);

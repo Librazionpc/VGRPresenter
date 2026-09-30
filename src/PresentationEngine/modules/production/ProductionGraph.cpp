@@ -313,6 +313,46 @@ bool ProductionGraph::WouldCreateCycle(std::string_view from, std::string_view t
     return Reachable(to, from, edges_);
 }
 
+bool ProductionGraph::CanConnect(std::string_view from, std::string_view to,
+                                 SignalType type) const {
+    const auto fit = nodes_.find(std::string(from));
+    const auto tit = nodes_.find(std::string(to));
+    // A MISSING node is NOT a refusal. The old rule here ("EnsureNode would
+    // create them; a TEST never does") sounded right but was backwards in
+    // practice: callers (BusListModel::toggleAudioRoute/toggleVideoRoute)
+    // lazily AddSource() the FROM node themselves, right before calling
+    // Connect(), whenever it's missing — a brand-new, never-before-routed
+    // source has no node yet, which is the COMMON case for a video source
+    // (nothing else ever creates its node proactively the way
+    // AudioInputListModel::pushEffectsToGraph does for audio on any
+    // level/mute change). Refusing here meant a video source's very FIRST
+    // connection attempt was refused unconditionally, forever — the node
+    // it was checking for only ever gets created BY a successful connect,
+    // which this pre-check never let happen. Treating a missing node as
+    // "will be created with exactly `type`" matches what Connect() actually
+    // does immediately afterward.
+    if (fit != nodes_.end() && fit->second.signalType != type)
+        return false;
+    if (tit != nodes_.end() && tit->second.signalType != type)
+        return false;
+    // A node that doesn't exist yet has no edges, so it cannot be part of a
+    // cycle — only check when both sides are already real.
+    if (fit != nodes_.end() && tit != nodes_.end() && WouldCreateCycle(from, to))
+        return false;
+    // The video 1:1 policy, the graph-side half: a VIDEO BUS with a video
+    // source already feeding it is full — except when the tested edge IS
+    // that source (the existing route). Audio buses fan in freely. (Buses
+    // are always created up front with both planes — AddBus() in
+    // BusListModel::createBusRow — so `to` missing here is only a
+    // theoretical/defensive case, not one the UI can actually reach.)
+    if (type == SignalType::Video && tit != nodes_.end() && tit->second.kind == NodeKind::Bus) {
+        const auto sit = edges_.find(std::string(to));
+        if (sit != edges_.end() && !sit->second.empty() && !sit->second.count(std::string(from)))
+            return false;
+    }
+    return true;
+}
+
 Result<void> ProductionGraph::Connect(std::string_view from, std::string_view to,
                                       SignalType type) {
     if (auto r = EnsureNode(from); !r.ok()) return r;

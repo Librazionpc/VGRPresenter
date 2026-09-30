@@ -470,7 +470,7 @@ Item {
                     Row {
                         visible: root.showResults
                         width: parent.width
-                        height: Math.min(7, root.filteredTemplates.length) * 54
+                        height: Math.min(7, root.filteredTemplates.length) * 58
                         spacing: 6
 
                     Flickable {
@@ -496,7 +496,7 @@ Item {
                                     readonly property bool selected: root.selectedKey === tplRow.modelData.key
 
                                     width: listCol.width
-                                    height: 48
+                                    height: 52
                                     radius: 8
                                     color: tplRow.selected ? "#1a2240" : (rowArea.containsMouse ? "#191b24" : "#161823")
                                     border.width: tplRow.selected ? 1.5 : 1
@@ -504,34 +504,45 @@ Item {
                                     Behavior on color { ColorAnimation { duration: 100 } }
 
                                     // A plain generic mark, not a redundant tiny render of the design - the actual preview is the
-                                    // big pane on the left; a 34px render of it here read as an unexplained blob of colour, not a
+                                    // big pane on the left; a 36px render of it here read as an unexplained blob of colour, not a
                                     // thumbnail anyone could read.
                                     Rectangle {
                                         x: 10
                                         anchors.verticalCenter: parent.verticalCenter
-                                        width: 34
-                                        height: 34
+                                        width: 36
+                                        height: 36
                                         radius: 5
                                         color: "#0d0f16"
                                         border.color: "#262a38"
                                         border.width: 1
 
-                                        IconGlyph {
+                                        // layoutTemplate is a hand-sized (non-24-grid) glyph — its
+                                        // 9x9 native box has more empty margin than the grid24
+                                        // icons IconGlyph can scale with `fit`. Explicitly centering
+                                        // it in an Item exactly its own size (rather than leaving
+                                        // it inside a bigger 16x16 IconGlyph box) removes that
+                                        // extra margin so it reads centered instead of adrift in
+                                        // the corner of its own bounding box.
+                                        Item {
                                             anchors.centerIn: parent
-                                            name: "layoutTemplate"
-                                            color: "#8a94a6"
-                                            width: 16; height: 16
+                                            width: 18; height: 18
+                                            IconGlyph {
+                                                anchors.centerIn: parent
+                                                name: "layoutTemplate"
+                                                color: "#8a94a6"
+                                                width: 18; height: 18
+                                            }
                                         }
                                     }
 
                                     Text {
-                                        x: 54
+                                        x: 58
                                         anchors.verticalCenter: parent.verticalCenter
-                                        width: parent.width - 54 - 36
+                                        width: parent.width - 58 - 36
                                         text: tplRow.modelData.name
                                         color: "#eef1f8"
                                         font.family: "Segoe UI"
-                                        font.pixelSize: 14
+                                        font.pixelSize: 15
                                         font.weight: Font.Medium
                                         elide: Text.ElideRight
                                     }

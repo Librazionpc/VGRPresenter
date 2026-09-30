@@ -83,6 +83,22 @@ void SelfTestDriver::click(double x, double y)
 #endif
 }
 
+void SelfTestDriver::press(double x, double y)
+{
+    move(x, y);
+#ifdef Q_OS_WIN
+    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+#endif
+}
+
+void SelfTestDriver::release(double x, double y)
+{
+    move(x, y);
+#ifdef Q_OS_WIN
+    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+#endif
+}
+
 void SelfTestDriver::type(const QString &text)
 {
     if (!m_window)

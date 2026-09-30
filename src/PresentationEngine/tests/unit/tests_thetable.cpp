@@ -421,6 +421,77 @@ void TestTheTableRealPdfs() {
     std::fflush(stdout);
 }
 
+// User data — notes and highlights persisted with the library (the Bible
+// module's AddNote/SetHighlight, keyed "bookId:chapter:verse"). The JSON
+// round-trip is the point: a note must survive a full Load of the file.
+void TestTheTableUserData() {
+    std::filesystem::remove_all(kRoot);
+    auto lib = lib::TheTableLibrary::Open(PathOf("userdata.json"));
+    auto r1 = lib->ImportSermon("downloads/1953/53_0217_Only_Believe.txt",
+                                "Only believe, all things are possible to them that believe.\n\n"
+                                "The second paragraph carries more words so it survives the length filter easily.");
+    CHECK(r1.ok());
+
+    // A note on paragraph 1; an unknown sermon/paragraph is refused.
+    CHECK(lib->AddNote("Y1953", 1, 1, "start here every time").ok());
+    CHECK(!lib->AddNote("Y1953", 1, 9, "no such paragraph").ok());
+    CHECK(!lib->AddNote("Y9999", 1, 1, "no such sermon").ok());
+    CHECK(!lib->AddNote("Y1953", 1, 1, "").ok());
+    auto one = lib->Notes("Y1953", 1, 1);
+    CHECK(one.ok() && one.value().size() == 1);
+    CHECK(one.ok() && one.value().front().text == "start here every time");
+    CHECK(one.ok() && one.value().front().ref == "53-0217 - Only Believe 1");
+    CHECK(lib->Notes("Y1953", 1, 2).ok() && lib->Notes("Y1953", 1, 2).value().empty());
+
+    // Adding to the same paragraph REPLACES the note (one note per paragraph).
+    CHECK(lib->AddNote("Y1953", 1, 1, "revised wording").ok());
+    CHECK(lib->Notes("Y1953", 1, 1).ok() && lib->Notes("Y1953", 1, 1).value().size() == 1);
+    CHECK(lib->Notes("Y1953", 1, 1).value().front().text == "revised wording");
+
+    // A second note (later paragraph) sorts most-recent-first in the sweep.
+    CHECK(lib->AddNote("Y1953", 1, 2, "the closing thought").ok());
+    auto all = lib->Notes();
+    CHECK(all.ok() && all.value().size() == 2);
+    CHECK(all.ok() && all.value().front().text == "the closing thought");
+
+    // Highlights: set, query, clear.
+    CHECK(lib->SetHighlight("Y1953", 1, 1, true).ok());
+    CHECK(!lib->SetHighlight("Y1953", 1, 9, true).ok());
+    CHECK(lib->IsHighlighted("Y1953", 1, 1).ok() && lib->IsHighlighted("Y1953", 1, 1).value());
+    CHECK(lib->IsHighlighted("Y1953", 1, 2).ok() && !lib->IsHighlighted("Y1953", 1, 2).value());
+    auto marks = lib->Highlights();
+    CHECK(marks.ok() && marks.value().size() == 1 && marks.value().front() == "Y1953:1:1");
+
+    // PERSISTENCE: reopen the file from disk — notes and highlights both come back.
+    auto reopened = lib::TheTableLibrary::Open(PathOf("userdata.json"));
+    auto survived = reopened->Notes("Y1953", 1, 1);
+    CHECK(survived.ok() && survived.value().size() == 1);
+    CHECK(survived.ok() && survived.value().front().text == "revised wording");
+    auto allSurvived = reopened->Notes();
+    CHECK(allSurvived.ok() && allSurvived.value().size() == 2);
+    auto marksSurvived = reopened->Highlights();
+    CHECK(marksSurvived.ok() && marksSurvived.value().size() == 1
+          && marksSurvived.value().front() == "Y1953:1:1");
+    CHECK(reopened->IsHighlighted("Y1953", 1, 1).ok() && reopened->IsHighlighted("Y1953", 1, 1).value());
+
+    // Clearing a highlight persists too.
+    CHECK(reopened->SetHighlight("Y1953", 1, 1, false).ok());
+    auto rechecked = lib::TheTableLibrary::Open(PathOf("userdata.json"));
+    CHECK(rechecked->IsHighlighted("Y1953", 1, 1).ok() && !rechecked->IsHighlighted("Y1953", 1, 1).value());
+    CHECK(rechecked->Notes().ok() && rechecked->Notes().value().size() == 2);
+
+    // Removal: gone from memory AND from the reopened file (the delete must
+    // write through, not just drop the in-memory entry).
+    CHECK(rechecked->RemoveNote("Y1953", 1, 2).ok());
+    CHECK(rechecked->Notes("Y1953", 1, 2).ok() && rechecked->Notes("Y1953", 1, 2).value().empty());
+    CHECK(rechecked->Notes().ok() && rechecked->Notes().value().size() == 1);
+    auto reagain = lib::TheTableLibrary::Open(PathOf("userdata.json"));
+    CHECK(reagain->Notes().ok() && reagain->Notes().value().size() == 1);
+    CHECK(reagain->Notes("Y1953", 1, 1).ok() && reagain->Notes("Y1953", 1, 1).value().front().text == "revised wording");
+
+    std::filesystem::remove_all(kRoot);
+}
+
 // Search Engine integration (docs/specs/20 §DocumentAdapterRegistry, the Bible
 // precedent): IndexWithSearchEngine puts one document per sermon into the
 // platform index — type "table", upsert-safe, removable — so the app-wide

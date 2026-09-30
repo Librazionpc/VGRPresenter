@@ -44,6 +44,28 @@ Rectangle {
     // The search button at the left end of the tab row.
     signal searchClicked()
 
+    // Window drag / maximize by the strip itself. Declared FIRST — z-order is
+    // declaration order, so every control below (GO LIVE, tabs, Search,
+    // Settings, window buttons) stacks ABOVE this and takes its own clicks
+    // before this sees them. Declared after the GO LIVE button once, the
+    // full-header drag layer buried it and the button stopped responding.
+    Item {
+        anchors.fill: parent
+
+        DragHandler {
+            target: null
+            onActiveChanged: {
+                // Only while windowed: a maximized window is restored by double-click.
+                if (active && root.Window.window && root.Window.window.visibility === Window.Windowed)
+                    root.Window.window.startSystemMove()
+            }
+        }
+        TapHandler {
+            acceptedButtons: Qt.LeftButton
+            onDoubleTapped: windowButtons.toggleMaximize()
+        }
+    }
+
     // GO LIVE sits directly beside Settings (user call). Reads the shared
     // live service; no signal needed — it calls it directly.
     readonly property bool live: LiveOutputService.live
@@ -107,26 +129,6 @@ Rectangle {
             font.weight: Font.DemiBold
             font.letterSpacing: 0.5
             textFormat: Text.PlainText
-        }
-    }
-
-    // Window drag / maximize by the strip itself. Declared FIRST so every control above
-    // it (menu labels, tabs, gear, window buttons) takes its own clicks before this sees
-    // them.
-    Item {
-        anchors.fill: parent
-
-        DragHandler {
-            target: null
-            onActiveChanged: {
-                // Only while windowed: a maximized window is restored by double-click.
-                if (active && root.Window.window && root.Window.window.visibility === Window.Windowed)
-                    root.Window.window.startSystemMove()
-            }
-        }
-        TapHandler {
-            acceptedButtons: Qt.LeftButton
-            onDoubleTapped: windowButtons.toggleMaximize()
         }
     }
 

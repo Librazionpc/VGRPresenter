@@ -420,6 +420,100 @@ void TestBiblePersistence() {
     (void)fs.RemoveAll(root);
 }
 
+// ---------------------------------------------------------------------------
+// User-data persistence: notes, highlights, and collections survive a full
+// engine restart when a store path is set (they ride the same JSON file as
+// the bibles, schema 2) and stay in memory without one — the parity The
+// Table's library has had all along (docs/specs/24 §User Data).
+// ---------------------------------------------------------------------------
+void TestBibleUserDataPersist() {
+    auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    const std::string root = "/tmp/bps_bible_userdata";
+    const std::string store = root + "/bibles.json";
+    (void)fs.RemoveAll(root);
+
+    auto& eng = bb::BibleEngine::Instance();
+    const char* xml =
+        "<bible abbrev=\"PRZ\" name=\"Userdata Bible\">"
+        "<book bnum=\"1\" bsname=\"GEN\" bname=\"Genesis\">"
+        "<chapter number=\"1\">"
+        "<verse number=\"1\">In the beginning God created the heaven and the earth.</verse>"
+        "<verse number=\"2\">And the earth was without form and void.</verse>"
+        "<verse number=\"3\">And God said, Let there be light.</verse>"
+        "</chapter></book></bible>";
+
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.Start().ok());
+    eng.SetStorePath(store);
+    CHECK(eng.Import(xml, "xml", bb::ImportOptions{std::string("PRZ"), std::string(), false, false}).ok());
+
+    auto noteRef = eng.ResolveReference("Genesis 1:3", "PRZ");
+    auto hiRef = eng.ResolveReference("Genesis 1:1", "PRZ");
+    auto colRef = eng.ResolveReference("Genesis 1:2", "PRZ");
+    CHECK(noteRef.ok() && hiRef.ok() && colRef.ok());
+    CHECK(eng.AddNote("PRZ", noteRef.value(), "preach here").ok());
+    CHECK(eng.SetHighlight("PRZ", hiRef.value(), true).ok());
+    CHECK(eng.AddCollection("Advent").ok());
+    CHECK(eng.AddToCollection("Advent", colRef.value()).ok());
+
+    // The user-data save rewrites the ONE store file, so the bible itself
+    // must still read back (the disk-merge kept its bibles array).
+    CHECK(fs.Exists(store));
+    CHECK(eng.BibleCount() == 1);
+    CHECK(eng.Metadata("PRZ").ok() && eng.Metadata("PRZ").value().name == "Userdata Bible");
+
+    // ---- full restart: user data comes back with the translation ----
+    CHECK(eng.Stop().ok());
+    CHECK(eng.Shutdown().ok());
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.Start().ok());
+    CHECK(eng.BibleCount() == 1);
+    auto notes = eng.Notes("PRZ", noteRef.value());
+    CHECK(notes.ok() && notes.value().size() == 1);
+    CHECK(notes.ok() && notes.value().front().text == "preach here");
+    CHECK(notes.ok() && notes.value().front().id.starts_with("note-"));
+    // The whole-bible roster (the notes drawer's source) sees it too.
+    auto roster = eng.Notes("PRZ");
+    CHECK(roster.ok() && roster.value().size() == 1);
+    auto highlights = eng.Highlights("PRZ");
+    CHECK(highlights.ok() && highlights.value().size() == 1);
+    CHECK(highlights.ok() && highlights.value().front().bookId == "GEN"
+          && highlights.value().front().verseStart == 1);
+    auto col = eng.Collection("Advent");
+    CHECK(col.ok() && col.value().size() == 1);
+    CHECK(col.ok() && col.value().front().bookId == "GEN" && col.value().front().chapter == 1
+          && col.value().front().verseStart == 2);
+
+    // ---- removals persist too: a deleted note stays deleted ----
+    CHECK(eng.RemoveNote("PRZ", noteRef.value()).ok());
+    CHECK(eng.Notes("PRZ", noteRef.value()).value().empty());
+    CHECK(eng.SetHighlight("PRZ", hiRef.value(), false).ok());
+    CHECK(eng.Stop().ok());
+    CHECK(eng.Shutdown().ok());
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.Start().ok());
+    CHECK(eng.Notes("PRZ", noteRef.value()).value().empty());
+    CHECK(eng.Notes("PRZ").value().empty());
+    CHECK(eng.Highlights("PRZ").value().empty());
+    CHECK(eng.Collection("Advent").value().size() == 1);   // untouched survives
+
+    // ---- no store path = no persistence (the unit-test default) ----
+    eng.SetStorePath("");
+    CHECK(eng.Reset().ok());
+    CHECK(eng.Import(xml, "xml", bb::ImportOptions{std::string("PRZ"), std::string(), false, false}).ok());
+    CHECK(eng.AddNote("PRZ", noteRef.value(), "ephemeral").ok());
+    CHECK(eng.Stop().ok());
+    CHECK(eng.Shutdown().ok());
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.Start().ok());
+    CHECK(eng.BibleCount() == 0);
+    CHECK(eng.Notes("PRZ").value().empty());
+
+    CHECK(eng.Stop().ok());
+    CHECK(eng.Shutdown().ok());
+    (void)fs.RemoveAll(root);
+}
+
 void TestBibleOutline() {
     auto& eng = bb::BibleEngine::Instance();
     CHECK(eng.Initialize().ok());

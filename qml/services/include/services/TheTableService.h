@@ -96,6 +96,22 @@ public:
     // Returns true when a sermon landed in the library.
     Q_INVOKABLE bool newSermon();
 
+    // ---- User data (the ScriptureService calls, the shared pane's drawer) ----
+    // The engine (TheTableLibrary) persists notes and highlights in the
+    // library JSON; `reference` may be "1953 12:3" or a sermon citation
+    // line — it resolves before anything stores. A bad one answers false/{}.
+    Q_INVOKABLE bool setNote(const QString &reference, const QString &text);
+    Q_INVOKABLE QString note(const QString &reference) const;
+    Q_INVOKABLE QVariantList notes() const;
+    Q_INVOKABLE bool setHighlighted(const QString &reference, bool on);
+    Q_INVOKABLE bool isHighlighted(const QString &reference) const;
+    Q_INVOKABLE QVariantList highlights() const;
+    // Id-shaped reads (no reference synthesis in QML) + the ONE batched call
+    // the verse rows read: { "5": { highlight: true, note: "..." } }.
+    Q_INVOKABLE bool isVerseHighlighted(const QString &bookId, int chapter, int verse) const;
+    Q_INVOKABLE QString verseNote(const QString &bookId, int chapter, int verse) const;
+    Q_INVOKABLE QVariantMap chapterUserData(const QString &bookId, int chapter) const;
+
     // "Add sermons folder": picks a folder and imports every .pdf/.txt under
     // it (recursively) on a WORKER THREAD — the UI stays live; `progress`
     // carries { done, total, current } per file and one final `imported`
@@ -113,6 +129,7 @@ signals:
     // searchAsync's answer: token matches the request, rows are the hits
     // (search()'s shape). Stale tokens never emit.
     void searchResultsReady(int token, const QVariantList &rows);
+    void userDataChanged();
 
 private:
     std::atomic<int> latestSearchToken_{0};   // searchAsync: only the newest emits

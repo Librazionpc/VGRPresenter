@@ -15,6 +15,8 @@
 VideoSourceListModel::VideoSourceListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
+    s_instance = this;
+
     // Starts EMPTY — no seeded cards. Cameras/screens come from the ENGINE's
     // video PAL (Media Foundation enumeration; the dialogs' Device selects
     // read EngineBridge.videoDevices), so a hardcoded mock roster would lie

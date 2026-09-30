@@ -183,6 +183,15 @@ Result<RenderObject*> RenderEngine::AddObject(std::string_view sceneId,
     return obj.get();
 }
 
+Result<void> RenderEngine::RemoveObject(std::string_view sceneId, std::string_view objId) {
+    auto scene = scenes_.GetScene(sceneId);
+    if (!scene.ok()) return scene.error();
+    if (!scene.value()->Root()->RemoveChild(objId))
+        return Error::Make(Err::Render_ObjectNotFound, "Render",
+                           "object '" + std::string(objId) + "' not found");
+    return Ok();
+}
+
 Result<RenderObject*> RenderEngine::GetObject(std::string_view sceneId,
                                               std::string_view objId) const {
     auto scene = scenes_.GetScene(sceneId);
@@ -414,14 +423,30 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
     style.color.a *= obj->Opacity();
 
     auto layoutRes = cache_.Layout(obj->Text(), style, fonts_);
+    Logger::Instance().Info(std::format(
+        "TEMPDIAG DrawTextObject text.len={} fontId='{}' size={} layoutOk={} lines={}",
+        obj->Text().size(), style.fontId, style.size, layoutRes.ok(),
+        layoutRes.ok() ? layoutRes.value().lines.size() : 0), "TEMPDIAG");
     if (!layoutRes.ok() || layoutRes.value().lines.empty()) return;
 
-    auto atlas = cache_.GlyphAtlas(style.size);
+    // Real font when style.fontId names one the system can resolve (GDI+,
+    // Windows), else the builtin bitmap font — same "try real, degrade
+    // gracefully" contract as the cache's own fallback inside this call.
+    auto atlas = cache_.GlyphAtlas(style, fonts_);
+    Logger::Instance().Info(std::format("TEMPDIAG atlas.ok={}", atlas.ok()), "TEMPDIAG");
     if (!atlas.ok()) return;
     const auto& entry = *atlas.value();
+    Logger::Instance().Info(std::format("TEMPDIAG atlas size={}x{} glyphs={}",
+                                       entry.atlas.width, entry.atlas.height, entry.glyphs.size()),
+                            "TEMPDIAG");
 
-    // Ensure the atlas texture is uploaded once.
-    const std::string atlasName = std::format("__font_atlas_{}", static_cast<int>(style.size));
+    // Ensure the atlas texture is uploaded once. Keyed by font identity too
+    // (not just size) — otherwise switching fonts/weights at the same
+    // pixel size would keep reading whichever atlas uploaded FIRST under
+    // this name, showing the wrong glyphs for every style after the first.
+    const std::string atlasName = std::format("__font_atlas_{}_{}_{}_{}",
+                                              style.fontId, static_cast<int>(style.size),
+                                              style.bold, style.italic);
     auto tex = gpu_.GetTexture(atlasName);
     TextureId tid = tex.ok() ? tex.value() : TextureId{};
     if (!tid.valid()) {

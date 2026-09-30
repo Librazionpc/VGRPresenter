@@ -30,6 +30,7 @@ public:
     Result<void> StopPreview(const std::string &deviceId) override;
     std::vector<uint8_t> PreviewFrame(const std::string &deviceId) override;
     std::vector<std::string> ActivePreviews() const override;
+    DecodedFrame PreviewFramePixels(const std::string &deviceId) override;
 
     Result<void> StartScreenPreview(const std::string &monitorId) override;
     Result<void> StopScreenPreview(const std::string &monitorId) override;

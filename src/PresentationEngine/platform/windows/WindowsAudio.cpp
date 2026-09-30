@@ -164,6 +164,19 @@ struct WindowsAudio::MeterTap {
     std::string deviceName;   // roster name — the reliable endpoint match key
     bool loopback = false;    // false = input capture, true = render loopback
     IAudio::InputMeterLevels latest;   // written by the capture thread under the table's mutex
+
+    // ---- Sample-through FIFO (the mixer's REAL carrier) ----------------
+    // The capture thread pushes its converted interleaved float32 frames
+    // here; AudioMixer (via ReadTapAudio) drains them per render chunk —
+    // the device's actual samples, not a level-carried approximation.
+    // ~200 ms of headroom at 48 kHz absorbs render-chunk jitter without
+    // growing; the mixer drains at the playout rate, so this stays near
+    // empty in steady state and a slow pump drops OLDEST samples (voice).
+    static constexpr size_t kRingFrames = 9600;
+    std::vector<float> ring;            // kRingFrames * channels samples
+    size_t ringChannels = 0;
+    size_t ringRead = 0, ringWrite = 0; // frame indices, ring.size() wrap
+    uint32_t ringRate = 0;
     // Owned + joined by the tap itself: erasing the tap (Stop, destructor)
     // blocks until the capture thread has fully exited, so no reference into
     // this storage — or into the table's mutex, which the thread takes to
@@ -331,6 +344,12 @@ void WindowsAudio::MeterThread(MeterTap &tap, std::mutex &publishMutex, bool loo
         tap.latest = base;
     }
 
+    // The sample-through ring: allocate once per tap start (format-fixed).
+    tap.ringChannels = channels;
+    tap.ringRate = rate;
+    tap.ring.assign(static_cast<size_t>(MeterTap::kRingFrames) * channels, 0.0f);
+    tap.ringRead = tap.ringWrite = 0;
+
     const UINT32 windowFrames = rate / 20;   // ~50 ms of analysis per snapshot
     UINT32 framesSinceSnapshot = 0;
     float peaks[IAudio::kMaxInputMeterChannels] = {};
@@ -384,6 +403,7 @@ void WindowsAudio::MeterThread(MeterTap &tap, std::mutex &publishMutex, bool loo
         // for real audio.
         const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
         for (UINT32 f = 0; f < frames; ++f) {
+            float converted[IAudio::kMaxInputMeterChannels] = {};
             if (!silent) {
                 const uint8_t *frame = p + static_cast<size_t>(f) * bytesPerFrame;
                 for (UINT32 c = 0; c < channels; ++c) {
@@ -395,12 +415,34 @@ void WindowsAudio::MeterThread(MeterTap &tap, std::mutex &publishMutex, bool loo
                         sample = static_cast<float>(reinterpret_cast<const int16_t *>(frame)[c])
                                  / 32768.f;
                     }
+                    converted[c] = sample;
                     if (c < IAudio::kMaxInputMeterChannels) {
                         const float a = sample < 0.f ? -sample : sample;
                         if (a > peaks[c]) peaks[c] = a;
                         sumSq[c] += static_cast<double>(sample) * sample;
                     }
                 }
+            }
+            // Sample-through: push the frame into the FIFO (overwrites the
+            // oldest when the render side falls behind — drop-old keeps a
+            // live input live instead of lagging forever). Under
+            // publishMutex — ReadTapAudio (the render thread, via
+            // AudioMixer::SumSource) reads/mutates this SAME ring, ringRead
+            // and ringWrite under that same lock; this push used to run
+            // unlocked, a real data race against that reader (found in
+            // review — an uncontended std::mutex lock is tens of ns, and a
+            // WASAPI packet is a handful of frames, not the render chunk,
+            // so the per-sample cost here is negligible against the
+            // correctness it buys).
+            {
+                const std::lock_guard<std::mutex> lock(publishMutex);
+                const size_t ringFrames = tap.ring.size() / (tap.ringChannels ? tap.ringChannels : 1);
+                const size_t w = tap.ringWrite % ringFrames;
+                for (UINT32 c = 0; c < tap.ringChannels; ++c)
+                    tap.ring[w * tap.ringChannels + c] = converted[c];
+                tap.ringWrite = (tap.ringWrite + 1) % ringFrames;
+                if (tap.ringWrite == tap.ringRead)
+                    tap.ringRead = (tap.ringRead + 1) % ringFrames;   // drop oldest
             }
             ++totalFrames;
             if (++framesSinceSnapshot >= windowFrames) {
@@ -505,6 +547,42 @@ std::vector<uint32_t> WindowsAudio::ActiveInputMeters() const
     for (const auto &[id, tap] : meters_->taps)
         if (tap->running.load() && !tap->loopback) ids.push_back(id);
     return ids;
+}
+
+// ---- Tap sample-through (the mixer's real carrier) -------------------------
+IAudio::TapAudio WindowsAudio::TapFormat(uint32_t deviceId)
+{
+    if (!meters_)
+        return {};
+    const std::lock_guard<std::mutex> lock(meters_->mutex);
+    auto it = meters_->taps.find(deviceId);
+    if (it == meters_->taps.end() || it->second->loopback || it->second->ringChannels == 0)
+        return {};
+    IAudio::TapAudio out;
+    out.channels = static_cast<uint32_t>(it->second->ringChannels);
+    out.sampleRateHz = it->second->ringRate;
+    return out;
+}
+
+size_t WindowsAudio::ReadTapAudio(uint32_t deviceId, float *dst, size_t frames)
+{
+    if (!meters_ || !dst || frames == 0)
+        return 0;
+    const std::lock_guard<std::mutex> lock(meters_->mutex);
+    auto it = meters_->taps.find(deviceId);
+    if (it == meters_->taps.end() || it->second->loopback || it->second->ringChannels == 0)
+        return 0;
+    MeterTap &tap = *it->second;
+    const size_t ringFrames = tap.ring.size() / tap.ringChannels;
+    const size_t chans = tap.ringChannels;
+    size_t got = 0;
+    while (got < frames && tap.ringRead != tap.ringWrite) {
+        const size_t r = tap.ringRead % ringFrames;
+        std::memcpy(dst + got * chans, &tap.ring[r * chans], chans * sizeof(float));
+        tap.ringRead = (tap.ringRead + 1) % ringFrames;
+        ++got;
+    }
+    return got;
 }
 
 // ---- OUTPUT metering (the program mix, via WASAPI loopback) ----------------
@@ -669,6 +747,198 @@ std::string WindowsAudio::Fingerprint() const {
     for (const auto& d : Enumerate())
         fp += d.id + (d.isInput ? ":in;" : ":out;");
     return fp;
+}
+
+// ---------------------------------------------------------------------------
+// RENDER — the engine's playout. A shared-mode WASAPI render client: the
+// first output path in this codebase that makes sound. One stream; the
+// callback pulls the mixer's frames from the engine's production graph.
+// ---------------------------------------------------------------------------
+struct WindowsAudio::RenderStream
+{
+    std::thread thread;
+    std::atomic<bool> running{false};
+    IAudio::RenderCallback callback;
+    uint32_t deviceId = UINT32_MAX;   // UINT32_MAX = the default output
+};
+
+// The render thread body: device matching (the meter thread's PRIMARY-name /
+// positional-fallback scheme), shared-mode IAudioClient on the endpoint mix
+// format, then the padded-frames pump writing the mixer's frames to the
+// speaker. Exits when stream.running goes false (clean stop) — the device
+// is released by the thread itself, so the stream never touches COM after
+// the join.
+void WindowsAudio::RenderThread(RenderStream &stream)
+{
+    ScopedComInit com;
+    IMMDeviceEnumerator *enumerator = nullptr;
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                  __uuidof(IMMDeviceEnumerator),
+                                  reinterpret_cast<void **>(&enumerator));
+    if (FAILED(hr) || !enumerator)
+        return;
+
+    // Default output unless a roster device was named (same correlation as
+    // the meter thread: friendly name first, positional fallback).
+    IMMDevice *device = nullptr;
+    if (stream.deviceId == UINT32_MAX) {
+        if (FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &device)))
+            device = nullptr;
+    } else {
+        IMMDeviceCollection *collection = nullptr;
+        hr = enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &collection);
+        if (SUCCEEDED(hr) && collection) {
+            UINT count = 0;
+            collection->GetCount(&count);
+            // Name matching needs the WinMM device name; the roster passes
+            // the number, so positional is the honest match here (the meter
+            // thread's PRIMARY-name path needs the name string, which the
+            // render start doesn't carry).
+            if (stream.deviceId < count)
+                collection->Item(static_cast<UINT>(stream.deviceId), &device);
+            collection->Release();
+        }
+    }
+    if (!device) {
+        enumerator->Release();
+        return;
+    }
+
+    IAudioClient *client = nullptr;
+    WAVEFORMATEX *fmt = nullptr;
+    if (FAILED(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                reinterpret_cast<void **>(&client)))
+        || !client
+        || FAILED(client->GetMixFormat(&fmt)) || !fmt
+        // SHARED mode: coexists with every app; the endpoint's own mix format
+        // (float32 in practice) means no negotiation, no exclusive hold. The
+        // 100 ms buffer rides the same hint the meter taps use; WASAPI snaps
+        // it to the endpoint's quantum.
+        || FAILED(client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0,
+                                     1000000 /* 100 ms */, 0, fmt, nullptr))) {
+        if (fmt) CoTaskMemFree(fmt);
+        if (client) client->Release();
+        device->Release();
+        enumerator->Release();
+        return;
+    }
+
+    IAudioRenderClient *render = nullptr;
+    if (FAILED(client->GetService(__uuidof(IAudioRenderClient),
+                                  reinterpret_cast<void **>(&render))) || !render) {
+        CoTaskMemFree(fmt);
+        client->Release();
+        device->Release();
+        enumerator->Release();
+        return;
+    }
+
+    const UINT32 channels = fmt->nChannels;
+    const UINT32 rate = fmt->nSamplesPerSec;
+    const UINT32 bytesPerFrame = fmt->nBlockAlign;
+    const bool isFloat = fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT
+                         || (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE
+                             && bytesPerFrame == channels * 4);
+    CoTaskMemFree(fmt);
+
+    if (channels == 0 || rate == 0 || bytesPerFrame == 0
+        || FAILED(client->Start())) {
+        render->Release();
+        client->Release();
+        device->Release();
+        enumerator->Release();
+        return;
+    }
+
+    UINT32 bufferFrames = 0;
+    client->GetBufferSize(&bufferFrames);
+
+    while (stream.running.load(std::memory_order_relaxed)) {
+        // The render contract: how much room is there? Fill that much.
+        UINT32 padding = 0;
+        if (FAILED(client->GetCurrentPadding(&padding))) {
+            Sleep(5);
+            continue;
+        }
+        UINT32 available = bufferFrames > padding ? bufferFrames - padding : 0;
+        if (available == 0) {
+            Sleep(5);
+            continue;
+        }
+        // One scratch staging buffer per stream (allocated ONCE per chunk-
+        // size change, outside the mixer call), reused every pump: the mixer
+        // writes into it, the writer converts into WASAPI's own buffer.
+        static thread_local std::vector<float> staging;
+        const size_t want = static_cast<size_t>(available) * channels;
+        if (staging.size() < want)
+            staging.resize(want);
+
+        bool got = stream.callback ? stream.callback(staging.data(), available, channels, rate)
+                                   : false;
+
+        BYTE *dst = nullptr;
+        if (FAILED(render->GetBuffer(available, &dst)) || !dst) {
+            Sleep(5);
+            continue;
+        }
+        if (!got) {
+            // No mixer output this chunk → real silence, not a repeat of the
+            // last buffer (a stuck loop is how engines howl).
+            memset(dst, 0, static_cast<size_t>(available) * bytesPerFrame);
+        } else if (isFloat) {
+            memcpy(dst, staging.data(), want * sizeof(float));
+        } else {
+            // Integer endpoint format (rare): clamp-convert the float mix.
+            auto *out = reinterpret_cast<int16_t *>(dst);
+            for (size_t i = 0; i < want; ++i) {
+                float s = staging[i];
+                s = s < -1.f ? -1.f : (s > 1.f ? 1.f : s);
+                out[i] = static_cast<int16_t>(s * 32767.f);
+            }
+        }
+        render->ReleaseBuffer(available, 0);
+    }
+
+    client->Stop();
+    render->Release();
+    client->Release();
+    device->Release();
+    enumerator->Release();
+}
+
+Result<void> WindowsAudio::StartRender(RenderCallback callback, uint32_t deviceId)
+{
+    if (!callback)
+        return Error::Make(Err::InvalidArgument, "Audio", "render callback is empty");
+    // Idempotent start: a running stream keeps its mixer (one playout path;
+    // a second Start is the UI asking twice, not a new mix).
+    if (render_ && render_->running.load())
+        return Ok();
+    StopRender();   // a dead stream's thread may need joining before reuse
+
+    auto s = std::make_unique<RenderStream>();
+    s->callback = std::move(callback);
+    s->deviceId = deviceId;
+    s->running.store(true);
+    s->thread = std::thread([&sref = *s]() { RenderThread(sref); });
+    render_ = std::move(s);
+    return Ok();
+}
+
+Result<void> WindowsAudio::StopRender()
+{
+    if (!render_)
+        return Ok();
+    render_->running.store(false);
+    if (render_->thread.joinable())
+        render_->thread.join();
+    render_.reset();
+    return Ok();
+}
+
+bool WindowsAudio::Rendering() const
+{
+    return render_ && render_->running.load();
 }
 
 } // namespace bps::platform

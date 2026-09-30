@@ -258,6 +258,29 @@ Result<void> ShowLibrary::RemoveCategory(std::string_view name) {
     return ScanLocked();
 }
 
+Result<void> ShowLibrary::ClearCategory(std::string_view name) {
+    if (!ValidFolderName(name))
+        return Error::Make(Err::InvalidArgument, kModule, "invalid category name");
+    auto& fs = platform::PlatformAccessor::Get().Filesystem();
+    const std::string dir = CategoryDir(name);
+    if (!fs.IsDirectory(dir)) return Ok();   // nothing to clear
+    auto contents = fs.Enumerate(dir);
+    if (!contents.ok()) return contents.error();
+    const std::string bin = fs.Join(root_, kDeletedFolder);
+    if (!contents.value().empty() && !fs.Exists(bin)) {
+        if (auto c = fs.CreateDirectories(bin); !c.ok()) return c.error();
+    }
+    for (const std::string& path : contents.value()) {
+        if (fs.IsDirectory(path) || !IsShowFile(path)) continue;
+        std::string target = fs.Join(bin, LeafName(path));
+        if (fs.Exists(target))
+            target = fs.Join(bin, std::format("{}-{}", NowMs(), LeafName(path)));
+        if (auto m = fs.Move(path, target); !m.ok()) return m.error();
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    return ScanLocked();
+}
+
 Result<std::string> ShowLibrary::MoveShow(std::string_view path, std::string_view category) {
     if (!category.empty() && !ValidFolderName(category))
         return Error::Make(Err::InvalidArgument, kModule, "invalid category name");

@@ -6,6 +6,9 @@
 #include "core/events/Events.hpp"
 #include "modules/project/UndoRedoManager.hpp"
 #include "modules/broadcast/BroadcastEngine.hpp"
+#include "modules/production/AudioMixer.hpp"
+#include "modules/production/ProductionEngine.hpp"
+#include "models/AudioInputListModel.h"
 #include "platform/PlatformAccessor.hpp"
 
 #include <QCoreApplication>
@@ -740,6 +743,11 @@ void EngineBridge::pumpMeterSnapshot()
     inputLevels_ = std::move(levels);
     emit inputLevelsChanged();
 
+    // The mixer eats what the taps see: every published snapshot becomes the
+    // corresponding graph source node's live level (the render callback's
+    // carrier). EngineBridge owns the node-id mapping (roster row → asrc:<id>).
+    feedMixerLevels();
+
     // The OUTPUT (program-mix) tap rides the same pump: one snapshot from
     // the loopback capture on the render endpoint.
     if (outputMetering_) {
@@ -903,6 +911,13 @@ void EngineBridge::stopAllInputMeters()
         inputLevels_.clear();
         emit inputLevelsChanged();
     }
+    // stopInputMeter() (the single-device release, above) emits this —
+    // this whole-roster release didn't, so anyAudioMetering/anyInputMetering
+    // bindings (the MonitorWall toolbar's audio button, the monitor tiles'
+    // meter-bar visibility) never re-evaluated: requestedMeters_ genuinely
+    // went empty, but nothing told QML to re-read it, so the button stayed
+    // stuck lit after a "stop all" click.
+    emit audioMeteringChanged();
 }
 
 // ============================================================================
@@ -1664,4 +1679,93 @@ QVariantList EngineBridge::recentEngineEvents(int max) const
     while (out.size() > max)
         out.removeFirst();
     return out;
+}
+
+// ============================================================================
+// THE ENGINE'S AUDIO OUT — the missing half of the sound path. AudioMixer
+// (engine) consumes the production graph's buses; WindowsAudio's WASAPI
+// render client plays the mix. The meter pump feeds the mixer the taps'
+// published levels; the render thread pulls the mix to the speaker.
+// ============================================================================
+bool EngineBridge::audioRenderActive() const
+{
+    return bps::platform::PlatformAccessor::Installed()
+           && bps::platform::PlatformAccessor::Get().Audio().Rendering();
+}
+
+void EngineBridge::setAudioRender(bool on)
+{
+    if (!bps::platform::PlatformAccessor::Installed())
+        return;
+    auto &audio = bps::platform::PlatformAccessor::Get().Audio();
+
+    if (!on) {
+        (void)audio.StopRender();
+        emit audioRenderChanged();
+        EventBus::instance().notify(tr("Engine audio stopped"), QStringLiteral("info"),
+                                    tr("Audio"), QStringLiteral("audio.render.stop"));
+        return;
+    }
+
+    if (!audioMixer_) {
+        audioMixer_ = new bps::production::AudioMixer();
+    }
+    auto *mixer = static_cast<bps::production::AudioMixer *>(audioMixer_);
+    mixer->Attach(&bps::production::ProductionEngine::Instance().Graph());
+    // The sample source: the same PAL taps the meters read. Real captured
+    // frames flow tap FIFO → mixer → render client from here on.
+    mixer->AttachTaps(&bps::platform::PlatformAccessor::Get().Audio());
+
+    auto r = audio.StartRender(
+        [mixer](float *frames, uint32_t framesCount, uint32_t channels, uint32_t rate) {
+            return mixer->Render(frames, framesCount, channels, rate);
+        });
+    if (!r.ok()) {
+        qWarning("EngineBridge: audio render start failed: %s", r.error().message.c_str());
+        return;
+    }
+    // The meter pump already runs while any input meter is open; the render
+    // path needs it even when none does (it is what feeds the mixer).
+    if (!inputMeterPump_) {
+        inputMeterPump_ = new QTimer(this);
+        inputMeterPump_->setInterval(50);
+        connect(inputMeterPump_, &QTimer::timeout, this, [this]() { pumpMeterSnapshot(); });
+    }
+    if (!inputMeterPump_->isActive())
+        inputMeterPump_->start();
+    emit audioRenderChanged();
+    EventBus::instance().notify(tr("Engine audio ON — mixing the routing graph to the default output"),
+                                QStringLiteral("success"), tr("Audio"),
+                                QStringLiteral("audio.render.start"));
+}
+
+// One pump tick's mixer publish: bind each LIVE TAP's capture device to the
+// matching graph source node. Roster row → stable id → "asrc:<id>" (the same
+// node id the routing edges key on); the mixer then drains REAL frames from
+// that device's FIFO every render chunk. Row↔tap matching mirrors the meter
+// overlay's: the roster row's sublabel (trimmed, case-insensitive; empty =
+// the default input) names the tap.
+void EngineBridge::feedMixerLevels()
+{
+    auto *mixer = static_cast<bps::production::AudioMixer *>(audioMixer_);
+    if (!mixer)
+        return;
+    auto *roster = AudioInputListModel::Instance();
+    if (!roster)
+        return;   // QML not up yet — nothing to map
+    for (auto it = inputLabels_.constBegin(); it != inputLabels_.constEnd(); ++it) {
+        const uint32_t deviceId = it.key();
+        const QString tapLabel = it.value().trimmed();
+        for (int row = 0; row < roster->rowCount(); ++row) {
+            const QString rowLabel = roster->index(row).data(
+                static_cast<int>(AudioInputListModel::SublabelRole)).toString().trimmed();
+            const bool matches = tapLabel.isEmpty() ? rowLabel.isEmpty()
+                                : rowLabel.compare(tapLabel, Qt::CaseInsensitive) == 0;
+            if (!matches)
+                continue;
+            const QString id = AudioInputListModel::stableIdForRow(row);
+            if (!id.isEmpty())
+                mixer->BindSourceDevice("asrc:" + id.toStdString(), deviceId);
+        }
+    }
 }

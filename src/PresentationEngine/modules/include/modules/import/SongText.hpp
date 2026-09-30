@@ -38,4 +38,14 @@ std::string GroupLabel(const std::string& group);
 // 0..1 how alike two strings are (FreeShow's edit-distance measure).
 double TextSimilarity(const std::string& a, const std::string& b);
 
+// The same content-based group guess ParseSongText makes for a header-less
+// stanza (repeated text -> chorus/bridge, a short or self-similar one ->
+// tag, an unrecognized-but-explicit label kept as itself, otherwise verse) —
+// exposed so an importer that already has each section's own text but no
+// USABLE group of its own (missing, or a meaningless placeholder like a bare
+// "1"/"2") can guess real ones instead of leaving them unlabeled or numbered.
+// One entry in, one standard group id out, same order; may rewrite a
+// section's text in place (a bracket/colon label line gets pulled off it).
+std::vector<std::string> AutoGroupSections(std::vector<std::string>& sections, bool autoGroups = true);
+
 } // namespace bps::import

@@ -309,6 +309,17 @@ Result<std::string> BibleEngine::Import(std::string_view source, std::string_vie
             hadOld = true;
             oldBible = it->second;
         }
+        // A (re)imported translation drops any user data keyed to the OLD text
+        // ("bible replaced" ≠ "notes preserved across versions" — the notes
+        // drawer must not show notes from a translation the user removed).
+        // Prefix-checked erase (not a plain range): "KJV|" must not sweep
+        // "KJV2|..." entries when only KJV is being replaced.
+        if (hadOld) {
+            const std::string prefix = bible.metadata.id + "|";
+            for (auto it = notes_.lower_bound(prefix); it != notes_.end() && it->first.starts_with(prefix);)
+                it = notes_.erase(it);
+            highlights_.erase(bible.metadata.id);
+        }
         bibles_[bible.metadata.id] = bible;
         // Persist the whole store so the import survives a restart (no-op
         // while no store path is set — unit tests stay in memory).
@@ -424,6 +435,15 @@ Result<void> BibleEngine::RemoveBible(std::string_view bibleId) {
                                "bible not found: " + std::string(bibleId));
         removed = std::move(it->second);
         bibles_.erase(it);
+        // Its user data has nowhere to live (every screen keys user data by
+        // bibleId): drop it with the translation, so a purge is a purge.
+        // Prefix-checked erase ("KJV" must not sweep "KJV2" — see Import).
+        {
+            const std::string prefix = std::string(bibleId) + "|";
+            for (auto it = notes_.lower_bound(prefix); it != notes_.end() && it->first.starts_with(prefix);)
+                it = notes_.erase(it);
+            highlights_.erase(std::string(bibleId));
+        }
         // Keep the store in sync so a removed translation stays removed after
         // a restart (no-op while no store path is set).
         if (!storePath_.empty()) {
@@ -590,6 +610,10 @@ Result<size_t> BibleEngine::LoadStoreLocked() {
             ++count;
         }
     }
+    // User data rides in the same file (schema 2): restore notes, highlights,
+    // and collections with the bibles they belong to. Absent = first boot or
+    // schema 1, both of which mean "no user data yet".
+    ReadUserDataLocked(parsed.value());
     return count;
 }
 
@@ -600,10 +624,152 @@ Result<void> BibleEngine::SaveStoreLocked() {
     for (const auto& [id, bible] : bibles_)
         arr.push_back(BibleToJsonLocked(bible));
     J::Object root;
-    root["schema"] = J::Number(1);
+    root["schema"] = J::Number(2);
     root["bibles"] = J(std::move(arr));
+    WriteUserDataLocked(root);   // the store is ONE file: never orphan user data
 
     auto& platform = platform::PlatformAccessor::Get();
+    (void)platform.Filesystem().CreateDirectories(
+        std::filesystem::path(storePath_).parent_path().generic_string());
+    return platform.Filesystem().Write(storePath_, J(std::move(root)).ToString());
+}
+
+// --- User-data <-> JSON (schema 2) -----------------------------------------
+
+// One reference as a JSON object. BookName/Raw are display sugar resolved
+// from the book table — the store keeps the canonical shape only (same rule
+// the bibles obey), so only the id/verse fields persist.
+json::Value BibleEngine::RefToJson(const PassageRef& ref) {
+    using J = json::Value;
+    J::Object o;
+    o["bookId"] = J::String(ref.bookId);
+    o["chapter"] = J::Number(ref.chapter);
+    o["verseStart"] = J::Number(ref.verseStart);
+    o["verseEnd"] = J::Number(ref.verseEnd);
+    return J(std::move(o));
+}
+
+PassageRef BibleEngine::RefFromJson(const json::Value& node) {
+    PassageRef ref;
+    if (const json::Value* b = node.Find("bookId"); b) ref.bookId = std::string(b->asString());
+    if (const json::Value* c = node.Find("chapter"); c) ref.chapter = static_cast<int>(c->asInt());
+    if (const json::Value* vs = node.Find("verseStart"); vs) ref.verseStart = static_cast<int>(vs->asInt());
+    if (const json::Value* ve = node.Find("verseEnd"); ve) ref.verseEnd = static_cast<int>(ve->asInt());
+    return ref;
+}
+
+// Append the user-data arrays into the store's root OBJECT (bibles stay
+// schema 1-compatible; the user-data keys are simply absent in schema-1
+// stores). Takes the map, not the Value — operator[] lives on the object
+// map in this JSON library.
+void BibleEngine::WriteUserDataLocked(json::Value::Object& root) {
+    using J = json::Value;
+    J::Array notes;
+    for (const auto& [key, list] : notes_) {
+        const size_t sep = key.find('|');
+        const std::string bibleId = sep == std::string::npos ? key : key.substr(0, sep);
+        for (const UserNote& n : list) {
+            J::Object no;
+            no["bible"] = J::String(bibleId);
+            no["id"] = J::String(n.id);
+            no["ref"] = RefToJson(n.ref);
+            no["text"] = J::String(n.text);
+            no["createdMs"] = J::Number(static_cast<double>(n.createdMs));
+            no["modifiedMs"] = J::Number(static_cast<double>(n.modifiedMs));
+            notes.push_back(J(std::move(no)));
+        }
+    }
+    J::Array highlights;
+    for (const auto& [bibleId, refs] : highlights_)
+        for (const PassageRef& r : refs) {
+            J::Object ho;
+            ho["bible"] = J::String(bibleId);
+            ho["ref"] = RefToJson(r);
+            highlights.push_back(J(std::move(ho)));
+        }
+    J::Array collections;
+    for (const auto& [name, refs] : collections_) {
+        J::Object co;
+        co["name"] = J::String(name);
+        J::Array cr;
+        for (const PassageRef& r : refs) cr.push_back(RefToJson(r));
+        co["refs"] = J(std::move(cr));
+        collections.push_back(J(std::move(co)));
+    }
+    root["notes"] = J(std::move(notes));
+    root["highlights"] = J(std::move(highlights));
+    root["collections"] = J(std::move(collections));
+}
+
+void BibleEngine::ReadUserDataLocked(const json::Value& root) {
+    notes_.clear();
+    highlights_.clear();
+    collections_.clear();
+    if (const json::Value* arr = root.Find("notes"); arr && arr->asArray()) {
+        for (const json::Value& nv : *arr->asArray()) {
+            const json::Value* bible = nv.Find("bible");
+            const json::Value* id = nv.Find("id");
+            const json::Value* ref = nv.Find("ref");
+            if (!bible || !id || !ref) continue;   // a damaged entry, not a lost store
+            UserNote n;
+            n.id = std::string(id->asString());
+            n.ref = RefFromJson(*ref);
+            if (n.id.empty() || !n.ref.Valid()) continue;
+            if (const json::Value* t = nv.Find("text"); t) n.text = std::string(t->asString());
+            if (const json::Value* c = nv.Find("createdMs"); c) n.createdMs = c->asInt();
+            if (const json::Value* m = nv.Find("modifiedMs"); m) n.modifiedMs = m->asInt();
+            notes_[std::string(bible->asString()) + "|" + RefKey(n.ref)].push_back(std::move(n));
+        }
+    }
+    if (const json::Value* arr = root.Find("highlights"); arr && arr->asArray()) {
+        for (const json::Value& hv : *arr->asArray()) {
+            const json::Value* bible = hv.Find("bible");
+            const json::Value* ref = hv.Find("ref");
+            if (!bible || !ref) continue;
+            PassageRef r = RefFromJson(*ref);
+            if (!r.Valid()) continue;
+            highlights_[std::string(bible->asString())].push_back(std::move(r));
+        }
+    }
+    if (const json::Value* arr = root.Find("collections"); arr && arr->asArray()) {
+        for (const json::Value& cv : *arr->asArray()) {
+            const json::Value* name = cv.Find("name");
+            if (!name) continue;
+            auto& list = collections_[std::string(name->asString())];
+            if (const json::Value* refs = cv.Find("refs"); refs && refs->asArray())
+                for (const json::Value& rv : *refs->asArray()) {
+                    PassageRef r = RefFromJson(rv);
+                    if (r.Valid()) list.push_back(std::move(r));
+                }
+        }
+    }
+}
+
+// Save ONLY the user-data half: load the store's bible array from disk and
+// rewrite the file with those bibles plus fresh user data. Beats threading a
+// snapshot into SaveStoreLocked() and re-serializing megabytes of verse text
+// on every highlight toggle.
+Result<void> BibleEngine::SaveUserDataLocked() {
+    if (storePath_.empty()) return Ok();
+    auto& platform = platform::PlatformAccessor::Get();
+    using J = json::Value;
+    J::Array bibles;
+    if (auto body = platform.Filesystem().ReadText(storePath_); body.ok()) {
+        if (auto parsed = json::Parse(body.value()); parsed.ok())
+            if (const J* arr = parsed.value().Find("bibles"); arr && arr->asArray())
+                bibles = *arr->asArray();
+    }
+    if (bibles.empty() && !bibles_.empty()) {
+        // Disk unreadable/corrupt: serialize from memory instead — a user-data
+        // save must never be the write that wipes installed bibles (slow path,
+        // and only on the happy path's failure mode).
+        for (const auto& [id, bible] : bibles_) bibles.push_back(BibleToJsonLocked(bible));
+    }
+    J::Object root;
+    root["schema"] = J::Number(2);
+    root["bibles"] = J(std::move(bibles));
+    WriteUserDataLocked(root);
+
     (void)platform.Filesystem().CreateDirectories(
         std::filesystem::path(storePath_).parent_path().generic_string());
     return platform.Filesystem().Write(storePath_, J(std::move(root)).ToString());
@@ -911,7 +1077,9 @@ Result<std::string> BibleEngine::Format(std::string_view bibleId, const PassageR
 
 // ---------------------------------------------------------------------------
 // User data (docs/specs/24 §User Data) — always keyed by canonical reference,
-// never stored inside Scripture.
+// never stored inside Scripture. Persisted alongside the bibles in the store
+// (schema 2): one JSON, the same write-per-change budget the bibles pay, so a
+// highlight or note survives a restart exactly like an imported translation.
 // ---------------------------------------------------------------------------
 std::string BibleEngine::RefKey(const PassageRef& ref) {
     std::string key = std::format("{}:{}", ref.bookId, ref.chapter);
@@ -939,6 +1107,16 @@ Result<void> BibleEngine::AddNote(std::string_view bibleId, const PassageRef& re
                                           .count();
     std::lock_guard<std::mutex> lock(mutex_);
     notes_[std::string(bibleId) + "|" + RefKey(ref)].push_back(std::move(note));
+    (void)SaveUserDataLocked();
+    return Ok();
+}
+
+Result<void> BibleEngine::RemoveNote(std::string_view bibleId, const PassageRef& ref) {
+    if (!ref.Valid())
+        return Error::Make(Err::Bible_InvalidReference, "BibleEngine", "invalid reference");
+    std::lock_guard<std::mutex> lock(mutex_);
+    notes_.erase(std::string(bibleId) + "|" + RefKey(ref));
+    (void)SaveUserDataLocked();
     return Ok();
 }
 
@@ -947,6 +1125,20 @@ Result<std::vector<UserNote>> BibleEngine::Notes(std::string_view bibleId,
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = notes_.find(std::string(bibleId) + "|" + RefKey(ref));
     return it == notes_.end() ? std::vector<UserNote>() : it->second;
+}
+
+Result<std::vector<UserNote>> BibleEngine::Notes(std::string_view bibleId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<UserNote> out;
+    // Only THIS bible's notes: the key is "<bibleId>|<ref>", so a plain
+    // prefix match (the map is sorted) keeps the drawer from blending notes
+    // across translations.
+    const std::string prefix = std::string(bibleId) + "|";
+    for (auto it = notes_.lower_bound(prefix); it != notes_.end() && it->first.starts_with(prefix); ++it)
+        out.insert(out.end(), it->second.begin(), it->second.end());
+    std::sort(out.begin(), out.end(),
+              [](const UserNote& a, const UserNote& b) { return a.modifiedMs > b.modifiedMs; });
+    return out;
 }
 
 Result<void> BibleEngine::SetHighlight(std::string_view bibleId, const PassageRef& ref,
@@ -962,6 +1154,7 @@ Result<void> BibleEngine::SetHighlight(std::string_view bibleId, const PassageRe
         list.push_back(ref);
     else if (!on && it != list.end())
         list.erase(it);
+    (void)SaveUserDataLocked();
     return Ok();
 }
 
@@ -988,6 +1181,7 @@ Result<void> BibleEngine::AddToCollection(std::string_view collection, const Pas
         return Error::Make(Err::NotFound, "BibleEngine",
                            "collection not found: " + std::string(collection));
     it->second.push_back(ref);
+    (void)SaveUserDataLocked();
     return Ok();
 }
 

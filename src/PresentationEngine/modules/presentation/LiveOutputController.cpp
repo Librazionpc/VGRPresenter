@@ -107,7 +107,7 @@ Result<void> LiveOutputController::StartFromOpenShow() {
         else
             preview_ = std::make_shared<rendering::FrameBufferOutput>(
                 rendering::OutputKind::Preview, kPreviewName,
-                rendering::Size(960, 540));
+                rendering::Size(kFrameBufferWidth, kFrameBufferHeight));
         (void)rendering::RenderEngine::Instance().AddOutput(preview_);
     }
     preview_->SetEnabled(true);
@@ -173,7 +173,7 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
             else
                 preview_ = std::make_shared<rendering::FrameBufferOutput>(
                     rendering::OutputKind::Preview, kPreviewName,
-                    rendering::Size(960, 540));
+                    rendering::Size(kFrameBufferWidth, kFrameBufferHeight));
             (void)rendering::RenderEngine::Instance().AddOutput(preview_);
         }
         preview_->SetEnabled(true);
@@ -431,11 +431,13 @@ void LiveOutputController::RenderPerOutputPasses() {
     for (size_t i = 0; i < specs.size() && i < buffers.size(); ++i) {
         auto out = engine.GetOutput(buffers[i]);
         if (!out.ok()) {
-            // Register on first use (named per-output frame buffer, preview-
-            // sized; the QML tile scales whatever it reads).
+            // Register on first use (named per-output frame buffer, sized
+            // for a real screen — see kFrameBufferWidth/Height; both the
+            // small in-app tile and a real OutputWindow scale whatever they
+            // read).
             auto created = std::make_shared<rendering::FrameBufferOutput>(
                 rendering::OutputKind::Audience, buffers[i],
-                rendering::Size(960, 540));
+                rendering::Size(kFrameBufferWidth, kFrameBufferHeight));
             if (!engine.AddOutput(created).ok()) continue;
             out = engine.GetOutput(buffers[i]);
             if (!out.ok()) continue;

@@ -39,6 +39,12 @@ public:
 
     Q_INVOKABLE void move(double x, double y);
     Q_INVOKABLE void click(double x, double y);
+    // Split press/release (click() does both at once, no move in between —
+    // no good for a DRAG). Real synthetic left-button down/up at whatever
+    // the cursor's CURRENT position is — pair with move() calls between
+    // press() and release() to drag: press(x1,y1); move(x2,y2); release().
+    Q_INVOKABLE void press(double x, double y);
+    Q_INVOKABLE void release(double x, double y);
     // Real key events (press+release) to the focused object — types into whatever
     // TextInput has focus, exercising the app's own key/text pipeline.
     Q_INVOKABLE void type(const QString &text);

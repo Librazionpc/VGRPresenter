@@ -24,19 +24,11 @@ Item {
     implicitHeight: 4
 
     // `value` (0..100) is a raw LINEAR amplitude percentage straight off the
-    // WASAPI tap. Normal speech/ambient levels sit around -60..-20 dBFS,
-    // which is a linear amplitude of ~0.001..0.1 — mapped directly to width
-    // that pins the bar in the leftmost few percent for virtually all real
-    // audio, so it reads as dead/not-animating. Meters read in dB, not
-    // linear amplitude (every real VU/level meter does this), so the FILL
-    // is mapped on the same -60..0 dB scale the gradient's zones assume.
-    function dbPct(linearPct) {
-        const linear = linearPct / 100
-        if (linear <= 0.0005) return 0   // ≈ -66 dBFS floor → silence
-        const db = 20 * Math.log10(linear)
-        return Math.max(0, Math.min(1, (db + 60) / 60))
-    }
-    readonly property real pct: root.dbPct(root.value)
+    // WASAPI tap. Meters read in dB, not linear amplitude, so the FILL is
+    // mapped on the same -60..0 dB scale the gradient's zones assume — the
+    // one shared mapping lives in the Db singleton (was a private copy here,
+    // OutputMonitorTile and ProAudioForm; three copies, three ways to drift).
+    readonly property real pct: Db.pct(root.value)
     // "is anything coming in at all" — mirrors Mic.svelte's rawDb > -60 dot: a small
     // nonzero floor so a hair of noise floor doesn't flicker the dot on its own.
     readonly property bool active: root.value > 1.5

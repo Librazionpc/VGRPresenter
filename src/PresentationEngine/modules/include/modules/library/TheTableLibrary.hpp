@@ -69,6 +69,19 @@ struct TheTableSearchHit {
     bool spanned = false;
 };
 
+// A reader's note on one paragraph, persisted with the library (the Bible
+// module's UserNote, keyed the table way: "bookId:chapter:verse").
+struct TableNote {
+    std::string id;          // "note-<ms>" (the Bible module's shape)
+    std::string ref;         // "1953 12:3" (the display reference as stored)
+    std::string bookId;      // "Y1953"
+    int chapter = 0;
+    int verse = 0;
+    std::string text;
+    int64_t createdMs = 0;
+    int64_t modifiedMs = 0;
+};
+
 class TheTableLibrary final {
 public:
     // Opens (or creates) the library persisted at `filePath`.
@@ -107,6 +120,25 @@ public:
     // `chapter` is the sermon's number within its year book; `verse` 0 gives
     // the sermon-level citation (no paragraph number). Unknown chapter -> {}.
     std::string Citation(std::string_view bookId, int chapter, int verse = 0) const;
+
+    // --- User data (notes and highlights, the Bible module's counterpart) ---
+    // Always keyed by the SERMON'S OWN location, never inside the text: a
+    // note lives on "Y1953" chapter 3 paragraph 5 whether or not the sermon
+    // is later re-imported with a changed title. An unknown chapter/verse is
+    // an error (a note nobody could ever navigate back to); an empty text is
+    // one too. Adding a note to a paragraph that already has one REPLACES it.
+    Result<void> AddNote(std::string_view bookId, int chapter, int verse,
+                         const std::string& text);
+    // A note removed is a note that never happened — the JSON write-through
+    // keeps the file truthful (the Bible module's RemoveNote, table-shaped).
+    Result<void> RemoveNote(std::string_view bookId, int chapter, int verse);
+    Result<std::vector<TableNote>> Notes(std::string_view bookId, int chapter,
+                                         int verse) const;
+    // Every note in the library, most-recently-modified first (the drawer).
+    Result<std::vector<TableNote>> Notes() const;
+    Result<void> SetHighlight(std::string_view bookId, int chapter, int verse, bool on);
+    Result<std::vector<std::string>> Highlights() const;   // "Y1953:3:5" keys
+    Result<bool> IsHighlighted(std::string_view bookId, int chapter, int verse) const;
 
     // --- Search Engine integration (docs/specs/24 §Search, the Bible pattern) -----
     // Registers this library's index adapter with the platform Search Engine and
@@ -156,6 +188,11 @@ private:
     explicit TheTableLibrary(std::string filePath);
 
     TheTableBook& BookForYear(std::string_view year);
+    // Is this paragraph real? Called with mutex_ held (the user-data writes
+    // validate before storing — a note on an unknown sermon is an error).
+    bool VerseKnownLocked(std::string_view bookId, int chapter, int verse) const;
+    // The citation line, mutex_ already held (the user-data writes build it).
+    std::string CitationLocked(std::string_view bookId, int chapter, int verse) const;
     // Adds one sermon's clean text (see ConvertToCleanText) to the books WITHOUT saving; returns its reference ("1953 12:1").
     // With `replaceUnreadable`, a stored sermon of the same title that does not read as text (see ReadableText) is replaced.
     Result<std::string> AddCleanText(std::string_view fileName, const std::string& text, bool replaceUnreadable = false);
@@ -176,6 +213,15 @@ private:
     mutable std::mutex scanMutex_;
     std::string filePath_;
     std::vector<TheTableBook> books_;
+    // User notes and highlights, keyed "bookId:chapter:verse" (notes) and
+    // "bookId:chapter:verse" (highlights) — written through to the library
+    // JSON on every change, so a crash loses nothing.
+    std::map<std::string, TableNote> notes_;
+    std::map<std::string, bool> highlights_;
+    // Last issued note timestamp: NowMs() has 1ms resolution, and two notes
+    // written in the same millisecond would tie, making the drawer's
+    // most-recent-first order ambiguous. Monotonic per library.
+    int64_t lastNoteMs_ = 0;
     uint32_t importSeq_ = 0;   // disambiguates same-named sermons
     // Lowered paragraph text per sermon ("bookId:number"), built lazily by
     // Search()'s scan and kept — the fallback scan must not re-lowercast the

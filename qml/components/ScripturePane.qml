@@ -11,6 +11,7 @@ ReferencePane {
     supportsTemplates: true
 
     adapter: QtObject {
+        id: ad
         // The tab's wording (the shared pane is fully generic).
         readonly property string sidebarLabel: qsTr("Bibles")
         readonly property string addLabel: qsTr("New scripture")
@@ -66,14 +67,34 @@ ReferencePane {
         readonly property var templateName: (id) => ScriptureService.templateName(id)
         readonly property var defaultTemplateId: () => ScriptureService.defaultTemplateId()
         readonly property var templates: () => ScriptureService.templates()
+        // ---- User data (notes & highlights, the engine's §User Data store) ----
+        // Reads are ID-SHAPED and BATCHED (one chapterUserData call per open
+        // chapter — no reference synthesis, no per-row resolution in JS);
+        // writes take the pane's display reference, which the ENGINE resolves
+        // (the reference grammar lives engine-side, once).
+        readonly property var chapterUserData: (src, bookId, ch) => ScriptureService.chapterUserData(src, bookId, ch)
+        readonly property var setNote: (reference, text) => ScriptureService.setNote(src(), reference, text)
+        readonly property var setHighlighted: (reference, on) => ScriptureService.setHighlighted(src(), reference, on)
+        readonly property var notes: () => ScriptureService.notes(src())
+        readonly property var userData: ({
+            chapterUserData: ad.chapterUserData,
+            setNote: ad.setNote,
+            setHighlighted: ad.setHighlighted,
+            notes: ad.notes
+        })
         // The shared pane re-syncs when this adapter signal fires (see below).
+        // (User-data notice is a revision counter, NOT a signal: the userData
+        // property already owns the change signal name `userDataChanged` — an
+        // explicit signal of that name is a QML duplicate-signal error.)
         signal changed()
+        property int userDataRevision: 0
     }
 
     // Service -> adapter: the pane's own Connections re-syncs it.
     Connections {
         target: ScriptureService
         function onChanged() { pane.adapter.changed() }
+        function onUserDataChanged() { pane.adapter.userDataRevision++ }
         // The async pill search's answer (searchAsync's token guard lives in
         // the pane — applySearchResults drops stale tokens).
         function onSearchResultsReady(token, rows) { pane.applySearchResults(token, rows) }

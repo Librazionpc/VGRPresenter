@@ -13,6 +13,7 @@
 #include "core/common/Common.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -118,6 +119,34 @@ public:
     // Devices with a live meter tap (drives the UI's metering refresh pump).
     virtual std::vector<uint32_t> ActiveInputMeters() const { return {}; }
 
+    // ---- Tap sample-through (the mixer's REAL carrier) -------------------
+    // A running input tap keeps a small FIFO of its CONVERTED float32
+    // frames (interleaved, the device's own rate/channel count) behind its
+    // meter snapshots. The engine's mixer drains them per render chunk —
+    // the actual samples a source routed into the graph produces, not a
+    // level-carried approximation. Underrun reads return fewer frames than
+    // asked (the mixer pads with silence); a stalled tap drains dry and
+    // stays silent — never a repeated buffer.
+    struct TapAudio {
+        uint32_t channels = 0;      // 0 = no tap / not supported
+        uint32_t sampleRateHz = 0;
+    };
+    // The tap's live capture format (what ReadTapAudio delivers).
+    virtual TapAudio TapFormat(uint32_t deviceId)
+    {
+        (void)deviceId;
+        return TapAudio{};
+    }
+    // Drain up to `frames` frames into `dst` (interleaved, tap's channel
+    // count). Returns the frames actually read (0 = drained or no tap).
+    virtual size_t ReadTapAudio(uint32_t deviceId, float *dst, size_t frames)
+    {
+        (void)deviceId;
+        (void)dst;
+        (void)frames;
+        return 0;
+    }
+
     // ---- OUTPUT metering (the program mix) ------------------------------
     // The SAME snapshot shape, taken from a LOOPBACK capture on a RENDER
     // endpoint (Windows WASAPI loopback): the levels of everything the
@@ -142,6 +171,36 @@ public:
         (void)deviceId;
         return InputMeterLevels{};
     }
+
+    // ---- Render (the engine's PLAYOUT — what the user actually hears) ----
+    // A REAL shared-mode WASAPI render client: an OS thread pulls float32
+    // frames through `renderCallback` at the endpoint's mix rate and writes
+    // them to the speaker. The FIRST render client in this codebase that
+    // makes sound; metering taps stay read-only. One stream at a time (the
+    // engine mixes everything into it).
+    // The mixer body: fill `frames` interleaved frames for `channels`
+    // channels at `sampleRateHz`. Return false to emit silence (a mixer
+    // with no sources, or a fault). Called from the WASAPI thread — no
+    // locks it can't afford, no allocations in the steady state.
+    using RenderCallback = std::function<bool(float *frames, uint32_t frameCount,
+                                              uint32_t channels, uint32_t sampleRateHz)>;
+    // Start rendering through `callback` on the default output device (the
+    // roster's waveout:<n> when given). Already-running → Ok (no-op).
+    virtual Result<void> StartRender(RenderCallback callback, uint32_t deviceId = UINT32_MAX)
+    {
+        (void)callback;
+        (void)deviceId;
+        return Error::Make(Err::Unsupported, "Audio",
+                           "audio render is not implemented on this platform");
+    }
+    // Stop and join the render thread. Idempotent; stopping when idle is Ok.
+    virtual Result<void> StopRender()
+    {
+        return Error::Make(Err::Unsupported, "Audio",
+                           "audio render is not implemented on this platform");
+    }
+    // Is the render stream alive? (the UI's "engine audio on" state)
+    virtual bool Rendering() const { return false; }
 };
 
 } // namespace bps::platform

@@ -29,22 +29,35 @@ Item {
     // "" = windowed), and whether its assignment starts locked.
     property string addScreenName: ""
     property bool addLocked: false
+    // Whether this output's real destination window (OutputWindow.qml)
+    // stays above other windows — off by default.
+    property bool addStayOnTop: false
+    // Whether that window fills its whole bound screen — on by default
+    // (a real projector/HDMI output's actual job); off starts it at
+    // half-size, centered and movable (a safe test mode for one monitor).
+    property bool addFullscreen: true
     // "smpte" | "gradient" | "checker" | "solidred"
     property string addPattern: "smpte"
 
     function submitAdd() {
         OutputListModel.addScreen(root.addName, root.addType, root.addRes, root.addRefresh, root.addPattern)
-        // Placement/lock are post-insert setters — the row must exist first.
-        if (root.addScreenName !== "" || root.addLocked) {
+        // Placement/lock/stayOnTop/fullscreen are post-insert setters — the
+        // row must exist first. fullscreenOutput defaults true on a new
+        // row already, so only an explicit UNCHECK needs a push here.
+        if (root.addScreenName !== "" || root.addLocked || root.addStayOnTop || !root.addFullscreen) {
             const row = OutputListModel.rowCount() - 1
             OutputListModel.setScreenName(row, root.addScreenName)
             OutputListModel.setBoundsLocked(row, root.addLocked)
+            OutputListModel.setStayOnTop(row, root.addStayOnTop)
+            OutputListModel.setFullscreenOutput(row, root.addFullscreen)
         }
         // Reset for next time, close.
         root.addName = ""
         root.addType = "HDMI"
         root.addScreenName = ""
         root.addLocked = false
+        root.addStayOnTop = false
+        root.addFullscreen = true
         root.addPattern = "smpte"
         root.addShown = false
     }
@@ -58,6 +71,11 @@ Item {
     property string editPattern: "smpte"
     property string editScreenName: ""
     property bool editLocked: false
+    // Whether this output's real destination window (OutputWindow.qml)
+    // stays above other windows — off by default.
+    property bool editStayOnTop: false
+    // Whether that window fills its whole bound screen — on by default.
+    property bool editFullscreen: true
     // Style assignment by the style's STABLE id ("" = None). Outputs
     // reference styles by id — surviving restarts and roster edits — never
     // by row index (deleting a style would re-point every later output at
@@ -74,6 +92,8 @@ Item {
         root.editPattern = data.testPattern !== "none" ? data.testPattern : "smpte"
         root.editScreenName = data.screenName
         root.editLocked = data.boundsLocked
+        root.editStayOnTop = data.stayOnTop
+        root.editFullscreen = data.fullscreenOutput
         root.editStyleId = data.styleId
     }
 
@@ -87,6 +107,8 @@ Item {
         OutputListModel.setTestPattern(root.editIndex, root.editPattern)
         OutputListModel.setScreenName(root.editIndex, root.editScreenName)
         OutputListModel.setBoundsLocked(root.editIndex, root.editLocked)
+        OutputListModel.setStayOnTop(root.editIndex, root.editStayOnTop)
+        OutputListModel.setFullscreenOutput(root.editIndex, root.editFullscreen)
         OutputListModel.setStyle(root.editIndex, root.editStyleId)
         root.editIndex = -1
     }
@@ -478,6 +500,53 @@ Item {
             onLockToggled: (l) => root.editLocked = l
         }
 
+        // Whether this output's REAL destination window (OutputWindow.qml,
+        // the borderless window on the bound physical/HDMI screen — not
+        // this in-app settings UI) stays above other windows. Off by
+        // default: an always-on-top window with no dedicated second
+        // monitor buries the app itself.
+        Item {
+            width: parent.width
+            height: 34
+            Text {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Stay on top"
+                color: Theme.textSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textSm
+            }
+            SettingsToggle {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                checked: root.editStayOnTop
+                onToggled: root.editStayOnTop = !root.editStayOnTop
+            }
+        }
+
+        // Whether that window fills its whole bound screen — on by
+        // default (a real projector/HDMI output's actual job); off starts
+        // it at half-size, centered and movable (a safe test mode for a
+        // single monitor with no second display to point it at).
+        Item {
+            width: parent.width
+            height: 34
+            Text {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Fill the whole screen"
+                color: Theme.textSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textSm
+            }
+            SettingsToggle {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                checked: root.editFullscreen
+                onToggled: root.editFullscreen = !root.editFullscreen
+            }
+        }
+
         Column {
             width: parent.width
             spacing: Theme.space2
@@ -601,6 +670,47 @@ Item {
                 }
             }
             onLockToggled: (l) => root.addLocked = l
+        }
+
+        // Same "Stay on top" toggle as the Edit dialog — off by default.
+        Item {
+            width: parent.width
+            height: 34
+            Text {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Stay on top"
+                color: Theme.textSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textSm
+            }
+            SettingsToggle {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                checked: root.addStayOnTop
+                onToggled: root.addStayOnTop = !root.addStayOnTop
+            }
+        }
+
+        // Same "Fill the whole screen" toggle as the Edit dialog — on by
+        // default.
+        Item {
+            width: parent.width
+            height: 34
+            Text {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Fill the whole screen"
+                color: Theme.textSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textSm
+            }
+            SettingsToggle {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                checked: root.addFullscreen
+                onToggled: root.addFullscreen = !root.addFullscreen
+            }
         }
     }
 

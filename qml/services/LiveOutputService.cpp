@@ -1,8 +1,10 @@
 #include "services/LiveOutputService.h"
 
 #include "services/ShowConverter.h"
+#include "services/DesignLibraryService.h"
 
 #include <QSet>
+#include "modules/presentation/CompositorState.hpp"
 #include "modules/presentation/LiveOutputController.hpp"
 #include "modules/presentation/PresentationEngine.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
@@ -26,11 +28,75 @@
 #include <QUrl>
 #include <QVideoFrame>
 #include <QVideoSink>
+#include <cstring>
+#include <utility>
 
 namespace pl = bps::presentation;
 namespace pr = bps::rendering;
 
 namespace {
+
+// Pushes lastMediaFrame_ (a QImage this service already owns/decodes — a
+// real QVideoSink frame or a loaded still) into the engine-side
+// CompositorState as plain RGBA8 bytes, so SceneBuilder's worker thread can
+// composite it too, not just the QML preview tile's image provider. A null
+// image clears the engine's copy instead of pushing empty bytes.
+void pushMediaFrameToCompositor(const QImage &frame)
+{
+    if (frame.isNull()) {
+        pl::CompositorState::Instance().ClearMedia();
+        return;
+    }
+    // Format_RGBA8888 is byte order R,G,B,A on every platform — exactly the
+    // engine's own RGBA8 convention (see LivePreviewProvider::requestImage's
+    // comment on the reverse conversion).
+    const QImage rgba = frame.format() == QImage::Format_RGBA8888
+        ? frame : frame.convertToFormat(QImage::Format_RGBA8888);
+    pl::CompositorState::MediaFrame mf;
+    mf.width = static_cast<uint32_t>(rgba.width());
+    mf.height = static_cast<uint32_t>(rgba.height());
+    // Row-by-row: QImage's bytesPerLine() can pad past width*4, so a
+    // straight constBits()..sizeInBytes() copy would smear padding bytes
+    // into a "tightly packed" buffer CompositorState's readers assume.
+    mf.rgba.resize(static_cast<size_t>(mf.width) * mf.height * 4);
+    for (int y = 0; y < rgba.height(); ++y) {
+        std::memcpy(mf.rgba.data() + static_cast<size_t>(y) * mf.width * 4,
+                    rgba.constScanLine(y), static_cast<size_t>(mf.width) * 4);
+    }
+    pl::CompositorState::Instance().SetMediaFrame(std::move(mf));
+}
+
+// Resolves the current activeOverlays_ list ({id,name} pairs — see
+// LiveOutputService::takeOverlay) into engine-ready CompositorState
+// snapshots and pushes them, called after every mutation
+// (takeOverlay/clearOverlay/clearAllOverlays) so SceneBuilder's worker
+// thread always sees the SAME overlay stack the QML tile's own Repeaters
+// composite. Resolution (OverlayLibraryService::design + block conversion)
+// happens HERE, on the GUI thread that owns those QML services — the
+// engine-side reader never calls back into them, only ever reads the
+// already-resolved plain data CompositorState hands it.
+void pushActiveOverlaysToCompositor(const QVariantList &activeOverlays)
+{
+    std::vector<pl::CompositorState::ActiveOverlay> out;
+    out.reserve(static_cast<size_t>(activeOverlays.size()));
+    for (const QVariant &v : activeOverlays) {
+        const QString id = v.toMap().value(QStringLiteral("id")).toString();
+        if (id.isEmpty())
+            continue;
+        const QVariantMap design = OverlayLibraryService::instance().design(id);
+        if (design.isEmpty())
+            continue;   // a deleted/missing overlay — drop it silently, same
+                        // "stale id self-heals" convention taken/preview ids use
+        pl::CompositorState::ActiveOverlay ao;
+        ao.id = id.toStdString();
+        ao.placeUnderSlide = design.value(QStringLiteral("placeUnderSlide")).toBool();
+        ao.background = design.value(QStringLiteral("background")).toString().toStdString();
+        for (const QVariant &b : design.value(QStringLiteral("blocks")).toList())
+            ao.blocks.push_back(ShowConverter::blockFromVariant(b.toMap()));
+        out.push_back(std::move(ao));
+    }
+    pl::CompositorState::Instance().SetActiveOverlays(std::move(out));
+}
 
 // The slide's CONTENT text — what a bound "text" block shows. Mirrors
 // SceneBuilder's SlideContentText: slide.text first; when empty (content
@@ -49,13 +115,27 @@ std::string slideContentText(const pl::Slide *slide)
 
 // The slide's content family ("scripture" | "table" | …), as tagged by
 // ShowConverter in the slide's meta — mirrors SceneBuilder's
-// slideContentType. Empty = untagged (the style's template then applies).
+// slideContentType. Empty = untagged = SHOWS content (it follows the shows
+// family slot).
 std::string slideContentType(const pl::Slide *slide)
 {
     if (auto meta = bps::json::Parse(slide->metaJson); meta.ok())
         if (const bps::json::Value *v = meta.value().Find("contentType"); v && v->type() == bps::json::Value::Type::String)
             return std::string(v->asString());
     return {};
+}
+
+// The OutputStyleSpec::familyTemplateKeys/Blocks slot a content family maps
+// to — EXACTLY SceneBuilder's own FamilyTemplateIndexFor (shows | media |
+// scripture | table, in the show* gates' order). Untagged slides are SHOWS
+// content (imported/Quick-Lyrics slides carry no tag) — they follow the
+// shows slot; only an unknown tag falls through to 4.
+size_t familyTemplateIndexFor(const std::string &contentType)
+{
+    if (contentType == "media")     return 1;
+    if (contentType == "scripture") return 2;
+    if (contentType == "table")     return 3;
+    return 0;   // "shows" — and untagged slides, which are shows content
 }
 
 // One slide as the QML preview shape: { valid, title, blocks, background } —
@@ -79,21 +159,33 @@ QVariantMap slideToVariantMap(const pl::Slide *slide)
     QString background = QString::fromStdString(slide->background);
     QVariantList blocks;
 
-    // Per-family rule, mirrored from SceneBuilder: the style's template only
-    // restyles its own contentType (a scripture-keyed style must not
-    // steamroll The Table's tab-template layout) — otherwise the slide's
-    // own blocks carry the look.
+    // Per-family rule, mirrored from SceneBuilder: a FAMILY-specific template
+    // (the Styles screen's own "Template for Shows/Media/Scripture/Table"
+    // row — style.familyTemplateBlocks[familyIdx]) wins outright when the
+    // style carries one for this slide's family; otherwise fall back to the
+    // whole-style default (style.templateBlocks, gated by contentType so a
+    // scripture-keyed style doesn't steamroll The Table's own layout);
+    // otherwise the slide's own blocks carry the look. Previously this only
+    // ever checked the whole-style default — a per-family pick (e.g. "Big"
+    // set as the Shows family's template) silently never reached this
+    // preview, even though SceneBuilder's real engine-composited frame
+    // already honored it correctly.
     const std::string slideType = slideContentType(slide);
-    const bool styleTemplateApplies = !style.templateBlocks.empty()
-        && (style.contentType.empty() || slideType.empty() || slideType == style.contentType);
+    const size_t familyIdx = familyTemplateIndexFor(slideType);
+    const std::vector<pl::ContentBlock> *activeTemplateBlocks = nullptr;
+    if (familyIdx < 4 && !style.familyTemplateBlocks[familyIdx].empty())
+        activeTemplateBlocks = &style.familyTemplateBlocks[familyIdx];
+    else if (!style.templateBlocks.empty()
+             && (style.contentType.empty() || slideType.empty() || slideType == style.contentType))
+        activeTemplateBlocks = &style.templateBlocks;
 
-    if (styleTemplateApplies) {
+    if (activeTemplateBlocks) {
         const QString styleBg = QString::fromStdString(style.backgroundColor);
         if (!styleBg.isEmpty() && styleBg != QLatin1String("transparent")
             && (background.isEmpty() || background == QLatin1String("transparent")
                 || !style.clearBackgroundOnText))
             background = styleBg;
-        for (const pl::ContentBlock &b : style.templateBlocks) {
+        for (const pl::ContentBlock &b : *activeTemplateBlocks) {
             pl::ContentBlock bound = b;
             if (b.kind == "text") {
                 if (!b.bind.empty()) {
@@ -155,16 +247,39 @@ LiveOutputService *LiveOutputService::create(QQmlEngine *engine, QJSEngine *jsEn
 // ---------------------------------------------------------------------------
 void LiveOutputService::goLive()
 {
+    // A staged ad-hoc pick (stageSlides() — a slide double-clicked in
+    // ShowCenter, say) wins over the open document: the whole point of
+    // staging is that the user's next real GO LIVE press commits whatever
+    // is sitting in the tile right now, not whatever happens to be open
+    // in the editor behind it.
+    if (!stagedSlidesRaw_.isEmpty()) {
+        const QString name = stagedName_;
+        const QVariantList slides = stagedSlidesRaw_;
+        stagedName_.clear();
+        stagedSlidesRaw_.clear();
+        stagedSlide_ = QVariantMap{};
+        emit stagedChanged();
+        goLiveWithSlides(name, slides);
+        return;
+    }
+
     auto r = bps::live::LiveOutputController::Instance().StartFromOpenShow();
     if (!r.ok()) {
-        // Surface the honest reason (no show open / no slides) as a toast —
-        // this used to be qWarning-only, which reads as "GO LIVE does
-        // nothing" from the header button (no console visible to a normal
-        // user) with zero clue why.
-        const QString reason = QString::fromStdString(r.error().message);
-        qWarning("LiveOutputService: goLive failed: %s", r.error().message.c_str());
-        EventBus::instance().notify(reason, QStringLiteral("warning"), QStringLiteral("Go Live"));
-        emit onAirChanged();
+        // No open document (nothing staged either, or this would already
+        // have returned above) — rather than refuse outright, go live with
+        // a single BLANK slide instead: the active output's own style
+        // (background colour/image) composites and shows on the real
+        // output the SAME way it would under real content, since
+        // SceneBuilder paints the style's background unconditionally,
+        // before/regardless of any blocks. A holding screen with the
+        // church's own branding before a service starts is a real, common
+        // need — GO LIVE with nothing queued should show that, not an
+        // error toast and a black screen.
+        QVariantMap blank;
+        blank.insert(QStringLiteral("blocks"), QVariantList{});
+        blank.insert(QStringLiteral("background"), QStringLiteral("transparent"));
+        blank.insert(QStringLiteral("title"), QString());
+        goLiveWithSlides(QString(), { blank });
         return;
     }
 
@@ -229,6 +344,37 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         poll_->start();
         pollTick();
     }
+}
+
+// Records a pick for the Main Output tile WITHOUT going live — see the
+// header comment on stagedSlide for why this exists (double-click used to
+// call goLiveWithSlides directly, which no user action gated). The staged
+// slide is already in the QML block shape (the same { blocks, background,
+// title } maps ShowCenter/ScripturePane/TheTablePane hand to
+// goLiveWithSlides), so it needs no engine round-trip to preview — only
+// actually going live converts it to real engine Slides.
+void LiveOutputService::stageSlides(const QString &name, const QVariantList &slides)
+{
+    stagedName_ = name;
+    stagedSlidesRaw_ = slides;
+    // Through the SAME active-style template composition onAirSlide/
+    // previewWithActiveStyle already apply — the staged tile used to show
+    // the slide's own raw, unstyled blocks, then visibly jump to bold/
+    // larger template text the instant GO LIVE actually committed it (live
+    // reported: "the main output preview got bolder" after pressing GO
+    // LIVE). Staging should already show what it will look like once live.
+    stagedSlide_ = slides.isEmpty() ? QVariantMap{} : previewWithActiveStyle(slides.first().toMap());
+    emit stagedChanged();
+}
+
+void LiveOutputService::clearStaged()
+{
+    if (stagedSlidesRaw_.isEmpty() && stagedSlide_.isEmpty())
+        return;
+    stagedName_.clear();
+    stagedSlidesRaw_.clear();
+    stagedSlide_ = QVariantMap{};
+    emit stagedChanged();
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +444,12 @@ void LiveOutputService::takeInput(const QString &label, const QString &kind, con
     // service can't see the provider's cache, so the QML side confirms via
     // confirmInputFrame() (warm-up honest: the pill/placeholder shows until
     // then).
+    // The RESOLVED PAL device id, not the roster label — CompositorState's
+    // reader (SceneBuilder, engine-side) calls straight into
+    // IVideo::PreviewFramePixels(deviceId), which knows nothing about QML
+    // roster labels.
+    const QString resolvedId = EngineBridge::instance().resolvedPreviewDeviceId(label);
+    pl::CompositorState::Instance().SetTakenInput(resolvedId.toStdString(), kind.toStdString());
     emit inputChanged();
 }
 
@@ -309,6 +461,51 @@ void LiveOutputService::takeInput(const QString &label, const QString &kind, con
 void LiveOutputService::confirmInputFrame(const QString &label)
 {
     Q_UNUSED(label)
+}
+
+// ---------------------------------------------------------------------------
+// Overlays on air — multiple, stacked (see the header's activeOverlays doc).
+// ---------------------------------------------------------------------------
+void LiveOutputService::takeOverlay(const QString &id, const QString &name)
+{
+    if (id.isEmpty())
+        return;
+    for (const QVariant &v : std::as_const(activeOverlays_))
+        if (v.toMap().value(QStringLiteral("id")).toString() == id)
+            return;   // already on — callers toggle via overlayIsOnAir
+    activeOverlays_.append(QVariantMap{ { QStringLiteral("id"), id },
+                                        { QStringLiteral("name"), name } });
+    pushActiveOverlaysToCompositor(activeOverlays_);
+    emit overlaysChanged();
+}
+
+void LiveOutputService::clearOverlay(const QString &id)
+{
+    for (int i = 0; i < activeOverlays_.size(); ++i) {
+        if (activeOverlays_.at(i).toMap().value(QStringLiteral("id")).toString() == id) {
+            activeOverlays_.removeAt(i);
+            pushActiveOverlaysToCompositor(activeOverlays_);
+            emit overlaysChanged();
+            return;
+        }
+    }
+}
+
+void LiveOutputService::clearAllOverlays()
+{
+    if (activeOverlays_.isEmpty())
+        return;
+    activeOverlays_.clear();
+    pushActiveOverlaysToCompositor(activeOverlays_);
+    emit overlaysChanged();
+}
+
+bool LiveOutputService::overlayIsOnAir(const QString &id) const
+{
+    for (const QVariant &v : std::as_const(activeOverlays_))
+        if (v.toMap().value(QStringLiteral("id")).toString() == id)
+            return true;
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +631,7 @@ void LiveOutputService::clearInput()
     inputKind_.clear();
     inputLive_ = false;
     producing_.remove(inputLabel_);
+    pl::CompositorState::Instance().ClearTakenInput();
     // A held card preview keeps the pump (and its rev bumps) alive.
     if (inputPump_ && cardPreviews_.isEmpty())
         inputPump_->stop();
@@ -672,6 +870,7 @@ void LiveOutputService::takeMedia(const QString &path, const QString &name)
             lastMediaFrame_ = f.toImage();
             if (!lastMediaFrame_.isNull())
                 mediaRev_++;
+            pushMediaFrameToCompositor(lastMediaFrame_);
             emit mediaTick();
         });
     }
@@ -681,6 +880,7 @@ void LiveOutputService::takeMedia(const QString &path, const QString &name)
     mediaIsVideo_ = isVideo;
     mediaIsAudio_ = isAudio;
     lastMediaFrame_ = QImage();   // warm-up: the tiles show their placeholder
+    pushMediaFrameToCompositor(lastMediaFrame_);
     mediaOnAir_ = true;
     if (isVideo || isAudio) {
         // Audio rides the SAME QMediaPlayer/QAudioOutput path video already
@@ -702,6 +902,7 @@ void LiveOutputService::takeMedia(const QString &path, const QString &name)
         lastMediaFrame_ = QImage(clean);
         if (!lastMediaFrame_.isNull())
             mediaRev_++;
+        pushMediaFrameToCompositor(lastMediaFrame_);
         mediaState_ = QStringLiteral("playing");   // a still "plays" forever
         mediaPosition_ = 0;
         mediaDuration_ = 0;
@@ -725,6 +926,7 @@ void LiveOutputService::clearMedia()
     mediaPosition_ = 0;
     mediaDuration_ = 0;
     lastMediaFrame_ = QImage();
+    pl::CompositorState::Instance().ClearMedia();
     qInfo("LiveOutputService: media taken off air");
     emit mediaChanged();
     emit mediaTick();
@@ -879,6 +1081,19 @@ QVariantMap LiveOutputService::onAirSlideAt(int index) const
             return slideToVariantMap(&s);
     }
     return {};
+}
+
+// A library preview's own slide (ShowCenter's grid/list thumbnails), run
+// through the exact same slideToVariantMap composition onAirSlide/
+// stagedSlide already use — so a show's preview shows what it will
+// actually look like once on air (the active output's style/template),
+// not just its own raw, unstyled blocks. Round-trips the QML block shape
+// through a real engine Slide only because slideToVariantMap's contentType
+// tagging (slideContentType) reads it off pl::Slide::metaJson.
+QVariantMap LiveOutputService::previewWithActiveStyle(const QVariantMap &slide) const
+{
+    const pl::Slide engineSlide = ShowConverter::slideFromVariant(slide);
+    return slideToVariantMap(&engineSlide);
 }
 
 // ---------------------------------------------------------------------------

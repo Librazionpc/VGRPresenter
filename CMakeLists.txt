@@ -140,6 +140,7 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/presentation/PresentationValidator.cpp
     ${BPS_ROOT}/modules/presentation/PresentationCompiler.cpp
     ${BPS_ROOT}/modules/presentation/SceneBuilder.cpp
+    ${BPS_ROOT}/modules/presentation/CompositorState.cpp
     ${BPS_ROOT}/modules/presentation/PresentationRuntime.cpp
     ${BPS_ROOT}/modules/presentation/PresentationSerializer.cpp
     ${BPS_ROOT}/modules/presentation/TextFormat.cpp
@@ -196,6 +197,7 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/automation/FlowEngine.cpp
     ${BPS_ROOT}/modules/production/ProductionGraph.cpp
     ${BPS_ROOT}/modules/production/ProductionEngine.cpp
+    ${BPS_ROOT}/modules/production/AudioMixer.cpp
     # Recording, Replay & Media Capture Engine (Phase 16, docs/specs/28)
     ${BPS_ROOT}/modules/recording/RecordingEngine.cpp
     ${BPS_ROOT}/modules/broadcast/BroadcastEngine.cpp
@@ -462,6 +464,7 @@ qt_add_executable(appVGRPresenterUI
 # undefined at deeper nesting and forced literal hex colors everywhere.
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/Theme.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/AppCursor.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/Db.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/components/NotificationCenter.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 
 qt_add_qml_module(appVGRPresenterUI
