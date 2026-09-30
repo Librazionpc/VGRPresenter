@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstring>
 #include <format>
+#include <mutex>
 
 namespace bps::rendering {
 
@@ -423,22 +424,14 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
     style.color.a *= obj->Opacity();
 
     auto layoutRes = cache_.Layout(obj->Text(), style, fonts_);
-    Logger::Instance().Info(std::format(
-        "TEMPDIAG DrawTextObject text.len={} fontId='{}' size={} layoutOk={} lines={}",
-        obj->Text().size(), style.fontId, style.size, layoutRes.ok(),
-        layoutRes.ok() ? layoutRes.value().lines.size() : 0), "TEMPDIAG");
     if (!layoutRes.ok() || layoutRes.value().lines.empty()) return;
 
     // Real font when style.fontId names one the system can resolve (GDI+,
     // Windows), else the builtin bitmap font — same "try real, degrade
     // gracefully" contract as the cache's own fallback inside this call.
     auto atlas = cache_.GlyphAtlas(style, fonts_);
-    Logger::Instance().Info(std::format("TEMPDIAG atlas.ok={}", atlas.ok()), "TEMPDIAG");
     if (!atlas.ok()) return;
     const auto& entry = *atlas.value();
-    Logger::Instance().Info(std::format("TEMPDIAG atlas size={}x{} glyphs={}",
-                                       entry.atlas.width, entry.atlas.height, entry.glyphs.size()),
-                            "TEMPDIAG");
 
     // Ensure the atlas texture is uploaded once. Keyed by font identity too
     // (not just size) — otherwise switching fonts/weights at the same

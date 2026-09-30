@@ -352,7 +352,7 @@ ApplicationWindow {
     // so the crashing step names itself in the output.
     Timer {
         id: selfTestStage1
-        running: false   // TEMP: yielded to selfTestTextDiag below
+        running: typeof SelfTest !== "undefined"
         interval: 1500
         onTriggered: {
             console.log("[SELFTEST] stage 1: open Quick search (Ctrl+K flow)")
@@ -636,30 +636,6 @@ ApplicationWindow {
         interval: 9999999
     }
 
-    // ---- TEMP: reproduce "text missing on the real output window, bg image
-    // shows fine" — go live on a real text slide and let a few real frames
-    // render so DrawTextObject's TEMPDIAG logging fires, then quit.
-    Timer {
-        id: selfTestTextDiag
-        running: typeof SelfTest !== "undefined"
-        interval: 1500
-        onTriggered: {
-            const peeked = ShowService.peekShow("C:/Users/znwaj/OneDrive/Documents/VGR Presenter/Shows/FreeShow/1088-WE ARE TRAVELLING ON THE RIGHT ROAD.vgr")
-            console.log("[SELFTEST-TEXTDIAG] peek ok=" + peeked.ok)
-            const slide0 = peeked.show && peeked.show.slides && peeked.show.slides.length > 0 ? peeked.show.slides[0] : null
-            if (slide0)
-                LiveOutputService.goLiveWithSlides("1088-WE ARE TRAVELLING ON THE RIGHT ROAD", [slide0])
-            selfTestTextDiag2.restart()
-        }
-    }
-    Timer {
-        id: selfTestTextDiag2
-        interval: 2500
-        onTriggered: {
-            console.log("[SELFTEST-TEXTDIAG] done waiting for frames")
-            SelfTest.quit()
-        }
-    }
 
 
 

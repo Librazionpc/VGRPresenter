@@ -2020,7 +2020,18 @@ Item {
         title: qsTr("Edit Audio Input")
         cardWidth: 640
         saveText: qsTr("Save Changes")
-        onCancelled: root.editAudioIndex = -1
+        // Cancel must release the dialog's tap too — saveEditAudio() already
+        // did, but Cancel skipped it, so backing out of an edit (instead of
+        // saving) left the device metering forever (nothing ever stopped
+        // it short of tearing the whole screen down): reported live as
+        // "just opening Settings > Audio & Video, the source in Media is
+        // already active" — a tap orphaned by an earlier cancelled edit,
+        // still running from a previous visit to this screen.
+        onCancelled: {
+            if (root.editAudioKind === "device")
+                root.closeAudioMeter(root.editAudioSublabel)
+            root.editAudioIndex = -1
+        }
         onAccepted: root.saveEditAudio()
 
         // (The signal pane was removed per design review — the dialog now
@@ -2184,7 +2195,11 @@ Item {
                 variant: "danger"
                 onClicked: {
                     // Routes-by-index must be compacted before the row goes
-                    // (same path as the context menu's Delete).
+                    // (same path as the context menu's Delete). Same
+                    // release-the-tap fix as Cancel above — deleting the row
+                    // out from under a running meter tap orphaned it too.
+                    if (root.editAudioKind === "device")
+                        root.closeAudioMeter(root.editAudioSublabel)
                     root.removeAudioFixingRoutes(root.editAudioIndex)
                     root.editAudioIndex = -1
                 }
@@ -2525,7 +2540,13 @@ Item {
         subtitle: qsTr("Add an audio input or video source, set its level, and dial in its effects rack.")
         cardWidth: 640
         saveText: qsTr("Add Source")
-        onCancelled: root.addSourceShown = false
+        // Same cancel-leaks-the-tap bug as Edit Audio's dialog above — see
+        // its comment.
+        onCancelled: {
+            if (root.addSourceType === "audio" && root.addSourceKind === "device")
+                root.closeAudioMeter(root.addSourceSublabel)
+            root.addSourceShown = false
+        }
         onAccepted: root.submitAddSource()
 
         // Audio/Video type toggle — presets which column's + Add opened it,

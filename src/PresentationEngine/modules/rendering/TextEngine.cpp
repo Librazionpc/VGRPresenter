@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 
 // ---------------------------------------------------------------------------
 // Real system font backend (Windows GDI+) — BuildSystemAtlas/HasSystemFont/
@@ -35,6 +36,23 @@ void EnsureGdiplusStarted() {
         return true;
     }();
     (void)started;
+}
+
+// GDI+ objects (Font/FontFamily/Bitmap/Graphics) are NOT documented as
+// thread-safe for concurrent use, and this engine renders MULTIPLE passes
+// (the shared preview + one gated pass per styled output) on separate
+// threads — live evidence (TEMPDIAG) showed DrawTextObject firing from
+// three different thread ids concurrently. RenderCache's own mutex only
+// serializes within ONE cache instance; with a separate RenderEngine/
+// RenderCache per pass, two instances could still call INTO GDI+ at the
+// exact same moment. One process-wide lock around every GDI+ call below
+// (not just the cache's map bookkeeping) is the standard fix for this
+// class of bug — reported live as "text missing/black on first go-live,
+// shows correctly after reselecting" (a race, not a hard failure, exactly
+// matches unsynchronized GDI+ corruption rather than a real logic bug).
+std::mutex& GdiplusMutex() {
+    static std::mutex m;
+    return m;
 }
 
 std::wstring Utf8ToWide(const std::string& s) {
@@ -306,11 +324,13 @@ RgbaImage FontManager::BuildAtlas(float sizePx,
 
 #ifdef _WIN32
 bool FontManager::HasSystemFont(const std::string& family) const {
+    std::lock_guard<std::mutex> lock(GdiplusMutex());
     return MakeGdiplusFont(family, 24.0f, false, false) != nullptr;
 }
 
 float FontManager::SystemCharAdvance(const std::string& family, float sizePx, bool bold,
                                      bool italic, uint8_t codepoint) const {
+    std::lock_guard<std::mutex> lock(GdiplusMutex());
     auto font = MakeGdiplusFont(family, sizePx, bold, italic);
     if (!font) return 0.0f;
     // A 1x1 bitmap's Graphics is a real, valid measuring context (GDI+
@@ -329,6 +349,7 @@ float FontManager::SystemCharAdvance(const std::string& family, float sizePx, bo
 std::vector<float> FontManager::SystemCharAdvances(const std::string& family, float sizePx,
                                                     bool bold, bool italic,
                                                     const std::string& text) const {
+    std::lock_guard<std::mutex> lock(GdiplusMutex());
     auto font = MakeGdiplusFont(family, sizePx, bold, italic);
     if (!font) return {};
     Gdiplus::Bitmap probe(1, 1, PixelFormat32bppARGB);
@@ -347,6 +368,7 @@ std::vector<float> FontManager::SystemCharAdvances(const std::string& family, fl
 
 RgbaImage FontManager::BuildSystemAtlas(const std::string& family, float sizePx, bool bold,
                                         bool italic, std::map<uint8_t, FontGlyph>& outGlyphs) const {
+    std::lock_guard<std::mutex> lock(GdiplusMutex());
     auto font = MakeGdiplusFont(family, sizePx, bold, italic);
     if (!font) return {};
 

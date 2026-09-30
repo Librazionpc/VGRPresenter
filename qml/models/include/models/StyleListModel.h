@@ -40,14 +40,19 @@ struct StyleItem
     // background colour, the style's background steps aside for it.
     bool clearBackgroundOnText = false;
     // Per-content-type gates: a chip ON means an output wearing this style
-    // ALLOWS that content type. NEW styles start with everything INACTIVE —
-    // the user activates exactly what the style serves (an intuitive explicit
-    // choice, not four pre-ticked boxes); existing rosters keep their saved
-    // flags (the JSON read defaults missing keys to true).
-    bool showShows = false;
-    bool showMedia = false;
-    bool showScripture = false;
-    bool showTable = false;
+    // ALLOWS that content type. NEW styles start with everything ACTIVE —
+    // matching StyleStore's JSON read default (missing keys read true) and
+    // OutputStyleSpec's own C++ defaults, so a fresh "New Style" never
+    // silently refuses every content family on the real output (the
+    // all-false default made BuildGatedSlideScene render BACKGROUND-ONLY
+    // scenes — styled bg, no text — while the QML tile kept showing text
+    // through its gate-free DesignPreview path). A style that genuinely
+    // wants no content is meaningless; the engine treats all-false as
+    // "unconfigured" anyway (SceneBuilder.cpp's StyleAdmitsSlide).
+    bool showShows = true;
+    bool showMedia = true;
+    bool showScripture = true;
+    bool showTable = true;
     // PER-FAMILY TEMPLATE KEYS ("" = no template for that family — NO
     // inherit; the family renders plain, and SHOWS alone falls back to the
     // Bible template, baked engine-side). The style renders each content

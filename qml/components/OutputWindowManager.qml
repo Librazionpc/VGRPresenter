@@ -27,6 +27,7 @@ Instantiator {
         required property string frameBuffer
         required property bool stayOnTop
         required property bool fullscreenOutput
+        required property bool active
 
         outputIndex: win.index
         outputEnabled: win.isEnabled
@@ -34,5 +35,6 @@ Instantiator {
         ownBuffer: win.frameBuffer
         outputStayOnTop: win.stayOnTop
         outputFullscreen: win.fullscreenOutput
+        outputActive: win.active
     }
 }

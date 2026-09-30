@@ -800,7 +800,12 @@ void OutputListModel::pushEngineStyle(const QString &styleId)
     std::vector<std::string> buffers;
     for (int i = 0; i < m_outputs.size(); ++i) {
         const OutputItem &item = m_outputs.at(i);
-        if (!item.isEnabled || !item.styleId.isEmpty()) {
+        // ENABLED + styled only (the comment below is the contract): the old
+        // `!isEnabled || hasStyle` De-Morgan slip also pushed specs for
+        // DISABLED styled outputs — wasted gated passes per frame, and a
+        // live output whose style was just removed kept its old spec pushed
+        // (the tile went unstyled while the real output stayed styled).
+        if (item.isEnabled && !item.styleId.isEmpty()) {
             const int styleRow = styleRowForId(item.styleId);
             if (styleRow >= 0) {
                 bps::presentation::OutputStyleSpec outSpec;

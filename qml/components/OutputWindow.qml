@@ -3,13 +3,20 @@ import VGRPresenterUI
 
 // ONE real destination window for an Output bound to a physical screen —
 // what an audience actually sees, as opposed to OutputMonitorTile.qml (the
-// small in-app preview tile). Content mirrors OutputMonitorTile's own
-// frameSource binding exactly (same image://livepreview provider, same
-// per-output buffer-name convention via OutputListModel's frameBuffer
-// role) — just full-window, borderless, and without the tile's
-// checkerboard/style-preview chrome: a real output shows the live frame or
-// plain black, never a placeholder texture (a checkerboard would look like
-// a broken feed to an audience, not "nothing on air yet").
+// small in-app preview tile). Content now MIRRORS the tile's OWN compositing
+// approach directly (DesignPreview drawing the on-air slide's blocks in
+// QML) instead of depending on the engine's separate per-output distributed
+// frame for text — that frame pipeline (a slower GDI+ text-layout pass,
+// its own scene cache, its own "frame ready" signal race) is what kept
+// going wrong here across several rounds of fixes, while the tile — using
+// this SAME DesignPreview path — never had any of those problems. The
+// distributed frame is now used ONLY where the tile also needs it: media/
+// camera-kind on-air content, where a block render would just be a
+// name-on-a-tile placeholder and the real captured/decoded pixels are the
+// honest picture. No checkerboard chrome (unlike the tile): a real output
+// shows the live frame/blocks or plain black/style background, never a
+// placeholder texture (a checkerboard would look like a broken feed to an
+// audience, not "nothing on air yet").
 //
 // Explicit x/y/width/height sized to the bound screen's real geometry
 // (OutputListModel.displayFor) rather than Window.FullScreen visibility:
@@ -95,12 +102,12 @@ Window {
     height: root.hasDisplay ? (root.outputFullscreen ? root.displayInfo.height : root.displayInfo.height / 2) : 270
     x: root.hasDisplay ? root.displayInfo.x + (root.displayInfo.width - root.width) / 2 : 0
     y: root.hasDisplay ? root.displayInfo.y + (root.displayInfo.height - root.height) / 2 : 0
-    // Up (covering the screen) whenever the Output is enabled and bound —
-    // independent of GO LIVE: a real projector/HDMI output stays claimed
-    // once configured, showing black between cues rather than flickering
-    // the OS desktop back into view every time the show stops (the same
-    // "claimed output" convention ProPresenter/OBS projector windows use).
-    visible: root.outputEnabled && root.hasDisplay && !root.dismissed
+    // Up ONLY while actually live — GO LIVE is the explicit "put this on
+    // the screen" action; an enabled-and-bound-but-not-live Output leaves
+    // the OS desktop alone instead of parking a black/branded window over
+    // it between services. STOP (or the show ending) takes the window back
+    // down the same frame LiveOutputService.live flips.
+    visible: root.outputEnabled && root.hasDisplay && !root.dismissed && LiveOutputService.live
 
     readonly property bool hasFrame: LiveOutputService.live && LiveOutputService.frameRev > 0
     readonly property url frameSource: root.hasFrame
@@ -110,11 +117,10 @@ Window {
         : ""
 
     // This output's own style background ({ color, image, hasImage }) — the
-    // SAME role OutputMonitorTile.qml's own styleBg reads. Was plain black
-    // whenever there's no frame yet (window claimed, nothing on air): with
-    // a real style assigned (a branded colour/image), that's what an idle
-    // projector should show — a claimed-but-idle output reading as "off
-    // air" black is wrong once a style exists to hold it instead.
+    // SAME role OutputMonitorTile.qml's own styleBg reads. The window only
+    // shows while live (see `visible` above), but a go-live with nothing
+    // staged still has to show SOMETHING — the style's own branded colour/
+    // image, not plain black — so this stays independent of hasSlidePreview.
     property int stylePulse: 0
     Connections {
         target: OutputListModel
@@ -127,43 +133,156 @@ Window {
         return (bg && typeof bg === "object") ? bg : { color: "", image: "", hasImage: false }
     }
 
-    // "hasFrame" only means the SERVICE thinks a frame exists (live &&
-    // frameRev bumped) — it does NOT mean THIS request actually got real
-    // pixels back. The per-output buffer this window reads (ownBuffer,
-    // rendered by a separate pass than the shared preview the tile uses)
-    // isn't always populated in time: reported live as "sometimes it stays
-    // black" — hasFrame was true, but the provider had nothing yet and
-    // handed back its 1×1-transparent placeholder, which Stretch turns
-    // into nothing visible and this window's OWN black fill showed through
-    // instead of the style. Checking the loaded IMAGE's own Ready status +
-    // real size (not just the service's coarser flag) is the same warm-up
-    // check OutputMonitorTile.qml's media layer already uses for the exact
-    // same "provider answered but with nothing yet" case.
-    readonly property bool frameReady: frameImg.status === Image.Ready && frameImg.sourceSize.width > 1
+    // Whether THIS output row is the app's currently-active one — mirrors
+    // OutputMonitorTile.qml's own root.active dependency inside
+    // suppressStyleBgImage below (wired from OutputListModel's ActiveRole
+    // by OutputWindowManager.qml, same as every other per-row property here).
+    property bool outputActive: false
+
+    // ---- On-air content — the SAME data/priority OutputMonitorTile.qml
+    // reads, so this window shows exactly what the tile shows instead of
+    // depending on the engine's own separate (and, historically, buggier)
+    // per-output distributed frame for text. See that file's own comments
+    // for the full reasoning behind each of these.
+    readonly property var onAirSlide: LiveOutputService.stagedSlide.valid === true
+        ? LiveOutputService.stagedSlide : LiveOutputService.onAirSlide
+    readonly property bool hasSlidePreview: onAirSlide.valid === true
+                                            && onAirSlide.blocks
+                                            && onAirSlide.blocks.length > 0
+
+    readonly property bool inputTaken: LiveOutputService.inputLabel !== ""
+    readonly property url inputSource: inputTaken
+        ? "image://videopreview/" + encodeURIComponent(LiveOutputService.inputLabel)
+          + "?n=" + LiveOutputService.inputRev : ""
+
+    readonly property bool mediaOnAir: LiveOutputService.mediaOnAir && !root.inputTaken
+    readonly property url mediaSource: mediaOnAir && !LiveOutputService.mediaIsAudio
+        ? "image://mediaplay?v=" + LiveOutputService.mediaRev : ""
+
+    function isClearColor(c) {
+        if (c === undefined || c === null || c === "" || c === "transparent")
+            return true
+        try { return Qt.color(c).a === 0 } catch (e) { return false }
+    }
+    readonly property bool styled: !isClearColor(root.styleBg.color) || root.styleBg.hasImage === true
+
+    readonly property bool suppressStyleBgImage: root.styleBg.clearOnText === true
+                                                 && root.outputActive
+        && (root.hasSlidePreview || root.mediaOnAir || root.inputTaken)
+
+    readonly property bool videoUnderneath: root.inputTaken
+        || (root.mediaOnAir && !LiveOutputService.mediaIsAudio)
+
+    // Media-kind on-air blocks (camera/media/audio/image) draw as a
+    // placeholder-only tile through DesignPreview — the distributed frame
+    // is the honest picture for those specifically; everything else (text/
+    // shape/clock/timer) draws true through DesignPreview and wins, since
+    // that frame can lag a slide change while the blocks never do.
+    readonly property bool framePriority: {
+        if (!hasFrame || !hasSlidePreview)
+            return false
+        const blocks = onAirSlide.blocks
+        for (let i = 0; i < blocks.length; ++i) {
+            const kind = String(blocks[i] && blocks[i].kind ? blocks[i].kind : "")
+            if (kind === "camera" || kind === "media" || kind === "audio" || kind === "image")
+                return true
+        }
+        return false
+    }
 
     Rectangle {
         anchors.fill: parent
-        visible: !root.frameReady && root.styleBg.color !== "" && root.styleBg.color !== "transparent"
+        visible: root.styleBg.color !== "" && root.styleBg.color !== "transparent"
         color: root.styleBg.color
     }
     Image {
         anchors.fill: parent
-        visible: !root.frameReady && root.styleBg.hasImage
-        source: root.styleBg.hasImage ? "file:///" + root.styleBg.image : ""
+        visible: root.styleBg.hasImage && !root.suppressStyleBgImage && !root.videoUnderneath
+        source: root.styleBg.hasImage && !root.suppressStyleBgImage && !root.videoUnderneath
+                ? "file:///" + root.styleBg.image : ""
         fillMode: Image.PreserveAspectCrop
     }
 
+    // Taken camera/screen input — under the on-air content, above the style
+    // background (camera-behind-lyrics), same layer OutputMonitorTile.qml
+    // draws.
     Image {
-        id: frameImg
         anchors.fill: parent
-        visible: root.hasFrame && root.frameReady
+        visible: root.inputTaken
+        source: root.inputSource
+        fillMode: Image.PreserveAspectCrop
+        cache: false
+        asynchronous: false
+    }
+
+    // Taken media file on air — same convention as the input layer above.
+    Image {
+        anchors.fill: parent
+        visible: root.mediaOnAir && !LiveOutputService.mediaIsAudio
+        source: root.mediaSource
+        fillMode: Image.PreserveAspectFit
+        cache: false
+        asynchronous: false
+    }
+
+    // Overlays, UNDER-SLIDE group — same model/lookup as
+    // OutputMonitorTile.qml.
+    Repeater {
+        model: LiveOutputService.activeOverlays
+        delegate: DesignPreview {
+            required property var modelData
+            readonly property var design: OverlayLibraryService.design(modelData.id)
+            anchors.fill: parent
+            visible: design.placeUnderSlide === true
+            showCheckerboard: false
+            blocks: design.blocks ?? []
+            background: design.background ?? "transparent"
+        }
+    }
+
+    // The on-air slide, drawn block-true through the SAME renderer the
+    // preview tile uses — this is the fix: no more depending on the
+    // engine's own separate distributed render for text.
+    DesignPreview {
+        anchors.fill: parent
+        visible: root.hasSlidePreview && !root.framePriority
+        showBindPlaceholders: false
+        showCheckerboard: false
+        backgroundImage: (root.styleBg.hasImage && !root.suppressStyleBgImage && !root.videoUnderneath)
+            ? root.styleBg.image : ""
+        blocks: root.onAirSlide.blocks ?? []
+        background: root.videoUnderneath ? "transparent" : (root.onAirSlide.background ?? "transparent")
+    }
+
+    // The distributed frame — wins only for media-kind on-air content (a
+    // block render would just be a name-on-a-tile placeholder), or when
+    // there's no slide preview at all but the service still has a frame
+    // (camera/screen taken with nothing else on air). Never over a taken
+    // input/media layer, which already IS the real picture.
+    Image {
+        anchors.fill: parent
+        visible: root.hasFrame
+                 && (root.framePriority && !root.mediaOnAir && !root.inputTaken
+                     || (!root.hasSlidePreview && !root.mediaOnAir && !root.inputTaken))
         source: root.frameSource
         fillMode: Image.Stretch
         asynchronous: false
         cache: false
-        // The provider hands back an ARGB32 already sized to the request;
-        // stretch keeps the mapping 1:1 with this window (matches the
-        // preview tile's own distributed-frame Image, OutputMonitorTile.qml).
+    }
+
+    // Overlays, OVER-SLIDE group — above everything, including the slide's
+    // own text (FreeShow's own overlays-above-text order).
+    Repeater {
+        model: LiveOutputService.activeOverlays
+        delegate: DesignPreview {
+            required property var modelData
+            readonly property var design: OverlayLibraryService.design(modelData.id)
+            anchors.fill: parent
+            visible: design.placeUnderSlide !== true
+            showCheckerboard: false
+            blocks: design.blocks ?? []
+            background: design.background ?? "transparent"
+        }
     }
 
     // The dismiss escape hatch: covers the whole window so Escape/double-

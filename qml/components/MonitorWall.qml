@@ -47,6 +47,14 @@ Item {
     // stage) vanished the moment something was staged instead of truly
     // live, so there was nothing left to click to go live WITH.
     readonly property bool staged: LiveOutputService.stagedSlide.valid === true
+    // "Genuinely has content on air" — narrower than toolbar.onAir
+    // (LiveOutputService.onAirTotal > 0), which counts the go-live-with-
+    // nothing blank fallback as "1 slide on air" too: that fallback exists
+    // so a real style background shows instead of plain black, not to mark
+    // the slide-status icon below as if a real pick was on air (reported
+    // live: "the icon is still selected... when there's no active show").
+    readonly property bool hasRealOnAirContent: !!(LiveOutputService.onAirSlide.blocks
+        && LiveOutputService.onAirSlide.blocks.length > 0)
     readonly property bool anythingOnAir: root.live || root.inputTaken || root.staged
         || LiveOutputService.mediaOnAir || LiveOutputService.activeOverlays.length > 0
         || EngineBridge.anyAudioMetering
@@ -458,30 +466,24 @@ Item {
                         if (root.inputTaken) LiveOutputService.clearInput()
                     }
                 }
-                // Slide: the on-air text/scripture/song content — a REAL
-                // toggle, not a one-shot clear: click while on air stops the
-                // output (and the button dims — LiveOutputService.stop() now
-                // resets onAirTotal so toolbar.onAir actually goes false);
-                // click again while off calls resumeSlide(), which replays
-                // whatever last went live (goLive()'s open show, or the last
-                // goLiveWithSlides() scripture/table pick) — bringing it
-                // straight back. `active` (not enabled2) carries the lit-vs-
-                // dim look so the button STAYS clickable between the two.
-                // A STAGED pick (not yet committed by GO LIVE) also lights
-                // it — it IS occupying the tile's slide layer, same as live
-                // content, just not pushed to a real output yet — and
-                // clicking it while only staged clears the stage instead of
-                // wrongly resuming whatever was live before it.
+                // Slide: the on-air text/scripture/song content indicator —
+                // same shape as the image/overlays buttons on either side of
+                // it now (enabled2 driven purely by "is my own content here
+                // right now", onPicked just clears it, no active override,
+                // no resume/live special-casing). The earlier "let it also
+                // resume the last go-live when nothing's on/staged" behaviour
+                // is gone — live report: "the book icon is not anywhere
+                // special, remove it from all special places and let it be
+                // among the pack" (it also never touches GO LIVE/STOP,
+                // exactly like every other button in this row never does).
                 ToolButton {
                     width: parent.btnW; height: 30
                     icon: "scripture"
                     danger: true
-                    enabled2: toolbar.onAir || root.staged || LiveOutputService.canResumeSlide
-                    active: toolbar.onAir || root.staged
+                    enabled2: root.hasRealOnAirContent || root.staged
                     onPicked: {
-                        if (LiveOutputService.live) LiveOutputService.stop()
-                        else if (root.staged) LiveOutputService.clearStaged()
-                        else LiveOutputService.resumeSlide()
+                        if (root.staged) LiveOutputService.clearStaged()
+                        if (root.hasRealOnAirContent) LiveOutputService.clearOnAirSlide()
                     }
                 }
                 // Overlays: the whole stacked layer off at once (no

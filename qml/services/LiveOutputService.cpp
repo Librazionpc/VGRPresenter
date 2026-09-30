@@ -170,14 +170,25 @@ QVariantMap slideToVariantMap(const pl::Slide *slide)
     // set as the Shows family's template) silently never reached this
     // preview, even though SceneBuilder's real engine-composited frame
     // already honored it correctly.
+    // A genuinely blank slide (the "go live with nothing" fallback: no
+    // blocks, no title, no text) must NOT bake a family/whole-style template
+    // in — doing so produced non-empty `blocks` (the template's own bound-
+    // to-nothing decorative blocks) for content that is really empty,
+    // which made hasSlidePreview read true downstream and suppressed the
+    // style's own idle background image in its place — reported live as
+    // "go live with nothing shows a black window instead of the bg."
+    const bool slideHasContent = !slide->blocks.empty() || !slide->title.empty()
+        || !slide->text.empty();
     const std::string slideType = slideContentType(slide);
     const size_t familyIdx = familyTemplateIndexFor(slideType);
     const std::vector<pl::ContentBlock> *activeTemplateBlocks = nullptr;
-    if (familyIdx < 4 && !style.familyTemplateBlocks[familyIdx].empty())
-        activeTemplateBlocks = &style.familyTemplateBlocks[familyIdx];
-    else if (!style.templateBlocks.empty()
-             && (style.contentType.empty() || slideType.empty() || slideType == style.contentType))
-        activeTemplateBlocks = &style.templateBlocks;
+    if (slideHasContent) {
+        if (familyIdx < 4 && !style.familyTemplateBlocks[familyIdx].empty())
+            activeTemplateBlocks = &style.familyTemplateBlocks[familyIdx];
+        else if (!style.templateBlocks.empty()
+                 && (style.contentType.empty() || slideType.empty() || slideType == style.contentType))
+            activeTemplateBlocks = &style.templateBlocks;
+    }
 
     if (activeTemplateBlocks) {
         const QString styleBg = QString::fromStdString(style.backgroundColor);
@@ -275,16 +286,10 @@ void LiveOutputService::goLive()
         // church's own branding before a service starts is a real, common
         // need — GO LIVE with nothing queued should show that, not an
         // error toast and a black screen.
-        QVariantMap blank;
-        blank.insert(QStringLiteral("blocks"), QVariantList{});
-        blank.insert(QStringLiteral("background"), QStringLiteral("transparent"));
-        blank.insert(QStringLiteral("title"), QString());
-        goLiveWithSlides(QString(), { blank });
+        goLiveBlank();
         return;
     }
 
-    lastWasAdHocSlides_ = false;
-    canResumeSlide_ = true;
     if (!live_) {
         live_ = true;
         emit liveChanged();
@@ -325,10 +330,6 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         emit onAirChanged();
         return;
     }
-    lastWasAdHocSlides_ = true;
-    lastSlidesName_ = name;
-    lastSlidesRaw_ = slides;
-    canResumeSlide_ = true;
     if (!live_) {
         live_ = true;
         emit liveChanged();
@@ -772,14 +773,20 @@ void LiveOutputService::stop()
     stopNdiFeed();
 }
 
-void LiveOutputService::resumeSlide()
+void LiveOutputService::goLiveBlank()
 {
-    if (live_ || !canResumeSlide_)
+    QVariantMap blank;
+    blank.insert(QStringLiteral("blocks"), QVariantList{});
+    blank.insert(QStringLiteral("background"), QStringLiteral("transparent"));
+    blank.insert(QStringLiteral("title"), QString());
+    goLiveWithSlides(QString(), { blank });
+}
+
+void LiveOutputService::clearOnAirSlide()
+{
+    if (!live_)
         return;
-    if (lastWasAdHocSlides_)
-        goLiveWithSlides(lastSlidesName_, lastSlidesRaw_);
-    else
-        goLive();
+    goLiveBlank();
 }
 
 // ---------------------------------------------------------------------------

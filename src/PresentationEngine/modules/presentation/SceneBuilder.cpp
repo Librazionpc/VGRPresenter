@@ -571,6 +571,18 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
 // admit the slide's content family? Untagged/unknown families are always
 // admitted (they belong to no gated tab).
 bool StyleAdmitsSlide(const OutputStyleSpec& style, const Slide& slide) {
+    // ALL-FOUR-OFF = "unconfigured style", not a deliberate refusal: an
+    // output wearing such a style would otherwise render BACKGROUND-ONLY
+    // scenes forever (every family refused), which is exactly how the
+    // "real output shows the style image but no text" bug looked while the
+    // QML tile kept painting text through its gate-free preview path. A
+    // genuinely content-less style is meaningless — the UI never offers
+    // one, and legacy rosters saved before the UI's chips defaulted on
+    // (StyleItem had all-false defaults) heal here instead of needing a
+    // data migration.
+    if (!style.showShows && !style.showMedia && !style.showScripture
+        && !style.showTable)
+        return true;
     const std::string fam = slideContentType(slide);
     if (fam.empty())    return true;
     if (fam == "shows")    return style.showShows;
@@ -631,7 +643,7 @@ Result<std::string> SceneBuilder::BuildGatedSlideScene(const Presentation& prese
     bgObj->SetLayer("bg");
     (void)engine.AddObject(sceneId, bgObj, "bg");
     // Same clearBackgroundOnText gate as BuildSlideScene — see its comment.
-    if (!style.backgroundImage.empty() && !style.clearBackgroundOnText) {
+    if (!style.backgroundImage.empty() && !(style.clearBackgroundOnText && !slide.blocks.empty())) {
         const rendering::RgbaImage img = LoadImageCached(style.backgroundImage);
         if (!img.empty()) {
             auto imageObj = std::make_shared<rendering::ImageObject>("stylebg", "StyleBackground");
@@ -711,7 +723,7 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
     // colour precedence a few lines up). Mirrors OutputMonitorTile.qml's own
     // suppressStyleBgImage gate, which already got this right on the preview
     // side — a busy branded background must never fight with live text.
-    if (!style.backgroundImage.empty() && !style.clearBackgroundOnText) {
+    if (!style.backgroundImage.empty() && !(style.clearBackgroundOnText && !slide.blocks.empty())) {
         const rendering::RgbaImage img = LoadImageCached(style.backgroundImage);
         if (!img.empty()) {
             auto imageObj = std::make_shared<rendering::ImageObject>("stylebg", "StyleBackground");

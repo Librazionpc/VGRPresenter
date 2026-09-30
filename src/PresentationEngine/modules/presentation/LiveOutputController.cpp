@@ -22,6 +22,43 @@ namespace {
 constexpr double kFrameSeconds = 1.0 / 60.0;
 // Slow re-sync with the open show's document (edits while live).
 constexpr double kSyncSeconds = 1.0;
+
+// A content fingerprint for StartFromSlides' generated slide ids — see its
+// own comment: a POSITION-only id ("temp:<name>-<i+1>") collides whenever the
+// same presentation NAME is reused across different single-slide pushes,
+// which is exactly what a double-click on a verse row does (ShowCenter.qml's
+// stageSlides(root.item.name, [slide]) — the song's name, not the verse's own
+// identity, every time). SceneBuilder/RenderEngine cache scenes by this
+// fingerprinted id, so a collision serves the FIRST verse's cached scene
+// forever on every later verse of the SAME song — reported live as "the real
+// output window freezes on an older verse, only stop+go-live fixes it"
+// (stop tears the presentation down, so the next go-live's id happens to
+// miss the stale cache; nothing in between ever did). Folding the slide's
+// own content into the id keeps the "reuse the cache for a genuine re-pick
+// of the identical passage" intent the position-only scheme was going for,
+// while guaranteeing two DIFFERENT verses never share one.
+uint64_t HashSlideContent(const bps::presentation::Slide& s) {
+    uint64_t h = 1469598103934665603ull;   // FNV offset basis
+    const auto mix = [&h](uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;             // FNV prime
+    };
+    const auto mixStr = [&h, &mix](std::string_view sv) {
+        mix(sv.size());
+        for (const char c : sv) mix(static_cast<unsigned char>(c));
+    };
+    mixStr(s.id);
+    mixStr(s.title);
+    mixStr(s.text);
+    mix(s.blocks.size());
+    for (const auto& b : s.blocks) {
+        mixStr(b.id);
+        mixStr(b.kind);
+        mixStr(b.text);
+        mixStr(b.bind);
+    }
+    return h;
+}
 } // namespace
 
 LiveOutputController& LiveOutputController::Instance() {
@@ -153,9 +190,14 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
     content.name = std::string(name);
     content.slides = slides;
     for (size_t i = 0; i < content.slides.size(); ++i) {
-        // Slide ids stable per position: a re-pick of the same passage re-uses
-        // the same scene ids, so the scene cache stays warm.
-        content.slides[i].id = std::format("{}-{}", content.id, i + 1);
+        // Slide ids fold in the slide's OWN content (see HashSlideContent):
+        // a genuine re-pick of the identical passage still lands on the same
+        // id (the scene cache stays warm, the original intent here), but two
+        // DIFFERENT verses of the SAME song — pushed one at a time under the
+        // SAME presentation name, exactly what a double-click on a verse row
+        // in ShowCenter.qml does — never collide onto one cached scene.
+        content.slides[i].id = std::format("{}-{}-{:016x}", content.id, i + 1,
+                                           HashSlideContent(content.slides[i]));
     }
     content.createdAt = content.modifiedAt = std::chrono::system_clock::now();
 
@@ -407,7 +449,6 @@ Result<void> LiveOutputController::RenderOnce() {
     opts.distribute = true;   // -> every enabled output -> Telemetry output meter
     auto frame = rendering::RenderEngine::Instance().Render(sceneId, opts);
     if (frame.ok()) {
-        frames_.fetch_add(1);
         lastRenderedScene_ = sceneId;
         lastStyleRevision_ = styleRev;
     }
@@ -416,6 +457,25 @@ Result<void> LiveOutputController::RenderOnce() {
     // live-output style set (best-effort — a failure in one pass never
     // kills the main deck's frame).
     RenderPerOutputPasses();
+
+    // frames_ is what LiveOutputService::pollTick() polls to decide whether
+    // to bump frameRev (the QML image providers' cache-buster) — and
+    // frameRev only bumps ONCE per change (change-driven, see above), so a
+    // bump the UI catches before a slower per-output pass above has actually
+    // Present()'d ITS buffer is a race the UI loses PERMANENTLY: nothing
+    // ever tells it to refetch that buffer again until the NEXT content
+    // change. A real OutputWindow's own per-output pass (heavier — GDI+ text
+    // layout/atlas rebuilds for a family template) can legitimately take
+    // longer than the main pass above it, so incrementing frames_ before
+    // RenderPerOutputPasses() ran let the poll's 100ms tick fetch a
+    // per-output buffer that wasn't written yet (a 1x1 placeholder, stuck
+    // forever) — reported live as "the real output window shows the idle
+    // background and never updates" for heavier (family-templated) content,
+    // while lighter content occasionally won the race and looked fine.
+    // Bumping it here, after every per-output buffer for this frame has
+    // ALSO landed, closes that window.
+    if (frame.ok())
+        frames_.fetch_add(1);
     return Ok();
 }
 

@@ -50,14 +50,22 @@ Rectangle {
     // The on-air slide AS DESIGN BLOCKS — the same data the preview pane's
     // DesignPreview draws, straight from the runtime's current slide (no
     // re-resolving the on-air title through a service, so every content kind
-    // works: scripture, The Table, shows). While NOT live, falls back to
-    // stagedSlide (a double-click in ShowCenter) so the Main Output tile
-    // still shows what was picked — WITHOUT that pick having gone live on
-    // any real output (this tile's own hasFrame/frameSource stay gated on
-    // LiveOutputService.live regardless, so a real bound-screen output
-    // window never sees a staged-only pick, only this in-app tile does).
-    readonly property var onAirSlide: LiveOutputService.live
-        ? LiveOutputService.onAirSlide : LiveOutputService.stagedSlide
+    // works: scripture, The Table, shows). A STAGED pick (a click in
+    // ShowCenter/the project sidebar) always wins here, live or not — it's
+    // "what I most recently picked," and clicking a NEW song while
+    // something is already live must still update this tile (reported
+    // live as "not responsive": staging while live used to be invisible,
+    // since this only ever fell back to stagedSlide while NOT live —
+    // staging a second pick after GO LIVE updated stagedSlide correctly,
+    // the tile just never looked at it in that state). goLive() clears the
+    // stage the instant it commits one, so right after a real go-live this
+    // still reads as onAirSlide with no visual jump — it only diverges once
+    // something NEW gets staged on top of an already-live show. This
+    // tile's own hasFrame/frameSource stay gated on LiveOutputService.live
+    // regardless, so a real bound-screen output window never sees a
+    // staged-only pick, only this in-app tile does.
+    readonly property var onAirSlide: LiveOutputService.stagedSlide.valid === true
+        ? LiveOutputService.stagedSlide : LiveOutputService.onAirSlide
     readonly property bool hasSlidePreview: onAirSlide.valid === true
                                             && onAirSlide.blocks
                                             && onAirSlide.blocks.length > 0
@@ -147,7 +155,15 @@ Rectangle {
     // so a style whose image carries its own baked-in text doesn't
     // permanently collide with live text painted over it. Only the IMAGE
     // steps aside (FreeShow's own semantics); the flat colour still shows.
+    // The "actually has something on it" half of that sentence was never
+    // actually checked — this suppressed the image at ALL times the flag
+    // was on, including going live with nothing staged/on air at all
+    // (reported live: "it turns blank... it's meant to still show the bg
+    // because nothing is staged" — a real go-live-with-nothing should show
+    // the branded image same as fully idle, only real content should ever
+    // clear it).
     readonly property bool suppressStyleBgImage: root.styleBg.clearOnText === true
+                                                 && (root.hasSlidePreview || root.inputTaken || root.mediaOnAir)
         && root.active
         && (root.hasSlidePreview || root.mediaOnAir || root.inputTaken)
 

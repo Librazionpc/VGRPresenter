@@ -58,12 +58,6 @@ class LiveOutputService : public QObject {
     Q_PROPERTY(int onAirIndex READ onAirIndex NOTIFY onAirChanged)
     // Total slides in the live show.
     Q_PROPERTY(int onAirTotal READ onAirTotal NOTIFY onAirChanged)
-    // Is there a snapshot of the last go-live (whole show, or an ad-hoc
-    // scripture/table pick) that resumeSlide() can bring back? The MonitorWall
-    // toolbar's slide-clear button toggles on this — stop() intentionally
-    // does not clear this, so "clear" then "bring back" round-trips even
-    // though there is no independent slide-only hide in the engine yet.
-    Q_PROPERTY(bool canResumeSlide READ canResumeSlide NOTIFY onAirChanged)
     // The on-air slide AS DESIGN BLOCKS — the same { blocks, background }
     // shape the preview pane renders: { valid, title, blocks, background }.
     // Empty map when not live. Lets QML previews (the monitor wall's tiles)
@@ -143,7 +137,6 @@ public:
     int onAirIndex() const { return onAirIndex_; }
     int onAirTotal() const { return onAirTotal_; }
     QVariantMap onAirSlide() const { return onAirSlide_; }
-    bool canResumeSlide() const { return canResumeSlide_; }
     QVariantMap stagedSlide() const { return stagedSlide_; }
 
     QString inputLabel() const { return inputLabel_; }
@@ -254,11 +247,13 @@ public:
     // Clear All did nothing at all to the tile.
     Q_INVOKABLE void clearStaged();
     Q_INVOKABLE void stop();
-    // Replays the last successful go-live (goLive()'s open show, or the last
-    // goLiveWithSlides() ad-hoc pick, whichever happened last) — the
-    // MonitorWall toolbar's slide-clear button's "click again" side. No-op
-    // already live or nothing to resume.
-    Q_INVOKABLE void resumeSlide();
+    // Clears WHATEVER'S currently on-air as its own content — the slide-
+    // status icon's click (MonitorWall.qml, same shape as the image/overlay
+    // buttons beside it): live_/STOP stays exactly as it is; only the
+    // on-air slide swaps to the same blank/branded-background content
+    // goLive() falls back to when nothing's queued at all. A no-op when
+    // not live.
+    Q_INVOKABLE void clearOnAirSlide();
     // The runtime's Next()/Previous() while live.
     Q_INVOKABLE bool next();
     Q_INVOKABLE bool previous();
@@ -325,6 +320,12 @@ private:
     // index moving (a document edit re-synced while live), so the 10Hz poll
     // keeps the QML preview honest rather than keying on title/index only.
     void refreshOnAirSlide();
+    // Shared by goLive()'s "nothing to open" fallback and clearOnAirSlide():
+    // pushes the one blank slide both need (empty blocks, transparent
+    // background) — the style's own background paints regardless, since
+    // SceneBuilder composites it unconditionally, before/regardless of
+    // blocks.
+    void goLiveBlank();
 
     bool live_ = false;
     qulonglong frameRev_ = 0;
@@ -339,11 +340,6 @@ private:
     QVariantList stagedSlidesRaw_;
     QVariantMap stagedSlide_;
 
-    // ---- resumeSlide() snapshot ----
-    bool canResumeSlide_ = false;
-    bool lastWasAdHocSlides_ = false;   // goLiveWithSlides() vs plain goLive()
-    QString lastSlidesName_;
-    QVariantList lastSlidesRaw_;
     QTimer *poll_ = nullptr;   // while live: onAir/frames refresh at 10Hz
     std::unique_ptr<LivePreviewProvider> provider_;
 
