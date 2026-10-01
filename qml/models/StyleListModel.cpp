@@ -31,9 +31,30 @@ StyleListModel::StyleListModel(QObject *parent)
 {
     s_instance = this;
 
-    // Hydrate from the kernel's persisted roster. A missing document (first
-    // run) or a corrupt one reads as an empty roster — the app starts fresh,
-    // never a failed boot (same contract as the production graph's restore).
+    // THE BOOT GAP (found live: "my styles don't show after a rebuild"): the
+    // kernel's DatabaseManager only OPENS <dataDir>/kernel.json during Boot,
+    // which the app defers until after the QML load — but this singleton is
+    // constructed AT QML load, so the hydrate below read an EMPTY store every
+    // launch (the styles were saved the whole time; the UI just never saw
+    // them again) and the first post-boot mutation flushed the empty roster
+    // over the real one. So: hydrate now for the already-booted case, and
+    // RE-HYDRATE the moment boot completes (TheTableService::loadLibrary's
+    // contract).
+    connect(&EngineBridge::instance(), &EngineBridge::bootedChanged, this, [this] {
+        if (EngineBridge::instance().booted())
+            reloadFromStore();
+    });
+    reloadFromStore();
+}
+
+void StyleListModel::reloadFromStore()
+{
+    beginResetModel();
+    m_styles.clear();
+
+    // A missing document (first run) or a corrupt one reads as an empty
+    // roster — the app starts fresh, never a failed boot (same contract as
+    // the production graph's restore).
     for (const bps::project::StoredStyle &s : bps::project::StyleStore::Instance().Get()) {
         StyleItem item;
         item.id = QString::fromStdString(s.id);
@@ -55,6 +76,8 @@ StyleListModel::StyleListModel(QObject *parent)
         item.category = QString::fromStdString(s.category);
         m_styles.append(item);
     }
+    endResetModel();
+    emit rosterChanged();
 }
 
 StyleListModel::~StyleListModel()

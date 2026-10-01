@@ -150,6 +150,12 @@ signals:
 private:
     int nextIdNumber() const;
     void save();
+    // Re-reads the roster from the kernel's StyleStore. Called at construction
+    // AND on EngineBridge::bootedChanged: this singleton is built at QML load,
+    // BEFORE the deferred boot has opened kernel.json, so the first read is
+    // empty — without the re-hydrate the user's styles vanish on every launch
+    // (and the first mutation flushed the empty roster over the real one).
+    void reloadFromStore();
 
     QList<StyleItem> m_styles;
 

@@ -32,6 +32,44 @@ OutputListModel::OutputListModel(QObject *parent)
 {
     s_instance = this;
 
+    // THE BOOT GAP (found live: "my saved styles/outputs don't show after a
+    // rebuild"): this singleton is constructed at QML load, BEFORE the
+    // deferred boot has opened kernel.json — the hydrate below read an EMPTY
+    // OutputStore every launch (the persisted roster was on disk the whole
+    // time) and the first post-boot mutation flushed the default roster over
+    // the real one. reloadFromStore() hydrates here (already-booted case) and
+    // AGAIN on bootedChanged — see connectToEngineBoot().
+    reloadFromStore();
+
+    // A style edit renames/re-keys the theme every output's styleName shows —
+    // re-resolve the derived roles when the roster changes. The engine spec
+    // IS pushed here too (see the rosterChanged lambda): an edited style that
+    // is on air must restyle the live output immediately.
+    //
+    // QML singleton construction order is undefined — StyleListModel (and the
+    // TemplateLibraryService the spec's baked template blocks come from) may
+    // not exist yet when this constructor runs — so retry once the event loop
+    // starts (by then the QML load has created every singleton).
+    connectToStyleRoster();
+    connectToTemplateLibrary();
+    connectToEngineBoot();
+    QTimer::singleShot(0, this, [this]() {
+        connectToStyleRoster();
+        connectToTemplateLibrary();
+        connectToEngineBoot();
+    });
+}
+
+// Re-reads the roster from the engine's OutputStore — at construction AND on
+// EngineBridge::bootedChanged: this singleton is built at QML load, BEFORE the
+// deferred boot has opened kernel.json, so the FIRST read is always empty
+// (this function existing is what makes the user's saved outputs come back).
+// Wraps in begin/endResetModel: rows are replaced wholesale.
+void OutputListModel::reloadFromStore()
+{
+    beginResetModel();
+    m_outputs.clear();
+
     const QList<OutputContentToggle> content = defaultContent();
 
     // ---- HYDRATE the persisted roster (the engine's OutputStore, the
@@ -111,25 +149,8 @@ OutputListModel::OutputListModel(QObject *parent)
     if (!sawActive && !m_outputs.isEmpty())
         m_outputs.first().active = true;
 
+    endResetModel();
     saveRoster();
-
-    // A style edit renames/re-keys the theme every output's styleName shows —
-    // re-resolve the derived roles when the roster changes. The engine spec
-    // IS pushed here too (see the rosterChanged lambda): an edited style that
-    // is on air must restyle the live output immediately.
-    //
-    // QML singleton construction order is undefined — StyleListModel (and the
-    // TemplateLibraryService the spec's baked template blocks come from) may
-    // not exist yet when this constructor runs — so retry once the event loop
-    // starts (by then the QML load has created every singleton).
-    connectToStyleRoster();
-    connectToTemplateLibrary();
-    connectToEngineBoot();
-    QTimer::singleShot(0, this, [this]() {
-        connectToStyleRoster();
-        connectToTemplateLibrary();
-        connectToEngineBoot();
-    });
 }
 
 // The whole roster back into the engine's OutputStore (StyleListModel::save
@@ -192,8 +213,13 @@ void OutputListModel::connectToEngineBoot()
         return;
     engineBootConnected_ = true;
     connect(&EngineBridge::instance(), &EngineBridge::bootedChanged, this, [this]() {
-        if (EngineBridge::instance().booted())
+        if (EngineBridge::instance().booted()) {
+            // The constructor's hydrate ran pre-boot against an empty
+            // DatabaseManager (kernel.json is only Open()ed during boot) —
+            // re-read the persisted roster now, THEN push the active style.
+            reloadFromStore();
             QTimer::singleShot(200, this, [this]() { pushActiveEngineStyle(); });
+        }
     });
     if (EngineBridge::instance().booted())
         QTimer::singleShot(200, this, [this]() { pushActiveEngineStyle(); });

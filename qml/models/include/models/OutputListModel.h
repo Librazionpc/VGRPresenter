@@ -249,6 +249,11 @@ private:
     // assignment, enabled/test-pattern/content state all survive a
     // restart. Every mutator calls it; hydrate happens in the constructor.
     void saveRoster();
+    // Re-reads the roster from the engine's OutputStore: at construction AND
+    // on EngineBridge::bootedChanged — this singleton is built at QML load,
+    // before the deferred boot has opened kernel.json, so the first read is
+    // always empty and the user's saved outputs would never come back.
+    void reloadFromStore();
 
     static QPointer<OutputListModel> s_instance;
     static QList<OutputContentToggle> defaultContent();
