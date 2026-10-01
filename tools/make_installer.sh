@@ -58,7 +58,9 @@ rm -rf "$DIST/logs" "$DIST/enginedata" "$DIST/crashes"
 
 # ---- 3. compile the installer -------------------------------------------------
 echo "== compiling installer (Inno Setup) =="
-if ! "$ISCC" "/DAPP_VERSION=$VER" "$(cygpath -w "$ROOT/tools/installer.iss")" \
+# MSYS2_ARG_CONV_EXCL: without it bash rewrites the /D define into a Windows
+# path and ISCC sees "more than one script filename".
+if ! MSYS2_ARG_CONV_EXCL="*" "$ISCC" "/DAPP_VERSION=$VER" "$(cygpath -w "$ROOT/tools/installer.iss")" \
         > /tmp/iscc.log 2>&1; then
     echo "ISCC FAILED:"
     tail -25 /tmp/iscc.log
