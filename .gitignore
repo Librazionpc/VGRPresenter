@@ -1,5 +1,9 @@
 build/
 build-*/
+# Portable release output (tools/make_portable.sh): the dist folder + zip are
+# build artifacts — the source of truth is the source tree, releases carry the
+# zip as a GitHub release asset, never in git.
+dist/
 *.user
 .qtc_clangd/
 CMakeLists.txt.user
