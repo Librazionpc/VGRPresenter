@@ -1,5 +1,9 @@
 # VGRPresenter
 
+<p align="center">
+  <img src="assets/brand-lockup.png" alt="VGRPresenter" width="480">
+</p>
+
 A presenter application for live worship services: show/slide editing, scripture
 and songs, the sermon library ("The Table"), media, overlays and live outputs —
 driven by a C++ presentation engine with a Qt 6 / QML interface.
