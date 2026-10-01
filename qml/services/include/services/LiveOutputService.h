@@ -22,6 +22,7 @@
 #include <QQmlEngine>
 #include <QtQml/qqmlregistration.h>
 #include <QVariantMap>
+#include <mutex>
 #include <memory>
 
 class LivePreviewProvider;
@@ -136,6 +137,10 @@ class LiveOutputService : public QObject {
 public:
     static LiveOutputService *create(QQmlEngine *engine, QJSEngine *jsEngine);
     static LiveOutputService &instance();
+    // aboutToQuit (main.cpp): stop the NDI worker thread and WAIT for it —
+    // the SDK must never be torn down under an in-flight send. Called before
+    // EngineBridge::shutdown().
+    Q_INVOKABLE void shutdownNdiWorker();
 
     bool live() const { return live_; }
     qulonglong frameRev() const { return frameRev_; }
@@ -161,9 +166,16 @@ public:
     qlonglong mediaDuration() const { return mediaDuration_; }
     qulonglong mediaRev() const { return mediaRev_; }
     bool mediaMuted() const { return mediaMuted_; }
-    bool ndiSending() const { return ndiSending_; }
-    QString ndiSendingOutputName() const { return ndiSendingOutput_; }
-    qulonglong ndiFramesSent() const { return ndiFramesSent_; }
+    // Read under ndiStateMutex_ — the worker writes these (see the members).
+    bool ndiSending() const;
+    QString ndiSendingOutputName() const;
+    qulonglong ndiFramesSent() const;
+    // The worker's job: sender-create + force-alpha + SDK send. Static; all
+    // argument state BY VALUE (the pixels' owned buffer crosses threads).
+    // Provider is a raw pointer (the caller resolved it on the GUI thread);
+    // the provider itself is internally mutex'd and thread-safe.
+    static void ndiWorkerSendFrame(QObject *worker, void *provider,
+                                   QImage frame, QString senderName, float fps, qint64 sendId);
     QVariantList cardPreviewsList() const
     {
         QVariantList out;
@@ -429,24 +441,33 @@ private:
     QImage lastMediaFrame_;
 
     // ---- NDI program sender (see the properties above) --------------------
+    // ndiSending_/ndiSendingOutput_/ndiFramesSent_ are written BY THE WORKER
+    // THREAD now; the GUI reads them for the pill. Guarded by ndiStateMutex_
+    // (a plain mutex, never held across the send itself).
     bool ndiSending_ = false;
     QString ndiSendingOutput_;   // roster name of the row being fed while sending
-    qulonglong ndiFramesSent_ = 0;   // provider's own counter, poll-refreshed
-    // One-shot send diagnostics (see pushNdiFrame): the gate warning, the
-    // first SendFrame failure, and the "frames flowing, monitor discovering"
-    // note — each logs once per outage, not once per poll tick.
+    qulonglong ndiFramesSent_ = 0;   // provider's own counter, worker-refreshed
+    // mutable: the const property readers lock it (QML reads from bindings).
+    mutable std::mutex ndiStateMutex_;
+    // In-flight send sequencing: the GUI stamps every queued frame; the
+    // worker reports back with the same id, so stale results (a slow send
+    // from an earlier tick landing after the state changed) can be dropped.
+    qint64 ndiSendSeq_ = 0;
+    qint64 ndiSendDone_ = 0;
+    // One-shot send diagnostics (moved onto the worker with the send): the
+    // gate warning, the first SendFrame failure, and the "frames flowing,
+    // monitor discovering" note — each logs once per outage, not per tick.
     bool ndiGateLogged_ = false;
     bool ndiSendFailedLogged_ = false;
     bool ndiFirstFrameLogged_ = false;
     bool ndiWaitLogged_ = false;   // "waiting for buffer/frame" warm-up note
-    // FreeShow-style send backpressure, adapted to a SYNCHRONOUS sender (see
-    // pushNdiFrame): our GUI-thread send cannot queue frames, but a slow one
-    // stalls the UI — so the tick after a slow send is skipped (half rate),
-    // logged once per incident. Plus connected-monitor telemetry (engine-side
-    // SDK truth) so "is anyone actually receiving" is visible in engine.log.
+    // FreeShow-style send backpressure — now measured ON THE WORKER: the
+    // worker clocks each send and reports slow ones back to the GUI, which
+    // skips the NEXT tick (half rate) when told. No UI stall is possible:
+    // even a 500 ms send only delays the feed, never the interface.
     QElapsedTimer ndiSendClock_;
     bool ndiClockStarted_ = false;
-    bool ndiBackoff_ = false;      // skip the tick after a slow send
+    bool ndiBackoff_ = false;      // skip the tick after a reported-slow send
     bool ndiSlowLogged_ = false;   // "send is slow" once per incident
     int ndiFastStreak_ = 0;        // consecutive fast sends; ≥30 re-arms the slow-send log (toast-spam guard)
     int ndiReceiversSeen_ = -1;    // last reported connected-monitor count
@@ -458,7 +479,15 @@ private:
     // for slide titles + the preview), so Settings · Outputs · Refresh rate
     // reaches the wire: the timer's interval IS the setting, and the sender
     // advertises it in every frame's metadata.
-    void ndiSendTick();                // the paced send (syncs the interval, then pushes)
+    // THE SEND IS OFF THE GUI THREAD (the "GO LIVE freezes the app with an
+    // NDI main output" report — and the AppHangB1s): ndiSendTick() only
+    // RESOLVES what to send (roster lookup, buffer read, geometry) on the
+    // GUI thread and hands the pixels to ndiWorker_, a dedicated QThread
+    // running its own event loop, which performs the 8 MB copy, the
+    // force-alpha pass, the SDK send and the (lazy) SENDER CREATION — the
+    // heaviest part of the first frame. The GUI thread never touches the
+    // SDK.
+    void ndiSendTick();                // GUI side: resolve + queue the frame
     void startNdiSendClock();          // go-live: arm the clock at a provisional cadence
     void stopNdiSendClock();           // off air: stop the clock
     // The poll's cheap NDI-clock watch: (re)arm the send timer when a clock
@@ -471,6 +500,14 @@ private:
     static float ndiConfiguredFps();
     QTimer *ndiSendTimer_ = nullptr;   // while live: the paced NDI send clock
     float ndiSendFps_ = 0.0f;          // fps the timer currently runs at (0 = unsynced)
+
+    // ---- The NDI worker thread ----------------------------------------------
+    // One QThread + one worker QObject moved to it, created lazily on the
+    // first send and retired at quit (aboutToQuit → shutdownNdiWorker(),
+    // which quits the loop and WAITS — the SDK must not be torn down under
+    // an in-flight send).
+    QThread *ndiThread_ = nullptr;
+    QObject *ndiWorker_ = nullptr;     // lives on ndiThread_; jobs queue on it
 };
 
 // QQuickImageProvider over the engine preview output's last frame:

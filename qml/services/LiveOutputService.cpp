@@ -22,6 +22,7 @@
 
 #include <QCoreApplication>
 #include <QTimer>
+#include <QThread>
 #include <QAudioOutput>
 #include <QFile>
 #include <QFileInfo>
@@ -231,6 +232,94 @@ QVariantMap slideToVariantMap(const pl::Slide *slide)
 } // namespace
 
 LiveOutputService *LiveOutputService::s_instance = nullptr;
+
+// ---- NDI send worker (runs on the dedicated NDI QThread) ------------------
+//
+// Everything heavy about the NDI program feed happens here, OFF the GUI
+// thread: the ~8 MB frame copy into the provider's send buffer, the
+// force-alpha pass over every pixel, the LAZY SENDER CREATION (the first
+// SendFrame after a reset builds the real NDI SDK sender — the single
+// heaviest step of GO LIVE with an NDI main output, hundreds of ms), and
+// the SDK send itself. The GUI thread only resolves WHICH frame to send
+// (roster lookup + buffer read) and queues it here.
+//
+// `worker` is a plain context object living on the thread (its event loop
+// serializes jobs — one send at a time, frames coalesce naturally because
+// each tick queues at most one). State feedback (sending pill, frame
+// counter, slow-send reports) crosses back through LiveOutputService's
+// mutex-guarded members and its worker-report slot.
+void LiveOutputService::ndiWorkerSendFrame(QObject *worker, void *providerVoid,
+                                           QImage frame, QString senderName, float fps, qint64 sendId)
+{
+    Q_UNUSED(worker)
+    auto *provider = static_cast<bps::display::NdiDisplayProvider *>(providerVoid);
+    auto &svc = LiveOutputService::instance();
+
+    // Identity BEFORE the send: SetSenderName only takes effect before the
+    // sender's first SendFrame (NDI can't rename a live sender), and the
+    // lazy creation below happens inside this very call — so the name set
+    // here is the one the new sender is born with. THE LAZY CREATION (the
+    // real NDI SDK sender build) is the multi-hundred-ms step that used to
+    // freeze the GUI at GO LIVE — it happens HERE now.
+    if (!senderName.isEmpty())
+        provider->SetSenderName(senderName.toStdString());
+    provider->SetFrameRate(fps);
+
+    QElapsedTimer clock;
+    clock.start();
+    bps::display::RenderFrameView view;
+    view.width = frame.width();
+    view.height = frame.height();
+    view.pixels = reinterpret_cast<const uint32_t *>(frame.constBits());
+    const bool sent = provider->SendFrame(view).ok();
+    const qint64 sendMs = clock.elapsed();
+
+    // Feedback to the GUI side (mutex-guarded members; the GUI reads them
+    // for the pill and its poll). Frame geometry can change between queue
+    // and run (a slide swap mid-tick) — drop a result that no longer matches
+    // the aspect the frame carries (stale-result guard).
+    std::lock_guard<std::mutex> lock(svc.ndiStateMutex_);
+    if (sendId <= svc.ndiSendDone_)   // an older tick's result — superseded
+        return;
+    svc.ndiSendDone_ = sendId;
+    if (sent) {
+        svc.ndiFramesSent_ = provider->FramesSent();
+        if (!svc.ndiFirstFrameLogged_) {
+            svc.ndiFirstFrameLogged_ = true;
+            qWarning("LiveOutputService: NDI frames flowing as '%s' — discovery on a receiving monitor can take 10-30s",
+                     provider->SenderName().c_str());
+        }
+        svc.ndiSendFailedLogged_ = false;
+        // Slow-send report: the GUI skips its NEXT tick (half rate) when a
+        // send could not finish within its own budget. On the worker this
+        // only delays the feed — the UI cannot stall, ever.
+        if (sendMs > qMax(50, fps > 0.0f ? int(1000.0f / fps) : 100))
+            svc.ndiBackoff_ = true;
+    } else if (!svc.ndiSendFailedLogged_) {
+        svc.ndiSendFailedLogged_ = true;
+        qWarning("LiveOutputService: NDI SendFrame FAILED (sender '%s') — check the engine log for the provider's own reason",
+                 provider->SenderName().c_str());
+    }
+}
+
+// The three NDI property readers — the worker writes the state, the GUI
+// (QML bindings + pollTick) reads it. One small mutex, never held across
+// the send itself.
+bool LiveOutputService::ndiSending() const
+{
+    std::lock_guard<std::mutex> lock(ndiStateMutex_);
+    return ndiSending_;
+}
+QString LiveOutputService::ndiSendingOutputName() const
+{
+    std::lock_guard<std::mutex> lock(ndiStateMutex_);
+    return ndiSendingOutput_;
+}
+qulonglong LiveOutputService::ndiFramesSent() const
+{
+    std::lock_guard<std::mutex> lock(ndiStateMutex_);
+    return ndiFramesSent_;
+}
 
 LiveOutputService::LiveOutputService(QObject *parent)
     : QObject(parent)
@@ -1376,6 +1465,10 @@ void LiveOutputService::pushNdiFrame()
 
     // The frame: THIS output's own gated buffer when styled, else the
     // shared preview feed (FrameBufferRole's exact keying — qHash(name)).
+    // GUI side reads the LAST frame from the engine's buffer and hands a
+    // COPY to the worker (the engine reuses its buffer for the next frame,
+    // so the pixels must be owned across threads). QImage is implicitly
+    // shared — the detach inside the copy constructor is the one allocation.
     const QString styleId = model && ndiRow >= 0
         ? model->getOutput(ndiRow).value("styleId").toString() : QString();
     const std::string buffer = styleId.isEmpty()
@@ -1391,9 +1484,12 @@ void LiveOutputService::pushNdiFrame()
             qWarning("LiveOutputService: NDI output '%s' waiting for buffer '%s' (live loop warming up)",
                      qUtf8Printable(ndiOutputName), buffer.c_str());
         }
-        if (ndiSending_) {
-            ndiSending_ = false;
-            ndiSendingOutput_.clear();
+        if (ndiSending()) {
+            {
+                std::lock_guard<std::mutex> lock(ndiStateMutex_);
+                ndiSending_ = false;
+                ndiSendingOutput_.clear();
+            }
             emit ndiChanged();
         }
         return;
@@ -1410,128 +1506,87 @@ void LiveOutputService::pushNdiFrame()
         return;
     }
 
-    // The Output row's own name IS the network-visible NDI source name —
-    // SetSenderName only takes effect before the sender's first SendFrame
-    // (NDI can't rename a live sender; the SDK identity is fixed at
-    // creation), so the sender is recreated per live session via
-    // armNdiSenderForSession() and the name is re-asserted every tick ahead
-    // of the send (catches a mid-session rename of the roster row: the next
-    // session picks it up). A blank name falls back to the provider's own
-    // default ("VGR Program") rather than broadcasting under an empty
-    // string.
-    const QString senderName = ndiSenderDisplayName(ndiOutputName);
-    if (!senderName.isEmpty())
-        provider->SetSenderName(senderName.toStdString());
-    // Advertise the REAL cadence: the send clock runs at the output's
-    // configured Refresh rate (ndiSendFps_), halved while a slow send is
-    // backing off — receivers key their frame clock on this number, so it
-    // must match the wire, not the setting's aspiration. Re-asserted per
-    // send so mid-live setting changes and backoff halves are reflected;
-    // the sender applies it on its next frame (NDI metadata rides every
-    // frame). The 30 fallback matches the provider's own default cadence.
-    const float baseFps = ndiSendFps_ > 0.0f ? ndiSendFps_ : 30.0f;
-    provider->SetFrameRate(ndiBackoff_ ? baseFps * 0.5f : baseFps);
+    // THE HANDOFF — pixels never touch the SDK on this thread. The worker
+    // (its own QThread, event loop serialized) does the copy, the lazy
+    // SENDER CREATION (the GO LIVE freeze with an NDI main output was this:
+    // hundreds of ms building the SDK sender inside the first GUI-thread
+    // send) and the SDK send.
+    {
+        // Worker lifecycle (lazy, GUI-side): one thread, created on demand.
+        if (!ndiThread_) {
+            ndiThread_ = new QThread(this);
+            ndiThread_->setObjectName("ndi-send");
+            ndiWorker_ = new QObject();          // context only; lives on ndiThread_
+            ndiWorker_->moveToThread(ndiThread_);
+            // AboutTo-quit ordering is handled by shutdownNdiWorker() from
+            // main.cpp's aboutToQuit — BEFORE the engine's own teardown.
+            ndiThread_->start();
+        }
+        QImage copy(reinterpret_cast<const uchar *>(frame.pixels.data()),
+                    frame.width, frame.height,
+                    frame.width * 4, QImage::Format_RGBA8888);
+        // Deep copy NOW (the engine reuses its buffer for the next frame).
+        QImage owned = copy.copy();
 
-    // The provider owns the wire format + send; frames only flow while live
-    // (pollTick gates this call).
-    //
-    // FreeShow-style send backpressure, adapted to a SYNCHRONOUS sender:
-    // their grandiose worker caps in-flight encodes (MAX_INFLIGHT_SENDS=3);
-    // our GUI-thread send never queues, but a SLOW one would stall this
-    // thread — so the send is clocked and, past half the send clock's own
-    // budget, the NEXT tick is skipped (half rate) and the incident logged
-    // once. The skip has a hard ceiling: a pathological sender can halve
-    // the feed, never stop it.
-    if (ndiBackoff_) {
-        ndiBackoff_ = false;
-        return;
-    }
-    bps::display::RenderFrameView view;
-    view.width = frame.width;
-    view.height = frame.height;
-    view.pixels = frame.pixels.data();
-    if (!ndiClockStarted_) {
-        ndiSendClock_.start();
-        ndiClockStarted_ = true;
-    }
-    ndiSendClock_.restart();
-    const bool sent = provider->SendFrame(view).ok();
-    const qint64 sendMs = ndiSendClock_.elapsed();
-    if (sent) {
-        ndiSendingOutput_ = ndiOutputName;   // the pill's LIVE row (re-asserted per frame: rename-safe)
-        if (!ndiSending_) {
-            ndiSending_ = true;
-            qWarning("LiveOutputService: NDI program sending started (%s)",
-                     provider->SenderName().c_str());   // qWarning: the engine log sink keeps WARN+ only
-        }
-        ndiWaitLogged_ = false;   // frames flow — the waiting notes re-arm
-        ndiFramesSent_ = provider->FramesSent();
-        emit ndiChanged();
-        // A later failure logs again — success clears the outage flag
-        // instead of it staying permanently tripped after the first one.
-        ndiSendFailedLogged_ = false;
-        // First-frame diagnostics: mDNS discovery (Studio Monitor's source
-        // list) can take tens of seconds; without this line "the output is
-        // not working" vs "my monitor just hasn't found the sender yet" is
-        // indistinguishable from a launch log. Fires once, right after the
-        // first successful send this outage.
-        if (!ndiFirstFrameLogged_) {
-            ndiFirstFrameLogged_ = true;
-            qWarning("LiveOutputService: NDI frames flowing as '%s' — discovery on a receiving monitor can take 10-30s",
-                     provider->SenderName().c_str());
-        }
-        // The backpressure trip: one synchronous send that a whole tick's
-        // budget could not cover. The bar is the send clock's interval, but
-        // NEVER below the legacy 50 ms — a 1080p RGBA copy + SDK send sits
-        // at ~5-15 ms, so a relative bar at 60 fps (~8 ms) would trip on
-        // EVERY send: the feed halved for nothing and this warning flapped.
-        // The tick after a trip is skipped (feed drops to half rate) so the
-        // GUI thread keeps breathing.
-        const int intervalMs = ndiSendFps_ > 0.0f ? int(1000.0f / ndiSendFps_) : 100;
-        if (sendMs > qMax(50, intervalMs)) {
-            ndiBackoff_ = true;
-            ndiFastStreak_ = 0;
-            if (!ndiSlowLogged_) {
-                ndiSlowLogged_ = true;
-                qWarning("LiveOutputService: NDI send is slow (%lld ms, sender '%s') — backing off to half rate (~%d fps) to keep the UI responsive",
-                         sendMs, provider->SenderName().c_str(),
-                         int(ndiSendFps_ > 0.0f ? ndiSendFps_ / 2.0f : 15.0f));
+        // The Output row's own name IS the network-visible NDI source name —
+        // re-resolved per tick (a mid-session rename lands next session;
+        // the sender's SDK identity is fixed at creation). The cadence
+        // advertised matches the wire: the configured Refresh rate, halved
+        // while backing off.
+        const QString senderName = ndiSenderDisplayName(ndiOutputName);
+        const float baseFps = ndiSendFps_ > 0.0f ? ndiSendFps_ : 30.0f;
+        const float fps = ndiBackoff_ ? baseFps * 0.5f : baseFps;
+
+        const qint64 sendId = ++ndiSendSeq_;
+        const bool firstSend = !ndiClockStarted_;
+        if (firstSend)
+            ndiClockStarted_ = true;
+
+        // Queue on the worker (event-loop serialized — one send at a time,
+        // no queue buildup: each tick replaces the previous workload).
+        QMetaObject::invokeMethod(ndiWorker_, [this, provider, owned = std::move(owned),
+                                               senderName, fps, sendId]() mutable {
+            LiveOutputService::ndiWorkerSendFrame(ndiWorker_, static_cast<void *>(provider),
+                                                  std::move(owned), senderName, fps, sendId);
+        }, Qt::QueuedConnection);
+
+        // GUI-side state: the pill lights NOW (the send may take a moment on
+        // the worker — the user must not see a dead "Inactive" row). The
+        // "sending started" log fires once per outage, here, because the
+        // worker's own first-frame log covers the frames-flowing beat.
+        {
+            std::lock_guard<std::mutex> lock(ndiStateMutex_);
+            ndiSendingOutput_ = ndiOutputName;   // the pill's LIVE row (rename-safe)
+            if (!ndiSending_) {
+                ndiSending_ = true;
+                qWarning("LiveOutputService: NDI program sending started (%s)",
+                         qUtf8Printable(senderName.isEmpty() ? QStringLiteral("VGR Program") : senderName));
             }
-        } else if (++ndiFastStreak_ >= 30) {
-            // Sustained recovery (≥30 consecutive fast sends ≈ 0.5-1.25 s)
-            // is what re-arms the incident log — a single fast send used to,
-            // so a send JITTERING around the bar (9/8/10/8 ms...) re-logged
-            // the incident every few ticks, and every log is an event-bus
-            // toast with a new millisecond value the deduper can't match.
-            // The legacy 10 Hz design never saw this: its 50 ms bar was
-            // rarely crossed.
-            ndiSlowLogged_ = false;
         }
-    } else if (!ndiSendFailedLogged_) {
-        ndiSendFailedLogged_ = true;
-        qWarning("LiveOutputService: NDI SendFrame FAILED (sender '%s') — check the engine log for the provider's own reason",
-                 provider->SenderName().c_str());
-    }
+        ndiWaitLogged_ = false;   // frames are flowing — the waiting notes re-arm
+        emit ndiChanged();
 
-    // Connected-monitor telemetry, every 10th SEND tick (the SDK's own
-    // connection count — ~1 Hz at the legacy 10 fps cadence, proportionally
-    // faster at higher configured rates; the bridge caps itself at ~1 Hz
-    // internally and emits only on change, so the extra calls are cheap).
-    // During the green-screen
-    // hunt this number was the missing witness — "2 monitor(s)" in the UI
-    // but nothing in engine.log. Now: a monitor connecting logs
-    // "monitors connected: N", and a drop to 0 while frames keep flowing
-    // is exactly the discovery/firewall drop worth surfacing.
-    if (++ndiTick_ % 10 == 0) {
-        const int connected = bps::broadcast::BroadcastEngine::Instance()
-                                  .SenderConnectedReceivers(provider->SenderId());
-        if (connected != ndiReceiversSeen_) {   // -1 = provider can't tell — stays silent
-            const bool first = ndiReceiversSeen_ < 0;
-            ndiReceiversSeen_ = connected;
-            qWarning("LiveOutputService: NDI sender '%s' %s %d monitor(s) connected",
-                     provider->SenderName().c_str(),
-                     first ? "currently has" : (connected > 0 ? "now has" : "has NO monitors left —"),
-                     connected);
+        // Backpressure (GUI side of the worker's report): skip the NEXT tick
+        // after a reported-slow send — the feed halves, the UI never stalls.
+        if (ndiBackoff_) {
+            ndiBackoff_ = false;
+            return;
+        }
+        ndiFastStreak_ = ndiBackoff_ ? 0 : ndiFastStreak_ + 1;
+        // Connected-monitor telemetry, every 10th tick (the SDK's own count;
+        // cheap query, GUI thread fine). "2 monitor(s)" stays the honest
+        // witness it was during the green-screen hunt.
+        if (++ndiTick_ % 10 == 0) {
+            const int connected = bps::broadcast::BroadcastEngine::Instance()
+                                      .SenderConnectedReceivers(provider->SenderId());
+            if (connected != ndiReceiversSeen_) {   // -1 = provider can't tell — stays silent
+                const bool first = ndiReceiversSeen_ < 0;
+                ndiReceiversSeen_ = connected;
+                qWarning("LiveOutputService: NDI sender '%s' %s %d monitor(s) connected",
+                         qUtf8Printable(senderName.isEmpty() ? QStringLiteral("VGR Program") : senderName),
+                         first ? "currently has" : (connected > 0 ? "now has" : "has NO monitors left —"),
+                         connected);
+            }
         }
     }
 }
@@ -1540,11 +1595,17 @@ void LiveOutputService::pushNdiFrame()
 // dead by then — stop() stops the clock first).
 void LiveOutputService::stopNdiFeed()
 {
-    if (ndiSending_) {
-        ndiSending_ = false;
-        ndiSendingOutput_.clear();
-        emit ndiChanged();
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(ndiStateMutex_);
+        if (ndiSending_) {
+            ndiSending_ = false;
+            ndiSendingOutput_.clear();
+            changed = true;
+        }
     }
+    if (changed)
+        emit ndiChanged();
     // Reset the incident state: backpressure, its log latch, and receiver
     // telemetry all belong to the live session that just ended — the next
     // one starts clean (and re-reports its monitors from scratch).
@@ -1552,6 +1613,10 @@ void LiveOutputService::stopNdiFeed()
     ndiSlowLogged_ = false;
     ndiFastStreak_ = 0;
     ndiReceiversSeen_ = -1;
+    // The in-flight sequence: queued jobs may still report back after this
+    // point — stamp the sequence so their results are dropped as stale (a
+    // session restart must not resurrect the pill from an old send).
+    ndiSendDone_ = ndiSendSeq_;
 }
 
 // ---------------------------------------------------------------------------
@@ -1582,6 +1647,24 @@ float LiveOutputService::ndiConfiguredFps()
         return (ok && fps > 0.0f && fps <= 240.0f) ? fps : 30.0f;
     }
     return 0.0f;   // no enabled NDI row at all
+}
+
+// aboutToQuit: retire the NDI worker thread BEFORE the engine's teardown —
+// quitting the loop first means no new send job can start, and wait() joins
+// whatever send is mid-flight. Without this the SDK/provider could be torn
+// down under a running send (the class of quit-crash the indexer fix solved
+// for The Table).
+void LiveOutputService::shutdownNdiWorker()
+{
+    if (ndiThread_) {
+        ndiThread_->quit();
+        ndiThread_->wait();
+        delete ndiWorker_;      // plain context object; its thread is gone
+        ndiWorker_ = nullptr;
+        delete ndiThread_;      // `this`-parented, but explicit for clarity
+        ndiThread_ = nullptr;
+        ndiClockStarted_ = false;
+    }
 }
 
 void LiveOutputService::startNdiSendClock()

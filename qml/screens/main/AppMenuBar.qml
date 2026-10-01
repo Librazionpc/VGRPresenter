@@ -310,11 +310,8 @@ Item {
                 // back to a plain system font and never looked like the distinctive wordmark it was meant to be. Bahnschrift is
                 // Microsoft's own font (every Windows 10/11 install has it), with the geometric, slightly condensed look a
                 // logotype wants, so it renders as intended instead of gambling on a font that isn't there.
-                // Was AlignTop: the label sat high in its 23 px box while the File/Edit/View/Help row beside it is vertically
-                // centered in its own box - two different anchors that happened to read as "not level with each other". Both
-                // boxes share the same vertical middle (see header_left/sys_menu below), so centering this the same way lines
-                // the two up exactly instead of by coincidence.
-                verticalAlignment: Text.AlignVCenter
+                // Both texts are vertical-center aligned in their 23 px boxes (see above), which is what keeps the two-tone
+                // wordmark level with the File/Edit/View/Help row beside it.
             }
 
             PositionHoverArea {

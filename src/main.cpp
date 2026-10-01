@@ -140,6 +140,10 @@ int main(int argc, char *argv[])
         // a still-running upsert pass into the Search Engine mid-teardown was the
         // 0xc0000005 on quit (the pass now stops between documents and joins here).
         TheTableService::instance().shutdownIndexing();
+        // The NDI send worker: stop + join BEFORE the engine teardown — the
+        // SDK/provider must never be torn down under an in-flight frame send
+        // (same quit-crash class as the indexer above).
+        LiveOutputService::instance().shutdownNdiWorker();
         EngineBridge::instance().shutdown();
     });
 
