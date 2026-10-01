@@ -2,19 +2,19 @@
 # ============================================================================
 # tools/set_version.sh <version> — single-source the app version.
 #
-# The version used to live in FIVE places that drifted independently (the
-# About menu said "v1.0.5-beta" while everywhere else said "v1.0.5-beta.2").
-# This script rewrites them all to one value:
+# The version lives in exactly TWO files (everything else READS them):
 #
-#   qml/services/SettingsService.cpp              kAppVersion (canonical)
-#   qml/components/NavRail.qml                    appVersion
-#   qml/screens/main/AppMenuBar.qml               About row + header subtitle
-#   qml/screens/main/VGRPresenterMainScreen.qml   the version line
-#   assets/app.rc.in                              Windows FILEVERSION/PRODUCTVERSION
-#                                                 (numeric quad + the string form)
+#   qml/services/SettingsService.cpp   kAppVersion — the canonical value; the
+#                                      QML binds it live via the exposed
+#                                      `SettingsService.appVersion` property
+#                                      (NavRail, AppMenuBar, MainScreen,
+#                                      GeneralScreen), so the UI can never
+#                                      drift from the shipped build.
+#   assets/app.rc.in                   Windows FILEVERSION/PRODUCTVERSION
+#                                      (numeric quad + the string form).
 #
-# The canonical version is read back from SettingsService.cpp, so the script
-# never needs to know what it is changing FROM.
+# The script also GUARDS the QML: if a hardcoded version literal ever
+# reappears there (the drift that started this), the run fails loudly.
 #
 # Usage:
 #   tools/set_version.sh 1.0.5-beta.3
@@ -52,26 +52,9 @@ QUAD="${MA},${MI},${PA},${BETA}"
 
 echo "set_version.sh: $OLD -> $NEW (Windows quad $QUAD)"
 
-# ---- 1. the canonical definition + every QML display string -----------------
+# ---- 1. the canonical definition --------------------------------------------
 # SettingsService.cpp is the source of truth: replace its value whatever it is.
 sed -i -E "s/(kAppVersion = )\"[^\"]*\"/\1\"$NEW\"/" "$SETTINGS"
-
-# The QML files show the version with a "v" prefix, and one of them had
-# DRIFTED to a truncated "v1.0.5-beta" (suffix WITHOUT a number) that an
-# exact-string replace cannot catch (that drift is the reason this script
-# exists). So: normalize ANY quoted version-shaped string — the -suffix part
-# may or may not carry .N — to "v$NEW".
-VERSION_RE='"v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z]+(\.[0-9]+)?)?"'
-for f in \
-    "$ROOT/qml/components/NavRail.qml" \
-    "$ROOT/qml/screens/main/AppMenuBar.qml" \
-    "$ROOT/qml/screens/main/VGRPresenterMainScreen.qml"; do
-    if [ ! -f "$f" ]; then
-        echo "set_version.sh: missing $f"
-        exit 1
-    fi
-    sed -i -E "s/$VERSION_RE/\"v$NEW\"/g" "$f"
-done
 
 # ---- 2. the Windows resource file -------------------------------------------
 RC="$ROOT/assets/app.rc.in"
@@ -83,26 +66,30 @@ sed -i -E \
     -e "s/(VALUE \"ProductVersion\",[[:space:]]*)\"[^\"]*\"/\1\"$NEW\"/" \
     "$RC"
 
-# ---- 3. verify: no OTHER version string may survive --------------------------
-# Not just OLD — ANY remaining version-shaped string (a drifted variant like
-# "v1.0.5-beta" is exactly what this guards against).
-LEFT="$(grep -rlnE "[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z]+\.[0-9]+)?" \
-    "$SETTINGS" \
-    "$ROOT/qml/components/NavRail.qml" \
-    "$ROOT/qml/screens/main/AppMenuBar.qml" \
-    "$ROOT/qml/screens/main/VGRPresenterMainScreen.qml" 2>/dev/null \
-    | xargs -r grep -lnE "v?[0-9]+\.[0-9]+\.[0-9]+" 2>/dev/null || true)"
+# ---- 3. verify ----------------------------------------------------------------
+# (a) no OTHER version string may survive in the two owned files;
+# (b) no hardcoded version literal may reappear in the QML — the UI binds
+#     SettingsService.appVersion, and a literal means somebody reintroduced
+#     the drift this script exists to prevent.
 BAD=""
-for f in $LEFT; do
-    # A line is only a problem when it holds a version string that is NOT $NEW.
+for f in "$SETTINGS" "$RC"; do
     if grep -nE "\"v?[0-9]+\.[0-9]+\.[0-9]+" "$f" | grep -vq "v\?$NEW"; then
         BAD="$BAD $f"
     fi
 done
+for f in \
+    "$ROOT/qml/components/NavRail.qml" \
+    "$ROOT/qml/screens/main/AppMenuBar.qml" \
+    "$ROOT/qml/screens/main/VGRPresenterMainScreen.qml"; do
+    [ -f "$f" ] || { echo "set_version.sh: missing $f"; exit 1; }
+    if grep -qE '\"v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z]+(\.[0-9]+)?)?\"' "$f"; then
+        BAD="$BAD $f (hardcoded version literal — bind SettingsService.appVersion instead)"
+    fi
+done
 if [ -n "$BAD" ]; then
-    echo "set_version.sh: a different version string survived in:$BAD"
+    echo "set_version.sh: version drift detected in:$BAD"
     exit 1
 fi
 
-echo "set_version.sh: OK — $NEW is now the single version"
-echo "  (rebuild to bake it into the exe: the resource + About screens read it at build/run time)"
+echo "set_version.sh: OK — $NEW is the single version (QML reads it live)"
+echo "  (rebuild to bake it into the exe: the resource + all UI screens read it at build/run time)"

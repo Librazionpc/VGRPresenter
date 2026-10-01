@@ -216,7 +216,7 @@ Rectangle {
                         font.pixelSize: 15
                         font.weight: Font.Medium
                         horizontalAlignment: Text.AlignHCenter
-                        text: qsTr("v0.0.1")
+                        text: qsTr("v%1").arg(SettingsService.appVersion)
                         textFormat: Text.PlainText
                         verticalAlignment: Text.AlignTop
                     }

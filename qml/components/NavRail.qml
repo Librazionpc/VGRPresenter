@@ -14,7 +14,10 @@ Rectangle {
         { key: "plugins",   label: "Plugins",         icon: "grid" }
     ]
     property string currentKey: "general"
-    property string appVersion: "v0.0.1"
+    // The version is the RELEASE's: read from the C++ single source
+    // (SettingsService.appVersion — SettingsService.cpp kAppVersion), so the
+    // UI can never drift from the shipped build.
+    property string appVersion: qsTr("v%1").arg(SettingsService.appVersion)
 
     signal sectionSelected(string key)
 
