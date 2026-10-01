@@ -1597,7 +1597,7 @@ std::string TheTableContent(const TheTableChapter& ch) {
     return content;
 }
 
-Result<size_t> TheTableLibrary::IndexWithSearchEngine() {
+Result<size_t> TheTableLibrary::IndexWithSearchEngine(const std::atomic<bool>* cancelled) {
     search::SearchEngine& engine = search::SearchEngine::Instance();
 
     // The adapter registers once per process; a re-register is a benign no-op
@@ -1620,6 +1620,14 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine() {
     engine.SuspendCacheInvalidation();
     for (const TheTableBook& book : snapshot) {
         for (const TheTableChapter& ch : book.chapters) {
+            // A set flag ends the walk BEFORE the next upsert (see the header):
+            // this is what keeps a shutdown's join short — the pass stops within
+            // one document instead of walking the whole library into an engine
+            // that is being torn down underneath it.
+            if (cancelled && cancelled->load(std::memory_order_relaxed)) {
+                engine.ResumeCacheInvalidation();   // (end the batch scope even when cancelled)
+                return indexed;
+            }
             search::SearchDocument doc;
             doc.id = TheTableDocId(book.id, ch.number);
             doc.type = "table";

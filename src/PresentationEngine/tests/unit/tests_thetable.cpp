@@ -554,6 +554,15 @@ void TestTheTableSearchIndexing() {
         angelDocs += r.documentId == "table:Y1953:2" ? 1u : 0u;
     CHECK(angelDocs == 1);
 
+    // Cancellation (the app's quit-crash fix): a pre-set flag ends the walk
+    // BEFORE the first upsert — ok, zero indexed, the existing documents stay.
+    std::atomic<bool> stop{true};
+    auto cancelledRun = lib->IndexWithSearchEngine(&stop);
+    CHECK(cancelledRun.ok());
+    CHECK(cancelledRun.value() == 0);
+    auto stillThere = eng.Search("road is prepared", tableOnly);
+    CHECK(stillThere.ok() && !stillThere.value().empty());
+
     // Other content in the index is untouched (the upsert never clobbers the rest).
     s::SearchDocument song;
     song.id = "index-test-song";

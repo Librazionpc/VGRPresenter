@@ -22,6 +22,7 @@
 
 #include "core/common/Common.hpp"
 
+#include <atomic>
 #include <functional>
 #include <map>
 #include <unordered_map>
@@ -149,7 +150,11 @@ public:
     // query); paragraph-level hits stay on this library's own Search().
     // Incremental: a re-index upserts, so other content stays searchable. Safe to
     // call repeatedly (a second call re-upserts the same ids).
-    Result<size_t> IndexWithSearchEngine();
+    // `cancelled` (caller-owned, may be null) is polled BETWEEN documents: a set
+    // flag ends the walk before the next upsert, so a shutdown can stop the pass
+    // before it touches the Search Engine that is being torn down. The return is
+    // the count indexed so far (0 when cancelled before the first document).
+    Result<size_t> IndexWithSearchEngine(const std::atomic<bool>* cancelled = nullptr);
     // Drops this library's documents ("table:*") from the Search Engine index.
     Result<void> UnindexFromSearchEngine();
 

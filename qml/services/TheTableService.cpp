@@ -174,12 +174,9 @@ void TheTableService::loadLibrary()
     // The sermons join the platform Search Engine's index (the Bible/Song
     // precedent): once here, the app-wide search (Ctrl+K) finds them. One
     // document per sermon — ~1,200 upserts, done in the background so the
-    // first paint never waits on the index.
-    std::thread([] {
-        if (keepAlive->IndexWithSearchEngine().ok())
-            EngineBridge::write(QStringLiteral("info"), QStringLiteral("Table"),
-                                QStringLiteral("Sermons indexed for the app-wide search"));
-    }).detach();
+    // first paint never waits on the index — on the ONE joinable worker, so
+    // quitting can always stop + join it before the engine tears down.
+    startIndexing();
     emit changed();
 }
 
@@ -605,7 +602,7 @@ bool TheTableService::newSermonFolder()
                            .arg(rep.imported).arg(rep.skipped).arg(rep.failed),
                        QStringLiteral("success"));
                 if (rep.imported > 0)
-                    std::thread([] { (void)TheTableService::instance().reindex(); }).detach();
+                    startIndexing();   // the new sermons into the app-wide search (coalesced)
                 emit changed();
             } else {
                 report(qstr(r.error().message), QStringLiteral("error"));
@@ -649,7 +646,7 @@ bool TheTableService::newSermon()
     report(tr("Added %1 · %2").arg(QFileInfo(QString::fromStdString(path)).fileName(),
                                    qstr(r.value())),
            QStringLiteral("success"));
-    std::thread([] { (void)TheTableService::instance().reindex(); }).detach();
+    startIndexing();   // the new sermon into the app-wide search (coalesced)
     emit changed();
     return true;
 }
@@ -657,10 +654,68 @@ bool TheTableService::newSermon()
 // Re-upserts every sermon document into the platform Search Engine (an import
 // landed). The engine's IndexDocument is an incremental upsert, so other
 // content's documents are never touched.
-void TheTableService::reindex()
+// ---------------------------------------------------------------------------
+// The background indexer. ONE joinable thread serves every pass — loadLibrary's
+// first index and each post-import reindex — where the three detached threads
+// here before were the 0xc0000005 on quit: an orphaned pass kept upserting into
+// the platform Search Engine while the kernel was tearing it down (the second
+// app instance's shutdown walked the first one's indexer into a destroyed
+// std::_Hashtable). Now: every indexWorker_ mutation happens on the GUI thread,
+// the walk polls indexCancel_ between documents (TheTableLibrary), and
+// shutdownIndexing() cancels + joins BEFORE the engine's own teardown.
+// ---------------------------------------------------------------------------
+void TheTableService::startIndexing()
 {
-    if (library_ && EngineBridge::instance().booted())
-        (void)tableLibrary(library_)->IndexWithSearchEngine();
+    if (!library_ || !EngineBridge::instance().booted())
+        return;
+    if (indexWorker_.joinable()) {
+        // A pass is already out: each run re-snapshots the library under the
+        // engine's lock, so a request landing mid-pass is served by the pass
+        // this one schedules when it ends (indexPassDone).
+        indexReindex_.store(true, std::memory_order_relaxed);
+        return;
+    }
+    indexCancel_.store(false, std::memory_order_relaxed);
+    indexReindex_.store(false, std::memory_order_relaxed);
+    indexWorker_ = std::thread([this] {
+        do {
+            indexReindex_.store(false, std::memory_order_relaxed);
+            if (indexCancel_.load(std::memory_order_relaxed))
+                break;
+            const auto r = tableLibrary(library_)->IndexWithSearchEngine(&indexCancel_);
+            if (indexCancel_.load(std::memory_order_relaxed))
+                break;   // quitting — no log write into a tearing-down process
+            if (!r.ok())
+                break;   // the engine logged the failure; never spin on a broken engine
+            EngineBridge::write(QStringLiteral("info"), QStringLiteral("Table"),
+                                QStringLiteral("Sermons indexed for the app-wide search"));
+        } while (indexReindex_.exchange(false, std::memory_order_relaxed));
+        // GUI-thread bookend: joins the exited thread and serves any request
+        // that landed after the loop's last check (a reindex between the final
+        // exchange() and the thread's last statement would otherwise be lost).
+        QMetaObject::invokeMethod(this, &TheTableService::indexPassDone,
+                                  Qt::QueuedConnection);
+    });
+}
+
+void TheTableService::indexPassDone()
+{
+    if (indexWorker_.joinable())
+        indexWorker_.join();   // the worker has run to completion; this only reaps it
+    if (indexReindex_.exchange(false, std::memory_order_relaxed))
+        startIndexing();
+}
+
+// aboutToQuit, BEFORE EngineBridge::shutdown (main.cpp): set the cancel flag —
+// the walk ends within one document — then join. Never blocks meaningfully; the
+// engine's Search Engine outlives the very last upsert because of this call.
+void TheTableService::shutdownIndexing()
+{
+    indexCancel_.store(true, std::memory_order_relaxed);
+    if (indexWorker_.joinable())
+        indexWorker_.join();
+    indexCancel_.store(false, std::memory_order_relaxed);
+    indexReindex_.store(false, std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------

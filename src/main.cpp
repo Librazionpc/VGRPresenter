@@ -1,4 +1,6 @@
+#include <QElapsedTimer>
 #include <QGuiApplication>
+#include <QIcon>
 #include <QQuickWindow>
 #include <QDateTime>
 #include <QDebug>
@@ -7,6 +9,7 @@
 #include <QQmlError>
 #include <QStandardPaths>
 #include <QStringList>
+#include <QTimer>
 
 #include <cstdio>
 #include <mutex>
@@ -15,6 +18,7 @@
 #include "services/EngineBridge.h"
 #include "services/SearchService.h"
 #include "services/MediaLibraryService.h"
+#include "services/TheTableService.h"
 #include "services/LiveOutputService.h"
 #include "services/RecordingService.h"
 #include "services/MediaThumbnailProvider.h"
@@ -106,22 +110,36 @@ int main(int argc, char *argv[])
     QGuiApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("VGRPresenter"));
     app.setOrganizationName(QStringLiteral("VGR"));
+    // The running app's title-bar/taskbar icon: the same multi-size .ico the
+    // build embeds as the executable's own resource (RC_ICONS in
+    // CMakeLists.txt — Explorer/taskbar-pinned icon). QML's ApplicationWindow
+    // ALSO sets it on the window itself (Main.qml icon.source) — a
+    // QQuickWindow does not reliably adopt the application icon on Windows,
+    // and the taskbar reads the WINDOW's icon. This app-level one covers
+    // any native dialog windows that don't go through Main.qml.
+    const QIcon appIcon(QStringLiteral(":/app/app-icon.ico"));
+    if (appIcon.isNull())
+        qWarning() << "App icon failed to load from ':/app/app-icon.ico' — the taskbar will show the default icon";
+    app.setWindowIcon(appIcon);
 
     // Needs QStandardPaths, which needs the QGuiApplication constructed above.
     InstallCrashHandler();
 
-    // Boots the real PresentationEngine before any QML loads, so every
-    // screen has it available from its very first frame. See EngineBridge.h
-    // for exactly what this does and doesn't touch — sandboxed data/log
-    // dirs, no plugins, no network listener. A failure here is reported as
-    // a toast (via EventBus, already wired above) rather than aborting
-    // startup — the UI still works against its existing mock data either way.
-    (void)EngineBridge::instance().boot();
+    // The engine boots DEFERRED — see the singleShot after the QML load.
+    // Booting here (synchronously, before any QML exists) left the screen
+    // BLANK for the whole kernel boot; now the branded boot splash is the
+    // visible face of the same call. A failure is reported as a toast (via
+    // EventBus, already wired above) and the splash still comes down — the
+    // UI keeps working against its existing mock data either way.
     QObject::connect(&app, &QGuiApplication::aboutToQuit, [] {
         // A Bible import may still be running on its own thread; let it finish before
         // the engine's systems are torn down under it.
         SearchService::instance().shutdown();
         MediaLibraryService::instance().shutdown();   // folder scans in progress
+        // The Table's search indexer: cancel + join BEFORE the kernel shutdown —
+        // a still-running upsert pass into the Search Engine mid-teardown was the
+        // 0xc0000005 on quit (the pass now stops between documents and joins here).
+        TheTableService::instance().shutdownIndexing();
         EngineBridge::instance().shutdown();
     });
 
@@ -166,6 +184,31 @@ int main(int argc, char *argv[])
     engine.addImageProvider(QStringLiteral("mediaplay"), new LiveMediaFrameProvider);
 
     engine.loadFromModule("VGRPresenterUI", "Main");
+
+    // The window's own taskbar/alt-tab icon: a QQuickWindow does NOT reliably
+    // adopt QGuiApplication::setWindowIcon() on Windows — the exe carried the
+    // icon (RC_ICONS) while the taskbar still showed the generic placeholder
+    // (this main window is frameless, so the taskbar button is its only
+    // OS-drawn chrome). QWindow::setIcon() is what reaches WM_SETICON. There
+    // is no Window.icon property in the QML API, so this has to happen here.
+    if (auto *rootWindow = qobject_cast<QQuickWindow *>(engine.rootObjects().value(0)))
+        rootWindow->setIcon(appIcon);
+
+    // DEFERRED ENGINE BOOT — the beat that closes the boot-splash contract:
+    // by now the window is up and the splash has painted (the 200 ms covers
+    // its fade-in), so the kernel boots behind the splash instead of behind
+    // a blank desktop. Boot() is synchronous ON THE GUI THREAD by contract
+    // (EngineBridge.h forbids a worker-thread boot) — the splash holds still
+    // for its duration, then Main.qml's BootSplash reveals on bootedChanged
+    // (or bootError, on failure).
+    QTimer::singleShot(200, &app, [] {
+        QElapsedTimer bootClock;
+        bootClock.start();
+        (void)EngineBridge::instance().boot();
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("App"),
+                            QStringLiteral("engine boot finished in %1 ms (deferred — the boot splash was on screen first)")
+                                .arg(bootClock.elapsed()));
+    });
 
     // Env-gated taken-input self-test: takes a real window through the
     // whole output-preview chain ~2.5s after launch and logs PASS/FAIL.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <thread>
 
 // The UI's window onto the ENGINE's sermon library (bps::library::TheTableLibrary)
 // behind "The Table" tab. The same reference architecture as scripture —
@@ -96,6 +97,12 @@ public:
     // Returns true when a sermon landed in the library.
     Q_INVOKABLE bool newSermon();
 
+    // aboutToQuit (main.cpp), BEFORE EngineBridge::shutdown(): cancel the
+    // background index pass between documents and join its thread — a pass
+    // still upserting into the Search Engine during the kernel teardown was
+    // the 0xc0000005 on quit. The SearchService::shutdown() counterpart.
+    void shutdownIndexing();
+
     // ---- User data (the ScriptureService calls, the shared pane's drawer) ----
     // The engine (TheTableLibrary) persists notes and highlights in the
     // library JSON; `reference` may be "1953 12:3" or a sermon citation
@@ -137,10 +144,27 @@ private:
 
     void loadLibrary();
     QVariantMap documentFromEngine() const;
-    void reindex();   // re-upserts the sermons into the platform Search Engine (after an import)
+    // The background index pass (one joinable worker, coalesced): (re-)upserts
+    // the sermons into the platform Search Engine — loadLibrary's first index
+    // and every post-import reindex go through this. indexPassDone joins a
+    // finished pass and restarts for a late request; shutdownIndexing (public,
+    // aboutToQuit) cancels + joins BEFORE the engine teardown.
+    void startIndexing();
+    void indexPassDone();
 
     void *library_ = nullptr;   // bps::library::TheTableLibrary* (void* keeps the engine header out of QML builds)
     bool loading_ = false;
     bool importing_ = false;
     QVariantMap progress_;
+
+    // The ONE background indexer (the three detached std::threads this replaced
+    // were the 0xc0000005 on quit: an orphaned pass walked its upserts into the
+    // Search Engine while the kernel was tearing it down). std::thread like the
+    // old passes; indexWorker_ is mutated ONLY on the GUI thread — loadLibrary,
+    // startIndexing's coalesce, indexPassDone and shutdownIndexing all run there.
+    // The worker itself touches only the engine-locked library, these two
+    // atomics, and the Logger (thread-safe by contract).
+    std::thread indexWorker_;
+    std::atomic<bool> indexCancel_{false};   // shutdownIndexing: end the walk between documents
+    std::atomic<bool> indexReindex_{false};  // a startIndexing() arrived while a pass ran
 };
