@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # ============================================================================
-# tools/release_windows.sh [version] — cut a Windows release, the FreeShow way.
+# tools/release_windows.sh [version] — cut a Windows release.
 #
-# (Format inspiration: github.com/ChurchApps/FreeShow/releases — version tags,
-# ✨ New features / 🔧 Tweaks / 🐞 Bugfixes sections, Pre-release flag for
-# betas, and the downloadable zip attached as the release asset.)
+# Release format: version tags, ✨ New features / 🔧 Tweaks / 🐞 Bugfixes
+# note sections, Pre-release flag for betas, and the downloadable zip
+# attached as the release asset.
 #
 # Steps:
 #   1. (optional) bump the version everywhere — tools/set_version.sh <version>
 #   2. build the portable dist + zip     — tools/make_portable.sh
-#   3. write dist/RELEASE_NOTES.md (a skeleton with the FreeShow sections, if
+#   3. write dist/RELEASE_NOTES.md (a skeleton with the note sections, if
 #      one does not exist yet) and create the GitHub release with the zip
 #      attached — via the gh CLI. When gh is missing or not authenticated the
 #      exact manual steps are printed instead.

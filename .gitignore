@@ -4,6 +4,20 @@ build-*/
 # build artifacts — the source of truth is the source tree, releases carry the
 # zip as a GitHub release asset, never in git.
 dist/
+
+# ---- local-only: ONLY the code goes to GitHub; everything else stays on the
+# dev machine (run logs, backups, agent notes, editor config, working docs).
+logs/
+backups/
+agent-notes/
+.claude/
+.vscode/
+*.log
+AGENTS.md
+KNOWN_ISSUES.md
+RELEASING.md
+TRANSFER_NOTE.md
+_paste_view.html
 *.user
 .qtc_clangd/
 CMakeLists.txt.user
@@ -35,3 +49,4 @@ src/download*
 # .claude/skills/ stub) even after deletion — some external process still
 # references the old pre-flatten path. Harmless; ignored rather than fought.
 /BelieversPresentationSoftware/
+*.log
