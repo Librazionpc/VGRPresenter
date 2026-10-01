@@ -479,6 +479,14 @@ private:
     QSet<QString> previewFirstFrameLogged_;
     QSet<QString> previewNoTapWarned_;
     QSet<QString> previewServedLogged_;   // per-label frame-served confirmation
+    // HOLD-LAST-FRAME (see heldPreviewFrame in the .cpp): per tap key — the
+    // device id for camera/screen taps, the NDI source name for receivers —
+    // the newest frame that actually arrived, served back whenever a pull
+    // comes up empty so panes never blink to their glyphs between frames.
+    // Cleared everywhere the tap itself dies (per-owner stops + stopAll).
+    QMap<QString, QImage> previewLastFrame_;
+    QImage heldPreviewFrame(const QString &key) const;
+    void setHeldPreviewFrame(const QString &key, const QImage &frame);
     // NDI receiver taps: source name → engine receiver id ("ndi-recv-N").
     // Owner counting rides the shared previewOwners_ table keyed by the
     // RAW source name (no "ndi:" prefix) — an NDI full name has the SDK's

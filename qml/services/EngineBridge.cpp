@@ -1281,6 +1281,34 @@ QImage EngineBridge::previewFrameFor(const QString &label)
     return devId.isEmpty() ? QImage{} : latestPreviewFrame(devId);
 }
 
+// The last frame each source actually delivered, by tap key (device id for
+// camera/screen taps, source name for NDI receivers). Preview taps are
+// PULL-based: any transient empty read — a screen-capture session re-dressing
+// mid-desktop-composition, a camera re-locking after a mode change, an NDI
+// tick where the receiver had nothing new — used to surface as a one-frame
+// empty QImage, which the QML provider turns into its 1×1 placeholder and
+// every pane's "frames flowing" test (sourceSize > 1) flips FALSE for that
+// tick: the decorative glyph art blinks over the live feed and back. A
+// preview pane shows the newest frame it EVER had until a real new one
+// arrives (exactly what a hardware preview monitor does) — one QMap entry
+// per open tap, a COW QImage copy. Cleared when the tap's last owner
+// releases it (stopVideoPreview/stopScreenPreview/stopNdiPreview) and in
+// stopAllVideoPreviews, so a closed pane never resurrects a stale frame.
+QImage EngineBridge::heldPreviewFrame(const QString &key) const
+{
+    return previewLastFrame_.value(key);
+}
+
+void EngineBridge::setHeldPreviewFrame(const QString &key, const QImage &frame)
+{
+    if (key.isEmpty())
+        return;
+    if (frame.isNull())
+        previewLastFrame_.remove(key);   // nothing ever arrived — keep it that way
+    else
+        previewLastFrame_[key] = frame;
+}
+
 QImage EngineBridge::latestPreviewFrame(const QString &deviceId)
 {
     if (!bps::platform::PlatformAccessor::Installed())
@@ -1289,7 +1317,8 @@ QImage EngineBridge::latestPreviewFrame(const QString &deviceId)
     const std::vector<uint8_t> jpeg =
         bps::platform::PlatformAccessor::Get().Video().PreviewFrame(id);
     if (jpeg.empty())
-        return {};
+        // HOLD-LAST-FRAME: a transient empty pull must not blink the pane (see heldPreviewFrame)
+        return heldPreviewFrame(QString::fromStdString(id));
     // DECODE-ONCE CACHE — the hot path that killed the UI: requestImage
     // runs on the GUI thread (synchronous QQuickImageProvider), and several
     // consumers (board thumb + dialog pane) poll the same device at 8-15 Hz
@@ -1367,6 +1396,11 @@ QImage EngineBridge::VideoPreviewProvider::requestImage(const QString &id, QSize
         owner_->previewServedLogged_.insert(label);
         qInfo("EngineBridge: preview frame SERVED for label '%s'", qUtf8Printable(label));
     }
+    // HOLD-LAST-FRAME, provider side: every consumer drains through HERE, so
+    // remembering the newest good frame per label (camera/screen keys use the
+    // device id, NDI the source name) keeps a stale-served pane from blinking
+    // even when the miss above took the no-tap path.
+    owner_->setHeldPreviewFrame(label, frame);
     if (frame.isNull()) {
         // 1×1 transparent keeps the QML Image valid while the tap warms up
         // — the pane keeps its glyph underneath.
@@ -1467,6 +1501,7 @@ void EngineBridge::stopVideoPreview(const QString &deviceLabel, const QString &o
     previewOwners_.erase(it);
     const QString id = previewIds_.take(want);
     previewModes_.remove(want);
+    previewLastFrame_.remove(id);   // tap gone — the held frame must not resurrect
     if (id.isEmpty() || !bps::platform::PlatformAccessor::Installed())
         return;
     (void)bps::platform::PlatformAccessor::Get().Video().StopPreview(id.toStdString());
@@ -1704,6 +1739,7 @@ void EngineBridge::stopScreenPreview(const QString &monitorLabel, const QString 
         return;
     previewOwners_.erase(it);
     const QString id = previewIds_.take(want);
+    previewLastFrame_.remove(id);   // tap gone — the held frame must not resurrect
     if (id.isEmpty() || !bps::platform::PlatformAccessor::Installed())
         return;
     (void)bps::platform::PlatformAccessor::Get().Video().StopScreenPreview(id.toStdString());
@@ -1719,6 +1755,7 @@ void EngineBridge::stopAllVideoPreviews()
     previewIds_.clear();
     previewModes_.clear();
     previewOwners_.clear();
+    previewLastFrame_.clear();   // every tap died with this call — held frames must not resurrect
     // The NDI receivers are ENGINE objects, not PAL taps — the AV screen's
     // teardown releases them here too, so a settings-screen close can never
     // leak a live network receiver.
@@ -1793,6 +1830,7 @@ void EngineBridge::stopNdiPreview(const QString &sourceName, const QString &owne
         return;   // another consumer still holds this source
     previewOwners_.erase(it);
     const QString recvId = ndiTaps_.take(want);
+    previewLastFrame_.remove(want);   // receiver gone — the held frame must not resurrect
     if (!recvId.isEmpty() && booted())
         (void)bps::broadcast::BroadcastEngine::Instance().DisconnectReceiver(recvId.toStdString());
 }
@@ -1808,7 +1846,11 @@ QImage EngineBridge::previewNdiFrameFor(const QString &sourceName)
     std::vector<uint8_t> payload;
     auto r = broadcast.ReceiveFrame(recvId.toStdString(), info, payload);
     if (!r.ok() || !r.value() || payload.empty() || info.width == 0 || info.height == 0)
-        return {};   // nothing new this tick (non-blocking capture) — warm-up or steady state
+        // Nothing new this tick (non-blocking capture) — warm-up, or the
+        // network feed hiccuped. HOLD-LAST-FRAME (see heldPreviewFrame): the
+        // pane keeps showing the newest frame it ever received instead of
+        // blinking to its glyph art for the tick.
+        return heldPreviewFrame(want);
 
     // UYVY (2 bytes/px, Y0 U Y1 V) or BGRA/RGBA (4 bytes/px) → RGBA8 for
     // the QML image pipeline (Format_RGBA8888, the SAME layout the live
@@ -1856,6 +1898,7 @@ QImage EngineBridge::previewNdiFrameFor(const QString &sourceName)
             }
         }
     }
+    setHeldPreviewFrame(want, out);   // newest good frame remembered (see heldPreviewFrame)
     return out;
 }
 

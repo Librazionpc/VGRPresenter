@@ -746,8 +746,23 @@ void TestAutoSizeVocabulary() {
     CHECK(shrunk > 3.0f * kScale && shrunk < setOutputPx - 1.0f);
     const float shrunkLegacy = builtSize(slideWithMode("shrink", longVerse));
     CHECK(std::abs(shrunkLegacy - shrunk) < 0.5f);   // both spellings agree
+    // GROW PARITY (the canvas solver's `lo`): grow with an OVERFLOWING verse
+    // descends to the largest size that fits — the set size is not a floor.
+    // (The old engine kept the overflowing set size; every growToFit
+    // template meeting a long verse rendered ~2.5× the canvas's answer and
+    // clipped off the frame.) All three modes must now land on the SAME
+    // fitted size — the box is the master regardless of mode.
+    const float grownLong = builtSize(slideWithMode("growToFit", longVerse));
+    CHECK(grownLong > 3.0f * kScale && grownLong < setOutputPx - 1.0f);
+    CHECK(std::abs(grownLong - shrunk) < 0.5f);
+    // CANVAS PARITY (EditScreen.recomputeFit: "EVERY mode solves, none
+    // included"): a none-mode block that overflows SQUEEZES too — the box is
+    // the master on every surface. (The engine used to render "none" at its
+    // fixed set size and honestly overflow; that divergence WAS the "NDI
+    // output renders the verse bigger than the canvas" report.)
     const float fixed = builtSize(slideWithMode("none", longVerse));
-    CHECK(std::abs(fixed - setOutputPx) < 1.0f);     // "none" is exact, overflow or not
+    CHECK(fixed > 3.0f * kScale && fixed < setOutputPx - 1.0f);
+    CHECK(std::abs(fixed - shrunk) < 0.5f);   // none and shrinkToFit agree now
 }
 
 // ---------------------------------------------------------------------------

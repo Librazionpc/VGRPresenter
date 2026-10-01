@@ -112,13 +112,25 @@ private:
         float wrap = 0;
         bool wrapOn = false;
         float letterSpacing = 0;
+        // Layout-affecting and therefore key-relevant: lineSpacing changes the
+        // line height (totalHeight), bold/italic change the real-font advances
+        // (SystemCharAdvances takes them) and with them every wrap decision.
+        // Omitting any of these served a stale layout whenever the SAME text
+        // was laid out twice under styles differing only here — measured
+        // fitting, drawn overflowing.
+        float lineSpacing = 0;
+        bool bold = false;
+        bool italic = false;
         bool operator<(const LayoutKey& o) const {
             if (text != o.text) return text < o.text;
             if (font != o.font) return font < o.font;
             if (size != o.size) return size < o.size;
             if (wrap != o.wrap) return wrap < o.wrap;
             if (wrapOn != o.wrapOn) return wrapOn < o.wrapOn;
-            return letterSpacing < o.letterSpacing;
+            if (letterSpacing != o.letterSpacing) return letterSpacing < o.letterSpacing;
+            if (lineSpacing != o.lineSpacing) return lineSpacing < o.lineSpacing;
+            if (bold != o.bold) return bold < o.bold;
+            return italic < o.italic;
         }
     };
     std::map<LayoutKey, TextLayoutResult> layouts_;

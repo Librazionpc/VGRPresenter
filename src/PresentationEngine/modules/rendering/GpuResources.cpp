@@ -151,6 +151,9 @@ Result<TextLayoutResult> RenderCache::Layout(const std::string& text,
     key.wrap = style.wrapWidth;
     key.wrapOn = style.wrap;
     key.letterSpacing = style.letterSpacing;
+    key.lineSpacing = style.lineSpacing;
+    key.bold = style.bold;
+    key.italic = style.italic;
     auto it = layouts_.find(key);
     if (it != layouts_.end()) return it->second;
     auto result = TextLayout::Measure(text, style, fonts);
