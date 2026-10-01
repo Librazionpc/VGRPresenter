@@ -205,7 +205,7 @@ void TestSceneBuilderStyles() {
                 : nullptr;
             CHECK(bg != nullptr);
             if (bg)
-                CHECK(std::abs(bg->BackgroundColor().r - 0.06f) < 0.01f);   // engine default
+                CHECK(std::abs(bg->BackgroundColor().r - 0.0f) < 0.01f);   // engine default: BLACK (projection no-signal, never a coloured stand-in)
         }
     }
 

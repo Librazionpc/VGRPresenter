@@ -157,10 +157,20 @@ Item {
             return
         OutputListModel.renameOutput(root.editIndex, root.editName)
         OutputListModel.setKind(root.editIndex, root.editType)
+        // The screen assignment must go back FIRST so a kind change's
+        // unassignment (setKind clears the display binding for non-HDMI
+        // kinds) isn't immediately overwritten by the dialog's stale value —
+        // that round-trip used to resurrect the HDMI transport on a row
+        // switched to NDI ("Main Output to NDI still shows the monitor
+        // window"). Empty editScreenName on a form that never touched the
+        // picker must also not CLEAR a valid binding, so it is normalized
+        // to the row's current one before writing.
+        if (root.editScreenName === "")
+            root.editScreenName = OutputListModel.getOutput(root.editIndex).screenName
+        OutputListModel.setScreenName(root.editIndex, root.editScreenName)
         OutputListModel.setResolution(root.editIndex, root.editRes)
         OutputListModel.setRefresh(root.editIndex, root.editRefresh)
         OutputListModel.setTestPattern(root.editIndex, root.editPattern)
-        OutputListModel.setScreenName(root.editIndex, root.editScreenName)
         OutputListModel.setBoundsLocked(root.editIndex, root.editLocked)
         OutputListModel.setStayOnTop(root.editIndex, root.editStayOnTop)
         OutputListModel.setFullscreenOutput(root.editIndex, root.editFullscreen)
@@ -237,10 +247,14 @@ Item {
                     readonly property bool ndiFeedIsThisRow: card.kind === "NDI"
                         && LiveOutputService.ndiSending
                         && LiveOutputService.ndiSendingOutputName === card.name
-                    // LIVE = on-air, or an NDI row whose frames verifiably
-                    // flow right now (sending survives a projector being
-                    // the on-air output — the feed runs beside it).
-                    readonly property bool live: card.active || ndiFeedIsThisRow
+                    // LIVE only while a GO LIVE session is actually running:
+                    // an NDI row whose frames verifiably flow right now, or
+                    // the on-air row DURING a live session. The active
+                    // (selected) output alone must not light the pill —
+                    // "selected" is a setting, not a broadcast state (the
+                    // pill used to read LIVE before GO LIVE was ever pressed).
+                    readonly property bool live: (card.active && LiveOutputService.live)
+                                                 || ndiFeedIsThisRow
 
                     width: layout.width
                     height: cardCol.height + Theme.space5 * 2

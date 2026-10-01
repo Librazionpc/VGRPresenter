@@ -49,6 +49,12 @@ struct StoredOutput {
     bool active = false;
     bool enabled = true;
     std::string styleId;                       // "" = no style
+    // On-air-only transport: this output carries ONLY its own feed (NDI etc.)
+    // — no physical-screen window, no slot in the screen pipeline. The QML
+    // model's transport mutual-exclusion switch (OutputListModel's
+    // isScreenTransport: !onAirOnly && kind=="HDMI"); forced true on hydrate
+    // for legacy NDI rows persisted before this field existed.
+    bool onAirOnly = false;
     // The Edit dialog's six item-kind toggles, in display order:
     // text, camera, media, clock, timer, shape.
     std::array<bool, 6> contentToggles{};

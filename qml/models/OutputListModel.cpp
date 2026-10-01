@@ -24,6 +24,20 @@ constexpr auto kMainOutputName = "Main Output";
 constexpr const char *kContentKeys[] = { "text", "camera", "media", "clock", "timer", "shape" };
 }
 
+namespace {
+// Only PHYSICAL-SCREEN outputs go to the audience-facing screen window
+// (OutputWindowManager → OutputWindow) and win the live loop's screen
+// priority. NDI and other network rows carry ONLY their own transport —
+// this is the transport mutual-exclusion contract in one place: one enabled
+// HDMI row starts the screen pipeline, one enabled NDI row starts the NDI
+// feed, never both from a single row. Falls back to kind=="HDMI" for rows
+// persisted before onAirOnly existed.
+bool isScreenTransport(const OutputItem &o)
+{
+    return !o.onAirOnly && o.kind == QLatin1String("HDMI");
+}
+}
+
 QPointer<OutputListModel> OutputListModel::s_instance = nullptr;
 
 
@@ -99,6 +113,18 @@ void OutputListModel::reloadFromStore()
         item.fullscreenOutput = so.fullscreenOutput;
         item.isEnabled = so.enabled;
         item.styleId = QString::fromStdString(so.styleId);
+        // Legacy rows (before onAirOnly was a thing): an NDI row never wears
+        // a screen window — enforce the transport rule on hydrate so pre-
+        // existing rosters get the fix without a settings round-trip.
+        item.onAirOnly = so.onAirOnly || item.kind == QLatin1String("NDI");
+        // Legacy repair: an NDI row persisted before the transport rule kept
+        // its old display binding — scrub it so the store and the edit form
+        // never show a screen assignment an NDI output cannot use.
+        if (item.onAirOnly && !item.screenName.isEmpty()) {
+            item.screenName.clear();
+            item.res.clear();
+            item.refresh.clear();
+        }
         item.content = content;   // the six defaults, then the persisted toggles on top
         for (int i = 0; i < item.content.size() && i < 6; ++i)
             item.content[i].enabled = so.contentToggles[i];
@@ -120,13 +146,11 @@ void OutputListModel::reloadFromStore()
         m_outputs.append(item);
     }
 
-    // The ONE mandatory output: the primary display — every show needs a
-    // way to put content on the main screen. Seeded only when the persisted
-    // roster is empty (first run); a saved roster that somehow lost it gets
-    // it back (removeOutput refuses for it, so this is belt-and-braces).
-    const bool hasMain = std::any_of(m_outputs.cbegin(), m_outputs.cend(),
-                                     [](const OutputItem &o) { return o.name == QLatin1String(kMainOutputName); });
-    if (!hasMain) {
+    // First-run seed only: a brand-new (EMPTY) roster starts with the
+    // primary display so the Outputs screen isn't empty. A DELETED Main
+    // Output stays deleted — no re-seed on a non-empty roster (the user's
+    // roster is the truth), and removeOutput no longer refuses it.
+    if (m_outputs.isEmpty()) {
         OutputItem main;
         main.name = QStringLiteral("Main Output");
         main.badge = QStringLiteral("LIVE 1");
@@ -154,7 +178,22 @@ void OutputListModel::reloadFromStore()
 }
 
 // The whole roster back into the engine's OutputStore (StyleListModel::save
-// is the same shape for styles). Every mutator funnels through here.
+// is the same shape for styles). Every mutator funnels through here.// Only PHYSICAL-SCREEN outputs go to the audience-facing screen window
+// (OutputWindowManager → OutputWindow) and win the live loop's screen
+// priority. NDI and other network rows carry ONLY their own transport —
+// this is the transport mutual exclusion in one place: one enabled HDMI row
+// starts the screen pipeline, one enabled NDI row starts the NDI feed, never
+// both from a single row. Falls back to kind=="HDMI" for rows persisted
+// before onAirOnly existed.
+QList<int> OutputListModel::outputsForScreens() const
+{
+    QList<int> rows;
+    for (int i = 0; i < m_outputs.size(); ++i)
+        if (m_outputs[i].isEnabled && isScreenTransport(m_outputs[i]))
+            rows.append(i);
+    return rows;
+}
+
 void OutputListModel::saveRoster()
 {
     QList<bps::project::StoredOutput> stored;
@@ -175,12 +214,25 @@ void OutputListModel::saveRoster()
         so.active = item.active;
         so.enabled = item.isEnabled;
         so.styleId = item.styleId.toStdString();
+        so.onAirOnly = item.onAirOnly;
         for (int i = 0; i < item.content.size() && i < 6; ++i)
             so.contentToggles[i] = item.content.at(i).enabled;
         stored.append(so);
     }
     (void)bps::project::OutputStore::Instance().Save(
         std::vector<bps::project::StoredOutput>(stored.cbegin(), stored.cend()));
+
+    // EVERY roster change re-pushes the engine's per-output style set (and
+    // the active style). saveRoster is the one door every mutator already
+    // walks through, so this is what makes a mid-live roster edit take
+    // effect on the NEXT FRAME instead of at the next GO LIVE: a New Screen
+    // enabled or styled while the show is live starts feeding immediately
+    // (the NDI push reads the same buffers this set registers — a buffer
+    // missing from the set kept the feed on "waiting for buffer" until
+    // restart), a removed/renamed output stops feeding under its old name.
+    // Both pushes are idempotent and cheap (SetLiveOutputStyles stores and
+    // the loop re-reads per frame; SetActiveOutputStyle no-ops on equality).
+    pushEngineStyle(activeStyleId());
 }
 
 void OutputListModel::connectToEngineBoot()
@@ -289,6 +341,7 @@ QVariant OutputListModel::data(const QModelIndex &index, int role) const
     case RefreshRole: return item.refresh;
     case TestPatternRole: return item.testPattern;
     case ScreenNameRole: return item.screenName;
+    case OnAirOnlyRole: return item.onAirOnly;
     case BoundsLockedRole: return item.boundsLocked;
     case StayOnTopRole: return item.stayOnTop;
     case FullscreenOutputRole: return item.fullscreenOutput;
@@ -339,6 +392,7 @@ QHash<int, QByteArray> OutputListModel::roleNames() const
         { EnabledRole, "isEnabled" },
         { StyleIdRole, "styleId" },
         { StyleNameRole, "styleName" },
+        { OnAirOnlyRole, "onAirOnly" },
         { ContentRole, "content" },
         { StyleBackgroundRole, "styleBackground" },
         { FrameBufferRole, "frameBuffer" },
@@ -367,6 +421,7 @@ void OutputListModel::addScreen(const QString &name, const QString &type,
     item.active = false;
     item.isEnabled = true;
     item.styleId = QStringLiteral();
+    item.onAirOnly = type == QLatin1String("NDI");
     item.content = defaultContent();
     m_outputs.append(item);
     endInsertRows();
@@ -400,9 +455,9 @@ void OutputListModel::removeOutput(int index)
 {
     if (index < 0 || index >= m_outputs.size())
         return;
-    // Main Output is load-bearing — every show needs a primary destination.
-    if (m_outputs.at(index).name == QLatin1String(kMainOutputName))
-        return;
+    // Main Output is deletable like any other row — the roster may even go
+    // empty (the user re-adds what they need). The seeded default only
+    // exists so a FIRST-RUN roster isn't blank; it is not mandatory.
 
     // If the removed output was the on-air one, the engine must drop its
     // style with it (the next setActive pushes the new output's own).
@@ -509,8 +564,23 @@ void OutputListModel::setKind(int index, const QString &kind)
         return;
 
     m_outputs[index].kind = kind;
+    // A display binding only means something for a PHYSICAL-SCREEN output
+    // (HDMI). Leaving HDMI with the binding intact used to leave a zombie
+    // assignment: OutputWindowManager instantiates a real per-row window for
+    // every row with a screen, and its visibility keys on
+    // outputEnabled && hasDisplay && live — so a Main Output switched
+    // HDMI→NDI still popped the FULLSCREEN SCREEN WINDOW at GO LIVE while
+    // the NDI feed sent too (the reported go-live hang: both transports up
+    // at once). One output, one transport: NDI/SDI/REC/STREAM rows keep
+    // no display. (Going back to HDMI re-picks a screen in the edit form.)
+    if (kind != QLatin1String("HDMI") && !m_outputs[index].screenName.isEmpty()) {
+        m_outputs[index].screenName.clear();
+        m_outputs[index].res.clear();
+        m_outputs[index].refresh.clear();
+    }
+    m_outputs[index].onAirOnly = kind == QLatin1String("NDI");
     const QModelIndex changed = this->index(index);
-    emit dataChanged(changed, changed, { KindRole });
+    emit dataChanged(changed, changed, { KindRole, ScreenNameRole, ResRole, RefreshRole, OnAirOnlyRole });
     saveRoster();
 }
 
@@ -635,6 +705,12 @@ QVariantMap OutputListModel::displayFor(int index) const
 void OutputListModel::setScreenName(int index, const QString &screenName)
 {
     if (index < 0 || index >= m_outputs.size())
+        return;
+    // An on-air-only output (NDI) has no display binding, period: the edit
+    // dialog's stale snapshot (or a stray pick on the form's mini-map) must
+    // not resurrect the screen transport on a network row — the guard that
+    // actually keeps one output on one transport against every caller.
+    if (!screenName.isEmpty() && m_outputs[index].onAirOnly)
         return;
     if (m_outputs[index].screenName == screenName)
         return;
@@ -879,6 +955,15 @@ void OutputListModel::bakeTemplateBlocks(bps::presentation::OutputStyleSpec &spe
     const QVariantList blocks = design.value(QStringLiteral("blocks")).toList();
     if (blocks.isEmpty())
         return;   // unknown/deleted id: keep the plain-layout fallback
+    // THE TEMPLATE'S OWN BACKGROUND WINS when the style's colour is empty or
+    // transparent: the template design IS the look the user picked (Big Bold
+    // carries #000000) — a transparent style colour must not steamroll it.
+    // The style's colour still wins when the style actually SETS one (and the
+    // slide's own background beats both, in the engine's precedence).
+    const QString templateBg = design.value(QStringLiteral("background")).toString();
+    if (!templateBg.isEmpty() && templateBg != QLatin1String("transparent")
+        && (spec.backgroundColor.empty() || spec.backgroundColor == "transparent"))
+        spec.backgroundColor = templateBg.toStdString();
     spec.templateBlocks.reserve(blocks.size());
     for (const QVariant &b : blocks)
         spec.templateBlocks.push_back(ShowConverter::blockFromVariant(b.toMap()));
@@ -911,6 +996,15 @@ void OutputListModel::bakeFamilyTemplateBlocks(bps::presentation::OutputStyleSpe
         const QVariantList blocks = design.value(QStringLiteral("blocks")).toList();
         if (blocks.isEmpty())
             continue;   // unknown/deleted id: the family falls back per SceneBuilder
+        // Same template-bg-wins rule as bakeTemplateBlocks: a family template
+        // with its own background (the Table design's #000000) adopts into the
+        // style when the style's colour is unset/transparent. This is what
+        // made Table render black while Shows/Scripture (transparent-bg
+        // designs) showed the engine's old tinted fallback instead.
+        const QString famBg = design.value(QStringLiteral("background")).toString();
+        if (!famBg.isEmpty() && famBg != QLatin1String("transparent")
+            && (spec.backgroundColor.empty() || spec.backgroundColor == "transparent"))
+            spec.backgroundColor = famBg.toStdString();
         spec.familyTemplateBlocks[i].reserve(blocks.size());
         for (const QVariant &b : blocks)
             spec.familyTemplateBlocks[i].push_back(ShowConverter::blockFromVariant(b.toMap()));
@@ -1029,6 +1123,7 @@ QVariantMap OutputListModel::getOutput(int index) const
         { "active", item.active },
         { "isEnabled", item.isEnabled },
         { "styleId", item.styleId },
+        { "onAirOnly", item.onAirOnly },
         { "styleName", styleName },
         { "content", content },
     };

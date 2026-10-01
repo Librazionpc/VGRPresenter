@@ -71,6 +71,7 @@ json::Value OutputStore::OutputToJson(const StoredOutput& o) {
     obj["active"] = json::Value::Bool(o.active);
     obj["enabled"] = json::Value::Bool(o.enabled);
     obj["styleId"] = json::Value::String(o.styleId);
+    obj["onAirOnly"] = json::Value::Bool(o.onAirOnly);
     obj["content"] = json::Value(std::move(c));
     obj["category"] = json::Value::String(o.category);
     return json::Value(std::move(obj));
@@ -110,6 +111,7 @@ Result<StoredOutput> OutputStore::OutputFromJson(const json::Value& v) {
     out.active = flag("active", false);
     out.enabled = flag("enabled", true);
     out.styleId = str("styleId");
+    out.onAirOnly = flag("onAirOnly", false);
     out.category = str("category");
     if (const json::Value* c = v.Find("content"); c && c->asObject()) {
         // Reads go through the NESTED content object (the outer flag() above

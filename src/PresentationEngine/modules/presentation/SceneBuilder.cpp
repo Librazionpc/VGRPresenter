@@ -766,7 +766,10 @@ Result<std::string> SceneBuilder::BuildGatedSlideScene(const Presentation& prese
     // The SAME background composition BuildSlideScene runs (colour, then the
     // style image, the slide's own colour still winning under the same
     // clear-on-text rule) — the refused output keeps its look, minus content.
-    rendering::Color bg = rendering::Color(0.06f, 0.07f, 0.09f, 1.0f);
+    // BLACK, not a tinted "default": a transparent/empty style background
+    // reads as "no fill" — a projection must go black (a real projector's
+    // no-signal state), never a coloured stand-in.
+    rendering::Color bg = rendering::Color(0.0f, 0.0f, 0.0f, 1.0f);
     const bool slideOwnsBackground = !slide.background.empty() && slide.background != "transparent";
     const rendering::Color styleBg = StyleBuilder::ParseColor(style.backgroundColor);
     if (styleBg.a > 0.0f && !(style.clearBackgroundOnText && slideOwnsBackground))
@@ -835,7 +838,11 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
     // clearStyleBackgroundOnText lets a slide that carries its own colour keep
     // it. An EMPTY style background (spec carries none — ParseColor("")->a ==
     // 0) leaves the slide's own (or the default) in place.
-    rendering::Color bg = rendering::Color(0.06f, 0.07f, 0.09f, 1.0f);   // engine default
+    // BLACK, not a tinted "default": a transparent/empty style background
+    // reads as "no fill" — a projection must go black (a real projector's
+    // no-signal state), never a coloured stand-in (the "NDI output shows
+    // light blue instead of the template's black" report was this line).
+    rendering::Color bg = rendering::Color(0.0f, 0.0f, 0.0f, 1.0f);   // engine default
     bool slideOwnsBackground = !slide.background.empty() && slide.background != "transparent";
     rendering::Color styleBg = StyleBuilder::ParseColor(style.backgroundColor);
     if (styleBg.a > 0.0f && !(style.clearBackgroundOnText && slideOwnsBackground)) {

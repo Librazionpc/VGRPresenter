@@ -62,6 +62,15 @@ struct OutputItem
     // a style can't re-point every later output at the wrong theme the way an
     // index reference would (FreeShow keys outputs→styles by id the same way).
     QString styleId;
+    // NDI (and other network) outputs: carry ONLY their own transport — no
+    // physical screen window, and no audience-facing window on this machine
+    // (the receiver's monitor IS the audience screen). FreeShow's NDI output
+    // is on-air-only by definition; its preview lives in the monitor wall.
+    // Screen-window gating (OutputWindowManager → OutputWindow) and the
+    // engine's loop priority (OutputListModel::outputsForScreens) both read
+    // this, so one flag keeps every consumer of "is this a screen output"
+    // consistent. Default false = the HDMI Main Output keeps its window.
+    bool onAirOnly = false;
     QList<OutputContentToggle> content;
 };
 
@@ -101,6 +110,11 @@ public:
         EnabledRole,
         StyleIdRole,
         StyleNameRole,
+        // True for network-kind outputs (NDI): they carry ONLY their own
+        // transport — no physical-screen window (OutputWindow), no place in
+        // the live loop's screen priority (outputsForScreens). The transport
+        // mutual-exclusion contract's per-row switch.
+        OnAirOnlyRole,
         ContentRole,
         // This output's style background as a QVariantMap { color, image,
         // hasImage } — what a CLEAR output (nothing on air, or a cleared
@@ -175,6 +189,15 @@ public:
     // every output that used the removed id to "None" without a save/emit
     // round trip through QML.
     void detachStyleEverywhere(const QString &styleId);
+
+    // Rows (roster order) whose transport is a PHYSICAL SCREEN — enabled
+    // HDMI rows without onAirOnly. The live loop's SyncWithDocument consults
+    // this for per-output frame priority: an NDI row never wins a screen
+    // slot, so a switched-to-NDI Main Output can never start the screen
+    // pipeline alongside its feed. Rows come and go from the roster, not
+    // from liveness — OutputWindowManager's Instantiator keeps the FULL
+    // roster as its model.
+    QList<int> outputsForScreens() const;
 
     // The ACTIVE output's style, re-resolved (by id) from the current
     // roster. Empty string = the on-air output has no style.

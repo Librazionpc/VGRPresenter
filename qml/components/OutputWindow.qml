@@ -28,8 +28,15 @@ import VGRPresenterUI
 Window {
     id: root
 
-    required property int outputIndex
+    required    property int outputIndex
     property bool outputEnabled: false
+    // NDI/network rows are on-air-only: their ONLY transport is their own
+    // feed (the receiver's monitor is the audience screen), so this window —
+    // the physical-screen transport — must never exist for them. Wired from
+    // OutputListModel's onAirOnly role by OutputWindowManager. A row switched
+    // HDMI→NDI used to keep its display binding AND this window here: at GO
+    // LIVE both transports came up at once (the reported go-live hang).
+    property bool onAirOnly: false
     property string outputScreenName: ""
     // OutputListModel's frameBuffer role ("" for an unstyled output, which
     // mirrors the shared preview feed — the exact convention
@@ -107,7 +114,8 @@ Window {
     // the OS desktop alone instead of parking a black/branded window over
     // it between services. STOP (or the show ending) takes the window back
     // down the same frame LiveOutputService.live flips.
-    visible: root.outputEnabled && root.hasDisplay && !root.dismissed && LiveOutputService.live
+    visible: root.outputEnabled && root.hasDisplay && !root.onAirOnly
+             && !root.dismissed && LiveOutputService.live
 
     readonly property bool hasFrame: LiveOutputService.live && LiveOutputService.frameRev > 0
     readonly property url frameSource: root.hasFrame
