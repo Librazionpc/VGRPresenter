@@ -275,6 +275,12 @@ void LiveOutputService::goLive()
         return;
     }
 
+    // Transition toast BEFORE the (synchronous, GUI-thread) engine start:
+    // the first frame is the heaviest (style load + scene build + full-
+    // frame rasterize), so the click must feel acknowledged immediately —
+    // and a fast STOP press right after is safe by design now.
+    EventBus::instance().notify(QStringLiteral("Going live…"),
+                                QStringLiteral("info"), QStringLiteral("Go Live"));
     auto r = bps::live::LiveOutputController::Instance().StartFromOpenShow();
     if (!r.ok()) {
         // No open document (nothing staged either, or this would already
@@ -857,7 +863,13 @@ void LiveOutputService::runEnvSelfTest()
 
 void LiveOutputService::stop()
 {
-    bps::live::LiveOutputController::Instance().StopLive();
+    // ASYNC STOP (the "press GO LIVE then immediately STOP" crash): the
+    // controller's StopLive JOINS the render worker, and on this thread that
+    // froze the whole GUI whenever the worker was mid-first-frame (AppHangB1
+    // at 20:13, 0.0.3). StopLiveAsync hands the join to a reaper thread —
+    // this function returns at once and the UI keeps pumping.
+    const bool wasLive = live_;
+    bps::live::LiveOutputController::Instance().StopLiveAsync();
     if (live_) {
         live_ = false;
         emit liveChanged();
@@ -883,6 +895,12 @@ void LiveOutputService::stop()
     // compositor (the pump stops with it — one last explicit clear keeps the
     // layer honest if the take is ever re-taken without clearInput first).
     clearNdiInputFrame();
+    // Transition toast: the teardown is now asynchronous, so say so — the
+    // user pressed STOP and the button flips instantly, but the engine's
+    // off-air cleanup finishes a moment later in the background.
+    if (wasLive)
+        EventBus::instance().notify(QStringLiteral("Going off air…"),
+                                    QStringLiteral("info"), QStringLiteral("Go Live"));
 }
 
 void LiveOutputService::goLiveBlank()

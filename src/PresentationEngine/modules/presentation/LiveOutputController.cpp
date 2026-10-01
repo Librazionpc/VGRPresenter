@@ -111,6 +111,12 @@ Metrics LiveOutputController::MetricsSnapshot() const {
 // Program start/stop
 // ---------------------------------------------------------------------------
 Result<void> LiveOutputController::StartFromOpenShow() {
+    // LIFECYCLE GATE (see the header): a stop landing inside this start used
+    // to join the worker mid-setup and then assign a new std::thread over a
+    // still-joinable handle — std::terminate (the fast GO LIVE -> STOP
+    // crash). Held for the WHOLE body; the loop's own syncs use control_ as
+    // before, so rendering is never blocked by this gate.
+    std::lock_guard<std::mutex> lifecycleLock(lifecycle_);
     std::lock_guard<std::mutex> lock(control_);
     if (running_.load()) return Ok();   // already live
 
@@ -179,6 +185,9 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
     if (slides.empty())
         return Error::Make(Err::InvalidState, "LiveOutputController",
                            "nothing selected to put on air");
+    // Same lifecycle gate as StartFromOpenShow (the fast GO LIVE -> STOP
+    // crash) — held for the whole body.
+    std::lock_guard<std::mutex> lifecycleLock(lifecycle_);
 
     // THE CONTROLLER OWNS THE ON-AIR CONTENT: the runtime binds a raw pointer,
     // so the copy must outlive the run. A stable member keyed by content name;
@@ -273,12 +282,57 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
 }
 
 Result<void> LiveOutputController::StopLive() {
+    // LIFECYCLE GATE: serializes against StartFrom* so a stop can never join
+    // a half-built start (or let a start assign over a joinable thread).
+    std::lock_guard<std::mutex> lifecycleLock(lifecycle_);
     bool wasRunning = running_.exchange(false);
     if (wasRunning) {
         if (worker_.joinable())
             worker_.join();
         Logger::Instance().Info("live output stopped", "LiveOutputController");
     }
+
+    // ---- THREAD LIFECYCLE MOP-UP (the stop-then-start crash's other half):
+    // the reaper below detaches itself, so the handle it was given may need
+    // releasing here if IT won the race to flip running_ but hadn't detached
+    // yet. If joinable, THIS (serialized) caller does the join — exactly one
+    // owner, no double-join, no thread-over-thread assignment.
+    if (worker_.joinable())
+        worker_.join();
+    return StopLiveTail();
+}
+
+// The GUI-thread-safe stop: returns immediately, the join happens on a
+// detached reaper. Used by LiveOutputService::stop() (the GO LIVE/STOP
+// button's path) — joining on the GUI thread froze the whole app whenever
+// the first heavy frame was mid-render (AppHangB1, "press go live and
+// immediately unpress"), because the worker can be inside its longest
+// single iteration (first RenderOnce: style load + scene build + full-
+// frame rasterize + distribute) when running_ flips.
+void LiveOutputController::StopLiveAsync() {
+    std::lock_guard<std::mutex> lifecycleLock(lifecycle_);
+    if (!running_.exchange(false)) {
+        // Nothing running: still run the tail once — a stop arriving while
+        // StartFrom* HELD the gate (queued behind it) must clean up whatever
+        // that start half-built. lifecycle_ is held, so this is serialized.
+        (void)StopLiveTail();
+        return;
+    }
+    // Take the worker handle by moving it out under the gate — StopLive()'s
+    // mop-up (or a later start) can then never see a joinable stale handle.
+    std::thread doomed = std::move(worker_);
+    worker_ = std::thread();
+    std::thread reaper([this, doomed = std::move(doomed)]() mutable {
+        if (doomed.joinable())
+            doomed.join();
+        Logger::Instance().Info("live output stopped", "LiveOutputController");
+    });
+    reaper.detach();   // lifecycle_ (held above) serializes any concurrent stop
+}
+
+// The shared off-air cleanup both stop paths run: unbind the runtime, clear
+// the per-session state. Caller holds lifecycle_; takes control_ itself.
+Result<void> LiveOutputController::StopLiveTail() {
     std::lock_guard<std::mutex> lock(control_);
     if (pres_) {
         // StopPlayback only transitions Live/Paused -> Stopped; the runtime

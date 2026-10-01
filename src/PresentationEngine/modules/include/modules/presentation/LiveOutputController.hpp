@@ -70,6 +70,12 @@ public:
     Result<void> StartFromSlides(std::string_view name,
                                  const std::vector<presentation::Slide>& slides);
     Result<void> StopLive();
+    // NON-BLOCKING stop: StopLive() joins the render worker, and on the GUI
+    // thread that froze the whole app whenever the first heavy frame was mid-
+    // render (AppHangB1 on a fast GO LIVE -> STOP). The reaper thread does
+    // the join; the GUI thread returns immediately. Shutdown()/Reset() still
+    // use the synchronous StopLive (teardown must be complete before exit).
+    void StopLiveAsync();
 
     bool IsLive() const noexcept { return running_.load(); }
     uint64_t FramesSent() const noexcept { return frames_.load(); }
@@ -98,6 +104,9 @@ private:
     LiveOutputController() = default;
 
     void Loop();
+    // The shared off-air cleanup both stop paths run (unbind the runtime,
+    // clear per-session state). Caller holds lifecycle_.
+    Result<void> StopLiveTail();
     // Re-sync the runtime with the open show's document (1Hz): rebind if the
     // presentation id changed, rebuild scenes if the compiled set changed.
     // Skipped entirely while temp content is on air (StartFromSlides).
@@ -112,6 +121,23 @@ private:
     std::atomic<uint64_t> frames_{0};
     std::thread worker_;
     std::mutex control_;   // start/stop vs. the loop's document sync
+    // START/STOP LIFECYCLE GATE: every entry (StartFrom*, StopLive) holds
+    // this for its whole body so a stop can never land inside a still-
+    // running start (the fast GO LIVE -> STOP crash: StopLive joined the
+    // worker while StartFromSlides was mid-setup and about to assign a NEW
+    // std::thread over the still-joinable one — std::terminate), and two
+    // rapid stops can't race each other's reaper threads.
+    std::mutex lifecycle_;
+    // The stop reaper: joins the render worker OFF the GUI thread (StopLive
+    // keeps its synchronous form for Shutdown/Reset, which must finish
+    // before the process ends). Started detached per async stop; lifecycle_
+    // keeps concurrent reapers serialized.
+    // START/STOP LIFECYCLE GATE: every entry (StartFrom*, StopLive) holds
+    // this for its whole body so a stop can never land inside a still-
+    // running start (the fast GO LIVE -> STOP crash: StopLive joined the
+    // worker while StartFromSlides was mid-setup and about to assign a NEW
+    // std::thread over the still-joinable one — std::terminate). Also keeps
+    // two rapid stops from racing each other's reaper.
     // Change-driven rendering: the loop only rasterizes when the on-air scene
     // actually changed (slide/style move). A static verse re-rendered at
     // 60Hz burned a whole core and dragged the whole app down with it.
