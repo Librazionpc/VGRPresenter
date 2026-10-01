@@ -275,80 +275,45 @@ std::vector<ContentBlock> BindTemplateBlocks(const std::vector<ContentBlock>& tm
 // (placeUnderSlide decides which). Returns the number of blocks seen (for
 // the scene log line).
 // Largest font size ≤ `style.size` whose wrapped layout still fits `box` —
-// the engine twin of the canvas's autoSize:"shrink" solver. DesignCatalogs::Text
-// writes that key with the comment "the set size is a CEILING"; DesignPreview
-// and the edit canvas have always honored it, but the engine set the ceiling
-// as a FIXED size — so the Big Bold template's 120px put a six-line chorus
-// straight through the 1080p frame bottom (the live "NDI not staying within
-// its resolution" report: text clipped at the frame edge on every output).
-// Proportional descent: measure at the current size, rescale by the height
-// ratio, repeat — wrapping changes as the size does, so a few rounds converge
-// where one closed-form step undershoots. Height is the binding constraint
-// (wrapWidth is the fixed box width; a monster word hard-breaks and grows
-// the height, which the loop then shrinks). Runs at scene-build time only.
-float FitTextToBox(const std::string& text, const rendering::TextStyle& style,
-                   const rendering::Rect& box, const rendering::FontManager& fonts,
-                   float minPx) {
-    constexpr int kMaxRounds = 10;
-    float size = style.size;
+// The ONE fit solver both auto-size modes ride — the canvas's own shape
+// (EditScreen.recomputeFit / DesignPreview.solveFit): bisect candidate sizes
+// between `minPx` and `maxPx` (OUTPUT px), re-measuring the full layout
+// through TextLayout::Measure at each probe — wrapping, real-font advances
+// and ink height included — and keep the largest size that fits the box on
+// BOTH axes. 12 rounds converge sub-pixel; containment is PROVEN by the
+// last measurement, never assumed by a formula. The two heuristic walks
+// this replaces were the "auto size/grow misbehaves when I change the
+// font" report: the grow walk ascended in ONE proportional step and gave
+// up the moment that step overshot (a short one-line verse's first step
+// blows past the width bound, so grow silently returned the SET size —
+// the exact test failure that proved it), and the shrink walk undershot
+// by a whole step. lineSpacing scales proportionally with each probe: it
+// is derived from the font's natural line height (SceneBuilder above),
+// exactly how Qt's ProportionalHeight lineHeight tracks the pixel size —
+// measuring a probe with the set size's spacing would lie about the
+// wrapped line count. letterSpacing stays FIXED across probes (a meta px
+// value, like the canvas's font.letterSpacing).
+float BisectFittedSize(const std::string& text, const rendering::TextStyle& style,
+                       const rendering::Rect& box, const rendering::FontManager& fonts,
+                       float minPx, float maxPx) {
     rendering::TextStyle probe = style;
-    for (int i = 0; i < kMaxRounds; ++i) {
-        if (size <= minPx) break;
-        probe.size = size;
-        const auto r = rendering::TextLayout::Measure(text, probe, fonts);
-        if (r.totalHeight <= box.height)
-            return size;   // fits at this size
-        size *= std::max(0.2f, box.height / std::max(1.0f, r.totalHeight) * 0.95f);
-    }
-    return std::max(minPx, size);
-}
-
-// The grow twin (autoSize "grow"/"growToFit" — TextItemPanel's picker; six
-// of this user's template blocks carry it): the template's set size is a
-// FLOOR, and the layout scales UP until it fills the box — the short-verse
-// case, where a template names a modest size for the WORST verse and the
-// actual one-line verse should read across the whole frame, not sit at the
-// worst-case size. Same proportional shape as FitTextToBox, ascending, then
-// a verify-and-step-back pass so the last scaling step's rounding can never
-// leave the final size overflowing. Height is the binding constraint for
-// exactly the same reason (wrapWidth is the fixed box width).
-// THE CANVAS RULE (EditScreen.recomputeFit / DesignPreview.solveFit, `lo`):
-// grow returns the LARGEST SIZE THAT FITS the box — full stop. The set size
-// is neither a floor nor a ceiling: if more fits, it grows past the set
-// size; if the set size itself overflows (a template sized for the WORST
-// verse meeting a long one), the fitted answer is SMALLER — the box is the
-// master even for grow. The old version kept an overflowing set size ("not
-// grow's job") — every growToFit template rendering a long verse came out
-// ~2.5× the canvas's answer and clipped off the frame: the "NDI output
-// renders the verse bigger than the canvas" report, exact numbers.
-float GrowTextToBox(const std::string& text, const rendering::TextStyle& style,
-                    const rendering::Rect& box, const rendering::FontManager& fonts) {
-    constexpr int kMaxRounds = 12;
-    float size = style.size;
-    rendering::TextStyle probe = style;
+    const float setSpacing = style.lineSpacing;
+    const float setSize = std::max(0.001f, style.size);
     const auto fits = [&](float s) {
         probe.size = s;
+        probe.lineSpacing = setSpacing * (s / setSize);
         const auto r = rendering::TextLayout::Measure(text, probe, fonts);
         return r.totalHeight <= box.height && r.totalWidth <= box.width;
     };
-    if (fits(size)) {
-        // Fits already: ascend toward filling the box, never past it.
-        for (int i = 0; i < kMaxRounds; ++i) {
-            probe.size = size;
-            const auto r = rendering::TextLayout::Measure(text, probe, fonts);
-            const float next =
-                size * std::max(1.05f, box.height / std::max(1.0f, r.totalHeight) * 0.96f);
-            if (next <= size * 1.01f || !fits(next))
-                break;
-            size = next;
-        }
-    } else {
-        // Overflows: descend to the largest proved-fitting size — the exact
-        // walk FitTextToBox already implements (proportional shrink, ~10
-        // rounds, the canvas bisection's own 3px-floor shape).
-        return FitTextToBox(text, style, box, fonts, /*minPx=*/1.0f);
+    if (!fits(minPx)) return minPx;   // even the floor overflows: floor it
+    float lo = minPx;
+    float hi = std::max(maxPx, minPx);
+    for (int i = 0; i < 12; ++i) {
+        const float mid = (lo + hi) * 0.5f;
+        if (fits(mid)) lo = mid;
+        else hi = mid;
     }
-    return size;
+    return lo;
 }
 
 int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
@@ -403,12 +368,37 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             // The typography knobs the canvas/DesignPreview honor and the
             // engine silently dropped — lineHeight (QML's Text default 1.2,
             // an empty line of black serif overflows a verse box at output
-            // scale) and letterSpacing. Both scale with the stage like the
-            // font size does. letter-spacing is PER GAP (n-1 gaps for n
-            // glyphs), the same convention TextLayout's width math uses.
-            styleComp->style.lineSpacing = static_cast<float>(
-                (MetaNumber(block.metaJson, "lineHeight", 1.2) - 1.0)
-                * MetaNumber(block.metaJson, "fontSize", 24.0) * size.height / kBlockStageH);
+            // scale) and letterSpacing. letter-spacing is PER GAP (n-1 gaps
+            // for n glyphs), the same convention TextLayout's width math uses.
+            //
+            // lineHeight → lineSpacing: Qt renders Text.lineHeight as a
+            // PROPORTIONAL multiplier of the font's OWN natural line height
+            // (a per-font number — its ascent/descent/lineGap), so the
+            // engine's additive lineSpacing must come from the font's real
+            // metrics too: lineStep = lineHeight · naturalStep, lineSpacing
+            // = lineStep − fontSize. The old (lineHeight−1)·fontSize formula
+            // forced every font onto the SAME line grid; a font with taller
+            // natural metrics (most display serifs vs Segoe UI) drew lines
+            // FARTHER apart than the fit solver measured — block taller than
+            // the box, last verse line clipped at the frame bottom with one
+            // font and fine with another (the "auto size/grow breaks when I
+            // change the font" report; the screenshots pair: same verse,
+            // same box, one font fits, one clips). Unresolvable metrics
+            // (builtin font, off-Windows) keep the legacy formula.
+            {
+                const double lh = MetaNumber(block.metaJson, "lineHeight", 1.2);
+                const float sizePx = styleComp->style.size;   // the output-scaled font size
+                rendering::FontManager::LineMetrics lm{};
+                if (rendering::RenderEngine::Instance().Fonts().SystemLineMetrics(
+                        styleComp->style.fontId, sizePx, styleComp->style.bold,
+                        styleComp->style.italic, lm)) {
+                    styleComp->style.lineSpacing = lm.baselineStep * static_cast<float>(lh) - sizePx;
+                } else {
+                    styleComp->style.lineSpacing = static_cast<float>(
+                        (lh - 1.0) * MetaNumber(block.metaJson, "fontSize", 24.0)
+                        * size.height / kBlockStageH);
+                }
+            }
             {
                 const double ls = MetaNumber(block.metaJson, "letterSpacing", 0.0);
                 styleComp->style.letterSpacing = static_cast<float>(ls * size.width / kBlockStageW);
@@ -417,11 +407,13 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             // (TextItemPanel: "none" | "shrinkToFit" | "growToFit"; legacy
             // "shrink"/"grow" from DesignCatalogs arrive too, and
             // DesignPreview has always accepted both spellings).
-            //   grow/growToFit — GrowTextToBox: the LARGEST size that fits
-            //     the box (the canvas solver's `lo`); see its comment.
-            //   shrink/shrinkToFit/none — FitTextToBox: the set size is the
-            //     CEILING, squeeze until the layout fits (the canvas rule
-            //     for every non-grow mode, "none" included).
+            //   grow/growToFit — BisectFittedSize bracketed to the full
+            //     [3px, 400 stage px] range: the LARGEST size that fits
+            //     (the canvas solver's `lo`).
+            //   shrink/shrinkToFit/none — BisectFittedSize bracketed to
+            //     [3px, set size]: the set size is the CEILING, squeeze
+            //     until the layout fits (the canvas rule for every non-grow
+            //     mode, "none" included).
             // THE CANVAS RULE FOR EVERYTHING ELSE ("none" included): the box
             // is the master and the text must always sit inside it — render
             // at the set size while it fits, SQUEEZE the moment it doesn't.
@@ -436,16 +428,27 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             // frame). ALWAYS solving (with the set size as the ceiling) makes
             // the engine agree with both QML surfaces by construction.
             const std::string autoSize = MetaString(block.metaJson, "autoSize");
+            const float minPx =
+                static_cast<float>(3.0 * size.height / kBlockStageH);   // the canvas solver's own 3px floor, output-scaled
             if (autoSize == "grow" || autoSize == "growToFit") {
-                styleComp->style.size = GrowTextToBox(
+                // GROW: the LARGEST size that fits — full stop (the canvas
+                // solver's `lo`, bracketed up to 400 stage px like its [3, 400]).
+                // The set size is neither floor nor ceiling: a short verse
+                // grows past it, an overflowing one descends below it — the
+                // box is the master even for grow. The floor (3px, output-
+                // scaled) protects only the degenerate 1×1-box case.
+                styleComp->style.size = BisectFittedSize(
                     block.text, styleComp->style, text->Bounds(),
-                    rendering::RenderEngine::Instance().Fonts());
+                    rendering::RenderEngine::Instance().Fonts(), minPx,
+                    static_cast<float>(400.0 * size.height / kBlockStageH));
             } else {
-                const float minPx =
-                    static_cast<float>(3.0 * size.height / kBlockStageH);   // the canvas solver's own 3px floor, output-scaled
-                styleComp->style.size = FitTextToBox(
+                // SHRINK/NONE: the set size is the CEILING — render at the
+                // set size while it fits, squeeze the moment it doesn't
+                // ("none" included; the box is the master on every surface).
+                styleComp->style.size = BisectFittedSize(
                     block.text, styleComp->style, text->Bounds(),
-                    rendering::RenderEngine::Instance().Fonts(), minPx);
+                    rendering::RenderEngine::Instance().Fonts(), minPx,
+                    styleComp->style.size);
             }
             text->AddComponent(styleComp);
             text->SetLayer(std::string(layer));

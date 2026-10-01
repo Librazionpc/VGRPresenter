@@ -1392,6 +1392,12 @@ void LiveOutputService::pushNdiFrame()
     const QString senderName = ndiSenderDisplayName(ndiOutputName);
     if (!senderName.isEmpty())
         provider->SetSenderName(senderName.toStdString());
+    // Advertise the REAL cadence, not a lie of convenience: this poll runs
+    // at 100 ms (10 fps) and halves to ~5 fps under send backpressure —
+    // receivers key their frame clock on this number. Re-asserted per send
+    // so the backoff halves are reflected too; the sender itself applies it
+    // on its next frame (NDI metadata rides every frame).
+    provider->SetFrameRate(ndiBackoff_ ? 5.0f : 10.0f);
 
     // The provider owns the wire format + send; frames only flow while live
     // (pollTick gates this call).

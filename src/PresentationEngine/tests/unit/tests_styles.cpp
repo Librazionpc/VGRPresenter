@@ -766,6 +766,102 @@ void TestAutoSizeVocabulary() {
 }
 
 // ---------------------------------------------------------------------------
+// FONT-METRICS FIT PARITY — "auto size works with one font, clips with
+// another". The fit solver must measure the SAME vertical extent the renderer
+// paints, and both must vary with the font the way real fonts vary:
+//   1. lineSpacing tracks the font: SceneBuilder derives it from the font's
+//      own natural line height (Qt's ProportionalHeight model), so two fonts
+//      at the same set size/lineHeight produce DIFFERENT additive spacing —
+//      a font-blind constant was the clip-with-one-font bug.
+//   2. measured height fits where it solved: laying the fitted size out
+//      through TextLayout::Measure must fit a box the solver fitted. The
+//      old model counted a full line box for the LAST line too, over-
+//      measuring by (step − ink) — a per-font number — so which sizes
+//      "fit" swung with the font while the painted result clipped the tail
+//      (second screenshot: last verse line cut at the frame bottom).
+// ---------------------------------------------------------------------------
+void TestFontMetricsFitParity() {
+    auto& fonts = r::RenderEngine::Instance().Fonts();
+
+    // Two families with genuinely different natural line heights if both are
+    // installed (they are on every Windows box this suite runs on); with
+    // neither, metrics fall back to the size+lineSpacing estimate and the
+    // assertions below still hold — just without proving font-dependence.
+    const char* famA = "Segoe UI";
+    const char* famB = "Georgia";
+    r::TextStyle st;
+    st.fontId = famA;
+    st.size = 100.0f;
+    st.lineSpacing = 20.0f;
+    st.wrap = true;
+    st.wrapWidth = 900.0f;
+
+    // (1) SceneBuilder's derivation: natural step × lineHeight − size, which
+    // differs between families; the fallback formula ((lh−1)·size) is what a
+    // font-blind engine used to apply to BOTH.
+    const auto spacingFor = [&](const char* family) {
+        r::FontManager::LineMetrics lm{};
+        if (fonts.SystemLineMetrics(family, st.size, false, false, lm))
+            return lm.baselineStep * 1.2f - st.size;
+        return (1.2f - 1.0f) * st.size;
+    };
+    if (fonts.HasSystemFont(famA) && fonts.HasSystemFont(famB))
+        CHECK(std::abs(spacingFor(famB) - spacingFor(famA)) > st.size * 0.01f);
+
+    // (2) Solver contract: the fitted size measures back as fitting. Grow a
+    // short verse in a tall box (the report's growToFit path), then verify —
+    // and GROW MUST ACTUALLY GROW: the old proportional-step walker aborted
+    // on its first overshoot and returned the SET size (the live "grow does
+    // nothing until I change the font" symptom), so this also pins the
+    // bisection rewrite.
+    const auto fittedSize = [&](const char* family) {
+        r::TextStyle s = st;
+        s.fontId = family;
+        float lo = 3.0f, hi = 400.0f;
+        for (int i = 0; i < 12; ++i) {
+            const float mid = (lo + hi) / 2.0f;
+            r::TextStyle probe = s;
+            probe.size = mid;
+            probe.lineSpacing = spacingFor(family) * (mid / st.size);
+            const auto m = r::TextLayout::Measure("He reigns", probe, fonts);
+            if (m.totalHeight <= 500.0f && m.totalWidth <= 900.0f) lo = mid;
+            else hi = mid;
+        }
+        return lo;
+    };
+    // Width-bound at ~2× the set size (900px box, 9 glyphs): the point is
+    // that grow GROWS — well past the 100px set size the old walker returned.
+    CHECK(fittedSize(famA) > st.size * 1.5f);
+    const float fitted = fittedSize(famA);
+    r::TextStyle verify = st;
+    verify.size = fitted;
+    verify.lineSpacing = spacingFor(famA) * (fitted / st.size);
+    const auto m = r::TextLayout::Measure("He reigns", verify, fonts);
+    CHECK(m.totalHeight <= 500.0f);
+    CHECK(m.totalWidth <= 900.0f);
+
+    // Multi-line height is ink-corrected: strictly less than the naive
+    // n·step (the old over-measure) whenever ink < step — true for every
+    // installed font at these sizes and identity for the builtin font.
+    const char* verse =
+        "It shall be light in the evening time, the path to glory you will "
+        "surely find; thru the water way, it is the light today.";
+    r::TextStyle vl = st;
+    vl.size = fitted;
+    vl.lineSpacing = verify.lineSpacing;
+    const auto mv = r::TextLayout::Measure(verse, vl, fonts);
+    if (mv.lines.size() > 1)
+        CHECK(mv.totalHeight < static_cast<float>(mv.lines.size()) * mv.lineStep + 0.01f);
+
+    // Builtin-font layouts keep the legacy totals exactly (n·step) — the
+    // fallback path this change promised not to touch.
+    r::TextStyle builtin = st;
+    builtin.fontId = "builtin";
+    const auto mb = r::TextLayout::Measure("He reigns", builtin, fonts);
+    CHECK(std::abs(mb.totalHeight - static_cast<float>(mb.lines.size()) * mb.lineStep) < 0.01f);
+}
+
+// ---------------------------------------------------------------------------
 // Engine-template styles — a style wearing a template design (templateKey
 // "tpl-…", blocks baked into the spec) renders THE TEMPLATE with the slide's
 // content bound in; the fingerprint hashes the blocks.

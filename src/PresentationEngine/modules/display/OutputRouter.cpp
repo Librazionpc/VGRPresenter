@@ -7,7 +7,16 @@ namespace bps::display {
 
 namespace {
 
-// Nearest-neighbor scale/crop of a frame region into a destination rectangle.
+// Scale/crop of a frame region into a destination rectangle. Downscale
+// area-averages (box filter — every source pixel contributes to every output
+// pixel it touches, so a 2× reduction can no longer alias thin text strokes
+// away); upscale bilinearly interpolates (no blocky 2× pixels). The old
+// nearest-neighbor pick was the CPU-hotspot AND the quality complaint in one:
+// at output scales ≈1:1 it sampled ONE source pixel per output pixel, so
+// song lyrics on a 1600×900 screen from a 1920×1080 feed shimmered/aliased
+// on every frame. Pixels are Color::Pack 0xAABBGGRR; channels are unpacked
+// and averaged in wider integers (premultiplied-alpha is NOT assumed — the
+// compositor hands over flattened frames).
 rendering::Frame ScaleFrame(const rendering::Frame& src, const rendering::Rect& srcRect,
                             const rendering::Rect& dstRect) {
     rendering::Frame out;
@@ -34,14 +43,93 @@ rendering::Frame ScaleFrame(const rendering::Frame& src, const rendering::Rect& 
 
     const int srcW = sx1 - sx0;
     const int srcH = sy1 - sy0;
+    const auto sample = [&src, sw](int x, int y) -> uint32_t {
+        return src.pixels[static_cast<size_t>(std::clamp(y, 0, src.height - 1)) * sw
+                          + std::clamp(x, 0, sw - 1)];
+    };
+    const auto unpack = [](uint32_t p, int& r, int& g, int& b, int& a) {
+        r = static_cast<int>(p & 0xFFu);
+        g = static_cast<int>((p >> 8) & 0xFFu);
+        b = static_cast<int>((p >> 16) & 0xFFu);
+        a = static_cast<int>((p >> 24) & 0xFFu);
+    };
+
     for (int dy = 0; dy < out.height; ++dy) {
-        int sy = sy0 + static_cast<int>(static_cast<double>(srcH) * dy / out.height);
-        sy = std::clamp(sy, sy0, sy1 - 1);
+        // Source footprint of this output row/column (in source pixels).
+        const double fy0 = static_cast<double>(srcH) * dy / out.height;
+        const double fy1 = static_cast<double>(srcH) * (dy + 1) / out.height;
         for (int dx = 0; dx < out.width; ++dx) {
-            int sx = sx0 + static_cast<int>(static_cast<double>(srcW) * dx / out.width);
-            sx = std::clamp(sx, sx0, sx1 - 1);
-            out.pixels[static_cast<size_t>(dy) * out.width + dx] =
-                src.pixels[static_cast<size_t>(sy) * sw + sx];
+            const double fx0 = static_cast<double>(srcW) * dx / out.width;
+            const double fx1 = static_cast<double>(srcW) * (dx + 1) / out.width;
+            uint32_t px;
+            if (fx1 - fx0 >= 1.0 || fy1 - fy0 >= 1.0) {
+                // DOWNSCALE (footprint ≥ 1 source px): box-average the
+                // covered area. Integer core + edge fractions keeps it fast;
+                // accumulate in 64-bit so a 100×100 footprint cannot roll
+                // a 8-bit channel over.
+                const int ix0 = sx0 + static_cast<int>(fx0);
+                const int iy0 = sy0 + static_cast<int>(fy0);
+                const int ix1 = sx0 + static_cast<int>(std::ceil(fx1));
+                const int iy1 = sy0 + static_cast<int>(std::ceil(fy1));
+                uint64_t rSum = 0, gSum = 0, bSum = 0, aSum = 0, wSum = 0;
+                for (int y = iy0; y < iy1 && y < sy1; ++y) {
+                    const double wy = std::min(fy1, static_cast<double>(y + 1))
+                                      - std::max(fy0, static_cast<double>(y));
+                    if (wy <= 0) continue;
+                    for (int x = ix0; x < ix1 && x < sx1; ++x) {
+                        const double wx = std::min(fx1, static_cast<double>(x + 1))
+                                          - std::max(fx0, static_cast<double>(x));
+                        if (wx <= 0) continue;
+                        const double w = wx * wy;
+                        int r, g, b, a;
+                        unpack(sample(x, y), r, g, b, a);
+                        rSum += static_cast<uint64_t>(r * w);
+                        gSum += static_cast<uint64_t>(g * w);
+                        bSum += static_cast<uint64_t>(b * w);
+                        aSum += static_cast<uint64_t>(a * w);
+                        wSum += static_cast<uint64_t>(w * 255.0);
+                    }
+                }
+                if (wSum == 0) {
+                    px = sample(sx0 + static_cast<int>(fx0), sy0 + static_cast<int>(fy0));
+                } else {
+                    const auto chan = [wSum](uint64_t s) -> uint32_t {
+                        return static_cast<uint32_t>(std::min<uint64_t>(
+                            255, (s + wSum / 2) / wSum));
+                    };
+                    px = chan(aSum) << 24 | chan(bSum) << 16 | chan(gSum) << 8 | chan(rSum);
+                }
+            } else {
+                // UPSCALE / ~1:1 (footprint < 1 px): bilinear at the center.
+                const double fx = fx0 + (fx1 - fx0) * 0.5;
+                const double fy = fy0 + (fy1 - fy0) * 0.5;
+                const double gx = sx0 + std::clamp(fx, 0.0, static_cast<double>(srcW - 1));
+                const double gy = sy0 + std::clamp(fy, 0.0, static_cast<double>(srcH - 1));
+                const int x0 = static_cast<int>(gx);
+                const int y0 = static_cast<int>(gy);
+                const int x1 = std::min(x0 + 1, sx1 - 1);
+                const int y1 = std::min(y0 + 1, sy1 - 1);
+                const double tx = gx - x0;
+                const double ty = gy - y0;
+                int r00, g00, b00, a00, r01, g01, b01, a01;
+                int r10, g10, b10, a10, r11, g11, b11, a11;
+                unpack(sample(x0, y0), r00, g00, b00, a00);   // top-left
+                unpack(sample(x1, y0), r01, g01, b01, a01);   // top-right
+                unpack(sample(x0, y1), r10, g10, b10, a10);   // bottom-left
+                unpack(sample(x1, y1), r11, g11, b11, a11);   // bottom-right
+                const auto lerp2 = [tx, ty](int c00, int c01, int c10, int c11) {
+                    const double top = c00 + (c01 - c00) * tx;
+                    const double bot = c10 + (c11 - c10) * tx;
+                    return static_cast<int>(top + (bot - top) * ty + 0.5);
+                };
+                int r = std::clamp(lerp2(r00, r01, r10, r11), 0, 255);
+                int g = std::clamp(lerp2(g00, g01, g10, g11), 0, 255);
+                int b = std::clamp(lerp2(b00, b01, b10, b11), 0, 255);
+                int a = std::clamp(lerp2(a00, a01, a10, a11), 0, 255);
+                px = static_cast<uint32_t>(a) << 24 | static_cast<uint32_t>(b) << 16
+                     | static_cast<uint32_t>(g) << 8 | static_cast<uint32_t>(r);
+            }
+            out.pixels[static_cast<size_t>(dy) * out.width + dx] = px;
         }
     }
     return out;

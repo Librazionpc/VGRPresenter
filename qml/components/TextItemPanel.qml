@@ -73,8 +73,8 @@ Column {
     // The list style (an ENGINE list style key, see TextFormatService.listStyles): every line of the text becomes a list item.
     readonly property string listStyle: root.meta.list ?? "none"
     readonly property real fontSize: root.meta.fontSize ?? 16
-    readonly property real lineHeight: root.meta.lineHeight ?? 1.2
-    readonly property real letterSpacing: root.meta.letterSpacing ?? 0
+    readonly property real lineHeight: root.meta.lineHeight ?? 0
+    readonly property real letterSpacing: root.meta.letterSpacing ?? -2.0
 
     // The largest font size at which this item's text still fits its box's
     // inner area (box minus padding). Measured from fitMeasure below: text

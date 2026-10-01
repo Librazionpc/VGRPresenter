@@ -449,7 +449,15 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
     }
 
     const auto& result = layoutRes.value();
-    const float lineHeight = style.size + style.lineSpacing;
+    // Step lines by the MEASURED per-line advance, not a re-derived estimate:
+    // for real fonts Measure used the font's actual baseline step (which
+    // differs per font), and painted spacing that disagrees with measured
+    // spacing re-spreads the block — un-doing the fit solve (fit says it
+    // fits; the paint overflows the box and clips the tail). Falls back to
+    // the legacy formula only for a zero-value result (never produced by
+    // Measure today, but a safe default if a caller hand-builds one).
+    const float lineHeight = result.lineStep > 0.0f ? result.lineStep
+                                                    : style.size + style.lineSpacing;
     const Rect bounds = obj->Bounds();
 
     // Vertical alignment offset.

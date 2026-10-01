@@ -134,9 +134,10 @@ Result<DisplayDevice> VirtualDisplayProvider::GetDevice(std::string_view id) con
 }
 
 // ---------------------------------------------------------------------------
-// LinuxDisplayProvider
+// PhysicalDisplayProvider (physical monitors via the PAL — cross-platform;
+// the "Linux" name string is legacy, see the header comment)
 // ---------------------------------------------------------------------------
-std::vector<DisplayDevice> LinuxDisplayProvider::FromPlatform() {
+std::vector<DisplayDevice> PhysicalDisplayProvider::FromPlatform() {
     std::vector<DisplayDevice> out;
     try {
         auto& platform = platform::PlatformAccessor::Get();
@@ -156,7 +157,7 @@ std::vector<DisplayDevice> LinuxDisplayProvider::FromPlatform() {
             d.primary = m.primary;
             d.connected = m.connected;
             d.hdrSupported = m.hdrSupported;
-            d.provider = "Linux";
+            d.provider = "Linux";   // legacy provider tag (see Providers.hpp)
             d.virtual_ = false;
             out.push_back(std::move(d));
         }
@@ -166,11 +167,11 @@ std::vector<DisplayDevice> LinuxDisplayProvider::FromPlatform() {
     return out;
 }
 
-std::vector<DisplayDevice> LinuxDisplayProvider::Enumerate() const {
+std::vector<DisplayDevice> PhysicalDisplayProvider::Enumerate() const {
     return FromPlatform();
 }
 
-Result<std::vector<DisplayDevice>> LinuxDisplayProvider::Probe() {
+Result<std::vector<DisplayDevice>> PhysicalDisplayProvider::Probe() {
     auto now = FromPlatform();
     std::vector<DisplayDevice> changed;
     std::map<std::string, DisplayDevice, std::less<>> nowMap;
@@ -191,7 +192,7 @@ Result<std::vector<DisplayDevice>> LinuxDisplayProvider::Probe() {
     return changed;
 }
 
-DisplayProviderCapabilities LinuxDisplayProvider::Capabilities() const noexcept {
+DisplayProviderCapabilities PhysicalDisplayProvider::Capabilities() const noexcept {
     DisplayProviderCapabilities c;
     c.supportsHotPlug = true;    // via PAL PollChanges
     c.supportsVirtualOutputs = false;
@@ -277,7 +278,7 @@ Result<void> NdiDisplayProvider::SendFrame(const RenderFrameView& frame) {
     info.width = static_cast<uint32_t>(frame.width);
     info.height = static_cast<uint32_t>(frame.height);
     info.fourCC = 0x41424752;   // 'RGBA' — the engine's native layout, byte for byte
-    info.fps = 30.0;
+    info.fps = frameRate_;      // the caller's real cadence (SetFrameRate)
     // NDI's RGBA honors per-pixel alpha (UYVY dropped it implicitly): the
     // compositor's scenes can carry <255 alpha in transparent regions and a
     // receiver would composite those over black. The program feed is a
@@ -307,6 +308,11 @@ Result<void> NdiDisplayProvider::SendFrame(const RenderFrameView& frame) {
 void NdiDisplayProvider::SetSenderName(std::string name) {
     std::lock_guard<std::mutex> lock(mutex_);
     senderName_ = std::move(name);
+}
+
+void NdiDisplayProvider::SetFrameRate(float fps) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    frameRate_ = (fps > 0.0f && fps <= 240.0f) ? fps : 30.0f;
 }
 
 void NdiDisplayProvider::ResetSender() {

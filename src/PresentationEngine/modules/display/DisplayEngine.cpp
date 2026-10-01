@@ -21,9 +21,10 @@ Result<void> DisplayEngine::Initialize() {
         std::lock_guard<std::mutex> lock(mutex_);
         if (initialized_.load()) return Ok();
         initialized_.store(true);
-        // Default providers: physical (Linux) + virtual + null (headless) +
-        // NDI (Phase 17 broadcast output; software-loopback when no SDK).
-        providers_.push_back(std::make_shared<LinuxDisplayProvider>());
+        // Default providers: physical (per-OS via the PAL) + virtual + null
+        // (headless) + NDI (Phase 17 broadcast output; software-loopback when
+        // no SDK).
+        providers_.push_back(std::make_shared<PhysicalDisplayProvider>());
         providers_.push_back(std::make_shared<VirtualDisplayProvider>());
         providers_.push_back(std::make_shared<NullDisplayProvider>());
         providers_.push_back(std::make_shared<NdiDisplayProvider>());

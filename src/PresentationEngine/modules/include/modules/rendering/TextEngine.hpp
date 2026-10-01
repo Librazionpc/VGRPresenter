@@ -136,6 +136,22 @@ public:
     std::vector<float> SystemCharAdvances(const std::string& family, float sizePx, bool bold,
                                           bool italic, const std::string& text) const;
 
+    // The font's REAL vertical rhythm: line gap between baselines and the
+    // last line's ink extent (ascent+descent, GDI+ GetCellDescent/GetLineSpacing
+    // family). Every other font metric in this engine is already REAL
+    // (SystemCharAdvances) — line height stayed the one estimated number,
+    // and it diverges per font (a display serif's natural line spacing is
+    // ~15% taller than Segoe UI's at the same pixel size), which is exactly
+    // the "fit works with one font, clips with another" report. False when
+    // the family can't be resolved or off Windows: callers fall back to the
+    // size+lineSpacing estimate, unchanged.
+    struct LineMetrics {
+        float baselineStep = 0.0f;   // natural baseline-to-baseline distance
+        float inkHeight = 0.0f;      // ascent+descent — one line's visual height
+    };
+    bool SystemLineMetrics(const std::string& family, float sizePx, bool bold, bool italic,
+                           LineMetrics& out) const;
+
 private:
     std::map<std::string, Font, std::less<>> fonts_;
     bool builtinRegistered_ = false;
@@ -152,7 +168,21 @@ struct LineLayout {
 struct TextLayoutResult {
     std::vector<LineLayout> lines;
     float totalWidth = 0.0f;
+    // Total painted extent. For real fonts this is (nLines-1)·baselineStep +
+    // last-line ink (ascent+descent) — NOT n·lineHeight: a baseline grid's
+    // last line carries only its own ink, and counting a full line box for
+    // it over-measures by (descender of line n−1 + ascender gap), which
+    // grows with the font's natural line height — the font-dependent
+    // "fits the solver, clips the last line" bug. Builtin font: n·step,
+    // its glyphs are uniform cells with no extra ink beyond the cell.
+    // DrawTextObject's own per-line painting model matches this exactly.
     float totalHeight = 0.0f;
+    // The per-line advance Measure used (real-font baseline step, or the
+    // size+lineSpacing estimate). DrawTextObject MUST step lines by THIS —
+    // the value it derives from style alone can diverge for real fonts,
+    // and painted spacing that disagrees with measured spacing un-does the
+    // fit solve above (fit says it fits; the paint spreads and clips).
+    float lineStep = 0.0f;
     bool truncated = false;
 };
 

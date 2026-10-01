@@ -416,6 +416,30 @@ std::vector<float> FontManager::SystemCharAdvances(const std::string& family, fl
     return out;
 }
 
+bool FontManager::SystemLineMetrics(const std::string& family, float sizePx, bool bold,
+                                    bool italic, LineMetrics& out) const {
+    std::lock_guard<std::mutex> lock(GdiplusMutex());
+    auto font = MakeGdiplusFont(family, sizePx, bold, italic);   // resolves the family
+    if (!font) return false;
+    Gdiplus::FontFamily ff;
+    if (font->GetFamily(&ff) != Gdiplus::Ok) return false;
+    const int fstyle = font->GetStyle();
+    if (ff.GetLastStatus() != Gdiplus::Ok || ff.GetEmHeight(fstyle) <= 0) return false;
+    // Font design units -> pixels at THIS raster size (the design metrics are
+    // the same font data at every size; the em height in units is not). The
+    // metrics are queried for the font's own style — a synthesized bold/italic
+    // leaves the family's vertical metrics alone, but querying with the real
+    // style keeps the call honest for families that ship per-style metrics.
+    const float scale = sizePx / static_cast<float>(ff.GetEmHeight(fstyle));
+    const float step = static_cast<float>(ff.GetLineSpacing(fstyle)) * scale;
+    const float ink = (static_cast<float>(ff.GetCellAscent(fstyle))
+                       + static_cast<float>(ff.GetCellDescent(fstyle))) * scale;
+    if (step <= 0.0f || ink <= 0.0f) return false;
+    out.baselineStep = step;
+    out.inkHeight = ink;
+    return true;
+}
+
 RgbaImage FontManager::BuildSystemAtlas(const std::string& family, float sizePx, bool bold,
                                         bool italic, std::map<uint8_t, FontGlyph>& outGlyphs) const {
     std::lock_guard<std::mutex> lock(GdiplusMutex());
@@ -521,6 +545,9 @@ bool FontManager::HasSystemFont(const std::string&) const { return false; }
 float FontManager::SystemCharAdvance(const std::string&, float, bool, bool, uint8_t) const { return 0.0f; }
 std::vector<float> FontManager::SystemCharAdvances(const std::string&, float, bool, bool,
                                                     const std::string&) const { return {}; }
+bool FontManager::SystemLineMetrics(const std::string&, float, bool, bool, LineMetrics&) const {
+    return false;
+}
 RgbaImage FontManager::BuildSystemAtlas(const std::string&, float, bool, bool,
                                         std::map<uint8_t, FontGlyph>&) const { return {}; }
 #endif
@@ -704,6 +731,24 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
     Font f = fonts.Resolve(style.fontId);
     const float lineHeight = style.size + style.lineSpacing;
     const float advance = UniformAdvance(style, f);
+    // REAL vertical ink extent when the style names a resolvable system
+    // font: ascent+descent, the visible height of ONE line of glyphs. The
+    // per-line STEP below stays size+lineSpacing (DrawTextObject advances
+    // lines by exactly that, and SceneBuilder now derives lineSpacing from
+    // the font's own natural line height — the font dependence lives there).
+    // Measuring the last line as a FULL step over-estimates by
+    // (step − ink): lineGap plus the space below the last baseline — a
+    // number that swings per font (negative for Segoe UI, ~15% of the em
+    // for many serifs) — which is why the fit solver accepted sizes that
+    // painted past the box only with certain fonts. Builtin font / non-
+    // Windows / unresolved family: ink == lineHeight and every total is
+    // byte-for-byte the legacy n·lineHeight.
+    FontManager::LineMetrics fm{};
+    const bool haveReal = fonts.SystemLineMetrics(style.fontId, style.size, style.bold,
+                                                  style.italic, fm);
+    const float ink = haveReal ? fm.inkHeight : lineHeight;
+    result.totalHeight = 0.0f;
+    result.lineStep = lineHeight;   // the step every line below advances by
 
     for (const auto& rawLine : raw) {
         // Real per-character advances for THIS line (empty = no real font
@@ -780,6 +825,15 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
         if (!current.empty())
             flush(current, currentWidth);
     }
+    // Baseline-grid correction: every line pushed a full `lineHeight` step,
+    // but the LAST line contributes only its ink (ascent+descent for real
+    // fonts, the same as one step for the builtin cell font) — exactly the
+    // rectangle DrawTextObject paints: (n−1) baselines between lines plus
+    // one line of glyphs. SWAP the last line's step for its ink: add the
+    // ink, subtract the step it never spends (ink == lineHeight for the
+    // builtin font, so the legacy n·lineHeight total is preserved there).
+    if (!result.lines.empty())
+        result.totalHeight += ink - lineHeight;
     return result;
 }
 

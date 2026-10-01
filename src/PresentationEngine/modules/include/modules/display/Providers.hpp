@@ -65,10 +65,13 @@ private:
     std::map<std::string, DisplayDevice, std::less<>> lastSeen_;
 };
 
-// --- Linux provider: physical monitors via the PAL IMonitor subsystem.
-class LinuxDisplayProvider final : public IDisplayProvider {
+// --- Physical provider: real monitors via the PAL IMonitor subsystem
+// (cross-platform by construction — the PAL carries the per-OS backends;
+// the registered name string "Linux" is legacy-only, kept so stored
+// profiles/event payloads that name the provider keep matching).
+class PhysicalDisplayProvider final : public IDisplayProvider {
 public:
-    LinuxDisplayProvider() = default;
+    PhysicalDisplayProvider() = default;
 
     const char* Name() const noexcept override { return "Linux"; }
     const char* Version() const noexcept override { return "1.0"; }
@@ -90,7 +93,7 @@ private:
 // the NDI SDK is not installed the engine's software loopback carries it, so
 // the whole path is exercised in CI. Frame delivery itself stays with the
 // caller (the sink in DisplayEngine::RouteFrame) — this provider is the
-// *device*, exactly like the Linux provider.
+// *device*, exactly like the physical provider.
 class NdiDisplayProvider final : public IDisplayProvider {
 public:
     NdiDisplayProvider();
@@ -109,6 +112,13 @@ public:
 
     // Sender name used for the NDI source ("VGR Program" by default).
     void SetSenderName(std::string name);
+    // The frame rate ADVERTISED in every sent frame's NDI metadata. The
+    // default (30) matches the legacy hardcoded value; the live feed's
+    // REAL cadence is its poll timer (LiveOutputService's 100 ms tick →
+    // 10 fps), and receivers key their smoothing/clock on this number —
+    // advertising 30 for a 10 fps feed made Studio Monitor's frame clock
+    // run 3× fast. Set from the actual loop that calls SendFrame.
+    void SetFrameRate(float fps);
     // Tears the live sender down (SendFrame recreates it from senderName_ on
     // its next call). NDI's SDK cannot rename an already-created sender, so
     // a per-session reset is the only way a SetSenderName change — or the
@@ -126,6 +136,7 @@ private:
     mutable std::mutex mutex_;
     std::vector<DisplayDevice> devices_;
     std::string senderName_ = "VGR Program";
+    float frameRate_ = 30.0f;       // advertised fps (SetFrameRate; legacy default)
     std::string senderId_;          // BroadcastEngine sender id (lazily created)
     std::atomic<uint64_t> framesSent_{0};
     // THE SEND BUFFER, OWNED BY THE PROVIDER — the crash fix for "GO LIVE

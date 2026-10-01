@@ -54,6 +54,7 @@ void TestGoLivePaths();
 void TestStyleBackgroundImage();
 void TestBlockScenes();
 void TestAutoSizeVocabulary();
+void TestFontMetricsFitParity();
 void TestTemplateStyleScenes();
 void TestOutputStore();
 void TestProjectUndoRedo();

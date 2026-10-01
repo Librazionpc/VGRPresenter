@@ -97,6 +97,7 @@ static const Suite kSuites[] = {
     {"styles", "style-bg-image", TestStyleBackgroundImage},
     {"styles", "block-scenes", TestBlockScenes},
     {"styles", "auto-size-vocabulary", TestAutoSizeVocabulary},
+    {"styles", "font-metrics-fit", TestFontMetricsFitParity},
     {"styles", "template-style-scenes", TestTemplateStyleScenes},
     {"adaptive", "adaptive-hw", TestAdaptiveHardware},
     {"adaptive", "adaptive-prof", TestAdaptiveProfiler},
