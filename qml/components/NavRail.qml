@@ -14,7 +14,7 @@ Rectangle {
         { key: "plugins",   label: "Plugins",         icon: "grid" }
     ]
     property string currentKey: "general"
-    property string appVersion: "v1.0.5-beta.2"
+    property string appVersion: "v0.0.1"
 
     signal sectionSelected(string key)
 

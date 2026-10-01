@@ -41,10 +41,7 @@ if [ -z "$OLD" ]; then
     echo "set_version.sh: could not read kAppVersion from $SETTINGS"
     exit 1
 fi
-if [ "$OLD" = "$NEW" ]; then
-    echo "set_version.sh: already at $NEW — nothing to do"
-    exit 0
-fi
+
 
 # Numeric quad for the Windows resource: 1.0.5-beta.3 -> 1,0,5,3
 NUM="${NEW%%-*}"                    # 1.0.5
@@ -55,9 +52,17 @@ QUAD="${MA},${MI},${PA},${BETA}"
 
 echo "set_version.sh: $OLD -> $NEW (Windows quad $QUAD)"
 
-# ---- 1. every plain string occurrence ---------------------------------------
+# ---- 1. the canonical definition + every QML display string -----------------
+# SettingsService.cpp is the source of truth: replace its value whatever it is.
+sed -i -E "s/(kAppVersion = )\"[^\"]*\"/\1\"$NEW\"/" "$SETTINGS"
+
+# The QML files show the version with a "v" prefix, and one of them had
+# DRIFTED to a truncated "v1.0.5-beta" (suffix WITHOUT a number) that an
+# exact-string replace cannot catch (that drift is the reason this script
+# exists). So: normalize ANY quoted version-shaped string — the -suffix part
+# may or may not carry .N — to "v$NEW".
+VERSION_RE='"v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z]+(\.[0-9]+)?)?"'
 for f in \
-    "$SETTINGS" \
     "$ROOT/qml/components/NavRail.qml" \
     "$ROOT/qml/screens/main/AppMenuBar.qml" \
     "$ROOT/qml/screens/main/VGRPresenterMainScreen.qml"; do
@@ -65,9 +70,7 @@ for f in \
         echo "set_version.sh: missing $f"
         exit 1
     fi
-    # Only the version STRING is replaced (quoted occurrences of OLD), so no
-    # other number in these files can be collateral damage.
-    sed -i "s/\"$OLD\"/\"$NEW\"/g" "$f"
+    sed -i -E "s/$VERSION_RE/\"v$NEW\"/g" "$f"
 done
 
 # ---- 2. the Windows resource file -------------------------------------------
@@ -80,16 +83,24 @@ sed -i -E \
     -e "s/(VALUE \"ProductVersion\",[[:space:]]*)\"[^\"]*\"/\1\"$NEW\"/" \
     "$RC"
 
-# ---- 3. verify: the new version must now be everywhere OLD was --------------
-LEFT="$(grep -rln "$OLD" \
+# ---- 3. verify: no OTHER version string may survive --------------------------
+# Not just OLD — ANY remaining version-shaped string (a drifted variant like
+# "v1.0.5-beta" is exactly what this guards against).
+LEFT="$(grep -rlnE "[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z]+\.[0-9]+)?" \
     "$SETTINGS" \
     "$ROOT/qml/components/NavRail.qml" \
     "$ROOT/qml/screens/main/AppMenuBar.qml" \
-    "$ROOT/qml/screens/main/VGRPresenterMainScreen.qml" \
-    "$RC" 2>/dev/null || true)"
-if [ -n "$LEFT" ]; then
-    echo "set_version.sh: old version still present in:"
-    echo "$LEFT"
+    "$ROOT/qml/screens/main/VGRPresenterMainScreen.qml" 2>/dev/null \
+    | xargs -r grep -lnE "v?[0-9]+\.[0-9]+\.[0-9]+" 2>/dev/null || true)"
+BAD=""
+for f in $LEFT; do
+    # A line is only a problem when it holds a version string that is NOT $NEW.
+    if grep -nE "\"v?[0-9]+\.[0-9]+\.[0-9]+" "$f" | grep -vq "v\?$NEW"; then
+        BAD="$BAD $f"
+    fi
+done
+if [ -n "$BAD" ]; then
+    echo "set_version.sh: a different version string survived in:$BAD"
     exit 1
 fi
 

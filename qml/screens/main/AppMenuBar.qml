@@ -220,7 +220,7 @@ Item {
         { label: "Check for updates" },
         { label: "Report a problem" },
         { divider: true },
-        { label: "About VGRPresenter", trailing: "v1.0.5-beta" }
+        { label: "About VGRPresenter", trailing: "v0.0.1" }
     ]
 
     // Swallows the next click anywhere on screen to close an open menu,
@@ -380,7 +380,7 @@ Item {
         x: 16; y: 48
         visible: root.openMenu === "logo"
         headerTitle: "VGRPresenter"
-        headerSubtitle: "v1.0.5-beta.2"
+        headerSubtitle: "v0.0.1"
         model: root.logoMenuItems
         onItemActivated: (label) => {
             // "Settings" doesn't activate — it PINS the section-list flyout
