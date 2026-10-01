@@ -2,15 +2,19 @@ import QtQuick
 import VGRPresenterUI
 
 // The boot splash — the first face of the app, matching the brand sheet:
-// the hexagon-play logo tile, the VGR (white) / Presenter (grey) wordmark,
-// the "Expressive · memorable · presenter-first" tagline pill and a thin
-// booting bar.
+// the hexagon-play logo tile, the VGR (white) / Presenter (grey) wordmark
+// and a thin booting bar. NO full-window backdrop: the splash IS the card —
+// a small frameless always-on-top window centered on the screen (the classic
+// Photoshop-style splash), floating over the app while the engine boots.
+// The user asked for exactly this: "remove the bg filler, leave the model
+// alone" — the card (its logo, wordmark, status line and bar) is untouched;
+// only the black Rectangle backdrop is gone.
 //
 // Why this exists: the engine used to boot synchronously BEFORE any QML
 // loaded, so the screen stayed blank for the whole kernel boot. Boot is now
 // DEFERRED (main.cpp fires it once this splash has painted), and this
-// overlay is what the user sees instead of a dead desktop: the kernel boots
-// behind it, and the app only opens when the engine has settled.
+// floating card is what the user sees instead of a dead desktop: the kernel
+// boots behind it, and the app only opens when the engine has settled.
 //
 // Reveal contract: done means the boot RETURNED — success (EngineBridge.
 // booted) or FAILURE (EngineBridge.bootError). A failure must still bring
@@ -20,18 +24,17 @@ import VGRPresenterUI
 //
 // Holding still is by design: boot() runs ON the GUI thread (EngineBridge.h
 // forbids a worker-thread boot), so this splash freezes for the boot's
-// duration — the logo, wordmark and tagline are static, so nothing looks
-// broken mid-freeze.
-//
-// Declared LAST in Main.qml at the top z: nothing behind it (screens,
-// modals, even toasts) paints or takes input during boot.
-Rectangle {
+// duration — the logo, wordmark and status line are static, so nothing
+// looks broken mid-freeze.
+Window {
     id: root
 
-    // The backdrop AROUND the splash card (black — the card below carries the
-    // brand surface). Still a full-window cover: nothing behind it paints or
-    // takes input during boot.
-    color: "#000000"
+    // The card's size IS the splash's size (678×378, the brand sheet's
+    // reference) — the window hugs the card, no backdrop around it.
+    width: 678
+    height: 378
+    flags: Qt.SplashScreen | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+    color: "transparent"
 
     // ---- Reveal state machine ------------------------------------------
     readonly property bool done: EngineBridge.booted
@@ -42,12 +45,10 @@ Rectangle {
 
     // FULLY OPAQUE FROM THE FIRST FRAME — deliberately no entrance fade.
     // The boot blocks the GUI thread ~200 ms after this loads (main.cpp),
-    // and a 280 ms fade-in froze half-done at that point: the live UI showed
-    // through a ~70%-opaque splash for the whole boot (the "splash doesn't
-    // cover the app" report). Only the hand-over fades — by then the loop is
-    // alive again, so that animation actually runs.
+    // and a fade-in would freeze half-done. Only the hand-over fades — by
+    // then the loop is alive again, so that animation actually runs.
     opacity: 1
-    visible: !hidden
+    visible: true
     Behavior on opacity {
         NumberAnimation { duration: 280; easing.type: Easing.OutCubic }
     }
@@ -81,18 +82,30 @@ Rectangle {
         onTriggered: root.opacity = 0
     }
 
-    // Input sink: nothing behind the splash may react during boot.
-    MouseArea {
-        anchors.fill: parent
-    }
+    onHiddenChanged: if (root.hidden) root.close()
 
-    // The splash CARD — the user's size reference (678×378), centered on the
-    // display. Card color stays the brand asset's own page background
+    // Centered on the SCREEN the app's main window is on (a QML Window with
+    // no explicit x/y lands wherever the OS puts it — pin it to the primary
+    // screen's centre so the splash reads as part of the app, not a stray
+    // window on a second monitor). Recomputed on screen changes (a display
+    // hotplug between launches).
+    function recenter() {
+        const scr = Qt.application.screens[0] ?? null
+        if (!scr)
+            return
+        x = scr.virtualX + (scr.width - width) / 2
+        y = scr.virtualY + (scr.height - height) / 2
+    }
+    Component.onCompleted: root.recenter()
+    onWidthChanged: root.recenter()
+    onHeightChanged: root.recenter()
+
+    // The splash CARD — the whole splash now (678×378, no backdrop behind
+    // it). Card color stays the brand asset's own page background
     // (rgb 17,19,27): the logo tile's rounded corners blend into it, no halo.
     Rectangle {
-        anchors.centerIn: parent
-        width: 678
-        height: 378
+        id: card
+        anchors.fill: parent
         radius: 24
         color: "#11131b"
 
@@ -137,49 +150,52 @@ Rectangle {
                     }
                 }
             }
+        }
 
-            // ---- Boot status + thin indeterminate bar. During the boot itself
-            // these hold still (GUI-thread boot — see the header); the "Ready"
-            // beat before the fade proves it was worth the wait.
-            Column {
-                width: 190
+        // ---- Boot status + thin indeterminate bar, pinned INSIDE the card
+        // below the lockup. During the boot itself these hold still (GUI-
+        // thread boot — see the header); the "Ready" beat before the fade
+        // proves it was worth the wait.
+        Column {
+            width: 190
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 34
+            spacing: 12
+
+            Text {
                 anchors.horizontalCenter: parent.horizontalCenter
-                spacing: 12
+                text: EngineBridge.booted
+                          ? qsTr("Ready")
+                        : EngineBridge.bootError.length > 0
+                          ? qsTr("Engine failed to boot — opening anyway")
+                        : qsTr("Booting the presentation engine…")
+                color: Theme.textSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: 12
+                font.letterSpacing: 0.4
+            }
 
-                Text {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    text: EngineBridge.booted
-                              ? qsTr("Ready")
-                            : EngineBridge.bootError.length > 0
-                              ? qsTr("Engine failed to boot — opening anyway")
-                            : qsTr("Booting the presentation engine…")
-                    color: Theme.textSecondary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: 12
-                    font.letterSpacing: 0.4
-                }
+            Rectangle {
+                width: parent.width
+                height: 3
+                radius: 1.5
+                color: "#1d1e28"
+                clip: true
 
                 Rectangle {
-                    width: parent.width
-                    height: 3
+                    id: barPill
+                    width: 58
+                    height: parent.height
                     radius: 1.5
-                    color: "#1d1e28"
-                    clip: true
-
-                    Rectangle {
-                        id: barPill
-                        width: 58
-                        height: parent.height
-                        radius: 1.5
-                        color: Theme.accent
-                        SequentialAnimation on x {
-                            loops: Animation.Infinite
-                            NumberAnimation {
-                                from: -barPill.width
-                                to: 190
-                                duration: 1100
-                                easing.type: Easing.InOutQuad
-                            }
+                    color: Theme.accent
+                    SequentialAnimation on x {
+                        loops: Animation.Infinite
+                        NumberAnimation {
+                            from: -barPill.width
+                            to: 190
+                            duration: 1100
+                            easing.type: Easing.InOutQuad
                         }
                     }
                 }

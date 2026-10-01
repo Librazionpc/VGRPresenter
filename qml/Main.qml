@@ -945,13 +945,12 @@ ApplicationWindow {
         z: 10000
     }
 
-    // The boot splash — declared after EVERYTHING and topmost: while the
-    // engine boots (deferred in main.cpp — the kernel starts only once this
-    // has painted), nothing behind it may paint or take input. It reveals on
-    // boot success OR failure (a failed boot must still open the app) with
-    // a minimum on-screen beat, so a fast boot never strobes.
-    BootSplash {
-        anchors.fill: parent
-        z: 20000
-    }
+    // The boot splash — its own frameless always-on-top WINDOW (a Window
+    // declaration inside this tree instantiates it top-level; anchors/z are
+    // meaningless for it): just the brand card centered on the screen, no
+    // backdrop, floating over the app while the engine boots (deferred in
+    // main.cpp — the kernel starts only once this has painted). It reveals
+    // on boot success OR failure (a failed boot must still open the app)
+    // with a minimum on-screen beat, so a fast boot never strobes.
+    BootSplash {}
 }
