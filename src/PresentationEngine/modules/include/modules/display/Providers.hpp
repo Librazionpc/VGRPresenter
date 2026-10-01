@@ -112,13 +112,18 @@ public:
 
     // Sender name used for the NDI source ("VGR Program" by default).
     void SetSenderName(std::string name);
-    // The frame rate ADVERTISED in every sent frame's NDI metadata. The
-    // default (30) matches the legacy hardcoded value; the live feed's
-    // REAL cadence is its poll timer (LiveOutputService's 100 ms tick →
-    // 10 fps), and receivers key their smoothing/clock on this number —
-    // advertising 30 for a 10 fps feed made Studio Monitor's frame clock
-    // run 3× fast. Set from the actual loop that calls SendFrame.
+    // The frame rate ADVERTISED in every sent frame's NDI metadata — and
+    // mirrored by the ndi-program device's listed refreshRateHz, so the
+    // engine's display enumeration tells the same story as the wire.
+    // Receivers key their smoothing/clock on this number, so it must be the
+    // sender's REAL cadence: the NDI feed's own send timer, paced at the
+    // first enabled NDI output's configured Refresh rate (Settings ·
+    // Outputs) — no longer the UI poll's legacy 10 Hz. The default (30)
+    // remains the fallback for unset/nonsense rates.
     void SetFrameRate(float fps);
+    // The rate SetFrameRate last accepted (after clamping) — the advertised
+    // fps, for tests and telemetry.
+    float FrameRate() const;
     // Tears the live sender down (SendFrame recreates it from senderName_ on
     // its next call). NDI's SDK cannot rename an already-created sender, so
     // a per-session reset is the only way a SetSenderName change — or the

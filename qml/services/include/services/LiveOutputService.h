@@ -376,7 +376,8 @@ private:
 
     // The NDI program sender: the first ENABLED NDI-kind output (not only
     // the active one — a projector can be on air while NDI must still feed)
-    // gets the live loop's frames pushed at the poll's rate while live.
+    // gets the live loop's frames pushed at that output's CONFIGURED refresh
+    // rate (Settings · Outputs) while live.
     void pushNdiFrame();
     void stopNdiFeed();
     // The network-visible NDI source name for an output row: "<AppName> .
@@ -447,8 +448,29 @@ private:
     bool ndiClockStarted_ = false;
     bool ndiBackoff_ = false;      // skip the tick after a slow send
     bool ndiSlowLogged_ = false;   // "send is slow" once per incident
+    int ndiFastStreak_ = 0;        // consecutive fast sends; ≥30 re-arms the slow-send log (toast-spam guard)
     int ndiReceiversSeen_ = -1;    // last reported connected-monitor count
-    int ndiTick_ = 0;              // poll tick counter (~10 Hz)
+    int ndiTick_ = 0;              // send-tick counter (telemetry, ~1 Hz nominal)
+    // ---- The NDI feed's own clock ------------------------------------------
+    // pushNdiFrame used to ride the 10 Hz GUI poll — the feed ran at the
+    // poll's rate no matter what the output's Refresh rate select said. It
+    // now runs on its OWN timer paced at that rate (the poll stays at 10 Hz
+    // for slide titles + the preview), so Settings · Outputs · Refresh rate
+    // reaches the wire: the timer's interval IS the setting, and the sender
+    // advertises it in every frame's metadata.
+    void ndiSendTick();                // the paced send (syncs the interval, then pushes)
+    void startNdiSendClock();          // go-live: arm the clock at a provisional cadence
+    void stopNdiSendClock();           // off air: stop the clock
+    // The poll's cheap NDI-clock watch: (re)arm the send timer when a clock
+    // is wanted but absent (a row enabled mid-live, the blank-roster edge)
+    // — the timer's own tick handles cadence sync and shutdown.
+    void pollTickRecheckNdi();
+    // The first enabled NDI output's configured Refresh rate ("60 Hz" → 60).
+    // A row with an unusable/blank value feeds at the engine's 30 fps
+    // default; 0 means NO enabled NDI row (the send clock stops).
+    static float ndiConfiguredFps();
+    QTimer *ndiSendTimer_ = nullptr;   // while live: the paced NDI send clock
+    float ndiSendFps_ = 0.0f;          // fps the timer currently runs at (0 = unsynced)
 };
 
 // QQuickImageProvider over the engine preview output's last frame:

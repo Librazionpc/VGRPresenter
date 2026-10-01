@@ -192,11 +192,30 @@ void TestDisplayNdi() {
     auto cap = ndi.Capabilities();
     CHECK(cap.supportsVirtualOutputs);
 
+    // SetFrameRate drives BOTH the advertised metadata fps AND the listed
+    // refreshRateHz of the ndi-program device — Settings · Outputs' Refresh
+    // rate select reaches the wire and the engine's display enumeration
+    // through this one call. The guard clamps 0/negative to the 30 default.
+    ndi.SetFrameRate(60.0f);
+    CHECK(ndi.FrameRate() == 60.0f);
+    devices = ndi.Enumerate();
+    CHECK(devices.size() == 1);
+    CHECK(devices[0].refreshRateHz == 60);
+    ndi.SetFrameRate(24.0f);
+    CHECK(ndi.FrameRate() == 24.0f);
+    devices = ndi.Enumerate();
+    CHECK(devices.size() == 1);
+    CHECK(devices[0].refreshRateHz == 24);
+
     // Empty frame rejected.
     d::RenderFrameView bad;
     CHECK(!ndi.SendFrame(bad).ok());
 
     // A real frame round-trips through the engine's sender -> receiver path.
+    // The rate under test is 24 (set above): the fps the sender advertises
+    // must survive to the receiver — the loopback copies VideoFrameInfo
+    // verbatim, the real SDK encodes frame_rate_N/D from it, both exact at
+    // integer rates.
     constexpr int W = 16, H = 8;
     std::vector<uint32_t> px(static_cast<size_t>(W) * H, 0xFF0000FFu);   // solid red
     d::RenderFrameView view;
@@ -217,6 +236,7 @@ void TestDisplayNdi() {
         CHECK(got.ok());
         if (got.ok() && got.value()) {
             CHECK(info.width == W && info.height == H);
+            CHECK(info.fps == 24.0);   // the advertised refresh survives the wire
             // Native RGBA on the wire now (was UYVY): 4 bytes per pixel, and
             // the alpha-forcing pass leaves a fully opaque source frame's
             // bytes untouched — solid red round-trips bit-exact.
@@ -227,6 +247,11 @@ void TestDisplayNdi() {
         }
         (void)bc.DisconnectReceiver(recv.value());
     }
+
+    // Nonsense rate → the legacy 30 fallback (never advertise <= 0).
+    ndi.SetFrameRate(0.0f);
+    CHECK(ndi.FrameRate() == 30.0f);
+    CHECK(ndi.Enumerate()[0].refreshRateHz == 30);
 
     // Registered in the DisplayEngine by default (Initialize registers it).
     auto& eng = d::DisplayEngine::Instance();

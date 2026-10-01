@@ -307,6 +307,7 @@ void LiveOutputService::goLive()
             connect(poll_, &QTimer::timeout, this, &LiveOutputService::pollTick);
         }
         poll_->start();
+        startNdiSendClock();   // the NDI feed's own clock, paced by the output's refresh rate
         pollTick();
     }
 }
@@ -353,6 +354,7 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
     }
     if (!poll_->isActive()) {
         poll_->start();
+        startNdiSendClock();   // the NDI feed's own clock, paced by the output's refresh rate
         pollTick();
     }
 }
@@ -874,7 +876,8 @@ void LiveOutputService::stop()
     emit onAirChanged();
     if (poll_)
         poll_->stop();
-    // The NDI feed rides the poll — off air it stops with it.
+    // The NDI feed has its own clock now — off air it stops with it.
+    stopNdiSendClock();
     stopNdiFeed();
     // An NDI INPUT taken while going off air also stops feeding the engine's
     // compositor (the pump stops with it — one last explicit clear keeps the
@@ -1245,9 +1248,16 @@ void LiveOutputService::pollTick()
     // the BroadcastEngine (real NDI when the runtime is installed, the
     // software loopback otherwise). The sender is the engine's own — this
     // only feeds it from the SAME per-output buffers the monitor tiles
-    // read, so what the network gets is what the wall shows, at the poll's
-    // 10 Hz.
-    pushNdiFrame();
+    // read, so what the network gets is what the wall shows.
+    //
+    // The SEND itself no longer rides this poll: it runs on its own clock
+    // (ndiSendTimer_) paced at the output's configured Refresh rate, so the
+    // feed runs at the setting's rate instead of this poll's 10 Hz. What
+    // stays here is the cheap watch: a refresh-rate change on the roster, or
+    // the NDI clock dying (no NDI output for a whole poll — e.g. the row was
+    // disabled mid-live), is re-armed within one poll tick instead of at
+    // the next GO LIVE.
+    pollTickRecheckNdi();
 
     // The engine's loop advances slides itself; mirror the runtime's state.
     auto &pres = pl::PresentationEngine::Instance();
@@ -1282,7 +1292,9 @@ void LiveOutputService::pollTick()
 // automatic software-loopback fallback). This reads the FIRST enabled NDI
 // output's frame (its own styled buffer, or the shared preview feed for an
 // unstyled output — the same source the monitor tile shows) and hands it to
-// the provider on every poll while live. The provider sends the engine's native RGBA unconverted ('RGBA'
+// the provider on the NDI send clock's cadence while live — paced at the
+// output's configured Refresh rate (see ndiSendTick), no longer the UI poll's
+// 10 Hz. The provider sends the engine's native RGBA unconverted ('RGBA'
 // fourCC — color decisions belong to the SDK's pipeline) and owns the
 // sender's network identity. (The removed pass converted RGBA→UYVY
 // in software — both wasted CPU and, mis-decoded as zero-YUV, the
@@ -1392,12 +1404,15 @@ void LiveOutputService::pushNdiFrame()
     const QString senderName = ndiSenderDisplayName(ndiOutputName);
     if (!senderName.isEmpty())
         provider->SetSenderName(senderName.toStdString());
-    // Advertise the REAL cadence, not a lie of convenience: this poll runs
-    // at 100 ms (10 fps) and halves to ~5 fps under send backpressure —
-    // receivers key their frame clock on this number. Re-asserted per send
-    // so the backoff halves are reflected too; the sender itself applies it
-    // on its next frame (NDI metadata rides every frame).
-    provider->SetFrameRate(ndiBackoff_ ? 5.0f : 10.0f);
+    // Advertise the REAL cadence: the send clock runs at the output's
+    // configured Refresh rate (ndiSendFps_), halved while a slow send is
+    // backing off — receivers key their frame clock on this number, so it
+    // must match the wire, not the setting's aspiration. Re-asserted per
+    // send so mid-live setting changes and backoff halves are reflected;
+    // the sender applies it on its next frame (NDI metadata rides every
+    // frame). The 30 fallback matches the provider's own default cadence.
+    const float baseFps = ndiSendFps_ > 0.0f ? ndiSendFps_ : 30.0f;
+    provider->SetFrameRate(ndiBackoff_ ? baseFps * 0.5f : baseFps);
 
     // The provider owns the wire format + send; frames only flow while live
     // (pollTick gates this call).
@@ -1405,10 +1420,10 @@ void LiveOutputService::pushNdiFrame()
     // FreeShow-style send backpressure, adapted to a SYNCHRONOUS sender:
     // their grandiose worker caps in-flight encodes (MAX_INFLIGHT_SENDS=3);
     // our GUI-thread send never queues, but a SLOW one would stall this
-    // thread — so the send is clocked and, past half the poll budget, the
-    // NEXT tick is skipped (half rate) and the incident logged once. The
-    // skip has a hard ceiling: a pathological sender can halve the feed,
-    // never stop it.
+    // thread — so the send is clocked and, past half the send clock's own
+    // budget, the NEXT tick is skipped (half rate) and the incident logged
+    // once. The skip has a hard ceiling: a pathological sender can halve
+    // the feed, never stop it.
     if (ndiBackoff_) {
         ndiBackoff_ = false;
         return;
@@ -1447,18 +1462,32 @@ void LiveOutputService::pushNdiFrame()
             qWarning("LiveOutputService: NDI frames flowing as '%s' — discovery on a receiving monitor can take 10-30s",
                      provider->SenderName().c_str());
         }
-        // The backpressure trip: over half the poll's 100 ms budget in ONE
-        // synchronous send. Skip the next tick (feed drops to ~5 fps) so the
-        // GUI thread keeps breathing; logged once per incident.
-        if (sendMs > 50) {
+        // The backpressure trip: one synchronous send that a whole tick's
+        // budget could not cover. The bar is the send clock's interval, but
+        // NEVER below the legacy 50 ms — a 1080p RGBA copy + SDK send sits
+        // at ~5-15 ms, so a relative bar at 60 fps (~8 ms) would trip on
+        // EVERY send: the feed halved for nothing and this warning flapped.
+        // The tick after a trip is skipped (feed drops to half rate) so the
+        // GUI thread keeps breathing.
+        const int intervalMs = ndiSendFps_ > 0.0f ? int(1000.0f / ndiSendFps_) : 100;
+        if (sendMs > qMax(50, intervalMs)) {
             ndiBackoff_ = true;
+            ndiFastStreak_ = 0;
             if (!ndiSlowLogged_) {
                 ndiSlowLogged_ = true;
-                qWarning("LiveOutputService: NDI send is slow (%lld ms, sender '%s') — backing off to ~5 fps to keep the UI responsive",
-                         sendMs, provider->SenderName().c_str());
+                qWarning("LiveOutputService: NDI send is slow (%lld ms, sender '%s') — backing off to half rate (~%d fps) to keep the UI responsive",
+                         sendMs, provider->SenderName().c_str(),
+                         int(ndiSendFps_ > 0.0f ? ndiSendFps_ / 2.0f : 15.0f));
             }
-        } else {
-            ndiSlowLogged_ = false;   // recovered — the next incident logs again
+        } else if (++ndiFastStreak_ >= 30) {
+            // Sustained recovery (≥30 consecutive fast sends ≈ 0.5-1.25 s)
+            // is what re-arms the incident log — a single fast send used to,
+            // so a send JITTERING around the bar (9/8/10/8 ms...) re-logged
+            // the incident every few ticks, and every log is an event-bus
+            // toast with a new millisecond value the deduper can't match.
+            // The legacy 10 Hz design never saw this: its 50 ms bar was
+            // rarely crossed.
+            ndiSlowLogged_ = false;
         }
     } else if (!ndiSendFailedLogged_) {
         ndiSendFailedLogged_ = true;
@@ -1466,8 +1495,11 @@ void LiveOutputService::pushNdiFrame()
                  provider->SenderName().c_str());
     }
 
-    // Connected-monitor telemetry, ~1 Hz (every 10th tick): the SDK's own
-    // connection count, logged on every CHANGE. During the green-screen
+    // Connected-monitor telemetry, every 10th SEND tick (the SDK's own
+    // connection count — ~1 Hz at the legacy 10 fps cadence, proportionally
+    // faster at higher configured rates; the bridge caps itself at ~1 Hz
+    // internally and emits only on change, so the extra calls are cheap).
+    // During the green-screen
     // hunt this number was the missing witness — "2 monitor(s)" in the UI
     // but nothing in engine.log. Now: a monitor connecting logs
     // "monitors connected: N", and a drop to 0 while frames keep flowing
@@ -1486,7 +1518,8 @@ void LiveOutputService::pushNdiFrame()
     }
 }
 
-// Stop the feed when the loop stops (pollTick no longer runs).
+// Stop the feed when the loop stops (the send clock and the poll are both
+// dead by then — stop() stops the clock first).
 void LiveOutputService::stopNdiFeed()
 {
     if (ndiSending_) {
@@ -1499,7 +1532,96 @@ void LiveOutputService::stopNdiFeed()
     // one starts clean (and re-reports its monitors from scratch).
     ndiBackoff_ = false;
     ndiSlowLogged_ = false;
+    ndiFastStreak_ = 0;
     ndiReceiversSeen_ = -1;
+}
+
+// ---------------------------------------------------------------------------
+// The NDI send clock — paced at the FIRST enabled NDI output's configured
+// Refresh rate (Settings · Outputs). pushNdiFrame used to ride the 10 Hz
+// GUI poll, which made that select decorative: the feed ran at the poll's
+// rate whatever the setting said. Now the setting IS the cadence — the
+// timer's interval is derived from the roster value, and the provider
+// advertises the same number in every frame's metadata, so receivers'
+// frame clocks finally agree with both the setting and the real send rate.
+// ---------------------------------------------------------------------------
+float LiveOutputService::ndiConfiguredFps()
+{
+    const auto *model = OutputListModel::instance();
+    if (!model)
+        return 0.0f;
+    for (int i = 0; i < model->rowCount(); ++i) {
+        const QVariantMap out = model->getOutput(i);
+        if (out.value("kind").toString() != QLatin1String("NDI")
+            || !out.value("isEnabled").toBool())
+            continue;
+        // The row EXISTS — an unusable/blank refresh value falls back to
+        // the engine's own 30 fps default cadence rather than returning 0
+        // (which would stop the clock and kill the feed entirely).
+        const QString rate = out.value("refresh").toString();
+        bool ok = false;
+        const float fps = rate.left(rate.indexOf(QLatin1Char(' '))).toFloat(&ok);
+        return (ok && fps > 0.0f && fps <= 240.0f) ? fps : 30.0f;
+    }
+    return 0.0f;   // no enabled NDI row at all
+}
+
+void LiveOutputService::startNdiSendClock()
+{
+    // Provisional cadence UNTIL the first tick reads the roster (the tick
+    // itself is the cheap sync point — this keeps a blank first interval
+    // from firing a burst or waiting forever).
+    ndiSendFps_ = 30.0f;
+    if (!ndiSendTimer_) {
+        ndiSendTimer_ = new QTimer(this);
+        // Precise, not Coarse: Windows' system timer granularity is
+        // ~15.6 ms, so a coarse 16 ms interval (the 60 Hz setting) really
+        // fired every ~16-31 ms and the feed ran visibly below the
+        // configured rate. One timer — precision costs nothing measurable.
+        ndiSendTimer_->setTimerType(Qt::PreciseTimer);
+        connect(ndiSendTimer_, &QTimer::timeout, this, &LiveOutputService::ndiSendTick);
+    }
+    ndiSendTimer_->setInterval(int(1000.0f / 30.0f));
+    ndiSendTimer_->start();
+}
+
+void LiveOutputService::stopNdiSendClock()
+{
+    if (ndiSendTimer_)
+        ndiSendTimer_->stop();
+    ndiSendFps_ = 0.0f;
+}
+
+void LiveOutputService::ndiSendTick()
+{
+    // Re-sync the cadence EVERY tick from the roster: a Settings change
+    // takes effect within one tick, live, no restart needed. The clamping
+    // mirror of the provider's own SetFrameRate guard (0 < fps <= 240).
+    const float fps = ndiConfiguredFps();
+    if (fps > 0.0f && fps <= 240.0f && fps != ndiSendFps_) {
+        ndiSendFps_ = fps;
+        ndiSendTimer_->setInterval(int(1000.0f / fps));
+    }
+    // No enabled NDI row anymore (disabled/removed mid-live): stop the clock
+    // and fall through — the push's own !want path tears the feed state down
+    // and clears the pill. Re-arming is pollTickRecheckNdi's job (only when
+    // a row wants feeding again).
+    if (fps <= 0.0f)
+        stopNdiSendClock();
+    pushNdiFrame();
+}
+
+// The poll's cheap NDI clock watch: re-arm the send timer when the roster
+// wants an NDI feed but no clock is running (a row enabled mid-live, the
+// blank-roster edge at GO LIVE). Gated on ndiConfiguredFps() so a live
+// session with NO enabled NDI row can't churn the timer stop/start every
+// poll — the clock only comes back when a row actually wants feeding.
+void LiveOutputService::pollTickRecheckNdi()
+{
+    if (!live_)
+        return;
+    if ((!ndiSendTimer_ || !ndiSendTimer_->isActive()) && ndiConfiguredFps() > 0.0f)
+        startNdiSendClock();
 }
 
 // The network-visible NDI source name: "<AppName> . <Row name>" ("VGRPresenter

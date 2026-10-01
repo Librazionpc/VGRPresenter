@@ -5,6 +5,7 @@
 #include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <mutex>
 
@@ -213,7 +214,7 @@ NdiDisplayProvider::NdiDisplayProvider() {
     ndi.name = "NDI Program";
     ndi.width = 1920;
     ndi.height = 1080;
-    ndi.refreshRateHz = 30;
+    ndi.refreshRateHz = 30;   // mirrors frameRate_'s default; SetFrameRate keeps it in sync
     ndi.dpi = 96;
     ndi.connected = true;
     ndi.provider = "Ndi";
@@ -313,6 +314,16 @@ void NdiDisplayProvider::SetSenderName(std::string name) {
 void NdiDisplayProvider::SetFrameRate(float fps) {
     std::lock_guard<std::mutex> lock(mutex_);
     frameRate_ = (fps > 0.0f && fps <= 240.0f) ? fps : 30.0f;
+    // The ndi-program device's listed refresh mirrors the advertised rate —
+    // the engine's display enumeration should tell the same story as the
+    // wire metadata does.
+    if (!devices_.empty())
+        devices_.front().refreshRateHz = static_cast<int>(std::lround(frameRate_));
+}
+
+float NdiDisplayProvider::FrameRate() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return frameRate_;
 }
 
 void NdiDisplayProvider::ResetSender() {
