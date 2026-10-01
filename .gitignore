@@ -18,6 +18,9 @@ KNOWN_ISSUES.md
 RELEASING.md
 TRANSFER_NOTE.md
 _paste_view.html
+# The installer's seed data is the operator's own content (shows, sermons,
+# Bibles, settings) — baked into locally-built installers, never pushed.
+installer/seed-data/
 *.user
 .qtc_clangd/
 CMakeLists.txt.user

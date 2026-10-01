@@ -8,11 +8,13 @@
 #
 # Steps:
 #   1. (optional) bump the version everywhere — tools/set_version.sh <version>
-#   2. build the portable dist + zip     — tools/make_portable.sh
+#   2. build the installer + portable zip — tools/make_installer.sh
+#      (Release build → deploy → smoke test → dist/VGRPresenter-Setup-<ver>.exe)
 #   3. write dist/RELEASE_NOTES.md (a skeleton with the note sections, if
-#      one does not exist yet) and create the GitHub release with the zip
-#      attached — via the gh CLI. When gh is missing or not authenticated the
-#      exact manual steps are printed instead.
+#      one does not exist yet) and create the GitHub release with the INSTALLER
+#      (and the portable zip as a secondary asset) attached — via the gh CLI.
+#      When gh is missing or not authenticated the exact manual steps are
+#      printed instead.
 #
 # Usage:
 #   tools/release_windows.sh                  # release the CURRENT version
@@ -49,6 +51,8 @@ TAG="v$VER"
 PRERELEASE=""
 case "$VER" in *-*) PRERELEASE="--prerelease" ;; esac
 
+SETUP="$ROOT/dist/VGRPresenter-Setup-$VER.exe"
+
 # ---- notes skeleton (the FreeShow section format) ----------------------------
 if [ ! -f "$NOTES" ]; then
     mkdir -p "$ROOT/dist"
@@ -69,18 +73,18 @@ if [ "$NOTES_ONLY" = 1 ]; then
     exit 0
 fi
 
-# ---- build the downloadable zip ---------------------------------------------
-bash "$ROOT/tools/make_portable.sh"
-[ -f "$ZIP" ] || { echo "release_windows.sh: $ZIP missing after make_portable.sh"; exit 1; }
+# ---- build the installer (+ portable zip as the secondary asset) -------------
+bash "$ROOT/tools/make_installer.sh"
+[ -f "$ZIP" ] || { echo "release_windows.sh: $ZIP missing after make_installer.sh"; exit 1; }
 
 # ---- publish -----------------------------------------------------------------
 if command -v gh >/dev/null 2>&1; then
     if gh auth status >/dev/null 2>&1; then
         echo "== creating GitHub release $TAG =="
-        gh release create "$TAG" "$ZIP" \
+        gh release create "$TAG" "$SETUP" "$ZIP" \
             --title "$TAG" $PRERELEASE \
             --notes-file "$NOTES"
-        echo "release_windows.sh: $TAG published (asset: $(basename "$ZIP"))"
+        echo "release_windows.sh: $TAG published (installer + zip attached)"
         exit 0
     fi
     echo "release_windows.sh: gh is installed but not authenticated."
@@ -94,12 +98,12 @@ cat <<EOF
 
 Manual release steps (once gh is ready, or from the GitHub web UI):
   1. Push the version bump first:      git push origin main
-  2. Create the tag + release:         gh release create $TAG "$ZIP" \\
+  2. Create the tag + release:         gh release create $TAG "$SETUP" "$ZIP" \\
                                            --title "$TAG" $PRERELEASE \\
                                            --notes-file "$NOTES"
      (web UI: Releases -> Draft a new release -> tag "$TAG" ->
-      attach $(basename "$ZIP") -> paste the notes)
+      attach $(basename "$SETUP") and $(basename "$ZIP") -> paste the notes)
   3. Beta versions: tick "Set as a pre-release" (the script's --prerelease does this).
 
-The zip is self-contained: Windows 10+, no Qt/MinGW installs needed on the target PC.
+The installer is self-contained: Windows 10+, per-user install (no admin), .vgr association included — no Qt/MinGW installs needed on the target PC.
 EOF

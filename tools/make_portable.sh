@@ -6,7 +6,11 @@
 # how dev_cycle.sh launches it). Another PC has neither, so this script assembles
 # everything the exe needs INTO one folder:
 #
-#   1. BUILD   via tools/dev_cycle.sh --build-only (same toolchain as dev).
+#   1. BUILD   dev build (default) or a real Release build (--release: a
+#              separate build-release/ directory configured -DCMAKE_BUILD_TYPE=Release
+#              — the dev build directory keeps its own configuration). Release is
+#              what ships: optimized (-O2/-DNDEBUG) where the dev default is
+#              unoptimized.
 #   2. DEPLOY  windeployqt --release --qmldir qml into dist/VGRPresenter/
 #              (Qt DLLs + platform/imageformats/multimedia plugins + the QML
 #              plugin trees for every `import` the qml/ directory uses, plus
@@ -26,6 +30,7 @@
 #
 # Usage:
 #   tools/make_portable.sh                 # build + deploy + smoke + zip
+#   tools/make_portable.sh --release       # Release build (build-release/), ships
 #   tools/make_portable.sh --no-build      # deploy the existing build exe
 #   tools/make_portable.sh --no-zip        # skip the archive (faster iteration)
 #
@@ -61,11 +66,13 @@ MINGW_RUNTIME_BIN="${MINGW_RUNTIME_BIN:-$MINGW_BIN}"
 QT_MINGW_BIN="${QT_MINGW_BIN:-C:/Qt/Tools/mingw1310_64/bin}"
 DO_BUILD=1
 DO_ZIP=1
+DO_RELEASE=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-build) DO_BUILD=0 ;;
         --no-zip)   DO_ZIP=0 ;;
+        --release)  DO_RELEASE=1 ;;
         *) echo "make_portable.sh: unknown argument '$1'"; exit 2 ;;
     esac
     shift
@@ -79,16 +86,47 @@ DIST="$ROOT/dist/VGRPresenter"
 LOG="$DIST/logs/engine.log"
 
 # ---- 1. BUILD ----------------------------------------------------------------
+RELEASE_BUILD_DIR="$ROOT/build-release"
 if [ "$DO_BUILD" = 1 ]; then
-    echo "== building =="
-    if ! bash "$ROOT/tools/dev_cycle.sh" --build-only; then
-        echo "PORTABLE: FAIL build"
-        exit 1
+    if [ "$DO_RELEASE" = 1 ]; then
+        echo "== building (Release → build-release/) =="
+        if [ ! -f "$RELEASE_BUILD_DIR/CMakeCache.txt" ]; then
+            echo "== configuring build-release/ (one-time) =="
+            # Ninja is NOT on the default PATH (msys2 doesn't ship it) — Qt
+            # installs it under Tools/Ninja. Pin it explicitly.
+            NINJA_BIN="${NINJA_BIN:-C:/Qt/Tools/Ninja/ninja.exe}"
+            if [ ! -f "$NINJA_BIN" ]; then
+                echo "ninja not found at $NINJA_BIN (set NINJA_BIN)"
+                echo "PORTABLE: FAIL configure"
+                exit 1
+            fi
+            if ! PATH="$MINGW_BIN:$PATH" "$CMAKE_BIN" -S "$ROOT" -B "$RELEASE_BUILD_DIR" -G Ninja \
+                    -DCMAKE_MAKE_PROGRAM="$NINJA_BIN" \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_PREFIX_PATH="C:/Qt/6.11.1/mingw_64" \
+                    -DCMAKE_C_COMPILER="C:/msys64/ucrt64/bin/gcc.exe" \
+                    -DCMAKE_CXX_COMPILER="C:/msys64/ucrt64/bin/g++.exe"; then
+                echo "PORTABLE: FAIL configure"
+                exit 1
+            fi
+        fi
+        if ! PATH="$MINGW_BIN:$PATH" "$CMAKE_BIN" --build "$RELEASE_BUILD_DIR"; then
+            echo "PORTABLE: FAIL build"
+            exit 1
+        fi
+    else
+        echo "== building (dev default) =="
+        if ! bash "$ROOT/tools/dev_cycle.sh" --build-only; then
+            echo "PORTABLE: FAIL build"
+            exit 1
+        fi
     fi
 fi
 
-if [ ! -f "$ROOT/build/$APP" ]; then
-    echo "deploy FAILED — $ROOT/build/$APP missing (build first)"
+EXE_SRC="$ROOT/build/$APP"
+[ "$DO_RELEASE" = 1 ] && EXE_SRC="$RELEASE_BUILD_DIR/$APP"
+if [ ! -f "$EXE_SRC" ]; then
+    echo "deploy FAILED — $EXE_SRC missing (build first)"
     echo "PORTABLE: FAIL deploy"
     exit 1
 fi
@@ -97,7 +135,7 @@ fi
 echo "== deploying to dist/VGRPresenter/ =="
 rm -rf "$DIST"
 mkdir -p "$DIST"
-cp "$ROOT/build/$APP" "$DIST/"
+cp "$EXE_SRC" "$DIST/"
 
 WINDEPLOYQT="$QT_BIN/windeployqt.exe"
 if [ ! -f "$WINDEPLOYQT" ]; then
