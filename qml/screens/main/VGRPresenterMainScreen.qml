@@ -184,23 +184,39 @@ Rectangle {
 
                     color: "transparent"
 
-                    Text {
+                    Row {
                         id: vGRPresenter_1
 
                         x: (parent.width - width) / 2
 
                         height: 60
-                        width: 333
+                        spacing: 0
 
-                        color: "#6c5ce7"
-                        font.family: "Outfit"
-                        font.letterSpacing: 0.48
-                        font.pixelSize: 55
-                        font.weight: Font.Black
-                        horizontalAlignment: Text.AlignHCenter
-                        text: qsTr("VGRPresenter")
-                        textFormat: Text.PlainText
-                        verticalAlignment: Text.AlignTop
+                        // The brand two-tone, matching the boot splash and the
+                        // menu bar's lockup: VGR WHITE (heavy) + Presenter GREY —
+                        // the whole wordmark was single purple before.
+                        Text {
+                            height: 60
+                            color: "#f2f3f7"
+                            font.family: "Outfit"
+                            font.letterSpacing: 0.48
+                            font.pixelSize: 55
+                            font.weight: Font.Black
+                            text: qsTr("VGR")
+                            textFormat: Text.PlainText
+                            verticalAlignment: Text.AlignTop
+                        }
+                        Text {
+                            height: 60
+                            color: "#8a8fa0"
+                            font.family: "Outfit"
+                            font.letterSpacing: 0.48
+                            font.pixelSize: 55
+                            font.weight: Font.Black
+                            text: qsTr("Presenter")
+                            textFormat: Text.PlainText
+                            verticalAlignment: Text.AlignTop
+                        }
                     }
                     Text {
                         id: v1_0_5_beta_2

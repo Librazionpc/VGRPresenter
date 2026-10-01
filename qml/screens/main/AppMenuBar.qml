@@ -273,27 +273,43 @@ Item {
                 Behavior on color { ColorAnimation { duration: 100 } }
             }
 
-            Text {
+            Row {
                 id: logoText
                 height: 23
-                // Literal, not Theme.accent: at this nesting depth (Main ->
+                spacing: 0
+                // The brand two-tone, matching the boot splash's lockup: VGR
+                // WHITE (bold) + Presenter GREY — not the old single purple
+                // text. Literals, not Theme.*: at this nesting depth (Main ->
                 // VGRPresenterMainScreen -> AppMenuBar) Qt 6.11.1's AOT
-                // compiler cannot resolve the Theme singleton at all here,
-                // even from an imperative Component.onCompleted reassignment
-                // — same root cause as the x/y-binding workaround elsewhere
-                // in this codebase. Value matches Theme.accent.
-                color: "#6C5CE7"
+                // compiler cannot resolve the Theme singleton here.
+                Text {
+                    height: 23
+                    color: "#f2f3f7"
+                    font.family: "Bahnschrift"
+                    font.letterSpacing: 0.09
+                    font.pixelSize: 21
+                    font.weight: Font.ExtraBold
+                    horizontalAlignment: Text.AlignLeft
+                    verticalAlignment: Text.AlignVCenter
+                    text: qsTr("VGR")
+                    textFormat: Text.PlainText
+                }
+                Text {
+                    height: 23
+                    color: "#8a8fa0"
+                    font.family: "Bahnschrift"
+                    font.letterSpacing: 0.09
+                    font.pixelSize: 21
+                    font.weight: Font.ExtraBold
+                    horizontalAlignment: Text.AlignLeft
+                    verticalAlignment: Text.AlignVCenter
+                    text: qsTr("Presenter")
+                    textFormat: Text.PlainText
+                }
                 // Was "Outfit" - a Google Font this app never bundles (same gap "Inter" had everywhere else), so it silently fell
                 // back to a plain system font and never looked like the distinctive wordmark it was meant to be. Bahnschrift is
                 // Microsoft's own font (every Windows 10/11 install has it), with the geometric, slightly condensed look a
                 // logotype wants, so it renders as intended instead of gambling on a font that isn't there.
-                font.family: "Bahnschrift"
-                font.letterSpacing: 0.09
-                font.pixelSize: 21
-                font.weight: Font.ExtraBold
-                horizontalAlignment: Text.AlignLeft
-                text: qsTr("VGRPresenter")
-                textFormat: Text.PlainText
                 // Was AlignTop: the label sat high in its 23 px box while the File/Edit/View/Help row beside it is vertically
                 // centered in its own box - two different anchors that happened to read as "not level with each other". Both
                 // boxes share the same vertical middle (see header_left/sys_menu below), so centering this the same way lines
