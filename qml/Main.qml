@@ -14,6 +14,12 @@ ApplicationWindow {
     minimumHeight: 640
     visible: true
     flags: Qt.Window | Qt.FramelessWindowHint
+    // (The taskbar/alt-tab icon is set from C++ — main.cpp grabs this window
+    // after load and calls QWindow::setIcon(). A QQuickWindow does NOT
+    // reliably adopt QGuiApplication::setWindowIcon() on Windows, and there
+    // is no Window.icon property in the QML API to do it from here — the
+    // exe's own icon (RC_ICONS) is not what the RUNNING taskbar button shows.
+    // This window is frameless, so the taskbar button is its only OS chrome.)
     // The open show's name, with a dot while it has unsaved changes.
     title: (ShowService.hasShow ? ShowService.showName + (ShowService.showDirty ? " •" : "") + " — " : "") + "VGRPresenter"
     color: Theme.windowBg
@@ -937,5 +943,15 @@ ApplicationWindow {
         // title bar (the header is window.headerHeight tall).
         anchors.topMargin: window.headerHeight + 8
         z: 10000
+    }
+
+    // The boot splash — declared after EVERYTHING and topmost: while the
+    // engine boots (deferred in main.cpp — the kernel starts only once this
+    // has painted), nothing behind it may paint or take input. It reveals on
+    // boot success OR failure (a failed boot must still open the app) with
+    // a minimum on-screen beat, so a fast boot never strobes.
+    BootSplash {
+        anchors.fill: parent
+        z: 20000
     }
 }

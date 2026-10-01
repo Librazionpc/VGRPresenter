@@ -1,0 +1,45 @@
+// Windows resource script for appVGRPresenterUI (CONFIGURED — see CMakeLists:
+// assets/app.rc.in is copied here with the absolute icon path substituted, so
+// windres/rc.exe always finds the .ico regardless of its working directory).
+//
+// Why this exists: Qt's RC_ICONS property silently produced NO icon in this
+// build (the exe's .rsrc section carried only the manifest — no windres step
+// was ever emitted for the icon), so Explorer, the taskbar and the pinned
+// shortcut showed the default application icon. This explicit .rc is compiled
+// and linked in, which works on MinGW and MSVC alike.
+//
+// Icon resource id 1 (lowest id wins; Explorer takes it) — the multi-size
+// assets/app-icon.ico (256→16 px); Windows picks the size per surface
+// (Explorer list/detail, taskbar, Alt-Tab, desktop).
+
+#include <windows.h>
+
+1 ICON "@APP_ICON@"
+
+// Version block: File Explorer's Properties › Details reads this.
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    1,0,5,2
+ PRODUCTVERSION 1,0,5,2
+ FILEFLAGSMASK  0x3fL
+ FILEFLAGS      0x0L
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "VGR"
+            VALUE "FileDescription",  "VGRPresenter — presentation engine"
+            VALUE "FileVersion",      "1.0.5.2"
+            VALUE "ProductName",      "VGRPresenter"
+            VALUE "ProductVersion",   "1.0.5.2"
+            VALUE "OriginalFilename", "appVGRPresenterUI.exe"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

@@ -176,6 +176,7 @@ bool EngineBridge::boot()
 
     if (!result.ok()) {
         bootError_ = QString::fromStdString(result.error().message);
+        emit bootErrorChanged();
         EventBus::instance().publish(QStringLiteral("engine.boot"), QVariantMap{
             {QStringLiteral("level"), QStringLiteral("error")},
             {QStringLiteral("title"), QStringLiteral("Engine")},
@@ -275,7 +276,10 @@ bool EngineBridge::boot()
         });
     }
 
-    bootError_.clear();
+    if (!bootError_.isEmpty()) {
+        bootError_.clear();
+        emit bootErrorChanged();   // a retried boot succeeded — clear the flag
+    }
     // Startup summary for the UI's boot toast: what booted AND what the
     // platform layer found — real device counts, so "loaded" is a fact, not
     // a hope. Names listed (up to a few) make it informative at a glance.

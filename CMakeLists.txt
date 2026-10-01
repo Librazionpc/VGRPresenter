@@ -477,10 +477,38 @@ qt_add_qml_module(appVGRPresenterUI
     RESOURCE_PREFIX /qt/qml
 )
 
+# The executable's File-Explorer/taskbar icon + version resource. RC_ICONS was
+# supposed to do this but SILENTLY produced nothing in this build (the exe's
+# .rsrc section carried only the manifest — no windres step was ever emitted),
+# so Explorer/taskbar/pinned shortcuts showed the default icon. The explicit
+# .rc below is configure-time generated (absolute .ico path substituted) and
+# linked into the target — windres on MinGW, rc.exe on MSVC — which works.
+# The same file is embedded below as a Qt resource so the RUNNING app's
+# title-bar and taskbar icon (QGuiApplication::setWindowIcon in src/main.cpp)
+# reads it back too — one file, so the exe's icon and the window's icon can't
+# drift apart.
+set(APP_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/app-icon.ico")
+# Qt's resource system refuses absolute source paths without an explicit
+# (relative) name INSIDE the resource bundle.
+set_source_files_properties("${APP_ICON}" PROPERTIES QT_RESOURCE_ALIAS "app-icon.ico")
+
 set_target_properties(appVGRPresenterUI PROPERTIES
     WIN32_EXECUTABLE TRUE
     MACOSX_BUNDLE TRUE
 )
+
+if(WIN32)
+    # ${APP_ICON} inside the .rc must be an absolute path (windres runs with an
+    # arbitrary working directory) — configure_file substitutes it verbatim.
+    set(APP_RC_IN "${CMAKE_CURRENT_SOURCE_DIR}/assets/app.rc.in")
+    set(APP_RC "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
+    configure_file("${APP_RC_IN}" "${APP_RC}" @ONLY)
+    target_sources(appVGRPresenterUI PRIVATE "${APP_RC}")
+endif()
+
+qt_add_resources(appVGRPresenterUI "appicon"
+    PREFIX "/app"
+    FILES "${APP_ICON}")
 
 target_link_libraries(appVGRPresenterUI
     PRIVATE Qt6::Quick Qt6::QuickControls2 Qt6::QuickShapes Qt6::Multimedia engine_core

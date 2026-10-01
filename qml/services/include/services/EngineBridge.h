@@ -51,6 +51,12 @@ class EngineBridge : public QObject
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY stackChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY stackChanged)
     Q_PROPERTY(bool booted READ booted NOTIFY bootedChanged)
+    // The boot failure reason ("" = no failure). The boot splash gates its
+    // reveal on `booted || bootError` — a FAILED boot must still bring the
+    // splash down (the UI keeps working against mock data and the error
+    // also surfaces as a toast), or a failure would leave the splash up
+    // forever.
+    Q_PROPERTY(QString bootError READ bootError NOTIFY bootErrorChanged)
     // Real hardware, enumerated by the engine's own platform layer (audio
     // via the PAL's IAudio — WinMM waveIn/waveOut on Windows — displays via
     // IMonitor) — the AV settings dialogs' device selects feed from these
@@ -369,6 +375,7 @@ signals:
     void audioRenderChanged();
     void stackChanged();
     void bootedChanged();
+    void bootErrorChanged();
     // Fired for every ENGINE-side event relayed into the UI process — kernel
     // state changes, display/recording/render/media/broadcast failures and
     // recoveries, undo/redo performed, ... (the curated set in
