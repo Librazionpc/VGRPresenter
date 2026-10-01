@@ -426,12 +426,18 @@ Item {
                             LiveOutputService.clearInput()
                         if (LiveOutputService.activeOverlays.length > 0)
                             LiveOutputService.clearAllOverlays()
-                        if (LiveOutputService.live)
-                            LiveOutputService.stop()
+                        // Never touches GO LIVE/STOP itself anymore — same
+                        // rule as every per-layer icon in this row now:
+                        // live_ is the ONE thing only the user's own GO
+                        // LIVE/STOP press controls. Clears the on-air SLIDE
+                        // content instead (same as the book icon), leaving
+                        // the output live and showing the style's own
+                        // background in its place.
+                        if (root.hasRealOnAirContent)
+                            LiveOutputService.clearOnAirSlide()
                         // A STAGED pick (double-clicked, not yet committed
-                        // by GO LIVE) is independent of live_ — stop() above
-                        // never touches it, so it kept showing in the tile
-                        // after Clear All with nothing live yet to stop.
+                        // by GO LIVE) is independent of live_ — it kept
+                        // showing in the tile after Clear All otherwise.
                         if (root.staged)
                             LiveOutputService.clearStaged()
                     }

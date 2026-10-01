@@ -14,6 +14,7 @@
 // ~the UI's update rate). Pixels come from the engine-side Preview output's
 // last frame — the same frame the real outputs received.
 
+#include <QElapsedTimer>
 #include <QImage>
 #include <QQuickImageProvider>
 #include <QSet>
@@ -119,10 +120,16 @@ class LiveOutputService : public QObject {
     // Muted playback (monitoring the file's own audio off the program mix).
     Q_PROPERTY(bool mediaMuted READ mediaMuted NOTIFY mediaChanged)
     // ---- NDI PROGRAM SENDER ---------------------------------------------
-    // True while the ACTIVE output's kind is NDI and the live loop is
-    // feeding the engine's NDI display provider (RGBA→UYVY→BroadcastEngine;
-    // real NDI when the runtime is installed, software loopback otherwise).
+    // True while the FIRST enabled NDI-kind output (the active one, or any
+    // other enabled NDI row when a projector is on air) is being fed by the
+    // live loop via the engine's NDI display provider (native RGBA →
+    // BroadcastEngine, no conversion; real NDI when the runtime is installed,
+    // software loopback otherwise).
     Q_PROPERTY(bool ndiSending READ ndiSending NOTIFY ndiChanged)
+    // Name of the NDI output whose frames are flowing RIGHT NOW (empty when
+    // none): the Settings · Outputs pill marks THAT row LIVE even when a
+    // projector is the on-air output. Identity = the roster row's name.
+    Q_PROPERTY(QString ndiSendingOutputName READ ndiSendingOutputName NOTIFY ndiChanged)
     // Frames the sender has pushed (poll-refreshed with the preview feed).
     Q_PROPERTY(qulonglong ndiFramesSent READ ndiFramesSent NOTIFY ndiChanged)
 
@@ -155,6 +162,7 @@ public:
     qulonglong mediaRev() const { return mediaRev_; }
     bool mediaMuted() const { return mediaMuted_; }
     bool ndiSending() const { return ndiSending_; }
+    QString ndiSendingOutputName() const { return ndiSendingOutput_; }
     qulonglong ndiFramesSent() const { return ndiFramesSent_; }
     QVariantList cardPreviewsList() const
     {
@@ -171,6 +179,10 @@ public:
     // layer on the compositor); clearInput() releases the device.
     Q_INVOKABLE void takeInput(const QString &label, const QString &kind, const QString &mode);
     Q_INVOKABLE void clearInput();
+    // Release ONLY an NDI take (no-op for camera/screen takes or when nothing
+    // is taken) — the "ndi" feature switch's teardown path (EngineBridge::
+    // applyNdiFeatureState) calls this when NDI is switched off mid-take.
+    Q_INVOKABLE void clearNdiInput();
     // Kept for source compatibility; no longer used by the tiles (the
     // service detects frames itself — see inputLive). Harmless no-op for a
     // non-taken or already-live input.
@@ -224,6 +236,11 @@ public:
     // real window input ~2.5s after launch and logs PASS (frames decoded) /
     // FAIL to the launch log ~4s later. Inert without the env var.
     static void runEnvSelfTest();
+    // (The env-gated NDI OUTPUT self-test that used to live here was removed
+    // at the user's request: auto-driving synthetic sends and a real GO LIVE
+    // mid-boot interfered with the boot process. NDI health is instead
+    // visible through the product's own telemetry — the connected-monitor
+    // and backpressure lines pushNdiFrame logs while live.)
 
     Q_INVOKABLE void goLive();
     // ANY-CONTENT go-live (scripture verses, a sermon, media items): the
@@ -315,6 +332,16 @@ private:
     // bumps inputRev so every consuming Image re-fetches. Stops itself when
     // neither a take nor a card preview is held.
     void pumpTick();
+    // The newest frame of a held tap, kind-aware (camera/screen → the PAL's
+    // decode cache, ndi → the engine receiver's converter) — see .cpp.
+    QImage inputFrame(const QString &label, const QString &kind) const;
+    // NDI-INPUT compositor feed: pushes the taken NDI source's newest frame
+    // into CompositorState's media layer (the engine's scene builder draws
+    // it under the on-air content — the same layer the media decoder fills).
+    // No-op unless the CURRENT take is an NDI one.
+    void pushNdiInputFrame(const QImage &frame);
+    // Clears that compositor hold when it was an NDI feed that filled it.
+    void clearNdiInputFrame();
     // Re-reads the runtime's current slide into onAirSlide_ (onAirChanged
     // piggybacks the emit). The slide's blocks change without the title or
     // index moving (a document edit re-synced while live), so the 10Hz poll
@@ -347,16 +374,31 @@ private:
     // {id,name} maps, insertion order = z-order (last taken = topmost).
     QVariantList activeOverlays_;
 
-    // The NDI program sender: the active output (kind NDI) gets the live
-    // loop's frames pushed at the poll's rate while live.
+    // The NDI program sender: the first ENABLED NDI-kind output (not only
+    // the active one — a projector can be on air while NDI must still feed)
+    // gets the live loop's frames pushed at the poll's rate while live.
     void pushNdiFrame();
     void stopNdiFeed();
+    // The network-visible NDI source name for an output row: "<AppName> .
+    // <Row name>" when the row has a name (Studio Monitor convention), or
+    // "" to fall back to the provider's own default. With no argument it
+    // resolves the first enabled NDI row itself.
+    static QString ndiSenderDisplayName(const QString &rowName = QString());
+    // NDI sender identity per live session: the NDI SDK can't rename a live
+    // sender, so a name change (or a new session) must recreate it. Called
+    // from goLive's paths; tracks the name it last armed.
+    void armNdiSenderForSession();
+    QString ndiArmedName_;
 
     // ---- taken-input state ----
     QString inputLabel_;
     QString inputKind_;
     qulonglong inputRev_ = 0;
     bool inputLive_ = false;
+    // True while an NDI take is feeding CompositorState's media layer (the
+    // frame side of the take — the PAL-side taken-input identity is
+    // ClearTakenInput, this is the pixels side).
+    bool ndiInputLive_ = false;
     QTimer *inputPump_ = nullptr;   // while taken: inputRev bump at ~15Hz
     // The internal card previews (one-click): label → {kind, mode}. Their
     // taps ride the SAME previewIds_ table under owner "card"; releasing is
@@ -387,7 +429,26 @@ private:
 
     // ---- NDI program sender (see the properties above) --------------------
     bool ndiSending_ = false;
+    QString ndiSendingOutput_;   // roster name of the row being fed while sending
     qulonglong ndiFramesSent_ = 0;   // provider's own counter, poll-refreshed
+    // One-shot send diagnostics (see pushNdiFrame): the gate warning, the
+    // first SendFrame failure, and the "frames flowing, monitor discovering"
+    // note — each logs once per outage, not once per poll tick.
+    bool ndiGateLogged_ = false;
+    bool ndiSendFailedLogged_ = false;
+    bool ndiFirstFrameLogged_ = false;
+    bool ndiWaitLogged_ = false;   // "waiting for buffer/frame" warm-up note
+    // FreeShow-style send backpressure, adapted to a SYNCHRONOUS sender (see
+    // pushNdiFrame): our GUI-thread send cannot queue frames, but a slow one
+    // stalls the UI — so the tick after a slow send is skipped (half rate),
+    // logged once per incident. Plus connected-monitor telemetry (engine-side
+    // SDK truth) so "is anyone actually receiving" is visible in engine.log.
+    QElapsedTimer ndiSendClock_;
+    bool ndiClockStarted_ = false;
+    bool ndiBackoff_ = false;      // skip the tick after a slow send
+    bool ndiSlowLogged_ = false;   // "send is slow" once per incident
+    int ndiReceiversSeen_ = -1;    // last reported connected-monitor count
+    int ndiTick_ = 0;              // poll tick counter (~10 Hz)
 };
 
 // QQuickImageProvider over the engine preview output's last frame:

@@ -250,56 +250,56 @@ Result<void> NdiDisplayProvider::SendFrame(const RenderFrameView& frame) {
     if (!frame.pixels || frame.width <= 0 || frame.height <= 0)
         return Error::Make(Err::InvalidArgument, "NdiDisplayProvider", "empty frame");
 
+    // One lock for the WHOLE send — the buffer lifetime contract below makes
+    // the copy and the send one atomic operation per frame (see the
+    // sendBuffer_ comment in the header for the crash this prevents).
+    std::lock_guard<std::mutex> lock(mutex_);
+
     // Lazy sender creation on first use (idempotent).
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (senderId_.empty()) {
-            auto& bc = broadcast::BroadcastEngine::Instance();
-            auto r = bc.Initialize();   // no-op if already initialized
-            if (!r.ok()) return r;
-            broadcast::NdiSenderConfig cfg;
-            auto id = bc.CreateNdiSender(senderName_, cfg);
-            if (!id.ok()) return id.error();
-            senderId_ = id.value();
-        }
+    if (senderId_.empty()) {
+        auto& bc = broadcast::BroadcastEngine::Instance();
+        auto r = bc.Initialize();   // no-op if already initialized
+        if (!r.ok()) return r;
+        broadcast::NdiSenderConfig cfg;
+        auto id = bc.CreateNdiSender(senderName_, cfg);
+        if (!id.ok()) return id.error();
+        senderId_ = id.value();
     }
 
-    // Convert RGBA8 (0xAABBGGRR) -> UYVY422, the standard NDI 4:2:2 layout.
-    const size_t w = static_cast<size_t>(frame.width);
-    const size_t h = static_cast<size_t>(frame.height);
-    std::vector<uint8_t> uyvy((w * h) * 2);
-    for (size_t y = 0; y < h; ++y) {
-        const uint32_t* row = frame.pixels + y * w;
-        uint8_t* outRow = uyvy.data() + y * w * 2;
-        for (size_t x = 0; x < w; x += 2) {
-            uint32_t p0 = row[x];
-            uint32_t p1 = (x + 1 < w) ? row[x + 1] : p0;
-            int r0 = static_cast<int>(p0 & 0xFF);
-            int g0 = static_cast<int>((p0 >> 8) & 0xFF);
-            int b0 = static_cast<int>((p0 >> 16) & 0xFF);
-            int r1 = static_cast<int>(p1 & 0xFF);
-            int g1 = static_cast<int>((p1 >> 8) & 0xFF);
-            int b1 = static_cast<int>((p1 >> 16) & 0xFF);
-            auto clamp = [](int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); };
-            // BT.601 coefficients.
-            int y0 = clamp(((66 * r0 + 129 * g0 + 25 * b0 + 128) >> 8) + 16);
-            int y1 = clamp(((66 * r1 + 129 * g1 + 25 * b1 + 128) >> 8) + 16);
-            int u = clamp(((-38 * r0 - 74 * g0 + 112 * b0 + 128) >> 8) + 128);
-            int v = clamp(((112 * r0 - 94 * g0 - 18 * b0 + 128) >> 8) + 128);
-            outRow[0] = static_cast<uint8_t>(u);
-            outRow[1] = static_cast<uint8_t>(y0);
-            outRow[2] = static_cast<uint8_t>(v);
-            outRow[3] = static_cast<uint8_t>(y1);
-        }
-    }
-
+    // NO conversion: the engine's pixels ARE a valid NDI wire format. Color::Pack
+    // (0xAABBGGRR, R in the low byte) is little-endian memory order R,G,B,A —
+    // exactly NDI's 'RGBA' (0x41424752). The previous per-pixel software
+    // RGBA->UYVY pass was both wasted CPU AND the green-screen bug: receivers
+    // that decoded its bytes as zero-YUV painted RGB(0,135,0) — the dark green
+    // Studio Monitor showed while 4587 frames were "flowing". Sending native
+    // RGBA leaves every color decision to the SDK's own proven pipeline.
     broadcast::VideoFrameInfo info;
     info.width = static_cast<uint32_t>(frame.width);
     info.height = static_cast<uint32_t>(frame.height);
-    info.fourCC = 0x59565955;   // UYVY
+    info.fourCC = 0x41424752;   // 'RGBA' — the engine's native layout, byte for byte
     info.fps = 30.0;
+    // NDI's RGBA honors per-pixel alpha (UYVY dropped it implicitly): the
+    // compositor's scenes can carry <255 alpha in transparent regions and a
+    // receiver would composite those over black. The program feed is a
+    // flattened picture — force full opacity.
+    //
+    // ALWAYS copy into sendBuffer_ and send FROM IT. NDI's contract: a sent
+    // frame's buffer must remain valid from its send call until the NEXT one
+    // (send_send_video_v2 does not copy; its worker thread reads the buffer
+    // asynchronously). A scoped/local buffer (or a zero-copy pointer into the
+    // caller's frame, which dies milliseconds later) leaves the SDK reading
+    // freed heap — the 0xc0000374 heap-corruption crash on GO LIVE. The
+    // member's previous contents ARE the "previous frame" the contract
+    // requires; the next call overwrites it only after the SDK has had its
+    // turn. A 1080p copy is ~8 MB — trivial next to the corruption it buys off.
+    const size_t count = static_cast<size_t>(frame.width) * static_cast<size_t>(frame.height);
+    sendBuffer_.assign(frame.pixels, frame.pixels + count);
+    for (auto& p : sendBuffer_)
+        p |= 0xFF000000u;
+
     auto& bc = broadcast::BroadcastEngine::Instance();
-    auto r = bc.SendVideoFrame(senderId_, info, uyvy.data(), uyvy.size());
+    const size_t bytes = count * 4u;
+    auto r = bc.SendVideoFrame(senderId_, info, sendBuffer_.data(), bytes);
     if (r.ok()) framesSent_.fetch_add(1);
     return r;
 }
@@ -309,9 +309,22 @@ void NdiDisplayProvider::SetSenderName(std::string name) {
     senderName_ = std::move(name);
 }
 
+void NdiDisplayProvider::ResetSender() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (senderId_.empty())
+        return;   // nothing live to reset
+    (void)broadcast::BroadcastEngine::Instance().StopSender(senderId_);
+    senderId_.clear();   // the next SendFrame recreates it under senderName_
+}
+
 std::string NdiDisplayProvider::SenderName() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return senderName_;
+}
+
+std::string NdiDisplayProvider::SenderId() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return senderId_;
 }
 
 uint64_t NdiDisplayProvider::FramesSent() const {

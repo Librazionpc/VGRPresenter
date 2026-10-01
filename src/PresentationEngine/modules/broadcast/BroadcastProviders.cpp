@@ -156,6 +156,9 @@ struct NdiApi {
     void (*send_send_video_v2)(NdiSendInstance, const NdiVideoFrameV2*);
     void (*send_send_audio_v2)(NdiSendInstance, const NdiAudioFrameV2*);
     void (*send_destroy)(NdiSendInstance);
+    // Receivers currently connected to a sender (mDNS-answered). 0 while
+    // frames flow = nobody accepts our video = the firewall/discovery case.
+    int (*send_get_no_connections)(NdiSendInstance);
     NdiRecvInstance (*recv_create_v3)(const NdiRecvCreateV3*);
     int (*recv_capture_v2)(NdiRecvInstance, NdiVideoFrameV2*, NdiAudioFrameV2*,
                            NdiMetadataFrame*, uint32_t timeout_ms);
@@ -353,6 +356,13 @@ public:
         return Ok();
     }
 
+    int ConnectedReceiverCount(std::string_view senderId) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = sends_.find(std::string(senderId));
+        if (it == sends_.end() || !api_.send_get_no_connections) return -1;
+        return static_cast<int>(api_.send_get_no_connections(it->second));
+    }
+
     Result<BroadcastReceiverId> CreateReceiver(std::string_view sourceName) override {
         std::lock_guard<std::mutex> lock(mutex_);
         auto probe = EnsureApi();
@@ -494,6 +504,8 @@ private:
         sym((void**)&api.send_send_video_v2, "NDIlib_send_send_video_v2");
         sym((void**)&api.send_send_audio_v2, "NDIlib_send_send_audio_v2");
         sym((void**)&api.send_destroy, "NDIlib_send_destroy");
+        // Optional (absent in very old runtimes): connected-receiver count.
+        sym((void**)&api.send_get_no_connections, "NDIlib_send_get_no_connections");
         sym((void**)&api.recv_create_v3, "NDIlib_recv_create_v3");
         sym((void**)&api.recv_capture_v2, "NDIlib_recv_capture_v2");
         sym((void**)&api.recv_free_video_v2, "NDIlib_recv_free_video_v2");
@@ -686,9 +698,16 @@ private:
 
 // Called by BroadcastEngine::Initialize to register the real providers.
 Result<void> RegisterBuiltinBroadcastProviders(BroadcastEngine& engine) {
-    auto r = engine.RegisterProvider(std::make_shared<NdiProvider>());
+    auto r = engine.RegisterProvider(MakeNdiProvider());
     if (!r.ok()) return r;
     return engine.RegisterProvider(std::make_shared<SdiProvider>());
+}
+
+// A fresh, unopened NDI provider (see the declaration in BroadcastEngine.hpp) —
+// SetNdiEnabled's off-cycle tears the old instance's SDK handles down and this
+// hands back a clean one for the next on.
+std::shared_ptr<IBroadcastProvider> MakeNdiProvider() {
+    return std::make_shared<NdiProvider>();
 }
 
 } // namespace bps::broadcast

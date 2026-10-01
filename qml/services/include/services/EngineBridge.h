@@ -73,6 +73,13 @@ class EngineBridge : public QObject
     Q_PROPERTY(QVariantList ndiSources READ ndiSources NOTIFY devicesChanged)
     Q_PROPERTY(bool ndiAvailable READ ndiAvailable NOTIFY devicesChanged)
     Q_PROPERTY(QString ndiStatus READ ndiStatus NOTIFY devicesChanged)
+    // The ENGINE's feature registry (AdaptiveRuntime's FeatureManager) as the
+    // Settings · Plugins screen's data source: entries { id, name, enabled,
+    // defaultEnabled }. `enabled` mirrors the registry's real state — the
+    // switch flips the ENGINE, not a local list. setPluginFeatureEnabled is
+    // the setter; pluginFeaturesChanged fires on any change (including boot,
+    // when the runtime auto-disables features the host cannot host).
+    Q_PROPERTY(QVariantList pluginFeatures READ pluginFeatures NOTIFY pluginFeaturesChanged)
     // "ready" | "notInstalled" | "error" | "unknown" (engine not booted). Only
     // "notInstalled" is something the user can fix — the UI then offers
     // openNdiDownloadPage(). ndiVersion is the runtime's own version string.
@@ -194,6 +201,24 @@ public:
     // Release every preview tap (the AV screen's teardown).
     Q_INVOKABLE void stopAllVideoPreviews();
 
+    // ---- Live NDI receiver tap -------------------------------------------
+    // Same owner-counted discipline as the camera/screen taps, keyed by the
+    // NDI source's FULL name ("<HOST> (<sender>)" — exactly what discovery
+    // reports and the roster stores). The tap is an ENGINE receiver
+    // (BroadcastEngine::CreateNdiReceiver — the NDI provider runtime-loads
+    // the vendor SDK); frames are pulled non-blocking on demand by
+    // previewNdiFrameFor()/the videopreview provider and converted
+    // UYVY/BGRA → RGBA, so QML's existing image pipeline needs no changes.
+    // Returns whether a receiver is (now) attached; a tap held while the
+    // NDI runtime is unavailable reports the refusal through its empty
+    // frames (the warm-up placeholder stays honest).
+    Q_INVOKABLE bool startNdiPreview(const QString &sourceName,
+                                     const QString &owner = QStringLiteral("dialog"));
+    // Release one NDI receiver (label-keyed, like the camera taps). The
+    // engine receiver dies with its last owner.
+    Q_INVOKABLE void stopNdiPreview(const QString &sourceName,
+                                    const QString &owner = QStringLiteral("dialog"));
+
     // ---- Live SCREEN preview --------------------------------------------
     // Same owner-counted discipline as the camera taps, keyed by the
     // monitor's roster label; frames flow through the same
@@ -262,6 +287,12 @@ public:
     // detect first frames itself, instead of QML confirming back (a write
     // into the tile's own URL binding = binding loop).
     QImage previewFrameFor(const QString &label);
+    // The newest frame of the NDI receiver tapped for this source name —
+    // the SAME contract previewFrameFor serves the camera/screen taps (a
+    // null QImage = no receiver or no frame yet, the warm-up signal).
+    // Converts the engine's UYVY/BGRA frame to RGBA on the fly (decode-once
+    // is unnecessary — the engine hands raw pixels, not a JPEG).
+    QImage previewNdiFrameFor(const QString &sourceName);
     // The SAME label→engine-id resolution previewFrameFor uses, exposed
     // standalone: LiveOutputService::takeInput needs the resolved PAL device
     // id (not the roster label) to tell the engine's CompositorState which
@@ -273,17 +304,47 @@ public:
     QString ndiState() const { return ndiState_; }
     QString ndiVersion() const { return ndiVersion_; }
     QString ndiDownloadUrl() const;
+    // The feature registry snapshot + the switch (see pluginFeatures).
+    QVariantList pluginFeatures() const;
+    Q_INVOKABLE void setPluginFeatureEnabled(const QString &featureId, bool enabled);
     bool sdiAvailable() const { return sdiAvailable_; }
     QString sdiStatus() const { return sdiStatus_; }
     QVariantList sdiDevices() const { return sdiDevices_; }
     // Opens the NDI runtime download page in the user's browser.
     Q_INVOKABLE void openNdiDownloadPage();
+    // Receivers currently CONNECTED to the NDI program sender (-1 = no
+    // sender / the SDK can't tell). 0 while frames flow = nothing on the
+    // network accepts our video — the firewall/discovery case.
+    Q_PROPERTY(int ndiConnectedReceivers READ ndiConnectedReceivers NOTIFY ndiConnectedReceiversChanged)
+    int ndiConnectedReceivers() const { return ndiConnectedReceivers_; }
+    // ONE-TIME firewall authorization prompt (Windows Security Alert):
+    // Windows shows it when the app first opens a listening socket, but a
+    // missed/cancelled dialog silently blocks INBOUND NDI connections
+    // forever (outbound receive keeps working — input w/o output). Runs the
+    // app once on the network profile with inbound rules added. Returns:
+    // "added" | "denied" | "failed" | "unavailable".
+    Q_INVOKABLE QString requestNdiFirewallAccess();
+    // Did the elevated rule add from requestNdiFirewallAccess() land? The
+    // request returns "prompt" and the verdict arrives asynchronously (the
+    // user answers UAC) — the UI calls this from a short retry timer.
+    Q_INVOKABLE bool checkNdiFirewallRule();
+    // True once the ask has fired this SESSION (deliberately not persisted:
+    // the firewall rule itself is the saved permission — see
+    // requestNdiFirewallAccess; a refused OS prompt re-asks next session).
+    Q_PROPERTY(bool ndiFirewallPrompted READ ndiFirewallPrompted NOTIFY ndiFirewallPromptedChanged)
+    bool ndiFirewallPrompted() const { return ndiFirewallPrompted_; }
+    // Poll hook (LiveOutputService's 10 Hz poll calls this): re-reads the
+    // SDK's connected-receiver count and emits on change. Cheap (1 Hz cap).
+    void refreshNdiConnections();
     // Re-checks for the runtime right now (after the user installed it).
     Q_INVOKABLE void recheckNdi();
     // Called from main.cpp on QGuiApplication::aboutToQuit — orderly
     // teardown of the 29 systems (threads joined, database flushed) instead
     // of letting process exit cut them off mid-flight.
     void shutdown();
+    // The "ndi" feature switch's runtime effect (see setPluginFeatureEnabled):
+    // disabling tears down every NDI receiver tap and the output take.
+    void applyNdiFeatureState(bool enabled);
 
     // GUI-thread-only entry point the relay's marshalled lambdas call (see
     // startRelay in EngineBridge.cpp): appends to the recent-events ring,
@@ -329,6 +390,12 @@ signals:
     // deliberately modest rate (not the ~480Hz the captures run at) so the
     // meter dots animate like a real VU without flooding the GUI thread.
     void inputLevelsChanged();
+    // The feature registry moved (a switch flipped, boot auto-disabled
+    // something) — the Plugins screen re-reads pluginFeatures.
+    void pluginFeaturesChanged();
+    // NDI program-sender connection telemetry + firewall authorization state.
+    void ndiConnectedReceiversChanged();
+    void ndiFirewallPromptedChanged();
     void outputLevelsChanged();
     void outputMeteringChanged();
     void audioMeteringChanged();
@@ -351,6 +418,13 @@ private:
 
     // GUI-thread-only device enumeration into audioDevices_/screenDevices_.
     void enumerateDevices();
+    // NDI runtime probe + source discovery OFF the GUI thread (runs on the
+    // global QThreadPool; results land via a queued invokeMethod + one
+    // devicesChanged emit). The first successful check loads and initializes
+    // the NDI runtime DLL — that must never happen inline on the GUI thread:
+    // the "I've installed it — check again" button ran the whole load inline
+    // and took the app down. Coalesced by ndiProbeBusy_.
+    void probeNdiAsync();
     QVariantList audioDevices_;
     QVariantList screenDevices_;
     QVariantList videoDevices_;
@@ -405,9 +479,20 @@ private:
     QSet<QString> previewFirstFrameLogged_;
     QSet<QString> previewNoTapWarned_;
     QSet<QString> previewServedLogged_;   // per-label frame-served confirmation
-
+    // NDI receiver taps: source name → engine receiver id ("ndi-recv-N").
+    // Owner counting rides the shared previewOwners_ table keyed by the
+    // RAW source name (no "ndi:" prefix) — an NDI full name has the SDK's
+    // own "<HOST> (<sender>)" shape, distinctive enough that a real camera/
+    // screen label collision is not a practical concern.
+    QHash<QString, QString> ndiTaps_;
     bool ndiAvailable_ = false;
-    bool ndiRetried_ = false;   // one deferred NDI re-query per boot/refreshDevices()
+    int ndiRetries_ = 0;   // deferred NDI re-query budget (2) per boot/refreshDevices()
+    // One async NDI probe at a time (see probeNdiAsync): a second recheck
+    // while one is in flight coalesces into the running probe instead of
+    // stacking a second runtime load/discovery pass.
+    std::atomic<bool> ndiProbeBusy_{false};
+    int ndiConnectedReceivers_ = -1;   // SDK connection count, poll-refreshed
+    bool ndiFirewallPrompted_ = false;   // once per install (settings-backed)
     qint64 lastEnumerationMs_ = 0;   // throttles refreshDevices()
     QString ndiStatus_;
     QString ndiState_ = QStringLiteral("unknown");

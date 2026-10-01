@@ -150,9 +150,9 @@ Rectangle {
                                    || root.styleBg.hasImage === true
 
     // FreeShow's clearStyleBackgroundOnText: the style opts its OWN
-    // background image out of the way once this (active/on-air) output
-    // actually has something on it — a slide, a taken input, or media —
-    // so a style whose image carries its own baked-in text doesn't
+    // background image out of the way once this output actually has
+    // something on it — a slide, a taken input, or media — so a style whose
+    // image carries its own baked-in text (a branded church-name PNG) doesn't
     // permanently collide with live text painted over it. Only the IMAGE
     // steps aside (FreeShow's own semantics); the flat colour still shows.
     // The "actually has something on it" half of that sentence was never
@@ -162,10 +162,16 @@ Rectangle {
     // because nothing is staged" — a real go-live-with-nothing should show
     // the branded image same as fully idle, only real content should ever
     // clear it).
+    //
+    // NO `active` gate here: the ENGINE suppresses this image for EVERY
+    // styled output while content is on air (SceneBuilder's
+    // clearBackgroundOnText rule), so gating the suppression on the active
+    // output alone made non-active outputs wearing the same style render
+    // differently — the live "same style, different result" report: the
+    // active tile hid the branded image while the others baked it under the
+    // slide. Content on air decides, for all of them alike.
     readonly property bool suppressStyleBgImage: root.styleBg.clearOnText === true
-                                                 && (root.hasSlidePreview || root.inputTaken || root.mediaOnAir)
-        && root.active
-        && (root.hasSlidePreview || root.mediaOnAir || root.inputTaken)
+        && (root.hasSlidePreview || root.inputTaken || root.mediaOnAir)
 
     // A taken input or on-air media file is a REAL frame sitting directly
     // under the on-air content in z-order (inputImage/mediaImage draw before

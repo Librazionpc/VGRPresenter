@@ -99,6 +99,11 @@ public:
     Result<RgbaImage> RenderThumbnail(std::string_view sceneId, Size size);
 
     // --- Outputs ---
+    // Read access to the font manager — scene builders (SceneBuilder's
+    // autoSize:"shrink" fit solver) measure text with the SAME font stack
+    // DrawTextObject rasterizes with, so fitted sizes match what gets drawn.
+    const FontManager& Fonts() const noexcept { return fonts_; }
+
     Result<void> AddOutput(std::shared_ptr<IRenderOutput> output);
     Result<std::shared_ptr<IRenderOutput>> GetOutput(std::string_view name) const;
     Result<void> RemoveOutput(std::string_view name);

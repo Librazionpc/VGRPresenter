@@ -58,6 +58,17 @@ public:
         (void)senderId;
         return Ok();
     }
+    // How many receivers are currently CONNECTED to a sender (-1 = this
+    // provider can't tell). The NDI provider reads the SDK's own connection
+    // count for its NDI-shaped senders: "frames flowing but 0 receivers" is
+    // THE firewall/discovery symptom — frames go out, nothing accepts them.
+    virtual int ConnectedReceiverCount(std::string_view /*senderId*/) const {
+        return -1;
+    }
+    // How many receivers are currently CONNECTED to this sender (-1 = the
+    // provider can't tell). The NDI provider reads the SDK's own connection
+    // count: "frames flowing but 0 receivers" is THE firewall/discovery
+    // symptom — frames go out, nothing on the network accepts them.
 
     // --- Receive ---
     virtual Result<BroadcastReceiverId> CreateReceiver(std::string_view sourceName) {

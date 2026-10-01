@@ -1,4 +1,5 @@
 #include "platform/linux/LinuxNetwork.hpp"
+#include "platform/linux/LinuxExec.hpp"
 
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -117,6 +118,52 @@ std::string LinuxNetwork::Proxy() const {
         if (const char* v = std::getenv(var); v && *v) return v;
     }
     return {};
+}
+
+// Unlike Windows Firewall, ufw/firewalld rules aren't naturally scoped to
+// one application path — they're port/service based, and NDI has no single
+// fixed port to name (mDNS discovery + a dynamic range). So this backend
+// only answers the question it CAN answer honestly: is any firewall even
+// active? Most desktop Linux installs ship with none enabled, which is
+// genuinely "nothing blocking inbound" — not a guess dressed up as one.
+// When a firewall IS active, this reports Unavailable rather than silently
+// opening a broad port range on the user's behalf.
+namespace {
+bool FirewallActive() {
+    using namespace linux_backend;
+    if (CommandAvailable("ufw")) {
+        const CmdResult r = RunCapture("ufw status 2>/dev/null");
+        if (r.exitCode == 0 && r.stdoutText.find("Status: active") != std::string::npos)
+            return true;
+    }
+    if (CommandAvailable("firewall-cmd")) {
+        const CmdResult r = RunCapture("firewall-cmd --state 2>/dev/null");
+        if (r.exitCode == 0 && r.stdoutText.find("running") != std::string::npos)
+            return true;
+    }
+    return false;
+}
+} // namespace
+
+INetwork::FirewallAccess LinuxNetwork::ProbeInboundAccess(const std::string& appPath,
+                                                           const std::string& ruleName) const {
+    (void)appPath;
+    (void)ruleName;
+    return FirewallActive() ? FirewallAccess::Unavailable : FirewallAccess::Allowed;
+}
+
+INetwork::FirewallRequestOutcome LinuxNetwork::RequestInboundAccess(
+    const std::string& appPath, const std::string& ruleName, const std::string& description,
+    std::string* diag) {
+    (void)ruleName;
+    (void)description;
+    (void)diag;
+    if (ProbeInboundAccess(appPath, ruleName) == FirewallAccess::Allowed)
+        return FirewallRequestOutcome::Added;
+    // No per-app rule automation for ufw/firewalld (see ProbeInboundAccess's
+    // own comment on why) — an active firewall here is a terminal Unavailable,
+    // not a Denied (nothing was actually refused; nothing was attempted).
+    return FirewallRequestOutcome::Unavailable;
 }
 
 } // namespace bps::platform

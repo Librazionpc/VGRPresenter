@@ -146,9 +146,14 @@ Item {
             // responsible for its own visual AND its own blink — the built-in
             // automatic blink is specifically a property of the default cursor,
             // not something TextEdit keeps driving once you supply your own.
+            //
+            // NOTE: every binding here reads `editInput` (this TextEdit), NOT
+            // displayText — the display Text is always focus:false, so a
+            // displayText-bound caret sat at opacity 0 with its blink stopped
+            // forever: the "edit mode shows no caret" regression.
             cursorDelegate: Rectangle {
                 id: caret
-                width: 2
+                width: Math.max(1, Math.round(editInput.font.pixelSize / 16))
                 color: "#ffffff"
                 // Blink ONLY while the field is actually being edited. The
                 // old delegate ran a loops: Animation.Infinite blink for the
@@ -157,9 +162,9 @@ Item {
                 // dozen idle, unfocused labels. Anchored blink instead:
                 // restarts on focus/position changes, holds fully visible
                 // when not editing.
-                opacity: displayText.activeFocus && displayText.cursorVisible ? 1 : 0
+                opacity: editInput.activeFocus && editInput.cursorVisible ? 1 : 0
                 SequentialAnimation on opacity {
-                    running: displayText.activeFocus
+                    running: editInput.activeFocus
                     loops: Animation.Infinite
                     PropertyAnimation { to: 0; duration: 500 }
                     PropertyAnimation { to: 1; duration: 500 }

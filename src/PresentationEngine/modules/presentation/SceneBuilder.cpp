@@ -274,6 +274,69 @@ std::vector<ContentBlock> BindTemplateBlocks(const std::vector<ContentBlock>& tm
 // that passes "media"/"overlay" instead, for an active overlay's own blocks
 // (placeUnderSlide decides which). Returns the number of blocks seen (for
 // the scene log line).
+// Largest font size ≤ `style.size` whose wrapped layout still fits `box` —
+// the engine twin of the canvas's autoSize:"shrink" solver. DesignCatalogs::Text
+// writes that key with the comment "the set size is a CEILING"; DesignPreview
+// and the edit canvas have always honored it, but the engine set the ceiling
+// as a FIXED size — so the Big Bold template's 120px put a six-line chorus
+// straight through the 1080p frame bottom (the live "NDI not staying within
+// its resolution" report: text clipped at the frame edge on every output).
+// Proportional descent: measure at the current size, rescale by the height
+// ratio, repeat — wrapping changes as the size does, so a few rounds converge
+// where one closed-form step undershoots. Height is the binding constraint
+// (wrapWidth is the fixed box width; a monster word hard-breaks and grows
+// the height, which the loop then shrinks). Runs at scene-build time only.
+float FitTextToBox(const std::string& text, const rendering::TextStyle& style,
+                   const rendering::Rect& box, const rendering::FontManager& fonts,
+                   float minPx) {
+    constexpr int kMaxRounds = 10;
+    float size = style.size;
+    rendering::TextStyle probe = style;
+    for (int i = 0; i < kMaxRounds; ++i) {
+        if (size <= minPx) break;
+        probe.size = size;
+        const auto r = rendering::TextLayout::Measure(text, probe, fonts);
+        if (r.totalHeight <= box.height)
+            return size;   // fits at this size
+        size *= std::max(0.2f, box.height / std::max(1.0f, r.totalHeight) * 0.95f);
+    }
+    return std::max(minPx, size);
+}
+
+// The grow twin (autoSize "grow"/"growToFit" — TextItemPanel's picker; six
+// of this user's template blocks carry it): the template's set size is a
+// FLOOR, and the layout scales UP until it fills the box — the short-verse
+// case, where a template names a modest size for the WORST verse and the
+// actual one-line verse should read across the whole frame, not sit at the
+// worst-case size. Same proportional shape as FitTextToBox, ascending, then
+// a verify-and-step-back pass so the last scaling step's rounding can never
+// leave the final size overflowing. Height is the binding constraint for
+// exactly the same reason (wrapWidth is the fixed box width).
+float GrowTextToBox(const std::string& text, const rendering::TextStyle& style,
+                    const rendering::Rect& box, const rendering::FontManager& fonts) {
+    constexpr int kMaxRounds = 12;
+    float size = style.size;
+    rendering::TextStyle probe = style;
+    for (int i = 0; i < kMaxRounds; ++i) {
+        probe.size = size;
+        const auto r = rendering::TextLayout::Measure(text, probe, fonts);
+        if (r.totalHeight >= box.height)
+            break;   // filled the box (a set size that already overflows stays — not grow's job)
+        const float next =
+            size * std::max(1.05f, box.height / std::max(1.0f, r.totalHeight) * 0.96f);
+        if (next <= size * 1.01f)
+            break;   // no measurable progress
+        size = next;
+    }
+    for (int i = 0; i < kMaxRounds && size > style.size; ++i) {
+        probe.size = size;
+        if (rendering::TextLayout::Measure(text, probe, fonts).totalHeight <= box.height)
+            break;
+        size *= 0.95f;
+    }
+    return std::max(style.size, size);
+}
+
 int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                    const std::vector<ContentBlock>& blocks,
                    const rendering::Size& size, std::string_view tag,
@@ -313,6 +376,30 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             styleComp->style.italic = MetaBool(block.metaJson, "italic");
             styleComp->style.wrap = true;
             styleComp->style.wrapWidth = text->Bounds().width;
+            // autoSize — the FULL vocabulary the template editor writes
+            // (TextItemPanel: "none" | "shrinkToFit" | "growToFit"; legacy
+            // "shrink"/"grow" from DesignCatalogs arrive too, and
+            // DesignPreview has always accepted both spellings). The engine
+            // previously honored ONLY literal "shrink" — every growToFit
+            // template rendered at its fixed set size on the engine outputs,
+            // reading as "the template's auto size is ignored".
+            //   shrink/shrinkToFit — the set size is a CEILING (see
+            //     FitTextToBox's comment): shrink until the layout fits.
+            //   grow/growToFit — the set size is a FLOOR (GrowTextToBox):
+            //     grow until the layout fills the box.
+            //   anything else — the set size is exact.
+            const std::string autoSize = MetaString(block.metaJson, "autoSize");
+            if (autoSize == "shrink" || autoSize == "shrinkToFit") {
+                const float minPx =
+                    static_cast<float>(3.0 * size.height / kBlockStageH);   // the canvas solver's own 3px floor, output-scaled
+                styleComp->style.size = FitTextToBox(
+                    block.text, styleComp->style, text->Bounds(),
+                    rendering::RenderEngine::Instance().Fonts(), minPx);
+            } else if (autoSize == "grow" || autoSize == "growToFit") {
+                styleComp->style.size = GrowTextToBox(
+                    block.text, styleComp->style, text->Bounds(),
+                    rendering::RenderEngine::Instance().Fonts());
+            }
             text->AddComponent(styleComp);
             text->SetLayer(std::string(layer));
             (void)engine.AddObject(sceneId, text, std::string(layer));

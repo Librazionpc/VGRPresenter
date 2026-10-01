@@ -671,6 +671,86 @@ void TestBlockScenes() {
 }
 
 // ---------------------------------------------------------------------------
+// autoSize vocabulary — the engine twin of the canvas's solver. AddStageBlocks
+// previously honored ONLY literal "shrink", so every "growToFit"/"shrinkToFit"
+// template (TextItemPanel's picker vocabulary) rendered at its FIXED set size
+// on the engine outputs — the live "auto size only works for shows; scripture
+// and the table always shrink even when the template says otherwise" report.
+// Grow: a short verse in a tall box must END UP BIGGER than its set size.
+// Shrink: an overflowing verse must end up smaller. None/absent: exact.
+// ---------------------------------------------------------------------------
+void TestAutoSizeVocabulary() {
+    p::Presentation pres;
+    pres.id = "pres-autosize";
+    r::RenderEngine& engine = r::RenderEngine::Instance();
+    p::SceneBuilder builder;
+    p::OutputStyleSpec style;
+    style.templateKey = "fullscreen";
+    style.backgroundColor = "#ff101020";
+
+    constexpr float kSetPx = 60.0f;                 // template's own size (stage units)
+    constexpr float kScale = 1080.0f / 428.0f;      // stage -> output (AddStageBlocks')
+    const float setOutputPx = kSetPx * kScale;
+
+    // Effective output-pixel font size of the single blk1 text object.
+    const auto builtSize = [&](const p::Slide& slide) -> float {
+        auto built = builder.BuildSlideScene(pres, slide, style, engine);
+        if (!built.ok()) return -1.0f;
+        float size = -1.0f;
+        for (const r::RenderObject* obj : engine.CollectObjects(built.value())) {
+            if (const auto* t = dynamic_cast<const r::TextObject*>(obj); t && t->Id() == "blk1")
+                for (const auto& c : t->Components())
+                    if (const auto* sc = dynamic_cast<const r::TextStyleComponent*>(c.get()))
+                        size = sc->style.size;
+        }
+        (void)engine.DestroyScene(built.value());
+        return size;
+    };
+
+    const auto slideWithMode = [&](const char* mode, const char* text) {
+        p::Slide slide;
+        slide.id = std::string("as-") + mode;
+        p::ContentBlock verse;
+        verse.id = "b1";
+        verse.kind = "text";
+        verse.x = 40; verse.y = 40; verse.width = 674; verse.height = 348;
+        verse.text = text;
+        verse.metaJson = std::format(
+            R"({{"color":"#ffffff","fontSize":{:.0f},"align":"center","verticalAlign":"center","autoSize":"{}"}})",
+            kSetPx, mode);
+        slide.blocks = {verse};
+        return slide;
+    };
+
+    // A short verse in a tall box: grow fills the box (well past the set
+    // size); shrink has nothing to shrink (short text fits) and stays exact.
+    const char* growModes[] = {"growToFit", "grow"};
+    for (const char* mode : growModes) {
+        const float size = builtSize(slideWithMode(mode, "He reigns"));
+        CHECK(size > setOutputPx + 1.0f);
+    }
+    const char* exactModes[] = {"shrinkToFit", "shrink", "none"};
+    for (const char* mode : exactModes) {
+        const float size = builtSize(slideWithMode(mode, "He reigns"));
+        CHECK(std::abs(size - setOutputPx) < 1.0f);
+    }
+
+    // Overflow: the same box, a verse far too long for 60px — both shrink
+    // spellings come DOWN, none stays exact (and overflows, honestly).
+    const char* longVerse =
+        "For God so loved the world that he gave his one and only Son, that "
+        "whoever believes in him shall not perish but have eternal life. And "
+        "the Spirit of God was hovering over the face of the waters, and "
+        "darkness was upon the face of the deep.";
+    const float shrunk = builtSize(slideWithMode("shrinkToFit", longVerse));
+    CHECK(shrunk > 3.0f * kScale && shrunk < setOutputPx - 1.0f);
+    const float shrunkLegacy = builtSize(slideWithMode("shrink", longVerse));
+    CHECK(std::abs(shrunkLegacy - shrunk) < 0.5f);   // both spellings agree
+    const float fixed = builtSize(slideWithMode("none", longVerse));
+    CHECK(std::abs(fixed - setOutputPx) < 1.0f);     // "none" is exact, overflow or not
+}
+
+// ---------------------------------------------------------------------------
 // Engine-template styles — a style wearing a template design (templateKey
 // "tpl-…", blocks baked into the spec) renders THE TEMPLATE with the slide's
 // content bound in; the fingerprint hashes the blocks.

@@ -102,7 +102,33 @@ Result<void> AdaptiveRuntime::Initialize() {
     ndiContract.estimatedStartupMs = 300;
     ndiContract.supportsLazyLoading = true;
     ndiContract.supportsSuspension = true;
+    // ON by default: the firewall ask (EngineBridge::requestNdiFirewall
+    // Access, raised once by the Outputs screen) covers the inbound-rule
+    // concern; an off-by-default here made every fresh boot start with NDI
+    // refused ("NDI is switched off") even when the user had toggled ON —
+    // the persisted replay couldn't rescue it because the store had rejected
+    // the undeclared "plugins.featureStates" key (now registered). A user
+    // who switches OFF still gets that honored via the same replay.
     (void)features_.Register({"ndi", "NDI Output", ndiContract, FeatureState::Enabled, true});
+
+    ModuleContract sdiContract;
+    sdiContract.name = "sdi";
+    sdiContract.minRamBytes = 64 * mb;
+    sdiContract.recommendedRamBytes = 128 * mb;
+    sdiContract.maxRamBytes = 512 * mb;
+    sdiContract.gpuOptional = true;
+    sdiContract.cpuThreads = 1;
+    sdiContract.estimatedStartupMs = 200;
+    sdiContract.supportsLazyLoading = true;
+    sdiContract.supportsSuspension = true;
+    // OFF by default, deliberately: probing SDI resolves the DeckLink SDK,
+    // and on a machine without it every device refresh published "DeckLink
+    // SDK not installed" as an error toast plus a WARN log line (the "add it
+    // to plugins and disable so it stops spamming me until we are ready for
+    // it" report). The Plugins screen's switch opens the gate when a
+    // DeckLink device is actually in play; the persisted replay honors it.
+    (void)features_.Register({"sdi", "SDI Capture (DeckLink)", sdiContract,
+                              FeatureState::Disabled, false});
 
     ModuleContract cloudContract;
     cloudContract.name = "cloud";

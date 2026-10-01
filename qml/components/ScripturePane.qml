@@ -43,9 +43,13 @@ ReferencePane {
         readonly property var searchAsync: (text, srcId, token) => ScriptureService.searchAsync(text, srcId, 60, token)
         readonly property var preview: (src, bookId, ch, nums) => ScriptureService.preview(src, bookId, ch, nums)
         readonly property var slides: (src, bookId, ch, nums) => ScriptureService.slides(src, bookId, ch, nums)
-        // GO LIVE (FreeShow's playScripture -> setOutput): the picked passage's
-        // slides to the live output, gated on the style's scripture pill.
-        readonly property var goLive: (name, slides) => LiveOutputService.goLiveWithSlides(name, slides)
+        // A picked passage STAGES (Main Output tile preview only) — the
+        // SAME gate ShowCenter.qml's own double-click pick already obeys:
+        // nothing reaches the real output until the top GO LIVE button
+        // actually commits it (live report: "media, overlay, scripture,
+        // the table all need to be aware of the go live gate — they can't
+        // just push live"). Gated on the style's scripture pill first.
+        readonly property var goLive: (name, slides) => LiveOutputService.stageSlides(name, slides)
         // Is THIS tab's content what's on air right now? (the play button's
         // refresh glyph — FreeShow's isActiveInOutput.) The on-air title of a
         // scripture pick IS the reference text, so a title match reads "ours".

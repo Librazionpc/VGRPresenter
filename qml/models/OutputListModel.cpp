@@ -860,12 +860,21 @@ void OutputListModel::bakeTemplateBlocks(bps::presentation::OutputStyleSpec &spe
 
 // NOTE: bakeTemplateBlocks bakes ONLY the whole-style template. The
 // per-family slots bake here (their keys are already in spec.familyTemplateKeys).
-// NO INHERIT: a family with no explicit pick gets nothing baked — except
-// SHOWS, whose fallback is the BIBLE template (the Scripture design): show
-// content (imported shows, Quick Lyrics — slides carry no family tag) must
-// never silently fall back to the old plain layout. The fallback fires only
-// when BOTH the shows pick and the whole-style template are unset/non-design
-// (an empty or legacy-preset templateKey); an explicit pick always wins.
+// INHERIT: a family slot left on "None" rides the style's WHOLE-STYLE design
+// (its documented contract — StyleStore.hpp: an empty key "inherits the
+// style's whole-style templateKey"). The old no-inherit behaviour stranded
+// exactly the families a style didn't name: with the style's contentType on
+// "shows", SceneBuilder's family gate excluded the whole-style template from
+// scripture/table slides, so the slide's own tab template (default font,
+// default autoSize) rendered instead and the style's font rules never
+// reached the output — the live "NDI doesn't see the font rules I set" and
+// "scripture always shrinks" reports. Binding is family-agnostic ("text" =
+// the content, "ref" = the reference — BindTemplateBlocks), so any design
+// carries any family's content. SHOWS additionally keeps a Bible fallback
+// (the Scripture design) for when even the whole-style template is unset or
+// a legacy preset: show content (imported shows, Quick Lyrics — slides
+// carry no family tag) must never silently fall back to the old plain
+// layout. An explicit pick always wins over both.
 void OutputListModel::bakeFamilyTemplateBlocks(bps::presentation::OutputStyleSpec &spec)
 {
     for (size_t i = 0; i < 4; ++i) {
@@ -880,10 +889,26 @@ void OutputListModel::bakeFamilyTemplateBlocks(bps::presentation::OutputStyleSpe
         for (const QVariant &b : blocks)
             spec.familyTemplateBlocks[i].push_back(ShowConverter::blockFromVariant(b.toMap()));
     }
+    // The inherit pass: only when the whole-style template is an ENGINE
+    // DESIGN (a legacy preset key can't be baked — the engine renders those
+    // via LayoutFor with the family key, which is empty here by definition).
+    const QString wholeKey = QString::fromStdString(spec.templateKey);
+    if (wholeKey.startsWith(QLatin1String("tpl-"))) {
+        const QVariantMap whole = TemplateLibraryService::instance().design(wholeKey);
+        const QVariantList wholeBlocks = whole.value(QStringLiteral("blocks")).toList();
+        if (!wholeBlocks.isEmpty()) {
+            for (size_t i = 0; i < 4; ++i) {
+                if (!spec.familyTemplateKeys[i].empty() || !spec.familyTemplateBlocks[i].empty())
+                    continue;   // explicit pick (baked above) always wins
+                spec.familyTemplateBlocks[i].reserve(wholeBlocks.size());
+                for (const QVariant &b : wholeBlocks)
+                    spec.familyTemplateBlocks[i].push_back(ShowConverter::blockFromVariant(b.toMap()));
+            }
+        }
+    }
     // The Bible fallback for show content (see the function comment): the
     // baked blocks alone gate the engine's family branch — the shows key
     // stays "" so the roster still reads "None".
-    const QString wholeKey = QString::fromStdString(spec.templateKey);
     if (spec.familyTemplateBlocks[0].empty()
         && QString::fromStdString(spec.familyTemplateKeys[0]).isEmpty()
         && !wholeKey.startsWith(QLatin1String("tpl-"))) {

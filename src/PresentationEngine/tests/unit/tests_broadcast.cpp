@@ -19,6 +19,11 @@ void TestBroadcastEngine() {
     CHECK(eng.Initialize().ok());
     CHECK(eng.Start().ok());
     eng.PreferProvider("software");   // deterministic loopback, whatever runtime is installed
+    // The "ndi" feature switch now defaults OFF (a fresh install needs a
+    // firewall grant first — see AdaptiveRuntime's own registration
+    // comment); this test exercises real sender/receiver creation, so it
+    // sets up its own precondition instead of relying on a default.
+    eng.SetNdiEnabled(true);
 
     // The software loopback provider is always available.
     auto names = eng.ProviderNames();
@@ -101,6 +106,7 @@ void TestBroadcastSenders() {
     CHECK(eng.Initialize().ok());
     CHECK(eng.Start().ok());
     eng.PreferProvider("software");
+    eng.SetNdiEnabled(true);   // "ndi" defaults off now — this test needs real senders
 
     // Multiple independent senders.
     auto a = eng.CreateNdiSender("Cam A");
@@ -173,6 +179,11 @@ void TestBroadcastNdiRuntime() {
     auto& eng = br::BroadcastEngine::Instance();
     CHECK(eng.Initialize().ok());
     CHECK(eng.Start().ok());
+    // This test's whole point is the REAL runtime's own status — "ndi"
+    // defaulting off would otherwise report Error/"switched off" here
+    // regardless of whether the SDK is actually installed, which is a
+    // different question than the one this test asks.
+    eng.SetNdiEnabled(true);
 
     const auto st = eng.NdiStatus();
     using State = br::BroadcastEngine::NdiRuntimeStatus::State;

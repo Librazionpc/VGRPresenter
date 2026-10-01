@@ -84,8 +84,9 @@ private:
 };
 
 // --- NDI provider: renders frames out over the BroadcastEngine (docs/specs/29).
-// Enumerates one virtual "NDI Program" device. SendFrame() converts an RGBA8
-// frame to UYVY and pushes it through BroadcastEngine::SendVideoFrame; when
+// Enumerates one virtual "NDI Program" device. SendFrame() pushes the engine's
+// native RGBA8 frame through BroadcastEngine::SendVideoFrame UNCONVERTED (the
+// layout is byte-for-byte NDI's 'RGBA' fourCC — the SDK owns color); when
 // the NDI SDK is not installed the engine's software loopback carries it, so
 // the whole path is exercised in CI. Frame delivery itself stays with the
 // caller (the sink in DisplayEngine::RouteFrame) — this provider is the
@@ -101,12 +102,23 @@ public:
     Result<std::vector<DisplayDevice>> Probe() override;   // static device set
     DisplayProviderCapabilities Capabilities() const noexcept override;
 
-    // Sends one RGBA frame as UYVY video over the BroadcastEngine. Creates the
-    // NDI sender on first use; errors (unconfigured engine) are reported.
+    // Sends one native RGBA frame over the BroadcastEngine (no conversion —
+    // see the class comment). Creates the NDI sender on first use; errors
+    // (unconfigured engine) are reported.
     Result<void> SendFrame(const RenderFrameView& frame);
 
     // Sender name used for the NDI source ("VGR Program" by default).
     void SetSenderName(std::string name);
+    // Tears the live sender down (SendFrame recreates it from senderName_ on
+    // its next call). NDI's SDK cannot rename an already-created sender, so
+    // a per-session reset is the only way a SetSenderName change — or the
+    // same name on a NEW live session — reaches the network. No-op when no
+    // sender exists yet.
+    void ResetSender();
+    // The engine sender id ("" until the first frame creates it lazily) —
+    // callers query BroadcastEngine::SenderConnectedReceivers with it to
+    // learn whether ANY monitor actually connected (the firewall signal).
+    std::string SenderId() const;
     std::string SenderName() const;
     uint64_t FramesSent() const;
 
@@ -116,6 +128,15 @@ private:
     std::string senderName_ = "VGR Program";
     std::string senderId_;          // BroadcastEngine sender id (lazily created)
     std::atomic<uint64_t> framesSent_{0};
+    // THE SEND BUFFER, OWNED BY THE PROVIDER — the crash fix for "GO LIVE
+    // crashes the app" (heap corruption 0xc0000374 in ntdll). NDI's contract:
+    // a frame's buffer must stay valid from its send UNTIL THE NEXT SEND CALL
+    // (send_send_video_v2 does not copy; its worker reads it asynchronously).
+    // Handing it a stack/scoped buffer (the old local UYVY vector, or worse
+    // the zero-copy pointer into the caller's frame) lets the SDK read freed
+    // heap. sendBuffer_ holds the flattened, opaque-alpha pixels between
+    // sends, so the SDK's view of "previous frame" is always live memory.
+    std::vector<uint32_t> sendBuffer_;
 };
 
 } // namespace bps::display

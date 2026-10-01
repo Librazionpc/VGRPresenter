@@ -16,6 +16,12 @@ public:
     Result<std::string> Gateway() const override;
     std::vector<std::string> DnsServers() const override;
     std::string Proxy() const override;
+    FirewallAccess ProbeInboundAccess(const std::string& appPath,
+                                      const std::string& ruleName) const override;
+    FirewallRequestOutcome RequestInboundAccess(const std::string& appPath,
+                                                const std::string& ruleName,
+                                                const std::string& description,
+                                                std::string* diag) override;
 };
 
 } // namespace bps::platform

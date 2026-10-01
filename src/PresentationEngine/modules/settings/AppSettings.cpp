@@ -172,6 +172,14 @@ std::vector<SettingDef> BuildDefinitions() {
     // JSON object written by RecordingService — declared here or every
     // write/read refuses with "there is no setting 'session.recordingConfig'".
     d.push_back(Text("session.recordingConfig", "session", "Recording config"));
+    // The Plugins screen's feature switches ({"ndi": true, ...}), written by
+    // EngineBridge::setPluginFeatureEnabled and replayed at boot — declared
+    // here or every write/read refuses with "there is no setting
+    // 'plugins.featureStates'" (which silently disabled persistence: the
+    // user's ON rebooted as OFF, and the self-test caught the send refusal).
+    d.push_back(Text("plugins.featureStates", "plugins", "Plugin feature states"));
+    // The once-per-install firewall-authorization flag (Outputs screen's NDI
+    // ask) — same "must be declared" contract as the rosters above.
     // The slide grid on the Show screen's centre page (FreeShow's slidesOptions): slides across, and how they are laid out.
     d.push_back(IntRange("session.slideColumns", "session", "Slides across", 4, 2, 10));
     d.push_back(Choice("session.slideView", "session", "Slide view", "grid", {

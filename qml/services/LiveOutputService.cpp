@@ -18,6 +18,7 @@
 
 #include "modules/display/DisplayEngine.hpp"
 #include "modules/display/Providers.hpp"
+#include "modules/broadcast/BroadcastEngine.hpp"
 
 #include <QCoreApplication>
 #include <QTimer>
@@ -290,6 +291,11 @@ void LiveOutputService::goLive()
         return;
     }
 
+    // This live session's NDI sender opens under the FIRST enabled NDI
+    // output's own name (recreated when the name changed since last time —
+    // NDI can't rename a live sender; see armNdiSenderForSession).
+    armNdiSenderForSession();
+
     if (!live_) {
         live_ = true;
         emit liveChanged();
@@ -330,6 +336,10 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         emit onAirChanged();
         return;
     }
+    // This live session's NDI sender opens under the FIRST enabled NDI
+    // output's own name (see armNdiSenderForSession).
+    armNdiSenderForSession();
+
     if (!live_) {
         live_ = true;
         emit liveChanged();
@@ -354,8 +364,24 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
 // title } maps ShowCenter/ScripturePane/TheTablePane hand to
 // goLiveWithSlides), so it needs no engine round-trip to preview — only
 // actually going live converts it to real engine Slides.
+//
+// WHILE LIVE a pick is NOT staged — it goes STRAIGHT ON AIR (the FreeShow
+// model, and the reported bug: with the show live, clicking a verse only
+// ever updated the tile preview while the engine kept rendering the blank
+// holding slide the GO LIVE press committed — tiles showed text, the real
+// output and NDI showed the style poster forever, with zero Scene-built
+// lines in the log). When not live, staging stays preview, exactly as
+// before.
 void LiveOutputService::stageSlides(const QString &name, const QVariantList &slides)
 {
+    if (live_) {
+        goLiveWithSlides(name, slides);   // commit the pick to the engine now
+        stagedName_.clear();
+        stagedSlidesRaw_.clear();
+        stagedSlide_ = QVariantMap{};     // tiles must read the NEW onAirSlide,
+        emit stagedChanged();             // not a stale staged copy over it
+        return;
+    }
     stagedName_ = name;
     stagedSlidesRaw_ = slides;
     // Through the SAME active-style template composition onAirSlide/
@@ -389,11 +415,11 @@ void LiveOutputService::clearStaged()
 // lifecycle (idempotent starts, owner-counted release) is already proven.
 void LiveOutputService::takeInput(const QString &label, const QString &kind, const QString &mode)
 {
-    if (kind != QLatin1String("camera") && kind != QLatin1String("screen")) {
-        // Honest refusal: media/NDI have no local tap yet (media plays
-        // through the player graph, NDI through the network receiver —
-        // neither is wired to a compositor layer today).
-        qWarning("LiveOutputService: input kind '%s' has no output-preview tap yet", kind.toUtf8().constData());
+    if (kind != QLatin1String("camera") && kind != QLatin1String("screen")
+        && kind != QLatin1String("ndi")) {
+        // Honest refusal: media has no compositor layer of its own — it
+        // takes through takeMedia() instead (the pane routes that already).
+        qWarning("LiveOutputService: input kind '%s' has no output-preview tap", kind.toUtf8().constData());
         emit inputChanged();
         return;
     }
@@ -411,6 +437,8 @@ void LiveOutputService::takeInput(const QString &label, const QString &kind, con
     } else if (!inputLabel_.isEmpty()) {
         if (inputKind_ == QLatin1String("screen"))
             EngineBridge::instance().stopScreenPreview(inputLabel_, QStringLiteral("output"));
+        else if (inputKind_ == QLatin1String("ndi"))
+            EngineBridge::instance().stopNdiPreview(inputLabel_, QStringLiteral("output"));
         else
             EngineBridge::instance().stopVideoPreview(inputLabel_, QStringLiteral("output"));
     }
@@ -424,6 +452,13 @@ void LiveOutputService::takeInput(const QString &label, const QString &kind, con
         // title drifted) unwinds the take here instead of parking a
         // warm-up placeholder that can never fill.
         started = EngineBridge::instance().startScreenPreview(label, QStringLiteral("output"));
+    } else if (kind == QLatin1String("ndi")) {
+        // The engine's NDI receiver (the BroadcastEngine's provider
+        // runtime-loads the vendor SDK). A refusal (runtime missing/SDK
+        // load failure) unwinds the take exactly like a refused screen tap
+        // — the roster row keeps its idle glyph instead of a placeholder
+        // that can never fill.
+        started = EngineBridge::instance().startNdiPreview(label, QStringLiteral("output"));
     } else {
         EngineBridge::instance().startVideoPreview(label, mode, QStringLiteral("output"));
         started = true;   // camera refusals surface via the provider's empty frames
@@ -452,6 +487,37 @@ void LiveOutputService::takeInput(const QString &label, const QString &kind, con
     const QString resolvedId = EngineBridge::instance().resolvedPreviewDeviceId(label);
     pl::CompositorState::Instance().SetTakenInput(resolvedId.toStdString(), kind.toStdString());
     emit inputChanged();
+}
+
+// One pump tick of the NDI input feed: while an NDI source is TAKEN (output
+// take, owner "output") its newest engine frame is pushed into
+// CompositorState's media layer — the scene builder's compositor pass
+// (AddCompositorLayers) draws whatever sits there UNDER the on-air content,
+// the exact layer the media decoder feeds. Card previews don't push (they
+// render straight off the QML provider, like every camera card).
+void LiveOutputService::pushNdiInputFrame(const QImage &frame)
+{
+    if (inputKind_ != QLatin1String("ndi") || inputLabel_.isEmpty())
+        return;
+    if (frame.isNull() || frame.width() <= 1)
+        return;   // no receiver or no frame yet — keep the previous compositor state
+    auto &compositor = pl::CompositorState::Instance();
+    pl::CompositorState::MediaFrame mf;
+    mf.width = uint32_t(frame.width());
+    mf.height = uint32_t(frame.height());
+    mf.rgba.assign(frame.constBits(), frame.constBits() + size_t(frame.sizeInBytes()));
+    compositor.SetMediaFrame(std::move(mf));
+    ndiInputLive_ = true;
+}
+
+// Release the NDI input's compositor hold (ClearTakenInput covers the PAL
+// tap side; the frame side clears only when THIS feed is what filled it).
+void LiveOutputService::clearNdiInputFrame()
+{
+    if (!ndiInputLive_)
+        return;
+    pl::CompositorState::Instance().ClearMedia();
+    ndiInputLive_ = false;
 }
 
 // KEPT FOR COMPATIBILITY, DELIBERATELY EMPTY: frame detection moved into
@@ -520,12 +586,18 @@ bool LiveOutputService::overlayIsOnAir(const QString &id) const
 // up without ever flipping inputLive). Stops itself when nothing is held.
 void LiveOutputService::pumpTick()
 {
-    if (!inputLive_ && !inputLabel_.isEmpty()) {
-        const QImage frame = EngineBridge::instance().previewFrameFor(inputLabel_);
-        if (!frame.isNull() && frame.width() > 1) {
+    // The taken input's frame is pulled ONCE per tick and shared by both
+    // consumers — first-frame detection and (for NDI) the compositor push.
+    // The QML provider's own request per rev bump pulls independently; each
+    // ReceiveFrame is non-blocking and returns the newest frame, so none of
+    // the pulls can queue or stall behind each other.
+    QImage takenFrame;
+    if (!inputLabel_.isEmpty()) {
+        takenFrame = inputFrame(inputLabel_, inputKind_);
+        if (!inputLive_ && !takenFrame.isNull() && takenFrame.width() > 1) {
             inputLive_ = true;
             qInfo("LiveOutputService: first frame decoded for '%s' (%dx%d)",
-                  qUtf8Printable(inputLabel_), frame.width(), frame.height());
+                  qUtf8Printable(inputLabel_), takenFrame.width(), takenFrame.height());
         }
     }
     // Per-label production (card previews' thumbnails light off this —
@@ -535,18 +607,21 @@ void LiveOutputService::pumpTick()
     for (const QString &held : cardPreviews_.keys()) {
         if (producing_.contains(held))
             continue;
-        const QImage frame = EngineBridge::instance().previewFrameFor(held);
+        const QImage frame = inputFrame(held, cardPreviews_.value(held).toMap()
+                                                .value(QStringLiteral("kind")).toString());
         if (!frame.isNull() && frame.width() > 1)
             producing_.insert(held);
     }
-    if (!inputLabel_.isEmpty() && !producing_.contains(inputLabel_)) {
-        const QImage frame = EngineBridge::instance().previewFrameFor(inputLabel_);
-        if (!frame.isNull() && frame.width() > 1)
-            producing_.insert(inputLabel_);
-    }
+    if (!inputLabel_.isEmpty() && !producing_.contains(inputLabel_)
+        && !takenFrame.isNull() && takenFrame.width() > 1)
+        producing_.insert(inputLabel_);
     // Unconditional rev bump while ANY tap is held — tiles and cards share
     // the nonce, so both re-fetch.
     inputRev_++;
+    // NDI taken as the OUTPUT input feeds the engine's compositor layer
+    // (the same one the media decoder fills) with the frame pulled above.
+    if (!takenFrame.isNull())
+        pushNdiInputFrame(takenFrame);
     emit inputChanged();
     if (inputLabel_.isEmpty() && cardPreviews_.isEmpty())
         inputPump_->stop();
@@ -555,6 +630,28 @@ void LiveOutputService::pumpTick()
 bool LiveOutputService::inputProducing(const QString &label) const
 {
     return producing_.contains(label);
+}
+
+// The newest frame of a held tap, kind-aware: camera/screen pulls through
+// the PAL's decode-once cache (previewFrameFor), NDI through the engine
+// receiver's convert-on-demand (previewNdiFrameFor). The pump's first-frame
+// detection reads through this one switch, so a kind can never watch the
+// wrong tap family.
+QImage LiveOutputService::inputFrame(const QString &label, const QString &kind) const
+{
+    if (kind == QLatin1String("ndi"))
+        return EngineBridge::instance().previewNdiFrameFor(label);
+    return EngineBridge::instance().previewFrameFor(label);
+}
+
+// Release ONLY an NDI take — the "ndi" feature switch's teardown path
+// (EngineBridge::applyNdiFeatureState). No-op for camera/screen takes and
+// card previews (those ride PAL taps the feature gate doesn't touch).
+void LiveOutputService::clearNdiInput()
+{
+    if (inputKind_ != QLatin1String("ndi") || inputLabel_.isEmpty())
+        return;
+    clearInput();
 }
 
 // ---------------------------------------------------------------------------
@@ -566,7 +663,8 @@ bool LiveOutputService::inputProducing(const QString &label) const
 // ---------------------------------------------------------------------------
 void LiveOutputService::previewInput(const QString &label, const QString &kind, const QString &mode)
 {
-    if (label.isEmpty() || (kind != QLatin1String("camera") && kind != QLatin1String("screen")))
+    if (label.isEmpty() || (kind != QLatin1String("camera") && kind != QLatin1String("screen")
+                            && kind != QLatin1String("ndi")))
         return;
     // Refuse UNREACHABLE sources quietly: a closed window / unplugged camera
     // must show the card's slashed "can't reach" state, not a toast.
@@ -578,6 +676,8 @@ void LiveOutputService::previewInput(const QString &label, const QString &kind, 
     }
     if (kind == QLatin1String("screen"))
         EngineBridge::instance().startScreenPreview(label, QStringLiteral("card"));
+    else if (kind == QLatin1String("ndi"))
+        EngineBridge::instance().startNdiPreview(label, QStringLiteral("card"));
     else
         EngineBridge::instance().startVideoPreview(label, mode, QStringLiteral("card"));
     cardPreviews_[label] = QVariantMap{
@@ -602,6 +702,8 @@ void LiveOutputService::endPreviewInput(const QString &label)
     const QString kind = entry.value("kind").toString();
     if (kind == QLatin1String("screen"))
         EngineBridge::instance().stopScreenPreview(label, QStringLiteral("card"));
+    else if (kind == QLatin1String("ndi"))
+        EngineBridge::instance().stopNdiPreview(label, QStringLiteral("card"));
     else
         EngineBridge::instance().stopVideoPreview(label, QStringLiteral("card"));
     producing_.remove(label);
@@ -626,12 +728,15 @@ void LiveOutputService::clearInput()
     // input never touches media state.
     if (inputKind_ == QLatin1String("screen"))
         EngineBridge::instance().stopScreenPreview(inputLabel_, QStringLiteral("output"));
+    else if (inputKind_ == QLatin1String("ndi"))
+        EngineBridge::instance().stopNdiPreview(inputLabel_, QStringLiteral("output"));
     else
         EngineBridge::instance().stopVideoPreview(inputLabel_, QStringLiteral("output"));
     inputLabel_.clear();
     inputKind_.clear();
     inputLive_ = false;
     producing_.remove(inputLabel_);
+    clearNdiInputFrame();   // the compositor frame side of an NDI take
     pl::CompositorState::Instance().ClearTakenInput();
     // A held card preview keeps the pump (and its rev bumps) alive.
     if (inputPump_ && cardPreviews_.isEmpty())
@@ -771,6 +876,10 @@ void LiveOutputService::stop()
         poll_->stop();
     // The NDI feed rides the poll — off air it stops with it.
     stopNdiFeed();
+    // An NDI INPUT taken while going off air also stops feeding the engine's
+    // compositor (the pump stops with it — one last explicit clear keeps the
+    // layer honest if the take is ever re-taken without clearInput first).
+    clearNdiInputFrame();
 }
 
 void LiveOutputService::goLiveBlank()
@@ -1111,6 +1220,10 @@ void LiveOutputService::pollTick()
     if (!live_)
         return;
 
+    // NDI monitor-connection telemetry rides the live poll (the bridge
+    // caps itself at ~1 Hz internally and emits only on change).
+    EngineBridge::instance().refreshNdiConnections();
+
     auto &ctrl = bps::live::LiveOutputController::Instance();
     const qulonglong sent = ctrl.FramesSent();
     if (sent != framesSent_) {
@@ -1124,13 +1237,16 @@ void LiveOutputService::pollTick()
     }
 
     // ---- NDI program sender ------------------------------------------------
-    // When the ACTIVE output's kind is NDI, the live loop's frames also go
-    // to the network: the display engine's NdiDisplayProvider converts each
-    // RGBA frame to UYVY and hands it to the BroadcastEngine (real NDI when
-    // the runtime is installed, the software loopback otherwise). The sender
-    // is the engine's own — this only feeds it from the SAME per-output
-    // buffers the monitor tiles read, so what the network gets is what the
-    // wall shows, at the poll's 10 Hz.
+    // The FIRST enabled NDI output's feed also goes to the network while the
+    // show is live (regardless of which output is active — a projector on
+    // air must not mute the NDI program feed): the display engine's
+    // NdiDisplayProvider sends each RGBA frame UNCONVERTED ('RGBA' fourCC)
+    // and hands it to
+    // the BroadcastEngine (real NDI when the runtime is installed, the
+    // software loopback otherwise). The sender is the engine's own — this
+    // only feeds it from the SAME per-output buffers the monitor tiles
+    // read, so what the network gets is what the wall shows, at the poll's
+    // 10 Hz.
     pushNdiFrame();
 
     // The engine's loop advances slides itself; mirror the runtime's state.
@@ -1163,19 +1279,55 @@ void LiveOutputService::pollTick()
 // ---------------------------------------------------------------------------
 // The NDI program sender — the display engine's NdiDisplayProvider IS the
 // output ("ndi-program" device, real NDI SDK via the BroadcastEngine with an
-// automatic software-loopback fallback). Nothing fed it before: this reads
-// the active output's frame (its own styled buffer, or the shared preview
-// feed for an unstyled output — the same source the monitor tile shows) and
-// hands it to the provider on every poll while live. The provider creates
-// its sender lazily and converts RGBA→UYVY internally.
+// automatic software-loopback fallback). This reads the FIRST enabled NDI
+// output's frame (its own styled buffer, or the shared preview feed for an
+// unstyled output — the same source the monitor tile shows) and hands it to
+// the provider on every poll while live. The provider sends the engine's native RGBA unconverted ('RGBA'
+// fourCC — color decisions belong to the SDK's pipeline) and owns the
+// sender's network identity. (The removed pass converted RGBA→UYVY
+// in software — both wasted CPU and, mis-decoded as zero-YUV, the
+// dark-green screen receivers showed while frames were "flowing".)
+//
+// NOT active-output-gated: the NDI feed runs whenever the show is live,
+// even with Main Output (a projector) active — the whole point of a program
+// NDI feed is that it carries the show BESIDE the physical screens, not
+// instead of them. (This was the "monitor stayed green while live" bug: the
+// sender only ever pushed when the NDI row itself was active, so with a
+// projector on air the monitor kept showing whatever it had connected to
+// last — the self-test's synthetic frame.)
 void LiveOutputService::pushNdiFrame()
 {
-    // NDI applies only while the ACTIVE output's kind is NDI.
+    // First ENABLED output whose kind is NDI wins (row order = roster order,
+    // so the first NDI row is deterministic); a disabled one can't go live
+    // and must not feed either. Styled vs unstyled mirrors FrameBufferRole
+    // exactly (its tile and this feed always show the same picture).
     bool want = false;
-    const int active = OutputListModel::instance()->activeIndex();
-    if (active >= 0) {
-        const QVariantMap out = OutputListModel::instance()->getOutput(active);
-        want = out.value("kind").toString() == QLatin1String("NDI");
+    int ndiRow = -1;
+    QString ndiOutputName;
+    const auto *model = OutputListModel::instance();
+    if (model) {
+        for (int i = 0; i < model->rowCount(); ++i) {
+            const QVariantMap out = model->getOutput(i);
+            if (out.value("kind").toString() == QLatin1String("NDI")
+                && out.value("isEnabled").toBool()) {
+                want = true;
+                ndiRow = i;
+                ndiOutputName = out.value("name").toString();
+                break;
+            }
+        }
+    }
+    // Feature switch off: the sender can't exist (the BroadcastEngine
+    // refuses NDI-shaped sends). Log it ONCE per outage so "my NDI monitor
+    // shows nothing" has a reason in the log.
+    if (want && !EngineBridge::instance().ndiAvailable()) {
+        if (!ndiGateLogged_) {
+            ndiGateLogged_ = true;
+            qWarning("LiveOutputService: NDI output requested but NDI is not usable (%s) — no frames will be sent",
+                     qUtf8Printable(EngineBridge::instance().ndiStatus()));
+        }
+    } else {
+        ndiGateLogged_ = false;
     }
 
     auto *provider = []() -> bps::display::NdiDisplayProvider * {
@@ -1186,24 +1338,32 @@ void LiveOutputService::pushNdiFrame()
     if (!want || !provider) {
         if (ndiSending_) {
             ndiSending_ = false;
+            ndiSendingOutput_.clear();
             emit ndiChanged();
         }
         return;
     }
 
-    // The frame: the ACTIVE output's own gated buffer when styled, else the
-    // shared preview feed (FrameBufferRole's exact keying).
-    const QString styleId = OutputListModel::instance()->activeStyleId();
+    // The frame: THIS output's own gated buffer when styled, else the
+    // shared preview feed (FrameBufferRole's exact keying — qHash(name)).
+    const QString styleId = model && ndiRow >= 0
+        ? model->getOutput(ndiRow).value("styleId").toString() : QString();
     const std::string buffer = styleId.isEmpty()
         ? std::string(bps::live::LiveOutputController::kPreviewName)
-        : QStringLiteral("__out_%1__").arg(qHash(OutputListModel::instance()
-                                                     ->getOutput(active)
-                                                     .value("name").toString()))
-              .toStdString();
+        : QStringLiteral("__out_%1__").arg(qHash(ndiOutputName)).toStdString();
     auto out = pr::RenderEngine::Instance().GetOutput(buffer);
     if (!out.ok()) {
+        // One-shot per outage: a missing buffer means the live loop hasn't
+        // registered it yet (GO LIVE just pressed) — silence here read as
+        // "NDI broken" when it was "NDI warming up".
+        if (!ndiWaitLogged_) {
+            ndiWaitLogged_ = true;
+            qWarning("LiveOutputService: NDI output '%s' waiting for buffer '%s' (live loop warming up)",
+                     qUtf8Printable(ndiOutputName), buffer.c_str());
+        }
         if (ndiSending_) {
             ndiSending_ = false;
+            ndiSendingOutput_.clear();
             emit ndiChanged();
         }
         return;
@@ -1212,23 +1372,111 @@ void LiveOutputService::pushNdiFrame()
     if (!fb || !fb->Enabled())
         return;
     const pr::Frame frame = fb->LastFrame();
-    if (frame.empty())
+    if (frame.empty()) {
+        if (!ndiWaitLogged_) {
+            ndiWaitLogged_ = true;
+            qWarning("LiveOutputService: NDI output waiting for the live loop's first rendered frame");
+        }
         return;
+    }
 
-    // The provider owns conversion + send; frames only flow while live
+    // The Output row's own name IS the network-visible NDI source name —
+    // SetSenderName only takes effect before the sender's first SendFrame
+    // (NDI can't rename a live sender; the SDK identity is fixed at
+    // creation), so the sender is recreated per live session via
+    // armNdiSenderForSession() and the name is re-asserted every tick ahead
+    // of the send (catches a mid-session rename of the roster row: the next
+    // session picks it up). A blank name falls back to the provider's own
+    // default ("VGR Program") rather than broadcasting under an empty
+    // string.
+    const QString senderName = ndiSenderDisplayName(ndiOutputName);
+    if (!senderName.isEmpty())
+        provider->SetSenderName(senderName.toStdString());
+
+    // The provider owns the wire format + send; frames only flow while live
     // (pollTick gates this call).
+    //
+    // FreeShow-style send backpressure, adapted to a SYNCHRONOUS sender:
+    // their grandiose worker caps in-flight encodes (MAX_INFLIGHT_SENDS=3);
+    // our GUI-thread send never queues, but a SLOW one would stall this
+    // thread — so the send is clocked and, past half the poll budget, the
+    // NEXT tick is skipped (half rate) and the incident logged once. The
+    // skip has a hard ceiling: a pathological sender can halve the feed,
+    // never stop it.
+    if (ndiBackoff_) {
+        ndiBackoff_ = false;
+        return;
+    }
     bps::display::RenderFrameView view;
     view.width = frame.width;
     view.height = frame.height;
     view.pixels = frame.pixels.data();
-    if (provider->SendFrame(view).ok()) {
+    if (!ndiClockStarted_) {
+        ndiSendClock_.start();
+        ndiClockStarted_ = true;
+    }
+    ndiSendClock_.restart();
+    const bool sent = provider->SendFrame(view).ok();
+    const qint64 sendMs = ndiSendClock_.elapsed();
+    if (sent) {
+        ndiSendingOutput_ = ndiOutputName;   // the pill's LIVE row (re-asserted per frame: rename-safe)
         if (!ndiSending_) {
             ndiSending_ = true;
-            qInfo("LiveOutputService: NDI program sending started (%s)",
-                  provider->SenderName().c_str());
+            qWarning("LiveOutputService: NDI program sending started (%s)",
+                     provider->SenderName().c_str());   // qWarning: the engine log sink keeps WARN+ only
         }
+        ndiWaitLogged_ = false;   // frames flow — the waiting notes re-arm
         ndiFramesSent_ = provider->FramesSent();
         emit ndiChanged();
+        // A later failure logs again — success clears the outage flag
+        // instead of it staying permanently tripped after the first one.
+        ndiSendFailedLogged_ = false;
+        // First-frame diagnostics: mDNS discovery (Studio Monitor's source
+        // list) can take tens of seconds; without this line "the output is
+        // not working" vs "my monitor just hasn't found the sender yet" is
+        // indistinguishable from a launch log. Fires once, right after the
+        // first successful send this outage.
+        if (!ndiFirstFrameLogged_) {
+            ndiFirstFrameLogged_ = true;
+            qWarning("LiveOutputService: NDI frames flowing as '%s' — discovery on a receiving monitor can take 10-30s",
+                     provider->SenderName().c_str());
+        }
+        // The backpressure trip: over half the poll's 100 ms budget in ONE
+        // synchronous send. Skip the next tick (feed drops to ~5 fps) so the
+        // GUI thread keeps breathing; logged once per incident.
+        if (sendMs > 50) {
+            ndiBackoff_ = true;
+            if (!ndiSlowLogged_) {
+                ndiSlowLogged_ = true;
+                qWarning("LiveOutputService: NDI send is slow (%lld ms, sender '%s') — backing off to ~5 fps to keep the UI responsive",
+                         sendMs, provider->SenderName().c_str());
+            }
+        } else {
+            ndiSlowLogged_ = false;   // recovered — the next incident logs again
+        }
+    } else if (!ndiSendFailedLogged_) {
+        ndiSendFailedLogged_ = true;
+        qWarning("LiveOutputService: NDI SendFrame FAILED (sender '%s') — check the engine log for the provider's own reason",
+                 provider->SenderName().c_str());
+    }
+
+    // Connected-monitor telemetry, ~1 Hz (every 10th tick): the SDK's own
+    // connection count, logged on every CHANGE. During the green-screen
+    // hunt this number was the missing witness — "2 monitor(s)" in the UI
+    // but nothing in engine.log. Now: a monitor connecting logs
+    // "monitors connected: N", and a drop to 0 while frames keep flowing
+    // is exactly the discovery/firewall drop worth surfacing.
+    if (++ndiTick_ % 10 == 0) {
+        const int connected = bps::broadcast::BroadcastEngine::Instance()
+                                  .SenderConnectedReceivers(provider->SenderId());
+        if (connected != ndiReceiversSeen_) {   // -1 = provider can't tell — stays silent
+            const bool first = ndiReceiversSeen_ < 0;
+            ndiReceiversSeen_ = connected;
+            qWarning("LiveOutputService: NDI sender '%s' %s %d monitor(s) connected",
+                     provider->SenderName().c_str(),
+                     first ? "currently has" : (connected > 0 ? "now has" : "has NO monitors left —"),
+                     connected);
+        }
     }
 }
 
@@ -1237,8 +1485,66 @@ void LiveOutputService::stopNdiFeed()
 {
     if (ndiSending_) {
         ndiSending_ = false;
+        ndiSendingOutput_.clear();
         emit ndiChanged();
     }
+    // Reset the incident state: backpressure, its log latch, and receiver
+    // telemetry all belong to the live session that just ended — the next
+    // one starts clean (and re-reports its monitors from scratch).
+    ndiBackoff_ = false;
+    ndiSlowLogged_ = false;
+    ndiReceiversSeen_ = -1;
+}
+
+// The network-visible NDI source name: "<AppName> . <Row name>" ("VGRPresenter
+// . New Screen 2") — how Studio Monitor lists a machine's sources — falling
+// back to the bare row name when the app name is unavailable, and to "" (the
+// provider's own "VGR Program" default) when the row has no name at all.
+QString LiveOutputService::ndiSenderDisplayName(const QString &rowName)
+{
+    QString resolved = rowName;
+    if (resolved.isEmpty()) {
+        const auto *model = OutputListModel::instance();
+        if (!model)
+            return {};
+        for (int i = 0; i < model->rowCount(); ++i) {
+            const QVariantMap out = model->getOutput(i);
+            if (out.value("kind").toString() == QLatin1String("NDI")
+                && out.value("isEnabled").toBool()) {
+                resolved = out.value("name").toString();
+                break;
+            }
+        }
+    }
+    if (resolved.isEmpty())
+        return {};
+    const QString app = QCoreApplication::applicationName();
+    return app.isEmpty() ? resolved : QStringLiteral("%1 . %2").arg(app, resolved);
+}
+
+// Per-live-session NDI sender identity (see the header comment): NDI's SDK
+// fixes a sender's name at creation, so the name that reached the network
+// LAST session would stick forever — the receiver saw "VGR Program" (the
+// self-test's name, or the default) instead of this output's row name.
+// Recreating the sender on every GO LIVE lets each session open under its
+// output's CURRENT name. A no-op when nothing changed since the last arm.
+void LiveOutputService::armNdiSenderForSession()
+{
+    const QString name = ndiSenderDisplayName();
+    if (name == ndiArmedName_)
+        return;   // same output, same name — the sender can keep its identity
+    ndiArmedName_ = name;
+    auto *provider = []() -> bps::display::NdiDisplayProvider * {
+        auto p = bps::display::DisplayEngine::Instance().Provider("Ndi");
+        return p ? dynamic_cast<bps::display::NdiDisplayProvider *>(p.get()) : nullptr;
+    }();
+    if (!provider)
+        return;
+    if (!name.isEmpty())
+        provider->SetSenderName(name.toStdString());
+    provider->ResetSender();   // recreate on the next SendFrame under the new name
+    qWarning("LiveOutputService: NDI sender reset for this live session — it will broadcast as '%s' once frames flow",
+             qUtf8Printable(name.isEmpty() ? QStringLiteral("VGR Program") : name));
 }
 
 // ---------------------------------------------------------------------------

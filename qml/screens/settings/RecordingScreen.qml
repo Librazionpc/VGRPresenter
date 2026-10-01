@@ -207,7 +207,18 @@ Item {
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.platform = platChip.modelData.key
+                                    onClicked: {
+                                        root.platform = platChip.modelData.key
+                                        // RecordingService never reads `platform` —
+                                        // only serverUrl/streamKey (typed by hand)
+                                        // decide the real stream target, so picking
+                                        // a named platform doesn't auto-fill its
+                                        // ingest URL the way it looks like it would.
+                                        if (platChip.modelData.key !== "rtmp")
+                                            EventBus.notify(qsTr("Picking %1 doesn't auto-fill its server yet — enter the RTMP URL and key manually below.").arg(platChip.modelData.label),
+                                                            "warning", qsTr("Not implemented"),
+                                                            "recording.platform.notImplemented")
+                                    }
                                 }
                             }
                         }

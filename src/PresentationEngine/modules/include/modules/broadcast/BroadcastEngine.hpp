@@ -55,6 +55,10 @@ public:
                                 const void* data, size_t bytes);
     Result<void> StopSender(std::string_view senderId);
     std::vector<std::string> SenderIds() const;
+    // Receivers currently CONNECTED to this sender (-1 = unknown). The NDI
+    // provider reads the SDK's own count; "sending but 0 connected" is the
+    // firewall/discovery case the UI surfaces.
+    int SenderConnectedReceivers(std::string_view senderId) const;
 
     Result<BroadcastReceiverId> CreateNdiReceiver(std::string_view sourceName);
     // Pulls the newest frame. Returns true when a frame was available.
@@ -89,6 +93,22 @@ public:
     void PreferProvider(std::string_view name);
     bool SdiAvailable() const;
 
+    // The "NDI Broadcast" feature switch (Settings · Plugins → AdaptiveRuntime's
+    // registry), engine-side: OFF refuses every NDI-shaped sender/receiver
+    // (including the software-loopback fallback — nothing NDI-shaped runs),
+    // empties discovery of real network sources, reports the switched-off
+    // state through NdiStatus()/NdiAvailable(), and tears down live senders
+    // and receivers created through the real provider. Default on.
+    void SetNdiEnabled(bool enabled);
+    bool NdiEnabled() const { return ndiEnabled_.load(); }
+    // The "sdi" feature switch (Settings · Plugins, OFF by default): while
+    // off, every sdi path refuses WITHOUT probing the DeckLink SDK — the
+    // absent-library probe used to publish "DeckLink SDK not installed" as
+    // an error toast on every device refresh (the "stop spamming me until
+    // we are ready for it" report).
+    void SetSdiEnabled(bool enabled);
+    bool SdiEnabled() const { return sdiEnabled_.load(); }
+
     // --- Events ---
     void WireEvents();
     void UnwireEvents();
@@ -107,6 +127,15 @@ private:
 
     std::map<std::string, std::shared_ptr<IBroadcastProvider>, std::less<>> providers_;
     std::string preferredProvider_;   // "" = automatic (see PreferProvider)
+    // Off by default (matches AdaptiveRuntime's own "ndi" feature default —
+    // see its registration comment): NDI sending needs a firewall rule the
+    // user hasn't granted on a fresh install yet. EngineBridge::boot() also
+    // syncs this to the registry's actual state unconditionally, so this
+    // starting value only matters for the narrow window before that sync
+    // runs, or for a caller that reaches BroadcastEngine before EngineBridge
+    // boots at all — staying off is the safe default either way.
+    std::atomic<bool> ndiEnabled_{false};   // the "ndi" feature switch (SetNdiEnabled)
+    std::atomic<bool> sdiEnabled_{false};   // the "sdi" feature switch (SetSdiEnabled)
     std::map<BroadcastSenderId, std::string, std::less<>> senders_;    // id -> provider
     std::map<BroadcastReceiverId, std::string, std::less<>> receivers_; // id -> provider
     std::map<std::string, std::string, std::less<>> sdiCaptures_;      // id -> provider
@@ -128,5 +157,11 @@ private:
 // BroadcastEngine::Initialize; declared here so the engine and Kernel can wire
 // providers without exposing provider internals.
 Result<void> RegisterBuiltinBroadcastProviders(BroadcastEngine& engine);
+
+// A fresh, unopened NDI provider instance (the concrete class is internal to
+// BroadcastProviders.cpp). SetNdiEnabled's off→ teardown → on cycle uses this
+// to re-register a clean provider after shutting the old one's SDK handles
+// down; Initialize registers through it too.
+std::shared_ptr<IBroadcastProvider> MakeNdiProvider();
 
 } // namespace bps::broadcast

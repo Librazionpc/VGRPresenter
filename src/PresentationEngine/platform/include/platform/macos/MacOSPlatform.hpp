@@ -153,6 +153,13 @@ private:
         }
         std::vector<std::string> DnsServers() const override { return {}; }
         std::string Proxy() const override { return {}; }
+        FirewallAccess ProbeInboundAccess(const std::string&, const std::string&) const override {
+            return FirewallAccess::Unavailable;
+        }
+        FirewallRequestOutcome RequestInboundAccess(const std::string&, const std::string&,
+                                                     const std::string&, std::string*) override {
+            return FirewallRequestOutcome::Unavailable;
+        }
     };
     struct StubPower final : IPower {
         PowerInfo Current() const override { return {}; }

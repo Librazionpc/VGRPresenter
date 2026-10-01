@@ -98,6 +98,47 @@ const Gdiplus::StringFormat& TightFormat() {
     return *fmt;
 }
 
+// True when the font actually OWNS `ch`'s glyph — GDI, marking
+// non-existing glyphs. GDI+ silently draws a font's .notdef for characters
+// it lacks, and .notdef is often BLANK ink: that is exactly how "TT Nooks
+// Trial" (a display font with no U+2019 in its cmap) made every folded
+// apostrophe vanish from the engine outputs while the QML tiles (Qt falls
+// back across fonts) kept showing them.
+bool FontOwnsGlyph(const std::string& family, bool bold, wchar_t ch) {
+    HDC hdc = CreateCompatibleDC(nullptr);
+    if (!hdc) return true;   // can't ask: assume yes (draw as before)
+    // Glyph PRESENCE is a property of the font's cmap, not of the size —
+    // a fixed height keeps this cheap and exact.
+    HFONT f = CreateFontW(-24, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL, FALSE, FALSE,
+                          FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                          CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                          DEFAULT_PITCH | FF_DONTCARE, Utf8ToWide(family).c_str());
+    if (!f) {
+        DeleteDC(hdc);
+        return true;
+    }
+    HFONT old = static_cast<HFONT>(SelectObject(hdc, f));
+    WORD index = 0;
+    const BOOL ok = GetGlyphIndicesW(hdc, &ch, 1, &index, GGI_MARK_NONEXISTING_GLYPHS);
+    SelectObject(hdc, old);
+    DeleteObject(f);
+    DeleteDC(hdc);
+    return ok && index != 0xFFFF;
+}
+
+// The wide char a codepoint's atlas cell draws AND measures: the folded
+// apostrophe renders as the typographic U+2019 WHEN the font owns it, else
+// as the ASCII quote it does have. Every site (atlas measure pass, atlas
+// draw pass, advance batch) must ask through THIS helper so wrap widths and
+// rasterized ink stay in agreement for fonts both with and without the
+// curly glyph. Call it ONCE per operation and reuse the result per loop —
+// it runs a font-metrics query.
+wchar_t AtlasCharFor(const std::string& family, bool bold, uint8_t cp) {
+    if (cp == 0x27)
+        return FontOwnsGlyph(family, bold, L'\u2019') ? L'\u2019' : L'\'';
+    return static_cast<wchar_t>(cp);
+}
+
 } // namespace
 #endif // _WIN32
 
@@ -340,7 +381,11 @@ float FontManager::SystemCharAdvance(const std::string& family, float sizePx, bo
     Gdiplus::Bitmap probe(1, 1, PixelFormat32bppARGB);
     Gdiplus::Graphics g(&probe);
     g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
-    const wchar_t ch = static_cast<wchar_t>(codepoint);
+    // Same apostrophe rule the atlas draws by (AtlasCharFor) — this single-
+    // char path measured the straight quote while the batch path measured
+    // U+2019, disagreeing with the ink whenever a style named a font
+    // lacking the curly glyph.
+    const wchar_t ch = AtlasCharFor(family, bold, codepoint);
     Gdiplus::RectF bounds;
     g.MeasureString(&ch, 1, font.get(), Gdiplus::PointF(0, 0), &TightFormat(), &bounds);
     return bounds.Width;
@@ -357,8 +402,13 @@ std::vector<float> FontManager::SystemCharAdvances(const std::string& family, fl
     g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
     std::vector<float> out;
     out.reserve(text.size());
+    // Folded apostrophes measure as the TYPOGRAPHIC glyph they'll draw as
+    // (AtlasCharFor) so wrapped line widths match the rasterized output byte
+    // for byte — and a font without U+2019 measures the ASCII quote it will
+    // actually render, never a blank .notdef advance.
+    const wchar_t quote = AtlasCharFor(family, bold, 0x27);
     for (unsigned char c : text) {
-        const wchar_t ch = static_cast<wchar_t>(c);
+        const wchar_t ch = c == 0x27 ? quote : static_cast<wchar_t>(c);
         Gdiplus::RectF bounds;
         g.MeasureString(&ch, 1, font.get(), Gdiplus::PointF(0, 0), &TightFormat(), &bounds);
         out.push_back(std::max(1.0f, bounds.Width));
@@ -383,8 +433,9 @@ RgbaImage FontManager::BuildSystemAtlas(const std::string& family, float sizePx,
     measureG.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
     std::map<uint8_t, float> advances;
     float cellW = 1.0f, cellH = sizePx * 1.4f;   // line-height-ish floor for descenders
+    const wchar_t quote = AtlasCharFor(family, bold, 0x27);
     for (int cp = 32; cp <= 126; ++cp) {
-        const wchar_t ch = static_cast<wchar_t>(cp);
+        const wchar_t ch = cp == 0x27 ? quote : static_cast<wchar_t>(cp);
         Gdiplus::RectF bounds;
         measureG.MeasureString(&ch, 1, font.get(), Gdiplus::PointF(0, 0), &TightFormat(), &bounds);
         const float adv = std::max(1.0f, bounds.Width);
@@ -396,8 +447,14 @@ RgbaImage FontManager::BuildSystemAtlas(const std::string& family, float sizePx,
     const int scH = static_cast<int>(cellH + 1.5f);
     const int cols = 16;
     const int rows = 6;   // covers 96 glyphs (32..126), same layout as BuildAtlas
+    // Cell gap: GDI+ glyph ink spills ~1-2px past its measured advance/height
+    // (antialiasing + overshoot). The old 1px packing let that spill cross
+    // into the NEIGHBOR cell's blit region — every glyph that followed a
+    // wide-ink character carried a small foreign tick (the stray
+    // "apostrophe" marks under ti/nt/ro in live text). 8px absorbs it.
+    constexpr int kCellGap = 8;
 
-    Gdiplus::Bitmap sheet(cols * (scW + 1), rows * (scH + 1), PixelFormat32bppARGB);
+    Gdiplus::Bitmap sheet(cols * (scW + kCellGap), rows * (scH + kCellGap), PixelFormat32bppARGB);
     Gdiplus::Graphics draw(&sheet);
     draw.Clear(Gdiplus::Color(0, 0, 0, 0));
     draw.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
@@ -406,9 +463,20 @@ RgbaImage FontManager::BuildSystemAtlas(const std::string& family, float sizePx,
 
     int cell = 0;
     for (int cp = 32; cp <= 126 && cell < cols * rows; ++cp, ++cell) {
-        const int cx = (cell % cols) * (scW + 1);
-        const int cy = (cell / cols) * (scH + 1);
-        const wchar_t ch = static_cast<wchar_t>(cp);
+        const int cx = (cell % cols) * (scW + kCellGap);
+        const int cy = (cell / cols) * (scH + kCellGap);
+        // The apostrophe cell draws the TYPOGRAPHIC U+2019 glyph, not the
+        // ASCII straight quote. FoldToAtlasAscii maps every ’ the transcripts
+        // use onto 0x27 so the byte-wise draw loop always hits the atlas — but
+        // rasterizing the straight quote made every one of them read as a big
+        // harsh tick (the live "the ' is too much" report) next to the QML
+        // tiles, which render the real curly glyph via Qt. Same key, prettier
+        // ink — WHEN the font owns it: a display font without U+2019 drew
+        // .notdef (blank) here and the apostrophe vanished entirely;
+        // AtlasCharFor falls back to the ASCII quote so every font shows
+        // SOMETHING for the folded apostrophe, and the measure pass above
+        // made the identical choice.
+        const wchar_t ch = cp == 0x27 ? quote : static_cast<wchar_t>(cp);
         draw.DrawString(&ch, 1, font.get(), Gdiplus::PointF(static_cast<float>(cx), static_cast<float>(cy)),
                         &TightFormat(), &white);
         FontGlyph g;
@@ -461,10 +529,23 @@ RgbaImage FontManager::BuildSystemAtlas(const std::string&, float, bool, bool,
 // TextLayout
 // ---------------------------------------------------------------------------
 
+namespace {
+// Defined below (with the other layout helpers); SplitLines is the fold's
+// first call site, so it needs the name visible up here.
+std::string FoldToAtlasAscii(const std::string& text);
+} // namespace
+
 std::vector<std::string> TextLayout::SplitLines(const std::string& text, bool rtl) {
+    // Fold to atlas ASCII up front: the draw loop (RenderEngine::DrawTextObject)
+    // steps line text BYTE-wise against an ASCII-only atlas, and the RTL path
+    // below reverses these very bytes — raw UTF-8 would both miss the atlas
+    // (the "that     s" apostrophe gap) and reverse multibyte sequences into
+    // mojibake. Every consumer of LineLayout::text draws via that loop, so
+    // folding here covers all of them.
+    const std::string folded = FoldToAtlasAscii(text);
     std::vector<std::string> lines;
     std::string cur;
-    for (char ch : text) {
+    for (char ch : folded) {
         if (ch == '\n') {
             lines.push_back(cur);
             cur.clear();
@@ -472,12 +553,107 @@ std::vector<std::string> TextLayout::SplitLines(const std::string& text, bool rt
             cur.push_back(ch);
         }
     }
-    if (!cur.empty() || text.empty()) lines.push_back(cur);
+    if (!cur.empty() || folded.empty()) lines.push_back(cur);
     if (rtl) std::reverse(lines.begin(), lines.end());
     return lines;
 }
 
 namespace {
+// Fold the Unicode punctuation the transcripts actually use (evidence: a
+// corpus-wide scan of src/downloads_vgr_txt — U+2019 715k hits, U+201C/D
+// 225k each, U+2026 127k, U+2014 94k, U+2018 8k, plus a long tail of
+// accented letters) down to the ASCII that BOTH glyph atlases contain
+// (BuildAtlas and BuildSystemAtlas rasterize codepoints 32..126 only).
+//
+// Without this, every U+2019 (') reached the layout/draw path as its 3-byte
+// UTF-8 encoding E2 80 99: none of those bytes are in the atlas, so
+// RenderEngine::DrawTextObject's per-byte glyph lookup missed three times
+// per apostrophe, each miss burning a style.size*0.6 blank advance — live
+// symptom: "that     s when" instead of "that's" on the engine-rendered
+// output (NDI), while the QML tiles (Qt's own text stack) rendered fine.
+//
+// Folding at LAYOUT ENTRY (not just at draw time) keeps every width
+// calculation — wrap points, line widths, centering — computed on exactly
+// the same characters the atlas draw loop will later step through, and
+// keeps layout cache keys (raw text) deduplicating lines that differ only
+// in punctuation flavor. Runs are scanned with a hand-rolled decoder
+// rather than std::codecvt (deprecated in C++17) or MultiByteToWideChar
+// (Windows-only; this TU also builds for the test host).
+std::string FoldToAtlasAscii(const std::string& text) {
+    bool asciiOnly = true;
+    for (unsigned char c : text)
+        if (c >= 0x80) { asciiOnly = false; break; }
+    if (asciiOnly) return text;
+
+    // UTF-8 codepoint -> ASCII replacement ('\0' slot = drop silently;
+    // reserved for control/zero-width characters we don't want a gap for).
+    const auto fold = [](uint32_t cp) -> char {
+        switch (cp) {
+            case 0x2018: case 0x2019: case 0x201B: case 0x2032:
+                return '\'';   // left/right single quotes, primes
+            case 0x201C: case 0x201D: case 0x201F:
+                return '"';    // double quotes
+            case 0x2011: case 0x2013: case 0x2014: case 0x2212:
+                return '-';     // nb-hyphen, en/em dash, minus
+            case 0x037E: return ';';  // Greek question mark (';' lookalike, in corpus)
+            case 0x2026: return '.';  // ellipsis: "…" -> "..." below
+            case 0x00A0: case 0x2007: case 0x202F:
+                return ' ';     // no-break / figure / narrow spaces
+            case 0x00A9: return 'c';  // (c)
+            case 0x00AE: return 'r';  // (r)
+            case 0x00B0: return '*';  // degree
+            case 0x2022: return '*';  // bullet
+            case 0x00AD: case 0x200B: case 0x200C: case 0x200D: case 0xFEFF:
+                return '\0';   // soft hyphen / zero-width: drop (no gap)
+            default: return '\1'; // unmapped: handled by caller
+        }
+    };
+
+    std::string out;
+    out.reserve(text.size());
+    for (size_t i = 0; i < text.size();) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c < 0x80) { out.push_back(text[i]); ++i; continue; }
+        // Decode one UTF-8 sequence (strict-ish: overlongs/invalid fall to '?' ).
+        uint32_t cp = 0;
+        size_t len = 0;
+        if ((c & 0xE0) == 0xC0 && i + 1 < text.size()
+            && (static_cast<unsigned char>(text[i + 1]) & 0xC0) == 0x80) {
+            cp = (c & 0x1Fu) << 6 | (static_cast<unsigned char>(text[i + 1]) & 0x3Fu);
+            len = 2;
+        } else if ((c & 0xF0) == 0xE0 && i + 2 < text.size()
+                   && (static_cast<unsigned char>(text[i + 1]) & 0xC0) == 0x80
+                   && (static_cast<unsigned char>(text[i + 2]) & 0xC0) == 0x80) {
+            cp = (c & 0x0Fu) << 12 | (static_cast<unsigned char>(text[i + 1]) & 0x3Fu) << 6
+                 | (static_cast<unsigned char>(text[i + 2]) & 0x3Fu);
+            len = 3;
+        } else if ((c & 0xF8) == 0xF0 && i + 3 < text.size()
+                   && (static_cast<unsigned char>(text[i + 1]) & 0xC0) == 0x80
+                   && (static_cast<unsigned char>(text[i + 2]) & 0xC0) == 0x80
+                   && (static_cast<unsigned char>(text[i + 3]) & 0xC0) == 0x80) {
+            cp = (c & 0x07u) << 18 | (static_cast<unsigned char>(text[i + 1]) & 0x3Fu) << 12
+                 | (static_cast<unsigned char>(text[i + 2]) & 0x3Fu) << 6
+                 | (static_cast<unsigned char>(text[i + 3]) & 0x3Fu);
+            len = 4;
+        } else {
+            out.push_back('?');  // invalid lead/continuation byte: one gap-char, not three
+            ++i;
+            continue;
+        }
+        const char mapped = fold(cp);
+        if (mapped == '\1') {
+            // Not in the fold table (accented letters etc.): substitute the
+            // atlas's own placeholder. One visible '?' beat three blank gaps.
+            out.push_back('?');
+        } else if (mapped != '\0') {
+            out.push_back(mapped);
+        }
+        if (cp == 0x2026) out.append("..");   // ellipsis: '.' + '..' = "..."
+        i += len;
+    }
+    return out;
+}
+
 // Uniform per-character estimate — the builtin bitmap font's only option
 // (monospace by construction), and the fallback whenever style.fontId
 // names a real font the system can't actually resolve right now.
@@ -501,21 +677,29 @@ std::vector<float> RealAdvances(const std::string& text, const TextStyle& style,
 
 float TextLayout::MeasureLine(const std::string& text, const TextStyle& style,
                               const FontManager& fonts) {
-    if (text.empty()) return 0.0f;
-    if (auto real = RealAdvances(text, style, fonts); !real.empty()) {
+    // Same fold as Measure/SplitLines — callers of this one-off measure must
+    // agree with the folded line text the atlas draw loop actually renders.
+    const std::string& folded = FoldToAtlasAscii(text);
+    if (folded.empty()) return 0.0f;
+    if (auto real = RealAdvances(folded, style, fonts); !real.empty()) {
         float w = 0.0f;
         for (float a : real) w += a;
-        return w + static_cast<float>(text.size() - 1) * style.letterSpacing;
+        return w + static_cast<float>(folded.size() - 1) * style.letterSpacing;
     }
     Font f = fonts.Resolve(style.fontId);
     const float advance = UniformAdvance(style, f);
-    return static_cast<float>(text.size()) * advance +
-           static_cast<float>(text.size() - 1) * style.letterSpacing;
+    return static_cast<float>(folded.size()) * advance +
+           static_cast<float>(folded.size() - 1) * style.letterSpacing;
 }
 
 TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& style,
                                      const FontManager& fonts) {
     TextLayoutResult result;
+    // SplitLines folds to atlas ASCII before splitting (see its comment): the
+    // RealAdvances/word-wrap/width math below indexes per-BYTE advances of the
+    // line text, and RenderEngine::DrawTextObject later walks the same line
+    // text byte-wise against an ASCII-only atlas — every stage needs exactly
+    // the folded string.
     auto raw = SplitLines(text, style.rtl);
     Font f = fonts.Resolve(style.fontId);
     const float lineHeight = style.size + style.lineSpacing;

@@ -10,11 +10,13 @@ import "."
 // pill, the Resolution mode pill and the kind-specific hint. Controlled:
 // the consumer owns kind/muted/mode and reacts to mutedToggled()/modePicked.
 //
-// The pane is LIVE for camera rows: the consumer passes previewLabel (the
-// device's roster label); the pane starts the PAL's MF Source Reader tap and
-// pumps image://videopreview/<label>?<nonce> at ~15 fps — REAL frames under
-// the glyphs, honoring the picked Resolution mode. Everything else (screen,
-// media, NDI) keeps the decorative glyph art.
+// The pane is LIVE for camera, screen AND NDI rows: the consumer passes
+// previewLabel (the device's roster label / the NDI source's full name); the
+// pane starts the PAL's MF Source Reader tap (camera) / the monitor tap
+// (screen) / the engine's NDI receiver (NDI) and pumps
+// image://videopreview/<label>?<nonce> at ~15 fps — REAL frames under the
+// glyphs. Only media keeps the decorative glyph art (a file preview is not
+// a live tap).
 //
 // Column root, like ProAudioForm: positioners auto-size from content, so
 // consumers only set width and the pane + hint stack correctly.
@@ -24,9 +26,9 @@ Column {
     // "camera" | "screen" | "media" | "ndi" — selects the glyph and the
     // pill/hint wording.
     property string kind: "camera"
-    // The source device's roster label — camera name or monitor label.
-    // non-empty + kind camera/screen turns the pane live (a real tap).
-    // Empty = decorative.
+    // The source device's roster label — camera name, monitor label, or the
+    // NDI source's full discovery name. non-empty + kind camera/screen/ndi
+    // turns the pane live (a real tap / engine receiver). Empty = decorative.
     property string previewLabel: ""
     property bool muted: false
     // Current capture-mode pick ("" = unset — the pill shows its fallback).
@@ -51,7 +53,7 @@ Column {
     // and won't re-request (the nonce changes every tick, so this only
     // matters if the pump stalls).
     property int previewNonce: 0
-    readonly property bool live: (kind === "camera" || kind === "screen")
+    readonly property bool live: (kind === "camera" || kind === "screen" || kind === "ndi")
                                  && previewLabel !== ""
     // The tap registered for THIS pane, reconciled (never assumed): switching
     // cameras changes previewLabel while live stays true, so a start wired to
@@ -78,12 +80,16 @@ Column {
         if (old !== "") {
             if (oldKind === "screen")
                 EngineBridge.stopScreenPreview(old, "dialog")
+            else if (oldKind === "ndi")
+                EngineBridge.stopNdiPreview(old, "dialog")
             else
                 EngineBridge.stopVideoPreview(old, "dialog")
         }
         if (want !== "") {
             if (kind === "screen")
                 EngineBridge.startScreenPreview(want, "dialog")
+            else if (kind === "ndi")
+                EngineBridge.startNdiPreview(want, "dialog")
             else
                 EngineBridge.startVideoPreview(want, mode, "dialog")
             previewNonce++
@@ -93,8 +99,9 @@ Column {
     // PAUSE FREES THE DEVICE: kind camera/screen + empty previewLabel OR a
     // paused pane drops the effective-live → false → reconcile stops the
     // tap (the hardware releases; the camera light goes off). Restarting is
-    // a plain re-pick.
-    readonly property bool effectiveLive: live && !muted
+    // a plain re-pick. NDI's MUTE pill is AUDIO-only (embedded-audio level),
+    // so a muted NDI pane stays live — the same rule the board row applies.
+    readonly property bool effectiveLive: live && (kind === "ndi" || !muted)
     onEffectiveLiveChanged: syncTap()
     onPreviewLabelChanged: syncTap()
     Component.onCompleted: syncTap()
@@ -185,10 +192,11 @@ Column {
         }
 
         // NDI — broadcast ripples (center dot + two rings): a
-        // network feed, not a local device.
+        // network feed, not a local device. Warm-up only — they retire
+        // once real frames flow (same rule as the camera lens).
         Item {
             anchors.centerIn: parent
-            visible: root.kind === "ndi"
+            visible: root.kind === "ndi" && !root.frameReady
             width: 56; height: 56
 
             Rectangle {

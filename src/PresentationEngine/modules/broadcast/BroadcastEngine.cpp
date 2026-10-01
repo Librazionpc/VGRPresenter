@@ -201,7 +201,14 @@ Result<void> BroadcastEngine::Shutdown() {
 
 Result<void> BroadcastEngine::Reload() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    for (auto& [name, p] : providers_) (void)p->Probe();
+    for (auto& [name, p] : providers_) {
+        // The "sdi" feature switch gates its probe: reloading with the SDK
+        // absent used to publish "DeckLink SDK not installed" at every boot
+        // (the toast spam). A switched-off provider keeps its registration
+        // and just isn't probed.
+        if (name == "sdi" && !sdiEnabled_.load()) continue;
+        (void)p->Probe();
+    }
     return Ok();
 }
 
@@ -269,6 +276,15 @@ std::vector<std::string> BroadcastEngine::ProviderNames() const {
 }
 
 Result<ProviderState> BroadcastEngine::Probe(std::string_view name) {
+    // The "sdi" feature switch gates its probe BEFORE the provider is
+    // touched: EngineBridge::enumerateDevices probes sdi on every device
+    // refresh, and without this the absent-SDK failure was published as an
+    // error toast each time. The refusal is a clean error (the UI shows it
+    // as the sdi status line), not a BroadcastProviderUnavailable event —
+    // a switched-off feature is a user choice, not a failure.
+    if (name == "sdi" && !sdiEnabled_.load())
+        return Error::Make(Err::Broadcast_Unsupported, kModule,
+                           "SDI is switched off (Settings · Plugins)");
     auto p = Find(name);
     if (!p)
         return Error::Make(Err::Broadcast_ProviderNotFound, kModule,
@@ -291,6 +307,13 @@ Result<ProviderState> BroadcastEngine::Probe(std::string_view name) {
 Result<std::vector<NdiSourceInfo>> BroadcastEngine::DiscoverNdiSources() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<NdiSourceInfo> out;
+    // The feature switch (Settings · Plugins): NDI off = no sources, ever —
+    // a network browse is exactly what the switch promises to stop.
+    if (!ndiEnabled_.load()) {
+        sourcesDiscovered_.store(0);
+        (void)EventBus::Instance().Publish(events::NdiSourcesChanged{0});
+        return out;
+    }
     // Discovery is provider-agnostic: the software provider reports loopback
     // senders; a real NDI provider reports network sources.
     for (const auto& [name, p] : providers_) {
@@ -307,6 +330,12 @@ Result<BroadcastSenderId> BroadcastEngine::CreateNdiSender(std::string_view name
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (name.empty())
         return Error::Make(Err::InvalidArgument, kModule, "sender name required");
+    // The feature switch (Settings · Plugins): NDI off refuses every
+    // NDI-shaped sender — the software loopback is NDI-shaped too, so it
+    // must not silently keep "sending" what the user switched off.
+    if (!ndiEnabled_.load())
+        return Error::Make(Err::Broadcast_Unsupported, kModule,
+                           "NDI is switched off (Settings · Plugins)");
     // Prefer a real NDI provider when it is actually usable (SDK present);
     // otherwise fall back to the always-available software loopback.
     std::shared_ptr<IBroadcastProvider> p;
@@ -385,8 +414,24 @@ std::vector<std::string> BroadcastEngine::SenderIds() const {
     return out;
 }
 
+// Delegates to the sender's own provider — the NDI provider answers from the
+// SDK's connection count; providers that can't tell return -1 (the UI hides
+// the indicator rather than guessing).
+int BroadcastEngine::SenderConnectedReceivers(std::string_view senderId) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    auto it = senders_.find(std::string(senderId));
+    if (it == senders_.end()) return -1;
+    auto p = Find(it->second);
+    return p ? p->ConnectedReceiverCount(senderId) : -1;
+}
+
 Result<BroadcastReceiverId> BroadcastEngine::CreateNdiReceiver(std::string_view sourceName) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // The feature switch (Settings · Plugins): NDI off refuses receivers as
+    // well — inputs and outputs stop together, as the switch promises.
+    if (!ndiEnabled_.load())
+        return Error::Make(Err::Broadcast_Unsupported, kModule,
+                           "NDI is switched off (Settings · Plugins)");
     std::shared_ptr<IBroadcastProvider> p;
     if (!preferredProvider_.empty()) {
         p = Find(preferredProvider_);
@@ -455,6 +500,12 @@ std::vector<std::string> BroadcastEngine::ReceiverIds() const {
 Result<std::vector<SdiDeviceInfo>> BroadcastEngine::EnumerateSdiDevices() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<SdiDeviceInfo> out;
+    // Feature switch: a disabled SDI refuses cleanly WITHOUT probing the
+    // SDK (the old path LoadLibrary'd DeckLink on every device refresh and
+    // published the failure as an error toast each time).
+    if (!sdiEnabled_.load())
+        return Error::Make(Err::Broadcast_Unsupported, kModule,
+                           "SDI is switched off (Settings · Plugins)");
     auto p = Find("sdi");
     if (!p)
         return Error::Make(Err::Broadcast_NoSdiDevices, kModule,
@@ -467,6 +518,9 @@ Result<std::vector<SdiDeviceInfo>> BroadcastEngine::EnumerateSdiDevices() {
 Result<std::string> BroadcastEngine::ConnectSdiCapture(int deviceIndex,
                                                        std::string_view graphNodeId) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!sdiEnabled_.load())
+        return Error::Make(Err::Broadcast_Unsupported, kModule,
+                           "SDI is switched off (Settings · Plugins)");
     auto p = Find("sdi");
     if (!p)
         return Error::Make(Err::Broadcast_Unsupported, kModule,
@@ -508,6 +562,7 @@ BroadcastStats BroadcastEngine::Stats() const {
 }
 
 bool BroadcastEngine::NdiAvailable() const {
+    if (!ndiEnabled_.load()) return false;
     auto p = Find("ndi");
     if (!p) return false;
     auto r = p->Probe();
@@ -516,6 +571,14 @@ bool BroadcastEngine::NdiAvailable() const {
 
 BroadcastEngine::NdiRuntimeStatus BroadcastEngine::NdiStatus() const {
     NdiRuntimeStatus st;
+    // The feature switch reports its own honest state first: the runtime may
+    // be installed and fine, but the user switched NDI off — that is neither
+    // "not installed" (nothing to download) nor an error (nothing broken).
+    if (!ndiEnabled_.load()) {
+        st.state = NdiRuntimeStatus::State::Error;
+        st.detail = "NDI is switched off in Settings · Plugins";
+        return st;
+    }
     auto p = Find("ndi");
     if (!p) {
         st.state = NdiRuntimeStatus::State::Error;
@@ -540,7 +603,67 @@ void BroadcastEngine::PreferProvider(std::string_view name) {
     preferredProvider_ = std::string(name);
 }
 
+// The feature switch, engine-side: OFF tears down everything the real NDI
+// provider owns (senders + receivers; its ShutdownProvider also drops the
+// persistent discovery finder), then re-registers a FRESH provider so the
+// next ON re-opens the SDK cleanly. The software loopback stays registered
+// (tests and non-NDI plumbing rely on it) but its NDI-shaped paths above
+// are gated by the same switch.
+void BroadcastEngine::SetNdiEnabled(bool enabled) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const bool was = ndiEnabled_.exchange(enabled);
+    if (was == enabled) return;
+    if (enabled) {
+        Logger::Instance().Info("[ndi] NDI switched on (Settings · Plugins)", kModule);
+        return;
+    }
+    Logger::Instance().Info("[ndi] NDI switched off (Settings · Plugins) — tearing down senders/receivers", kModule);
+    std::vector<std::string> toStop;
+    toStop.reserve(senders_.size());
+    for (const auto& [id, provider] : senders_)
+        if (provider == "ndi") toStop.push_back(id);
+    for (const auto& id : toStop) (void)StopSender(id);   // publishes sender-stopped
+    std::vector<std::string> toDrop;
+    toDrop.reserve(receivers_.size());
+    for (const auto& [id, provider] : receivers_)
+        if (provider == "ndi") toDrop.push_back(id);
+    for (const auto& id : toDrop) (void)DisconnectReceiver(id);
+    // Fresh provider: closes the SDK handles (incl. the persistent finder)
+    // and re-enters the registry under the same name.
+    auto ndi = Find("ndi");
+    if (ndi) {
+        (void)ndi->ShutdownProvider();
+        providers_.erase("ndi");
+    }
+    (void)RegisterProviderLocked(MakeNdiProvider());
+    (void)EventBus::Instance().Publish(events::NdiSourcesChanged{0});
+}
+
+// The "sdi" feature switch, engine-side. OFF (the default) keeps every sdi
+// path at a clean refusal without probing the DeckLink SDK — the absent-
+// library probe used to run on every device refresh and publish "DeckLink
+// SDK not installed" as an error toast each time (the spam report). ON just
+// opens the gate; the next enumerate/refresh re-opens the SDK on demand.
+// Going OFF drops any live captures (same teardown contract as NDI's).
+void BroadcastEngine::SetSdiEnabled(bool enabled) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const bool was = sdiEnabled_.exchange(enabled);
+    if (was == enabled) return;
+    if (enabled) {
+        Logger::Instance().Info("[sdi] SDI switched on (Settings · Plugins)", kModule);
+        return;
+    }
+    Logger::Instance().Info("[sdi] SDI switched off (Settings · Plugins) — dropping live captures", kModule);
+    std::vector<std::string> toDrop;
+    toDrop.reserve(sdiCaptures_.size());
+    for (const auto& [id, provider] : sdiCaptures_) toDrop.push_back(id);
+    for (const auto& id : toDrop) (void)DisconnectSdiCapture(id);
+}
+
 bool BroadcastEngine::SdiAvailable() const {
+    // The feature switch gates the SDK probe: a disabled SDI reports
+    // not-available without ever touching libDeckLinkAPI.
+    if (!sdiEnabled_.load()) return false;
     auto p = Find("sdi");
     if (!p) return false;
     auto r = p->Probe();

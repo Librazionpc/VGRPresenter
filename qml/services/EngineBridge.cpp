@@ -8,23 +8,33 @@
 #include "modules/broadcast/BroadcastEngine.hpp"
 #include "modules/production/AudioMixer.hpp"
 #include "modules/production/ProductionEngine.hpp"
+#include "modules/adaptive/AdaptiveRuntime.hpp"
+#include "modules/display/DisplayEngine.hpp"
+#include "modules/display/Providers.hpp"
 #include "models/AudioInputListModel.h"
 #include "platform/PlatformAccessor.hpp"
+#include "services/LiveOutputService.h"
+#include "services/SettingsService.h"
 
 #include <QCoreApplication>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QDateTime>
 #include <QDebug>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
 #include <QJSEngine>
+#include <QStringList>
 #include <QQmlEngine>
 #include <QPointer>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QThreadPool>
 #include <QUrl>
 #include <QVariantMap>
 
+#include <algorithm>
 #include <cmath>
 
 #include <atomic>
@@ -190,6 +200,61 @@ bool EngineBridge::boot()
     // selects read audioDevices/screenDevices instead of mock lists, and the
     // hot-plug subscriptions above keep them current from here on.
     enumerateDevices();
+
+    // (The firewall ask no longer reads a persisted flag here — it gates on
+    // the rule itself; see requestNdiFirewallAccess.)
+
+    // The Plugins screen's switches are SETTINGS, not just UI state: replay
+    // the persisted feature states into the engine's registry once, after
+    // boot's auto-evaluation has run (so a user's explicit ON outranks the
+    // runtime's auto-OFF, matching the screen's own mental model), then
+    // publish. A switch the user flipped last session re-applies here.
+    if (SettingsService *settings = SettingsService::instancePtr()) {
+        const QString blob = settings->value(QStringLiteral("plugins.featureStates")).toString();
+        if (!blob.isEmpty()) {
+            const QJsonDocument doc = QJsonDocument::fromJson(blob.toUtf8());
+            if (doc.isObject()) {
+                auto &runtime = bps::adaptive::AdaptiveRuntime::Instance();
+                const QJsonObject states = doc.object();
+                for (auto it = states.begin(); it != states.end(); ++it) {
+                    (void)runtime.SetFeatureEnabled(it.key().toStdString(), it.value().toBool());
+                    // The broadcast gates ride the registry: replay the NDI
+                    // and SDI entries into the engine before anything touches
+                    // the network/capture stacks.
+                    if (it.key().compare(QLatin1String("ndi"), Qt::CaseInsensitive) == 0)
+                        (void)bps::broadcast::BroadcastEngine::Instance().SetNdiEnabled(
+                            it.value().toBool());
+                    else if (it.key().compare(QLatin1String("sdi"), Qt::CaseInsensitive) == 0)
+                        (void)bps::broadcast::BroadcastEngine::Instance().SetSdiEnabled(
+                            it.value().toBool());
+                }
+            }
+        }
+    }
+    // UNCONDITIONAL sync, even with nothing saved yet (a fresh install):
+    // BroadcastEngine::ndiEnabled_ is its OWN independent flag, not read
+    // from the registry automatically — without this, a fresh install
+    // could show the Plugins toggle off (the registry's real default) while
+    // the broadcast stack's actual gate stayed at ITS OWN separate default,
+    // letting NDI genuinely send/receive despite the switch reading off.
+    // Every other NDI entry point (taps, sends, discovery) already checks
+    // BroadcastEngine::ndiEnabled_ centrally, so keeping THIS one flag
+    // truthful is what makes that check mean anything.
+    {
+        auto ndiState = bps::adaptive::AdaptiveRuntime::Instance().GetFeatureState("ndi");
+        const bool ndiOn = ndiState.ok() && ndiState.value() == bps::adaptive::FeatureState::Enabled;
+        bps::broadcast::BroadcastEngine::Instance().SetNdiEnabled(ndiOn);
+    }
+    // Same unconditional sync for sdi: BroadcastEngine's gate is its OWN
+    // flag (default off — the spam-proof state), and the registry's default
+    // for a fresh install is off too, so both agree. A user who switched ON
+    // re-applies via the replay above.
+    {
+        auto sdiState = bps::adaptive::AdaptiveRuntime::Instance().GetFeatureState("sdi");
+        const bool sdiOn = sdiState.ok() && sdiState.value() == bps::adaptive::FeatureState::Enabled;
+        bps::broadcast::BroadcastEngine::Instance().SetSdiEnabled(sdiOn);
+    }
+    emit pluginFeaturesChanged();
 
     // REPLAY the kernel's CURRENT state into the relay. The Booting → Running
     // transition was published on the engine's bus DURING Boot() — before any
@@ -510,55 +575,28 @@ void EngineBridge::enumerateDevices()
         ndiStatus_.clear();
         ndiVersion_.clear();
         ndiState_ = QStringLiteral("unknown");
+        // The "ndi" feature switch first: a deliberate OFF is its own state
+        // ("disabled"), distinct from "notInstalled" (nothing to download)
+        // and "error" (nothing broken) — the notice component stays quiet
+        // for it and the Plugins row reads amber "Installed", not red.
         if (booted()) {
-            auto &broadcast = bps::broadcast::BroadcastEngine::Instance();
-            using NdiState = bps::broadcast::BroadcastEngine::NdiRuntimeStatus::State;
-            const auto ndi = broadcast.NdiStatus();
-            ndiAvailable_ = ndi.state == NdiState::Ready;
-            switch (ndi.state) {
-            case NdiState::Ready:
-                ndiState_ = QStringLiteral("ready");
-                ndiVersion_ = qstr(ndi.version);
-                break;
-            case NdiState::NotInstalled:
-                // The actionable case: the UI offers the download page.
-                ndiState_ = QStringLiteral("notInstalled");
-                ndiStatus_ = QStringLiteral("The NDI runtime isn't installed on this computer.");
-                break;
-            case NdiState::Error:
-                ndiState_ = QStringLiteral("error");
-                ndiStatus_ = qstr(ndi.detail);
-                break;
-            }
-            if (ndiAvailable_) {
-                auto sources = broadcast.DiscoverNdiSources();
-                if (sources.ok()) {
-                    for (const auto &s : sources.value()) {
-                        const QString nm = qstr(s.name);
-                        ndiSources_.append(QVariantMap{
-                            {QStringLiteral("id"), qstr(s.urlAddress)},
-                            {QStringLiteral("label"), nm},
-                            {QStringLiteral("value"), nm},
-                            {QStringLiteral("url"), qstr(s.urlAddress)},
-                        });
-                    }
-                    // First discovery pass after the finder's creation is
-                    // usually empty (the SDK browses in the background) —
-                    // one deferred re-query lets the cache warm up without
-                    // blocking this one.
-                    // Once per refreshDevices()/boot — the re-query itself must not
-                    // re-arm, or an empty network loops forever (and re-runs the
-                    // camera enumeration each pass).
-                    if (ndiSources_.isEmpty() && !ndiRetried_) {
-                        ndiRetried_ = true;
-                        QTimer::singleShot(1200, this, [this]() { if (booted()) enumerateDevices(); });
-                    }
-                } else {
-                    ndiAvailable_ = false;
-                    ndiStatus_ = QString::fromStdString(sources.error().message);
-                }
+            auto ndiState = bps::adaptive::AdaptiveRuntime::Instance().GetFeatureState("ndi");
+            const bool ndiFeatureOn = ndiState.ok()
+                && ndiState.value() == bps::adaptive::FeatureState::Enabled;
+            if (!ndiFeatureOn) {
+                ndiState_ = QStringLiteral("disabled");
+                ndiStatus_ = QStringLiteral("NDI is switched off in Settings · Plugins.");
             }
         }
+        // The probe itself moved OFF this thread (probeNdiAsync below): the
+        // first successful check runtime-loads + NDIlib_initialize's the whole
+        // NDI runtime inline, and discovery blocks on the finder — running
+        // that between a mouse click and the next GUI paint is what took the
+        // app down on the Plugins screen's "check again" button. Only the
+        // cheap feature gate above stays synchronous; results arrive via
+        // devicesChanged once the worker finishes.
+        if (booted() && ndiState_ != QStringLiteral("disabled"))
+            probeNdiAsync();
 
         // ---- SDI (DeckLink) — the same honest-runtime treatment as NDI ----
         // The engine's SDI provider resolves the SDK at runtime; an absent
@@ -569,6 +607,15 @@ void EngineBridge::enumerateDevices()
         sdiAvailable_ = false;
         sdiStatus_.clear();
         auto &broadcast2 = bps::broadcast::BroadcastEngine::Instance();
+        // The "sdi" feature switch gates the whole probe: with the plugin
+        // off (the default), no DeckLink SDK resolve happens at all — the
+        // absent-library failure used to toast "Stream provider unavailable"
+        // on every device refresh. The status line says where to flip it.
+        if (!broadcast2.SdiEnabled()) {
+            sdiStatus_ = QStringLiteral("SDI is switched off (Settings · Plugins).");
+            emit devicesChanged();
+            return;
+        }
         auto sdiProvider = broadcast2.Probe("sdi");
         if (sdiProvider.ok() && sdiProvider.value() == bps::broadcast::ProviderState::Available) {
             auto devices = broadcast2.EnumerateSdiDevices();
@@ -597,6 +644,95 @@ void EngineBridge::enumerateDevices()
     emit devicesChanged();
 }
 
+// NDI runtime probe + source discovery OFF the GUI thread. Runs on the global
+// QThreadPool; results land back on the GUI thread through a queued
+// invokeMethod that republishes every ndi* property and fires devicesChanged.
+// Everything expensive happens on the worker: LoadLibrary of the NDI runtime,
+// NDIlib_initialize (first successful check of a session), and the blocking
+// discovery pass. BroadcastEngine serializes these against its own callers
+// (recursive mutex), and the SDK is thread-safe once initialized, so a probe
+// in flight while the user goes live is exactly as safe as the old inline
+// version — minus the GUI-thread stall.
+void EngineBridge::probeNdiAsync()
+{
+    if (!booted()) return;
+    bool expected = false;
+    if (!ndiProbeBusy_.compare_exchange_strong(expected, true))
+        return;   // a probe is already in flight; it publishes fresh state itself
+
+    QPointer<EngineBridge> guard(this);
+    QThreadPool::globalInstance()->start([guard]() {
+        auto &broadcast = bps::broadcast::BroadcastEngine::Instance();
+        using NdiState = bps::broadcast::BroadcastEngine::NdiRuntimeStatus::State;
+
+        const auto ndi = broadcast.NdiStatus();
+        bool available = ndi.state == NdiState::Ready;
+        QString state, status, version;
+        QVariantList sources;
+        switch (ndi.state) {
+        case NdiState::Ready:
+            state = QStringLiteral("ready");
+            version = qstr(ndi.version);
+            break;
+        case NdiState::NotInstalled:
+            // The actionable case: the UI offers the download page.
+            state = QStringLiteral("notInstalled");
+            status = QStringLiteral("The NDI runtime isn't installed on this computer.");
+            break;
+        case NdiState::Error:
+            state = QStringLiteral("error");
+            status = qstr(ndi.detail);
+            break;
+        }
+        if (available) {
+            auto found = broadcast.DiscoverNdiSources();
+            if (found.ok()) {
+                for (const auto &s : found.value()) {
+                    const QString nm = qstr(s.name);
+                    sources.append(QVariantMap{
+                        {QStringLiteral("id"), qstr(s.urlAddress)},
+                        {QStringLiteral("label"), nm},
+                        {QStringLiteral("value"), nm},
+                        {QStringLiteral("url"), qstr(s.urlAddress)},
+                    });
+                }
+            } else {
+                available = false;
+                state = QStringLiteral("error");
+                status = QString::fromStdString(found.error().message);
+            }
+        }
+
+        // Apply on the GUI thread: the ndi* members back Q_PROPERTY reads and
+        // devicesChanged is a GUI-thread signal. invokeMethod with `this` as
+        // the context object drops the call entirely if this object is
+        // destroyed before it runs; the QPointer re-check is the same guard
+        // made explicit.
+        QMetaObject::invokeMethod(guard, [guard, available, state, status, version,
+                                          sources]() mutable {
+            if (!guard) return;
+            EngineBridge *self = guard.data();
+            self->ndiAvailable_ = available;
+            self->ndiState_ = state;
+            self->ndiStatus_ = status;
+            self->ndiVersion_ = version;
+            self->ndiSources_ = sources;
+            // First discovery pass after the finder's creation is usually
+            // empty (the SDK browses in the background) — deferred re-queries
+            // let the cache warm up. Two retries (~1.2s and ~3.6s after the
+            // first pass), NDI-side only now (the old chain re-ran the whole
+            // camera enumeration per pass); the cap keeps an empty network
+            // from looping forever.
+            if (available && sources.isEmpty() && self->ndiRetries_ < 2) {
+                ++self->ndiRetries_;
+                QTimer::singleShot(1200, self, [self]() { self->probeNdiAsync(); });
+            }
+            self->ndiProbeBusy_ = false;
+            emit self->devicesChanged();
+        }, Qt::QueuedConnection);
+    });
+}
+
 // Where the vendor's runtime is downloaded (NDI Tools includes it). Kept here,
 // not in QML, so there is exactly one place to update if the vendor moves it.
 QString EngineBridge::ndiDownloadUrl() const
@@ -604,9 +740,215 @@ QString EngineBridge::ndiDownloadUrl() const
     return QStringLiteral("https://ndi.video/tools/");
 }
 
+// ============================================================================
+// The ENGINE's feature registry as the Plugins screen's data source. The
+// AdaptiveRuntime registers every built-in feature ("ndi", "streaming",
+// "cloud", ...) against the machine's real contract at boot; the screen's
+// toggle reads/writes THAT state, so "Active/Installed" is the engine's own
+// fact — and a flipped switch actually turns the subsystem on or off (the
+// broadcast stack honors the "ndi" entry, see ndiRuntimeUsable() and
+// enumerateDevices()' gated discovery below).
+// ============================================================================
+QVariantList EngineBridge::pluginFeatures() const
+{
+    QVariantList out;
+    if (!booted())
+        return out;
+    for (const auto &f : bps::adaptive::AdaptiveRuntime::Instance().Features()) {
+        out.append(QVariantMap{
+            {QStringLiteral("id"), QString::fromStdString(f.id)},
+            {QStringLiteral("name"), QString::fromStdString(f.name)},
+            {QStringLiteral("enabled"), f.state == bps::adaptive::FeatureState::Enabled},
+            {QStringLiteral("defaultEnabled"), f.enabledByDefault},
+        });
+    }
+    return out;
+}
+
+void EngineBridge::setPluginFeatureEnabled(const QString &featureId, bool enabled)
+{
+    if (!booted())
+        return;
+    auto &runtime = bps::adaptive::AdaptiveRuntime::Instance();
+    auto r = enabled ? runtime.SetFeatureEnabled(featureId.toStdString(), true)
+                     : runtime.SetFeatureEnabled(featureId.toStdString(), false);
+    if (!r.ok()) {
+        qWarning("EngineBridge: feature '%s' not registered — switch ignored",
+                 qUtf8Printable(featureId));
+        return;
+    }
+    // The broadcast stack learns the flip immediately: a disabled "ndi"
+    // tears down live senders/receivers (the discovery roster empties and
+    // the NDI output tile stops sending); "sdi" opens/closes the DeckLink
+    // gate and re-runs the device roster so the AV board's SDI rows appear
+    // (ON) or blank out (OFF) without waiting for a hot-plug event.
+    if (featureId.compare(QLatin1String("ndi"), Qt::CaseInsensitive) == 0)
+        applyNdiFeatureState(enabled);
+    else if (featureId.compare(QLatin1String("sdi"), Qt::CaseInsensitive) == 0) {
+        bps::broadcast::BroadcastEngine::Instance().SetSdiEnabled(enabled);
+        enumerateDevices();
+    }
+    emit pluginFeaturesChanged();
+}
+
+// The "ndi" feature's runtime effect. Disabling pushes the gate down into
+// the ENGINE's BroadcastEngine (its NDI-shaped sender/receiver/discovery
+// paths refuse, live teardown runs, NdiStatus reports the switch) AND tears
+// the UI's receiver taps down; re-enabling re-opens the gate — the next
+// take/discovery re-opens the SDK on demand.
+void EngineBridge::applyNdiFeatureState(bool enabled)
+{
+    auto &broadcast = bps::broadcast::BroadcastEngine::Instance();
+    broadcast.SetNdiEnabled(enabled);
+    // Re-run discovery so the roster reflects the flip immediately (both
+    // ways: refill on ON, empty on OFF).
+    ndiRetries_ = 0;
+    enumerateDevices();
+    if (enabled)
+        return;
+    // Release every NDI receiver tap (owners included — the feature gate
+    // outranks any held preview; a re-enable re-takes from the UI).
+    if (broadcast.NdiStatus().state
+        == bps::broadcast::BroadcastEngine::NdiRuntimeStatus::State::Ready) {
+        for (const QString &recvId : ndiTaps_.values())
+            (void)broadcast.DisconnectReceiver(recvId.toStdString());
+    }
+    for (const QString &name : ndiTaps_.keys())   // keys() copies — removal-safe
+        previewOwners_.remove(name);
+    ndiTaps_.clear();
+    // LiveOutputService drops the OUTPUT take itself (the tiles' inputLabel
+    // clears and the compositor layer comes off with it). Discovery was
+    // already re-run above (before this teardown) — SetNdiEnabled(false)
+    // already emptied it, so a second enumerateDevices() here re-did the
+    // exact same work for nothing.
+    LiveOutputService::instance().clearNdiInput();
+}
+
 void EngineBridge::openNdiDownloadPage()
 {
     QDesktopServices::openUrl(QUrl(ndiDownloadUrl()));
+}
+
+// Connected-receiver telemetry: the live poll's 100 ms cadence is overkill
+// for an mDNS-level counter — 1 s is plenty and this piggybacks on the
+// existing poll thread instead of owning another timer.
+void EngineBridge::refreshNdiConnections()
+{
+    int connected = -1;
+    if (booted()) {
+        auto *provider = []() -> bps::display::NdiDisplayProvider * {
+            auto p = bps::display::DisplayEngine::Instance().Provider("Ndi");
+            return p ? dynamic_cast<bps::display::NdiDisplayProvider *>(p.get()) : nullptr;
+        }();
+        if (provider) {
+            const std::string senderId = provider->SenderId();
+            if (!senderId.empty())
+                connected = bps::broadcast::BroadcastEngine::Instance()
+                                .SenderConnectedReceivers(senderId);
+        }
+    }
+    if (connected != ndiConnectedReceivers_) {
+        ndiConnectedReceivers_ = connected;
+        emit ndiConnectedReceiversChanged();
+    }
+}
+
+// ============================================================================
+// Firewall authorization for INBOUND NDI connections.
+//
+// Why this exists: NDI receiving is outbound-only (works through any default
+// firewall) but NDI SENDING needs other machines to connect TO us — inbound
+// — which every desktop firewall blocks new apps for by default. Windows
+// shows its own "Windows Security Alert" prompt the first time an app opens
+// a listening port, but a missed/dismissed prompt never re-appears and the
+// app then sends frames that nobody receives, silently. requestNdiFirewall
+// Access() makes the request explicit and re-runnable.
+//
+// The actual platform mechanics (Windows Firewall + UAC, Linux ufw/
+// firewalld detection, macOS not-yet-implemented) live in the PAL's
+// INetwork::ProbeInboundAccess/RequestInboundAccess — this is genuinely
+// platform-specific system behavior, not something that belongs hardcoded
+// in the Qt bridge layer behind a `#if Q_OS_WIN`. This function is just the
+// QML-facing string contract on top of that.
+//
+// "DNS access" needs nothing separate: NDI discovery is mDNS multicast
+// (UDP 5353) which is also network traffic FROM this app — the same
+// program-scoped rule covers it, and no separate DNS permission exists on
+// any of these platforms.
+// ============================================================================
+
+namespace { constexpr const char *kNdiFirewallRule = "VGR Presenter NDI"; }
+
+QString EngineBridge::requestNdiFirewallAccess()
+{
+    if (!bps::platform::PlatformAccessor::Installed()) {
+        EngineBridge::write(QStringLiteral("warning"), QStringLiteral("NDI firewall"),
+                            QStringLiteral("platform network layer unavailable — cannot check or add the rule"));
+        return QStringLiteral("unavailable");
+    }
+    auto &net = bps::platform::PlatformAccessor::Get().Network();
+    const std::string app = QCoreApplication::applicationFilePath().toStdString();
+    const std::string desc = "Allows other computers to receive this app's NDI video";
+    using Access = bps::platform::INetwork::FirewallAccess;
+    using Outcome = bps::platform::INetwork::FirewallRequestOutcome;
+
+    // The firewall RULE ITSELF is the saved permission, not a settings flag:
+    // probe first (one hidden netsh child, only until access is confirmed)
+    // and stay quiet when the rule already exists. This also self-heals — a
+    // user who refused the OS prompt once gets asked again next time it
+    // matters, instead of a persisted flag silencing the ask forever.
+    if (net.ProbeInboundAccess(app, kNdiFirewallRule) == Access::Allowed) {
+        if (!ndiFirewallPrompted_) {
+            ndiFirewallPrompted_ = true;   // session-only anti-nag (see header)
+            emit ndiFirewallPromptedChanged();
+        }
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("NDI firewall"),
+                            QStringLiteral("rule already present — no prompt needed"));
+        return QStringLiteral("allowed");
+    }
+
+    // Ask at most once per session (the QML gates on ndiFirewallPrompted,
+    // which is deliberately NOT persisted any more — see above).
+    if (!ndiFirewallPrompted_) {
+        ndiFirewallPrompted_ = true;
+        emit ndiFirewallPromptedChanged();
+    }
+
+    // Every attempt is observable now: the elevated step's refusals are
+    // fire-and-forget, so without these lines a request that didn't land
+    // was indistinguishable from one that did.
+    std::string diag;
+    const Outcome outcome = net.RequestInboundAccess(app, kNdiFirewallRule, desc, &diag);
+    const QStringList lines = QString::fromStdString(diag).split('\n', Qt::SkipEmptyParts);
+    for (const QString &line : lines)
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("NDI firewall"), line.trimmed());
+
+    const char *text = "failed";
+    switch (outcome) {
+        case Outcome::Added:       text = "added";       break;
+        case Outcome::Prompted:    text = "prompt";      break;   // verdict lands async
+        case Outcome::Denied:      text = "denied";      break;
+        case Outcome::Failed:      text = "failed";      break;
+        case Outcome::Unavailable: text = "unavailable"; break;
+    }
+    EngineBridge::write(outcome == Outcome::Added || outcome == Outcome::Prompted
+                            ? QStringLiteral("info") : QStringLiteral("warning"),
+                        QStringLiteral("NDI firewall"),
+                        QStringLiteral("request outcome: %1").arg(QLatin1String(text)));
+    return QLatin1String(text);
+}
+
+// The elevated add (Windows: UAC) resolves AFTER requestNdiFirewallAccess()
+// returned (the user still has the consent dialog up). This re-probes so the
+// UI can confirm success and stop retrying once the rule is actually there.
+bool EngineBridge::checkNdiFirewallRule()
+{
+    if (!bps::platform::PlatformAccessor::Installed())
+        return false;
+    auto &net = bps::platform::PlatformAccessor::Get().Network();
+    const std::string app = QCoreApplication::applicationFilePath().toStdString();
+    return net.ProbeInboundAccess(app, kNdiFirewallRule)
+           == bps::platform::INetwork::FirewallAccess::Allowed;
 }
 
 // "I installed it — check again": bypasses refreshDevices()'s throttle so the
@@ -614,7 +956,7 @@ void EngineBridge::openNdiDownloadPage()
 void EngineBridge::recheckNdi()
 {
     lastEnumerationMs_ = 0;
-    ndiRetried_ = false;
+    ndiRetries_ = 0;
     enumerateDevices();
 }
 
@@ -629,7 +971,7 @@ void EngineBridge::refreshDevices()
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (lastEnumerationMs_ > 0 && now - lastEnumerationMs_ < kMinRefreshGapMs)
         return;
-    ndiRetried_ = false;
+    ndiRetries_ = 0;
     enumerateDevices();
 }
 
@@ -997,8 +1339,18 @@ QImage EngineBridge::VideoPreviewProvider::requestImage(const QString &id, QSize
     if (queryAt >= 0)
         path.truncate(queryAt);
     const QString label = QUrl::fromPercentEncoding(path.toUtf8());
-    const QString devId = owner_->previewIds_.value(label);
-    if (devId.isEmpty()) {
+    QImage frame;
+    if (owner_->previewIds_.contains(label)) {
+        // Camera/screen tap: drain the PAL's newest JPEG through the usual
+        // label→engine-id translation.
+        const QString devId = owner_->previewIds_.value(label);
+        frame = owner_->latestPreviewFrame(devId.isEmpty() ? id : devId);
+    } else if (owner_->ndiTaps_.contains(label)) {
+        // NDI receiver tap: drain the engine's newest UYVY/BGRA frame and
+        // convert — the SAME provider URL the tiles/cards already pump, so
+        // NDI inputs ride the exact preview pipeline camera feeds do.
+        frame = owner_->previewNdiFrameFor(label);
+    } else {
         // One warning per label per session — a missing tap is a wiring
         // bug (start never ran / a different label spelling), not a warm-up.
         if (!owner_->previewNoTapWarned_.contains(label)) {
@@ -1006,8 +1358,8 @@ QImage EngineBridge::VideoPreviewProvider::requestImage(const QString &id, QSize
             qWarning("EngineBridge: preview requested for '%s' but no tap was started",
                      qUtf8Printable(label));
         }
+        frame = owner_->latestPreviewFrame(id);
     }
-    QImage frame = owner_->latestPreviewFrame(devId.isEmpty() ? id : devId);
     // One-shot per label: did the provider actually SERVE a frame through
     // the label→id translation? (Decoded-frames-in-cache but a dark pane
     // means this never fired with the pane's label.)
@@ -1162,6 +1514,21 @@ bool EngineBridge::inputSourceReachable(const QString &label, const QString &kin
         for (const auto &d : video.Enumerate())
             if (qstr(d.name).trimmed().compare(want, Qt::CaseInsensitive) == 0)
                 return true;
+        return false;
+    }
+    if (kind == QLatin1String("ndi")) {
+        // A source is reachable while the engine's discovery roster knows
+        // it (the same full-name string the roster stores). An NDI runtime
+        // that isn't usable makes every source unreachable — the card's
+        // slashed state then reads honestly instead of offering a take
+        // that could never produce frames.
+        if (!booted() || !ndiAvailable_)
+            return false;
+        for (const QVariant &v : ndiSources_) {
+            const QVariantMap d = v.toMap();
+            if (d.value("label").toString().trimmed().compare(want, Qt::CaseInsensitive) == 0)
+                return true;
+        }
         return false;
     }
     if (kind == QLatin1String("audio")) {
@@ -1352,6 +1719,144 @@ void EngineBridge::stopAllVideoPreviews()
     previewIds_.clear();
     previewModes_.clear();
     previewOwners_.clear();
+    // The NDI receivers are ENGINE objects, not PAL taps — the AV screen's
+    // teardown releases them here too, so a settings-screen close can never
+    // leak a live network receiver.
+    if (bps::broadcast::BroadcastEngine::Instance().NdiStatus().state
+        == bps::broadcast::BroadcastEngine::NdiRuntimeStatus::State::Ready) {
+        for (const QString &recvId : ndiTaps_.values())
+            (void)bps::broadcast::BroadcastEngine::Instance().DisconnectReceiver(
+                recvId.toStdString());
+    }
+    ndiTaps_.clear();
+}
+
+// ============================================================================
+// Live NDI receiver tap — the input half of the broadcast stack. The NDI
+// source's full discovery name ("<HOST> (<sender>)") is the tap key, the
+// same string the roster stores as its sublabel; the engine receiver is
+// created through the BroadcastEngine's NDI provider (which runtime-loads
+// the vendor SDK) and pulled non-blocking on every frame request. Owner
+// counting rides the shared previewOwners_ table keyed by the raw source
+// name (see ndiTaps_'s own comment on why that's not a collision risk) so a
+// card preview and an output take (or two dialogs) can hold the same source
+// without fighting — the receiver dies with its last owner, exactly like a
+// camera tap.
+// ============================================================================
+bool EngineBridge::startNdiPreview(const QString &sourceName, const QString &owner)
+{
+    const QString want = sourceName.trimmed();
+    if (want.isEmpty())
+        return false;
+    auto &owners = previewOwners_[want];
+    if (!owners.contains(owner))
+        owners.insert(owner);
+    if (ndiTaps_.contains(want))
+        return true;   // already attached — this owner just joined
+    if (!booted()) {
+        qWarning("EngineBridge: NDI preview requested for '%s' but the engine is not booted",
+                 qUtf8Printable(want));
+        return false;
+    }
+    auto &broadcast = bps::broadcast::BroadcastEngine::Instance();
+    auto recv = broadcast.CreateNdiReceiver(want.toStdString());
+    if (!recv.ok()) {
+        // Runtime absent / SDK load failure / receiver refused: undo the
+        // owner claim so a later start (after recheckNdi()) can try again,
+        // and surface the reason in the log (the UI keeps its warm-up
+        // placeholder — never a fake feed).
+        qWarning("EngineBridge: NDI receiver failed for '%s': %s",
+                 qUtf8Printable(want), recv.error().message.c_str());
+        auto it = previewOwners_.find(want);
+        if (it != previewOwners_.end()) {
+            it->remove(owner);
+            if (it->isEmpty())
+                previewOwners_.erase(it);
+        }
+        return false;
+    }
+    const QString recvId = qstr(recv.value());   // engine id (std::string) → QString
+    ndiTaps_.insert(want, recvId);
+    qInfo("EngineBridge: NDI receiver '%s' -> %s started", qUtf8Printable(want),
+          qUtf8Printable(recvId));
+    return true;
+}
+
+void EngineBridge::stopNdiPreview(const QString &sourceName, const QString &owner)
+{
+    const QString want = sourceName.trimmed();
+    auto it = previewOwners_.find(want);
+    if (it == previewOwners_.end())
+        return;
+    it->remove(owner);
+    if (!it->isEmpty())
+        return;   // another consumer still holds this source
+    previewOwners_.erase(it);
+    const QString recvId = ndiTaps_.take(want);
+    if (!recvId.isEmpty() && booted())
+        (void)bps::broadcast::BroadcastEngine::Instance().DisconnectReceiver(recvId.toStdString());
+}
+
+QImage EngineBridge::previewNdiFrameFor(const QString &sourceName)
+{
+    const QString want = sourceName.trimmed();
+    const QString recvId = ndiTaps_.value(want);
+    if (recvId.isEmpty() || !booted())
+        return {};   // no receiver / engine gone — the caller keeps its placeholder
+    auto &broadcast = bps::broadcast::BroadcastEngine::Instance();
+    bps::broadcast::VideoFrameInfo info;
+    std::vector<uint8_t> payload;
+    auto r = broadcast.ReceiveFrame(recvId.toStdString(), info, payload);
+    if (!r.ok() || !r.value() || payload.empty() || info.width == 0 || info.height == 0)
+        return {};   // nothing new this tick (non-blocking capture) — warm-up or steady state
+
+    // UYVY (2 bytes/px, Y0 U Y1 V) or BGRA/RGBA (4 bytes/px) → RGBA8 for
+    // the QML image pipeline (Format_RGBA8888, the SAME layout the live
+    // preview provider hands out). Rows may carry a stride; honor it.
+    const int bpp = info.fourCC == 0x59565955 ? 2 : 4;
+    const size_t stride = payload.size() / info.height;
+    QImage out(int(info.width), int(info.height), QImage::Format_RGBA8888);
+    for (uint32_t y = 0; y < info.height; ++y) {
+        const uint8_t *row = payload.data() + y * stride;
+        uchar *dst = out.scanLine(int(y));
+        for (uint32_t x = 0; x < info.width; ++x) {
+            if (bpp == 2) {
+                // UYVY packs chroma per PIXEL PAIR (Y0 U Y1 V): even pixels
+                // own the pair's U/V, odd pixels reuse the preceding pair's
+                // (reading x*2+2 on the LAST pixel would run one byte past
+                // the final row when the buffer is tightly packed).
+                const uint8_t Y = row[x * 2];
+                // Chroma reads clamped into the row: an even pixel owns the
+                // pair's U/V, an odd pixel reuses the preceding pair's (and
+                // a pathological odd-width frame can't read past the end).
+                const size_t rowBytes = std::min(stride, size_t(info.width) * 2);
+                const uint8_t u = (x & 1) != 0 ? row[x * 2 - 1]
+                                               : row[std::min(size_t(x) * 2 + 1, rowBytes - 1)];
+                const uint8_t v = (x & 1) != 0 ? row[x * 2 - 2]
+                                               : row[std::min(size_t(x) * 2 + 2, rowBytes - 1)];
+                const int Cb = int(u) - 128;
+                const int Cr = int(v) - 128;
+                // BT.601, full range — the conversion the display engine's
+                // own RGBA→UYVY uses, inverted.
+                const int R = Y + (91881 * Cr >> 16);
+                const int G = Y - ((22554 * Cb + 46802 * Cr) >> 16);
+                const int B = Y + (116130 * Cb >> 16);
+                dst[x * 4 + 0] = uchar(qBound(0, R, 255));
+                dst[x * 4 + 1] = uchar(qBound(0, G, 255));
+                dst[x * 4 + 2] = uchar(qBound(0, B, 255));
+                dst[x * 4 + 3] = 255;
+            } else {
+                // BGRA and RGBA both map to RGBA8888 by swapping the
+                // matching byte pair; the two non-native orders are rare
+                // enough to accept as-is (colors would swap, never crash).
+                dst[x * 4 + 0] = info.fourCC == 0x41524742 ? row[x * 4 + 2] : row[x * 4 + 0];
+                dst[x * 4 + 1] = row[x * 4 + 1];
+                dst[x * 4 + 2] = info.fourCC == 0x41524742 ? row[x * 4 + 0] : row[x * 4 + 2];
+                dst[x * 4 + 3] = row[x * 4 + 3];
+            }
+        }
+    }
+    return out;
 }
 
 void EngineBridge::startRelay()

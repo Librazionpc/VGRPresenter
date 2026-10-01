@@ -350,9 +350,45 @@ ApplicationWindow {
     // exact flow — open dialog, type, log results, invoke the SAME choose()
     // handler a row click runs — with a log line before and after each step,
     // so the crashing step names itself in the output.
+    // TEMP: NDI toggle destroyed-delegate investigation — clicking the
+    // Plugins screen's NDI toggle threw "root is not defined" (a delegate
+    // destroyed mid-handler). Navigate to Settings > Plugins, find the real
+    // toggle, and fire its toggled() signal exactly like a real click would.
+    Timer {
+        id: selfTestNdiToggle1
+        running: typeof SelfTest !== "undefined"
+        interval: 1500
+        onTriggered: {
+            window.openSettings("plugins")
+            selfTestNdiToggle2.restart()
+        }
+    }
+    Timer {
+        id: selfTestNdiToggle2
+        interval: 1000
+        onTriggered: {
+            const toggle = SelfTest.findItem("selfTestNdiToggle")
+            console.log("[SELFTEST-NDI] toggle found:", toggle ? "yes" : "NO")
+            if (toggle) {
+                console.log("[SELFTEST-NDI] firing toggled() — simulated click")
+                toggle.toggled()
+                console.log("[SELFTEST-NDI] survived the click, no exception propagated")
+            }
+            selfTestNdiToggle3.restart()
+        }
+    }
+    Timer {
+        id: selfTestNdiToggle3
+        interval: 1500
+        onTriggered: {
+            console.log("[SELFTEST-NDI] pluginFeatures:", JSON.stringify(EngineBridge.pluginFeatures))
+            console.log("[SELFTEST-NDI] done — quitting")
+            SelfTest.quit()
+        }
+    }
     Timer {
         id: selfTestStage1
-        running: typeof SelfTest !== "undefined"
+        running: false // TEMP: yielded to selfTestNdiToggle1 above
         interval: 1500
         onTriggered: {
             console.log("[SELFTEST] stage 1: open Quick search (Ctrl+K flow)")
@@ -647,7 +683,7 @@ ApplicationWindow {
     // pixel truth for "is the live camera actually rendering".
     Timer {
         id: selfTestPreviewStage1
-        running: typeof SelfTest !== "undefined"
+        running: false // TEMP: yielded to selfTestNdiToggle1 above
         interval: 1500
         onTriggered: {
             console.log("[SELFTEST-PREVIEW] stage 1: open Settings > Audio & Video")

@@ -1254,8 +1254,8 @@ Item {
             LiveOutputService.clearInput()
             return
         }
-        if (v.kind !== "camera" && v.kind !== "screen") {
-            EventBus.notify(qsTr("%1 feeds can't show in the output preview yet — camera and screen sources only.")
+        if (v.kind !== "camera" && v.kind !== "screen" && v.kind !== "ndi") {
+            EventBus.notify(qsTr("%1 feeds can't show in the output preview yet — camera, screen and NDI sources only.")
                                 .arg(v.kind), "info", qsTr("Output preview"), "media.preview.input")
             return
         }

@@ -4,6 +4,8 @@
 #include "TestHarness.hpp"
 #include "modules/rendering/PngCodec.hpp"
 
+#include <fstream>
+
 void TestRenderTypes() {
     // Color pack/unpack round trip (0xAABBGGRR native little-endian).
     r::Color c(0.5f, 0.25f, 1.0f, 0.75f);
@@ -308,6 +310,34 @@ void TestRenderText() {
     wrap.wrapWidth = 40.0f;
     auto wrapped = r::TextLayout::Measure("abcdefghij", wrap, fm);
     CHECK(wrapped.lines.size() >= 2);   // long string wraps
+
+    // Unicode punctuation folds to the ASCII the glyph atlases actually
+    // contain (regression: U+2019 reached the byte-wise draw loop as UTF-8
+    // E2 80 99 — three atlas misses, three 0.6×size blank gaps, live symptom
+    // "that     s when" for "that's" on engine-rendered output).
+    auto apostrophed = r::TextLayout::SplitLines("that\xE2\x80\x99s", false);
+    CHECK(apostrophed.size() == 1);
+    CHECK(apostrophed[0] == "that's");
+    auto quoted = r::TextLayout::SplitLines(
+        "\xE2\x80\x9C" "Don\xE2\x80\x99t\xE2\x80\x9D \xE2\x80\xA6 \xE2\x80\x94 ok\xC2\xA0!", false);
+    CHECK(quoted.size() == 1);
+    CHECK(quoted[0] == "\"Don't\" ... - ok !");
+    // Text already ASCII must pass through byte-for-byte (fast path).
+    CHECK(r::TextLayout::SplitLines("plain ascii", false)[0] == "plain ascii");
+    // Invalid UTF-8 lead byte degrades to one '?', not three blank gaps.
+    auto bad = r::TextLayout::SplitLines("a\xFF" "b", false);
+    CHECK(bad[0] == "a?b");
+    // Corpus stragglers: non-breaking hyphen and the Greek question mark.
+    CHECK(r::TextLayout::SplitLines("a\xE2\x80\x91" "b", false)[0] == "a-b");
+    CHECK(r::TextLayout::SplitLines("x\xCD\xBE" "y", false)[0] == "x;y");
+    // Real engine path: layout + atlas contain only ASCII for a raw-UTF-8
+    // line, so every drawn byte resolves in the atlas (no 0.6×size gaps).
+    auto foldedLayout = r::TextLayout::Measure("Don\xE2\x80\x99t you believe that?", r::TextStyle{}, fm);
+    CHECK(foldedLayout.lines.size() == 1);
+    bool allAscii = true;
+    for (char ch : foldedLayout.lines[0].text)
+        if (static_cast<unsigned char>(ch) >= 0x80 || ch < 32) allAscii = false;
+    CHECK(allAscii);
 
     // RenderCache: glyph atlas + layout caching.
     r::RenderCache cache;
@@ -745,6 +775,147 @@ void TestRenderEngine() {
             return i;
         },
         [&](bps::Result<r::TextureId>) { asyncDone++; });
+    // TEMP DIAGNOSTIC (apostrophe/stray-tick probe): render the exact live
+    // chorus (Segoe UI bold, wrapped, centered) at full output size and dump
+    // a PNG so the engine's actual glyphs can be inspected pixel-level.
+    {
+        CHECK(engine.CreateScene("probe", "Probe", r::Size(1920, 1080)).ok());
+        CHECK(engine.AddLayer("probe", r::Layer("bg", "Background", r::LayerKind::Background, 0)).ok());
+        CHECK(engine.AddLayer("probe", r::Layer("text", "Text", r::LayerKind::Text, 2)).ok());
+        auto bg = std::make_shared<r::BackgroundObject>("pbg", "Background", r::Color(0, 0, 0));
+        bg->SetBounds(r::Rect(0, 0, 1920, 1080));
+        CHECK(engine.AddObject("probe", bg, "bg").ok());
+        const std::string chorus =
+            "When I come into your presence , I\xE2\x80\x99" "m so happy\n"
+            "When I come into your presence , I\xE2\x80\x99" "m so \nGlad\n"
+            "In your presence, there\xE2\x80\x99" "s anointing\n"
+            "And the Spirit moves around me\n"
+            "In your presence, the anointing breaks the yoke.";
+        auto text = std::make_shared<r::TextObject>("ptxt", "Body", chorus);
+        text->SetBounds(r::Rect(50, 88, 1820, 904));
+        r::TextStyle ts;
+        ts.fontId = "Segoe UI";
+        ts.size = 100.0f;
+        ts.bold = true;
+        ts.color = r::Color::White();
+        ts.align = r::TextAlign::Center;
+        ts.valign = r::TextVAlign::Middle;
+        ts.wrap = true;
+        ts.wrapWidth = 1820.0f;
+        text->AddComponent(r::MakeTextStyle(ts));
+        CHECK(engine.AddObject("probe", text, "text").ok());
+        auto img = engine.Render("probe");
+        CHECK(img.ok() && img.value().width == 1920);
+        if (img.ok()) {
+            auto png = r::EncodePngRgba8(
+                reinterpret_cast<const uint8_t *>(img.value().pixels.data()),
+                img.value().width, img.value().height);
+            if (png.ok()) {
+                std::ofstream out("logs/apostrophe_probe.png", std::ios::binary);
+                out.write(reinterpret_cast<const char *>(png.value().data()),
+                          static_cast<std::streamsize>(png.value().size()));
+            }
+            // Self-contained viewer (the preview server serves exactly one
+            // file — sibling assets 404): PNG inlined as a data URI.
+            if (png.ok()) {
+                static const char *kB64 =
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                std::string b64;
+                b64.reserve((png.value().size() + 2) / 3 * 4);
+                const auto *d = png.value().data();
+                size_t i = 0;
+                for (; i + 2 < png.value().size(); i += 3) {
+                    const uint32_t v = (d[i] << 16) | (d[i + 1] << 8) | d[i + 2];
+                    b64 += kB64[(v >> 18) & 63]; b64 += kB64[(v >> 12) & 63];
+                    b64 += kB64[(v >> 6) & 63]; b64 += kB64[v & 63];
+                }
+                if (i + 1 < png.value().size()) {
+                    const uint32_t v = (d[i] << 16) | (d[i + 1] << 8);
+                    b64 += kB64[(v >> 18) & 63]; b64 += kB64[(v >> 12) & 63];
+                    b64 += kB64[(v >> 6) & 63]; b64 += '=';
+                } else if (i < png.value().size()) {
+                    const uint32_t v = d[i] << 16;
+                    b64 += kB64[(v >> 18) & 63]; b64 += kB64[(v >> 12) & 63];
+                    b64 += "==";
+                }
+                std::ofstream html("probe.html", std::ios::binary);
+                html << "<!doctype html><html><body style='margin:0;background:#222'>"
+                     << "<img style='width:100%' src='data:image/png;base64," << b64
+                     << "'></body></html>";
+            }
+        }
+        (void)engine.DestroyScene("probe");
+    }
+
+    // TEMP DIAGNOSTIC (style-font probe): the user's actual template font
+    // (TT Nooks Trial — installed per-user) with folded apostrophes. This
+    // font has no U+2019, so before the FontOwnsGlyph fallback every
+    // apostrophe cell drew blank .notdef ink and vanished; now each one
+    // draws the ASCII quote the font DOES own. Self-contained viewer:
+    // fontprobe.html (the preview server serves exactly one file).
+    {
+        CHECK(engine.CreateScene("fontprobe", "Probe", r::Size(1920, 1080)).ok());
+        CHECK(engine.AddLayer("fontprobe", r::Layer("bg", "Background", r::LayerKind::Background, 0)).ok());
+        CHECK(engine.AddLayer("fontprobe", r::Layer("text", "Text", r::LayerKind::Text, 2)).ok());
+        auto nbg = std::make_shared<r::BackgroundObject>("pbg", "Background", r::Color(0, 0, 0));
+        nbg->SetBounds(r::Rect(0, 0, 1920, 1080));
+        CHECK(engine.AddObject("fontprobe", nbg, "bg").ok());
+        const std::string nooksBody =
+            "God\xE2\x80\x99" "s Spirit moves, it\xE2\x80\x99" "s alive (TT Nooks Trial)\n"
+            "He said, come unto me, all ye that labour\n"
+            "And I will give you rest, saith the Lord. It's a straight one.\n"
+            "Matthew 11:28-30";
+        auto ntext = std::make_shared<r::TextObject>("ptxt", "Body", nooksBody);
+        ntext->SetBounds(r::Rect(50, 88, 1820, 904));
+        r::TextStyle nts;
+        nts.fontId = "TT Nooks Trial";
+        nts.size = 90.0f;
+        nts.color = r::Color::White();
+        nts.align = r::TextAlign::Center;
+        nts.valign = r::TextVAlign::Middle;
+        nts.wrap = true;
+        nts.wrapWidth = 1820.0f;
+        ntext->AddComponent(r::MakeTextStyle(nts));
+        CHECK(engine.AddObject("fontprobe", ntext, "text").ok());
+        auto nimg = engine.Render("fontprobe");
+        CHECK(nimg.ok() && nimg.value().width == 1920);
+        if (nimg.ok()) {
+            auto png = r::EncodePngRgba8(
+                reinterpret_cast<const uint8_t *>(nimg.value().pixels.data()),
+                nimg.value().width, nimg.value().height);
+            if (png.ok()) {
+                std::ofstream out("logs/font_probe.png", std::ios::binary);
+                out.write(reinterpret_cast<const char *>(png.value().data()),
+                          static_cast<std::streamsize>(png.value().size()));
+                static const char *kB64 =
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                std::string b64;
+                b64.reserve((png.value().size() + 2) / 3 * 4);
+                const auto *d = png.value().data();
+                size_t i = 0;
+                for (; i + 2 < png.value().size(); i += 3) {
+                    const uint32_t v = (d[i] << 16) | (d[i + 1] << 8) | d[i + 2];
+                    b64 += kB64[(v >> 18) & 63]; b64 += kB64[(v >> 12) & 63];
+                    b64 += kB64[(v >> 6) & 63]; b64 += kB64[v & 63];
+                }                if (i + 1 < png.value().size()) {
+                    const uint32_t v = (d[i] << 16) | (d[i + 1] << 8);
+                    b64 += kB64[(v >> 18) & 63]; b64 += kB64[(v >> 12) & 63];
+                    b64 += kB64[(v >> 6) & 63]; b64 += '=';
+                } else if (i < png.value().size()) {
+                    const uint32_t v = d[i] << 16;
+                    b64 += kB64[(v >> 18) & 63]; b64 += kB64[(v >> 12) & 63];
+                    b64 += "==";
+                }
+
+                std::ofstream html("fontprobe.html", std::ios::binary);
+                html << "<!doctype html><html><body style='margin:0;background:#222'>"
+                     << "<img style='width:100%' src='data:image/png;base64," << b64
+                     << "'></body></html>";
+            }
+        }
+        (void)engine.DestroyScene("fontprobe");
+    }
+
     bool asyncOk = false;
     for (int i = 0; i < 100; ++i) {
         (void)engine.Render("s1");   // pump() runs inside Render

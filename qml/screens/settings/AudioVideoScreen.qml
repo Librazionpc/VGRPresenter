@@ -1574,7 +1574,9 @@ Item {
                             // The row's live thumbnail source (nonce-pumped
                             // by the thumb itself — see vidThumb). Cameras
                             // AND screens: the monitor label resolves through
-                            // the same videopreview provider.
+                            // the same videopreview provider. NDI: the SAME
+                            // URL — the provider serves the engine receiver's
+                            // converted frames for NDI taps (startNdiPreview).
                             readonly property url liveThumb:
                                 vidThumb.liveCam
                                 ? "image://videopreview/" + encodeURIComponent(vidRow.sublabel)
@@ -1697,9 +1699,10 @@ Item {
                                     id: frameImg
                                     anchors.fill: parent
                                     source: vidRow.liveThumb
-                                    visible: (vidRow.kind === "camera" || vidRow.kind === "screen")
+                                    visible: (vidRow.kind === "camera" || vidRow.kind === "screen"
+                                              || vidRow.kind === "ndi")
                                              && status === Image.Ready && sourceSize.width > 1
-                                             && !vidRow.muted
+                                             && (vidRow.kind === "ndi" || !vidRow.muted)
                                     fillMode: vidRow.kind === "screen" ? Image.PreserveAspectFit
                                                                        : Image.PreserveAspectCrop
                                     cache: false
@@ -1711,11 +1714,19 @@ Item {
                                 // the old one running — no per-switch stop
                                 // (repeated close/re-open exhausts virtual-cam
                                 // drivers; the screen-wide stopAllVideoPreviews
-                                // at teardown is the only release).
+                                // at teardown is the only release). NDI joins
+                                // the same discipline: the ENGINE receiver
+                                // (startNdiPreview/stopNdiPreview) is started
+                                // for the row's source and released at teardown.
                                 readonly property bool liveCam:
-                                    (vidRow.kind === "camera" || vidRow.kind === "screen")
+                                    (vidRow.kind === "camera" || vidRow.kind === "screen"
+                                     || vidRow.kind === "ndi")
                                     && vidRow.sublabel !== ""
-                                    && !vidRow.muted
+                                    // NDI's MUTE pill is AUDIO-only (the feed
+                                    // carries embedded audio; muting must not
+                                    // tear the receiver down — camera/screen
+                                    // mute IS the feed pause, NDI's isn't).
+                                    && (vidRow.kind === "ndi" || !vidRow.muted)
                                 // Frames actually flowing — the warm-up test that
                                 // retires the decorative glyphs (same rule as the
                                 // dialogs' pane): a live thumb must not wear the
@@ -1746,12 +1757,16 @@ Item {
                                     if (old !== "") {
                                         if (oldKind === "screen")
                                             EngineBridge.stopScreenPreview(old, "board")
+                                        else if (oldKind === "ndi")
+                                            EngineBridge.stopNdiPreview(old, "board")
                                         else
                                             EngineBridge.stopVideoPreview(old, "board")
                                     }
                                     if (want !== "") {
                                         if (vidRow.kind === "screen")
                                             EngineBridge.startScreenPreview(want, "board")
+                                        else if (vidRow.kind === "ndi")
+                                            EngineBridge.startNdiPreview(want, "board")
                                         else
                                             EngineBridge.startVideoPreview(want, "", "board")
                                     }
@@ -1791,10 +1806,13 @@ Item {
                                 }
 
                                 // NDI — broadcast ripples (center dot +
-                                // two rings) for network sources.
+                                // two rings) for network sources, warm-up
+                                // only: they retire once real frames flow
+                                // (same rule as the camera lens and screen
+                                // outline — never painted over live pixels).
                                 Item {
                                     anchors.centerIn: parent
-                                    visible: vidRow.kind === "ndi"
+                                    visible: vidRow.kind === "ndi" && !vidThumb.thumbLive
 
                                     Rectangle {
                                         anchors.centerIn: parent
@@ -2266,7 +2284,9 @@ Item {
         VideoPreviewPane {
             width: parent.width
             kind: root.editVideoKind
+            // Camera/screen/NDI go live (a real tap); media stays decorative.
             previewLabel: root.editVideoKind === "camera" || root.editVideoKind === "screen"
+                          || root.editVideoKind === "ndi"
                           ? root.editVideoSublabel : ""
             muted: root.editVideoMuted
             mode: root.editVideoMode
@@ -2762,7 +2782,10 @@ Item {
                 showHint: false
                 paneObjectName: "selfTestPreviewPane"   // the ADD dialog's pane — the grab target
                 kind: root.addSourceKind
+                // Camera/screen/NDI go live (a real tap); media stays
+                // decorative (no live tap exists for a file pick).
                 previewLabel: root.addSourceKind === "camera" || root.addSourceKind === "screen"
+                              || root.addSourceKind === "ndi"
                               ? root.addSourceSublabel : ""
                 muted: root.addSourceMuted
                 mode: root.addSourceVideoMode

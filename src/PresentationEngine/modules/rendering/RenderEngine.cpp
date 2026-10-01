@@ -495,7 +495,14 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
             const uint8_t cp = static_cast<uint8_t>(ch);
             const auto gIt = entry.glyphs.find(cp);
             if (gIt == entry.glyphs.end()) {
-                cx += style.size * 0.6f;
+                // Line text is folded to atlas ASCII by TextLayout (see
+                // FoldToAtlasAscii), so a miss here is a stray control byte,
+                // not visible punctuation — never repeat the old behavior of
+                // burning a 0.6×size blank gap per byte (the "that     s"
+                // apostrophe holes). Carriage returns advance nothing; the
+                // fallback advance is ~one builtin-font cell, not half a line.
+                if (ch == '\r') continue;
+                cx += (ch == '\t') ? style.size * 1.2f : style.size * 0.25f;
                 continue;
             }
             const FontGlyph& g = gIt->second;

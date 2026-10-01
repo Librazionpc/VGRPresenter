@@ -53,6 +53,7 @@ void TestSetActiveOutputStyle();
 void TestGoLivePaths();
 void TestStyleBackgroundImage();
 void TestBlockScenes();
+void TestAutoSizeVocabulary();
 void TestTemplateStyleScenes();
 void TestOutputStore();
 void TestProjectUndoRedo();

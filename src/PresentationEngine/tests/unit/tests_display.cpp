@@ -177,6 +177,11 @@ void TestDisplayNdi() {
     // The NDI display provider enumerates a program device and pushes RGBA
     // frames through the BroadcastEngine (software loopback when the NDI SDK
     // is absent — so this runs on any host).
+    // The "ndi" feature switch defaults OFF now (see AdaptiveRuntime's own
+    // registration comment) — this test exercises real sending/receiving,
+    // so it sets up its own precondition rather than relying on a default
+    // some OTHER test file's run order happened to leave enabled.
+    broadcast::BroadcastEngine::Instance().SetNdiEnabled(true);
     d::NdiDisplayProvider ndi;
     CHECK(std::string(ndi.Name()) == "Ndi");
     auto devices = ndi.Enumerate();
@@ -212,7 +217,13 @@ void TestDisplayNdi() {
         CHECK(got.ok());
         if (got.ok() && got.value()) {
             CHECK(info.width == W && info.height == H);
-            CHECK(out.size() == static_cast<size_t>(W) * H * 2);   // UYVY
+            // Native RGBA on the wire now (was UYVY): 4 bytes per pixel, and
+            // the alpha-forcing pass leaves a fully opaque source frame's
+            // bytes untouched — solid red round-trips bit-exact.
+            CHECK(info.fourCC == 0x41424752u);
+            CHECK(out.size() == static_cast<size_t>(W) * H * 4);
+            const auto first = *reinterpret_cast<const uint32_t*>(out.data());
+            CHECK(first == 0xFF0000FFu);
         }
         (void)bc.DisconnectReceiver(recv.value());
     }

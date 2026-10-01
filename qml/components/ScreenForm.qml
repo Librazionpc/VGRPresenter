@@ -268,6 +268,14 @@ Item {
         Column {
             width: parent.width
             spacing: Theme.space2
+            // HDMI/SDI outputs sit on a real physical display; NDI/REC/
+            // STREAM don't (see `placement`'s own doc comment above) — the
+            // whole mini-map + Identify/Lock section only makes sense for
+            // the two that do. Showing it for NDI let you "bind" a network
+            // output to a monitor, which does nothing real and reads as the
+            // form still being the HDMI one underneath (live report: pick
+            // NDI, it still shows "the HDMI own").
+            visible: root.type === "HDMI" || root.type === "SDI"
 
             Text {
                 text: "Screen placement"

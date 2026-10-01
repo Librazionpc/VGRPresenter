@@ -238,7 +238,14 @@ Rectangle {
                         required property var modelData
                         required property int index
                         width: itemList.width
-                        sourceComponent: modelData.divider === true ? dividerC : itemC
+                        // Stale-row guard: the model rebuilds live (the
+                        // autocomplete box repopulates on every keystroke),
+                        // and a mouse release can land on a row whose model
+                        // entry is already gone — bare derefs threw
+                        // "Cannot read property 'payload' of undefined" live.
+                        // A detached row falls through to itemC and its own
+                        // alive guard renders/swallows it.
+                        sourceComponent: modelData && modelData.divider === true ? dividerC : itemC
 
                         Component {
                             id: dividerC
@@ -260,12 +267,25 @@ Rectangle {
                                 id: itemRow
                                 width: itemList.width
                                 height: 34
+                                // STALE-ROW GUARD — the click fix: a model
+                                // rebuild (autocomplete retyping, menu
+                                // re-opening) can leave a delegate clickable
+                                // for a beat after its data is gone, and the
+                                // click used to throw live ("Cannot read
+                                // property 'payload' of undefined", or
+                                // "root is not defined" when the creation
+                                // context was already torn down). A detached
+                                // row must render blank and swallow its
+                                // click. typeof (not truthiness) is the one
+                                // reference that cannot itself throw.
+                                readonly property bool alive: typeof modelData !== "undefined"
+                                                              && modelData !== null
                                 // Disabled entries (e.g. capture modes a
                                 // device's max fps can't reach) sit greyed
                                 // with no hover wash and swallow activation.
                                 // Autocomplete mode draws the keyboard highlight (the row
                                 // Up/Down will accept) under the mouse hover, same wash.
-                                color: !modelData.disabled && (itemArea.hovered || root.highlightedIndex === index)
+                                color: alive && !modelData.disabled && (itemArea.hovered || root.highlightedIndex === index)
                                        ? (modelData.danger ? "#24ff4d3d" /* Theme.danger @ 14% */
                                                            : "#232530" /* Theme.border */)
                                        : "transparent"
@@ -276,7 +296,7 @@ Rectangle {
                                     anchors.right: parent.right
                                     anchors.rightMargin: 16 // Theme.space4
                                     anchors.verticalCenter: parent.verticalCenter
-                                    text: modelData.trailing || ""
+                                    text: alive ? modelData.trailing || "" : ""
                                     color: "#5c6475" // Theme.textMuted
                                     font.family: "Segoe UI" // Theme.fontFamily
                                     font.pixelSize: 10 // Theme.textXs
@@ -290,12 +310,14 @@ Rectangle {
                                     // width ("51-0501"), not a flat 40% of the row — the flat
                                     // reserve truncated short titles long before the row edge
                                     // (user call: the dropdown must show the full name).
-                                    width: parent.width - root.insetPad
+                                    width: alive ? parent.width - root.insetPad
                                             - (modelData.trailing ? rowTrailing.implicitWidth + 26 : 0) - 8
+                                                 : parent.width
                                     elide: Text.ElideRight
-                                    text: modelData.label
-                                    color: modelData.disabled ? "#5c6475" /* Theme.textMuted */
-                                        : modelData.danger ? "#ff6b61" /* Theme.dangerLight */ : "#e2e8f0" /* Theme.textPrimary */
+                                    text: alive ? modelData.label : ""
+                                    color: alive ? (modelData.disabled ? "#5c6475" /* Theme.textMuted */
+                                        : modelData.danger ? "#ff6b61" /* Theme.dangerLight */ : "#e2e8f0" /* Theme.textPrimary */)
+                                        : "#5c6475" /* Theme.textMuted */
                                     font.family: "Segoe UI" // Theme.fontFamily
                                     font.pixelSize: 15 // Theme.textMd
                                     font.weight: Font.Medium
@@ -311,12 +333,41 @@ Rectangle {
                                 PositionHoverArea {
                                     id: itemArea
                                     anchors.fill: parent
-                                    onClicked: if (!modelData.disabled) {
-                                        root.itemActivated(modelData.label)
-                                        root.itemPicked(index, modelData.payload)
+                                    onClicked: {
+                                        // THE fix for the reported TypeError:
+                                        // itemActivated's consumer may rebuild
+                                        // root.model SYNCHRONOUSLY (retagging,
+                                        // switching content) — the Repeater then
+                                        // rebinds this delegate's modelData to
+                                        // undefined while this handler is still
+                                        // on the stack, and the old code read
+                                        // modelData.payload AFTER that ("Cannot
+                                        // read property 'payload' of undefined";
+                                        // a consumer that closed the panel
+                                        // entirely tore the context down instead
+                                        // — "root is not defined"). Capture the
+                                        // row's data FIRST (the user picked THIS
+                                        // row — itemPicked must carry it even if
+                                        // the model just changed under us), and
+                                        // typeof-guard both lookups (the one
+                                        // reference that cannot itself throw) so
+                                        // a fully dead row does nothing.
+                                        if (typeof modelData === "undefined" || !modelData || modelData.disabled
+                                            || typeof root === "undefined")
+                                            return
+                                        const pickedLabel = modelData.label
+                                        const pickedPayload = modelData.payload
+                                        const pickedIndex = index
+                                        root.itemActivated(pickedLabel)
+                                        root.itemPicked(pickedIndex, pickedPayload)
                                     }
-                                    onEntered: root.itemHovered(modelData.label, true, itemRow, index)
-                                    onExited: root.itemHovered(modelData.label, false, itemRow, index)
+                                    // Same stale-row guards as the click: a
+                                    // hover recompute can also fire on a row
+                                    // whose model entry is gone.
+                                    onEntered: if (typeof modelData !== "undefined" && modelData)
+                                                   root.itemHovered(modelData.label, true, itemRow, index)
+                                    onExited: if (typeof modelData !== "undefined" && modelData)
+                                                  root.itemHovered(modelData.label, false, itemRow, index)
                                 }
                             }
                         }

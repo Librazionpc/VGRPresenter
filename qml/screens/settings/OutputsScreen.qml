@@ -18,6 +18,61 @@ Item {
     // Index the right-click context menu was opened for; -1 = closed.
     property int contextMenuIndex: -1
 
+    // ---- NDI firewall authorization (see EngineBridge::
+    // requestNdiFirewallAccess) ------------------------------------------
+    // Asked at most once per session, only while the firewall rule is
+    // actually missing: the RULE is the persisted permission, so once it is
+    // in place (or if the user refused the OS prompt, once they revisit)
+    // this re-fires exactly when it should and never otherwise. The
+    // elevated verdict is confirmed by a short retry timer.
+    property bool firewallPending: false
+    // Probe cap: each tick runs a netsh child process — unbounded retries
+    // while a UAC dialog sits unanswered (or was denied) would spawn one
+    // every 2 s for as long as this screen stays open. 15 tries (~30 s)
+    // then give up with an honest notice; the manual re-run remains in
+    // this screen.
+    property int firewallProbes: 0
+    Timer {
+        id: firewallConfirmTimer
+        interval: 2000
+        repeat: true
+        running: root.firewallPending
+        onTriggered: {
+            root.firewallProbes++
+            if (EngineBridge.checkNdiFirewallRule()) {
+                root.firewallPending = false
+                EventBus.notify(qsTr("Windows Firewall now allows NDI receivers to connect — other computers can find this app's output."),
+                                "success", qsTr("NDI ready"), "outputs.ndi.firewall.added")
+                firewallConfirmTimer.stop()
+            } else if (root.firewallProbes >= 15) {
+                root.firewallPending = false
+                EventBus.notify(qsTr("Still waiting on the Windows Firewall decision — NDI output may not reach other computers until it is allowed. Re-run from Settings · Outputs."),
+                                "warning", qsTr("NDI firewall"), "outputs.ndi.firewall.pending")
+                firewallConfirmTimer.stop()
+            }
+        }
+    }
+    function maybeRequestNdiFirewall() {
+        if (EngineBridge.ndiFirewallPrompted)
+            return
+        const result = EngineBridge.requestNdiFirewallAccess()
+        if (result === "allowed")
+            return   // rule already in place: no banner, no toast, nothing to grant
+        if (result === "added") {
+            EventBus.notify(qsTr("Windows Firewall is set — NDI receivers on other computers can connect."),
+                            "success", qsTr("NDI ready"), "outputs.ndi.firewall.added")
+        } else if (result === "prompt") {
+            root.firewallPending = true
+            root.firewallProbes = 0
+            EventBus.notify(qsTr("Allow the Windows Firewall request so other computers can receive this app's NDI output."),
+                            "info", qsTr("NDI ready"), "outputs.ndi.firewall.prompt")
+        } else if (result === "denied" || result === "failed") {
+            EventBus.notify(qsTr("Windows Firewall wasn't set — NDI output may not reach other computers. Re-run it from Settings · Outputs."),
+                            "warning", qsTr("NDI firewall"), "outputs.ndi.firewall.failed")
+        }
+        // "unavailable" (non-Windows): silent — no firewall concept to grant.
+    }
+
     // Add-dialog form state (VGRPresenter · Settings · Outputs · Add).
     property bool addShown: false
     property string addName: ""
@@ -175,6 +230,18 @@ Item {
                     required property bool isEnabled
                     required property string styleName
 
+                    // This NDI row is the one actually being fed: only the
+                    // FIRST enabled NDI output sends (see
+                    // LiveOutputService::pushNdiFrame), so the global
+                    // ndiSending alone would light up every NDI row.
+                    readonly property bool ndiFeedIsThisRow: card.kind === "NDI"
+                        && LiveOutputService.ndiSending
+                        && LiveOutputService.ndiSendingOutputName === card.name
+                    // LIVE = on-air, or an NDI row whose frames verifiably
+                    // flow right now (sending survives a projector being
+                    // the on-air output — the feed runs beside it).
+                    readonly property bool live: card.active || ndiFeedIsThisRow
+
                     width: layout.width
                     height: cardCol.height + Theme.space5 * 2
                     radius: Theme.radiusLg
@@ -244,20 +311,25 @@ Item {
                         // NETWORK OUTPUTS — real runtime state, not a label.
                         // NDI: the live sender's frame counter while the active
                         // output is sending (the counter only moves when frames
-                        // actually flow). SDI: the DeckLink runtime/device
-                        // truth from the engine.
+                        // actually flow), PLUS the SDK's connected-monitor
+                        // count — 0 while sending reads "firewall?". SDI: the
+                        // DeckLink runtime/device truth from the engine.
                         Row {
                             spacing: Theme.space2
                             visible: card.kind === "NDI" || card.kind === "SDI"
+                            // The once-per-session firewall ask rides the NDI
+                            // row's visibility: an NDI output on the roster +
+                            // a usable runtime is exactly the moment it matters.
+                            Component.onCompleted: if (card.kind === "NDI") root.maybeRequestNdiFirewall()
 
                             Rectangle {
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 6; height: 6; radius: 3
                                 visible: card.kind === "NDI"
-                                color: LiveOutputService.ndiSending ? "#3ddc84" : Theme.textMuted
+                                color: card.ndiFeedIsThisRow ? "#3ddc84" : Theme.textMuted
 
                                 SequentialAnimation on opacity {
-                                    running: card.kind === "NDI" && LiveOutputService.ndiSending
+                                    running: card.ndiFeedIsThisRow
                                     loops: Animation.Infinite
                                     NumberAnimation { from: 1; to: 0.3; duration: 700 }
                                     NumberAnimation { from: 0.3; to: 1; duration: 700 }
@@ -266,20 +338,30 @@ Item {
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: {
-                                    if (card.kind === "NDI")
-                                        return LiveOutputService.ndiSending
-                                            ? "NDI · sending · " + LiveOutputService.ndiFramesSent + " frames"
-                                            : "NDI · " + (EngineBridge.ndiAvailable
+                                    if (card.kind === "NDI") {
+                                        // The monitor-connection truth from the
+                                        // SDK: sending with 0 connected receivers
+                                        // is THE firewall symptom — frames go
+                                        // out, nothing accepts them.
+                                        if (card.ndiFeedIsThisRow) {
+                                            const connected = EngineBridge.ndiConnectedReceivers
+                                            return connected === 0
+                                                ? "NDI · sending · " + LiveOutputService.ndiFramesSent
+                                                  + " frames · 0 monitors connected (firewall?)"
+                                                : "NDI · sending · " + LiveOutputService.ndiFramesSent
+                                                  + " frames · " + (connected > 0 ? connected + " monitor(s)" : "")
+                                        }
+                                        return "NDI · " + (EngineBridge.ndiAvailable
                                                           ? "ready (go live to send)"
                                                           : "runtime not installed")
+                                    }
                                     if (card.kind === "SDI")
                                         return EngineBridge.sdiAvailable
                                             ? "SDI · " + EngineBridge.sdiDevices.length + " DeckLink device(s)"
                                             : "SDI · " + EngineBridge.sdiStatus
                                     return ""
                                 }
-                                color: card.kind === "NDI" && LiveOutputService.ndiSending
-                                           ? "#3ddc84" : Theme.textMuted
+                                color: card.ndiFeedIsThisRow ? "#3ddc84" : Theme.textMuted
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.textXs
                             }
@@ -313,11 +395,11 @@ Item {
 
                         Pill {
                             anchors.verticalCenter: parent.verticalCenter
-                            text: card.active ? "LIVE" : "Inactive"
+                            text: card.live ? "LIVE" : "Inactive"
                             baseColor: Theme.danger
                             lightColor: Theme.dangerLight
-                            tint: card.active
-                            tintAlpha: card.active ? 0.22 : 0.14
+                            tint: card.live
+                            tintAlpha: card.live ? 0.22 : 0.14
 
                             MouseArea {
                                 anchors.fill: parent
@@ -489,7 +571,14 @@ Item {
             onTypePicked: (k) => root.editType = k
             onResPicked: (v) => root.editRes = v
             onRefreshPicked: (v) => root.editRefresh = v
-            onPatternPicked: (k) => root.editPattern = k
+            onPatternPicked: (k) => {
+                root.editPattern = k
+                // Saved with the row, but nothing downstream (SceneBuilder,
+                // the real OutputWindow) ever reads it to actually paint a
+                // pattern — picking one has no real effect yet.
+                EventBus.notify(qsTr("Test patterns aren't wired to the output yet — this pick is saved but has no visible effect."),
+                                "warning", qsTr("Not implemented"), "outputs.testPattern.notImplemented")
+            }
             onPlacementPicked: (s, r, f) => {
                 root.editScreenName = s
                 if (r !== "") {
@@ -661,7 +750,11 @@ Item {
             onTypePicked: (k) => root.addType = k
             onResPicked: (v) => root.addRes = v
             onRefreshPicked: (v) => root.addRefresh = v
-            onPatternPicked: (k) => root.addPattern = k
+            onPatternPicked: (k) => {
+                root.addPattern = k
+                EventBus.notify(qsTr("Test patterns aren't wired to the output yet — this pick is saved but has no visible effect."),
+                                "warning", qsTr("Not implemented"), "outputs.testPattern.notImplemented")
+            }
             onPlacementPicked: (s, r, f) => {
                 root.addScreenName = s
                 if (r !== "") {

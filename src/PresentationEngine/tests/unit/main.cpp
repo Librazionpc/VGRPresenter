@@ -96,6 +96,7 @@ static const Suite kSuites[] = {
     {"styles", "go-live-paths", TestGoLivePaths},
     {"styles", "style-bg-image", TestStyleBackgroundImage},
     {"styles", "block-scenes", TestBlockScenes},
+    {"styles", "auto-size-vocabulary", TestAutoSizeVocabulary},
     {"styles", "template-style-scenes", TestTemplateStyleScenes},
     {"adaptive", "adaptive-hw", TestAdaptiveHardware},
     {"adaptive", "adaptive-prof", TestAdaptiveProfiler},

@@ -50,9 +50,10 @@ ReferencePane {
         readonly property var preview: (src, bookId, ch, nums) => TheTableService.preview(bookId, ch, nums)
         // The picked paragraphs as show slides, template-split by the tab's options.
         readonly property var slides: (src, bookId, ch, nums) => TheTableService.slides(bookId, ch, nums)
-        // GO LIVE (FreeShow's playScripture): the picked sermon on air, gated on
-        // the style's table pill. Title match = ours (the play glyph turns green).
-        readonly property var goLive: (name, slides) => LiveOutputService.goLiveWithSlides(name, slides)
+        // A picked sermon paragraph STAGES (Main Output tile preview only) —
+        // same gate as ScripturePane.qml/ShowCenter.qml now; the top GO LIVE
+        // button is what actually commits it to the real output.
+        readonly property var goLive: (name, slides) => LiveOutputService.stageSlides(name, slides)
         readonly property var liveIsOurs: (refText) => LiveOutputService.live
                                              && refText !== "" && LiveOutputService.onAirTitle === refText
         readonly property var importNew: () => TheTableService.newSermon()

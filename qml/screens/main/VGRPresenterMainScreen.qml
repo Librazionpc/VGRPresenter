@@ -516,93 +516,99 @@ Rectangle {
                             onClicked: vGRPresenter_Main_Screen.newShowRequested()
                         }
 
-                        // CENTERED CONTENT ROW: icon + gap + label + chevron as
-                        // one Row, centered in the button (the old hardcoded
-                        // x-offsets put the label off-centre whenever the text
-                        // width didn't match the Figma export's assumption).
-                        Row {
-                            anchors.centerIn: parent
-                            spacing: 8
+                        // Same fixed x-offset convention as Quick search/New
+                        // project above (icon x=20, label x=42, chevron
+                        // x=208) — this row previously centered its own
+                        // icon+label+chevron Row as a group instead, which
+                        // put its icon/label at a DIFFERENT x than its two
+                        // siblings (the button is wider than that group),
+                        // reading as visibly misaligned against them.
+                        Rectangle {
+                            id: presentation_1
 
-                            Rectangle {
-                                id: presentation_1
+                            x: 20
+                            y: 11
 
-                                anchors.verticalCenter: parent.verticalCenter
+                            height: 14
+                            width: 14
 
-                                height: 15
-                                width: 15
+                            clip: true
+                            color: "transparent"
 
-                                clip: true
-                                color: "transparent"
+                            Shape {
+                                id: _vector_20
 
-                                Shape {
-                                    id: _vector_20
+                                anchors.centerIn: parent
 
-                                    anchors.centerIn: parent
+                                height: 10.50
+                                width: 11.67
 
-                                    height: 10.50
-                                    width: 11.67
+                                ShapePath {
+                                    id: _vector_20_ShapePath0
 
-                                    ShapePath {
-                                        id: _vector_20_ShapePath0
+                                    fillColor: "#00000000"
+                                    strokeColor: "#6c5ce7"
+                                    strokeWidth: 2
 
-                                        fillColor: "#00000000"
-                                        strokeColor: "#6c5ce7"
-                                        strokeWidth: 2
+                                    PathSvg {
+                                        id: _vector_20_ShapePath0_PathSvg0
 
-                                        PathSvg {
-                                            id: _vector_20_ShapePath0_PathSvg0
-
-                                            path: "M 0 0 L 11.667600631713867 0 M 11.084220600128175 0 L 11.084220600128175 6.416666666666667 C 11.084220600128175 6.726085916161537 10.961294218155647 7.02283191929261 10.74248426689028 7.241624355316163 C 10.523674315624913 7.460416791339716 10.226904556745712 7.583333333333334 9.917460536956789 7.583333333333334 L 1.7501400947570802 7.583333333333334 C 1.440696074968156 7.583333333333334 1.1439260379116805 7.460416791339716 0.9251160866463125 7.241624355316163 C 0.7063061353809446 7.02283191929261 0.5833800315856936 6.726085916161537 0.5833800315856934 6.416666666666667 L 0.5833800315856934 0 M 2.916900157928467 10.5 L 5.833800315856934 7.583333333333334 L 8.7507004737854 10.5"
-                                        }
+                                        path: "M 0 0 L 11.667600631713867 0 M 11.084220600128175 0 L 11.084220600128175 6.416666666666667 C 11.084220600128175 6.726085916161537 10.961294218155647 7.02283191929261 10.74248426689028 7.241624355316163 C 10.523674315624913 7.460416791339716 10.226904556745712 7.583333333333334 9.917460536956789 7.583333333333334 L 1.7501400947570802 7.583333333333334 C 1.440696074968156 7.583333333333334 1.1439260379116805 7.460416791339716 0.9251160866463125 7.241624355316163 C 0.7063061353809446 7.02283191929261 0.5833800315856936 6.726085916161537 0.5833800315856934 6.416666666666667 L 0.5833800315856934 0 M 2.916900157928467 10.5 L 5.833800315856934 7.583333333333334 L 8.7507004737854 10.5"
                                     }
                                 }
                             }
-                            Text {
-                                id: new_show
+                        }
+                        Text {
+                            id: new_show
 
-                                anchors.verticalCenter: parent.verticalCenter
+                            x: 42
+                            y: 10
 
-                                height: 16
+                            height: 16
+                            width: 159
 
-                                color: "#e2e8f0"
-                                font.family: "Segoe UI"
-                                font.pixelSize: 15
-                                font.weight: Font.Medium
-                                text: qsTr("New show")
-                                textFormat: Text.PlainText
-                            }
-                            Rectangle {
-                                id: chevron_right_2
+                            color: "#e2e8f0"
+                            font.family: "Segoe UI"
+                            font.pixelSize: 15
+                            font.weight: Font.Medium
+                            horizontalAlignment: Text.AlignLeft
+                            text: qsTr("New show")
+                            textFormat: Text.PlainText
+                            verticalAlignment: Text.AlignVCenter   // (see quick_search: glyph/icon alignment)
+                            wrapMode: Text.Wrap
+                        }
+                        Rectangle {
+                            id: chevron_right_2
 
-                                anchors.verticalCenter: parent.verticalCenter
+                            x: 208
+                            y: 12
 
-                                height: 12
-                                width: 12
+                            height: 12
+                            width: 12
 
-                                clip: true
-                                color: "transparent"
+                            clip: true
+                            color: "transparent"
 
-                                Shape {
-                                    id: _vector_21
+                            Shape {
+                                id: _vector_21
 
-                                    anchors.centerIn: parent
+                                x: 4.50
+                                y: 3
 
-                                    height: 6
-                                    width: 3
+                                height: 6
+                                width: 3
 
-                                    ShapePath {
-                                        id: _vector_21_ShapePath0
+                                ShapePath {
+                                    id: _vector_21_ShapePath0
 
-                                        fillColor: "#00000000"
-                                        strokeColor: "#5c6475"
-                                        strokeWidth: 2
+                                    fillColor: "#00000000"
+                                    strokeColor: "#5c6475"
+                                    strokeWidth: 2
 
-                                        PathSvg {
-                                            id: _vector_21_ShapePath0_PathSvg0
+                                    PathSvg {
+                                        id: _vector_21_ShapePath0_PathSvg0
 
-                                            path: "M 0 6 L 3 3 L 0 0"
-                                        }
+                                        path: "M 0 6 L 3 3 L 0 0"
                                     }
                                 }
                             }
