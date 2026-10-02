@@ -10,6 +10,7 @@
 #include "modules/project/OutputStore.hpp"
 #include "modules/project/StyleStore.hpp"
 #include "modules/rendering/PngCodec.hpp"
+#include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -17,6 +18,9 @@
 #include <fstream>
 #include <iostream>
 #include <thread>
+
+#include <cstdint>
+#include <vector>
 
 namespace l = bps::live;
 
@@ -65,6 +69,46 @@ void TestStyleStore() {
     CHECK(proj::StyleStore::Instance().Save(smaller).ok());
     auto after = proj::StyleStore::Instance().Get();
     CHECK(after.size() == 1 && after[0].id == "s9");
+}
+
+// ---------------------------------------------------------------------------
+// Portable background paths: a roster saved on ANOTHER machine carries an
+// absolute path that cannot exist here (seeded install on a new PC). The
+// re-attach pass must find this machine's own copy by file name (the
+// installer seeds it into the user-data dir) and leave every other case —
+// valid local path, no local copy, empty — untouched.
+// ---------------------------------------------------------------------------
+void TestStylePortableImagePaths() {
+    auto& platform = bps::platform::PlatformAccessor::Get();
+    const std::string userDir = platform.Paths().UserDataDir();
+    CHECK(!userDir.empty());
+    if (userDir.empty())
+        return;   // platform not usable in this environment
+
+    // Probe file in the seeded location (unique name; removed afterwards).
+    const std::string name = "vgr-style-heal-probe.png";
+    const std::string probe = platform.Filesystem().Join(userDir, name);
+    const std::vector<uint8_t> bytes{'p', 'r', 'o', 'b', 'e'};
+    CHECK(platform.Filesystem().WriteBinary(probe, bytes).ok());
+    CHECK(platform.Filesystem().Exists(probe));
+
+    // 1. A path from another machine re-attaches to the local seeded copy.
+    const std::string healed = proj::StyleStore::ReattachBackgroundImage(
+        "Z:/from another machine/" + name);
+    CHECK(healed == probe);
+
+    // 2. A path that exists on this machine is untouched (the authoring PC).
+    CHECK(proj::StyleStore::ReattachBackgroundImage(probe) == probe);
+
+    // 3. No local copy with that name — kept as-is (renders without image).
+    const std::string absent = "Z:/nowhere/definitely-absent-heal-probe-7f3d.png";
+    CHECK(proj::StyleStore::ReattachBackgroundImage(absent) == absent);
+
+    // 4. Empty stays empty.
+    CHECK(proj::StyleStore::ReattachBackgroundImage("").empty());
+
+    (void)platform.Filesystem().Remove(probe);
+    CHECK(!platform.Filesystem().Exists(probe));
 }
 
 // ---------------------------------------------------------------------------

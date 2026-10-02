@@ -64,8 +64,18 @@ public:
     std::vector<StoredStyle> Get() const;
 
     // Replaces the roster and persists it. Returns the persistence result so
-    // a failed write surfaces (the in-memory store is still updated).
-    Result<void> Save(const std::vector<StoredStyle>& styles);
+    // a failed write surfaces (the in-memory store is still updated). Const:
+    // state lives in the DatabaseManager singleton, and Get() needs to persist
+    // its portable-path self-heal in place.
+    Result<void> Save(const std::vector<StoredStyle>& styles) const;
+
+    // PORTABLE PATHS: a style saved on one machine stores its background
+    // image as an absolute path that cannot exist on another PC (seeded
+    // install, restored backup). Re-attaches it by file NAME to this
+    // machine's own copy — the installer seeds the image into the user-data
+    // dir — returning the stored path untouched when it already exists here
+    // or no local copy was found. Exposed for tests.
+    static std::string ReattachBackgroundImage(const std::string& stored);
 
 private:
     StyleStore() = default;

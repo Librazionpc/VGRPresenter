@@ -2,6 +2,7 @@
 
 #include "core/database/DatabaseManager.hpp"
 #include "core/logging/Logger.hpp"
+#include "platform/PlatformAccessor.hpp"
 
 namespace bps::project {
 
@@ -12,6 +13,36 @@ namespace {
 constexpr const char* kCollection = "styles";
 constexpr const char* kKey = "roster";
 } // namespace
+
+std::string StyleStore::ReattachBackgroundImage(const std::string& stored) {
+    if (stored.empty())
+        return stored;
+    auto& platform = platform::PlatformAccessor::Get();
+    if (platform.Filesystem().Exists(stored))
+        return stored;                        // valid on this machine already
+
+    // File name only — everything after the last slash of either flavour.
+    const size_t slash = stored.find_last_of("/\\");
+    const std::string name = slash == std::string::npos ? stored : stored.substr(slash + 1);
+    if (name.empty())
+        return stored;
+
+    // Order = preference: the seeded user-data copy first (what the installer
+    // ships), then the engine's asset dir, then the install dir's assets/.
+    const std::string roots[] = {
+        platform.Paths().UserDataDir(),                    // %LocalAppData%\bps
+        platform.Paths().AssetDir(),                       // %LocalAppData%\bps\assets
+        platform.Paths().ExecutableDir() + "/assets",      // <install>\assets
+    };
+    for (const std::string& root : roots) {
+        if (root.empty())
+            continue;
+        const std::string candidate = platform.Filesystem().Join(root, name);
+        if (platform.Filesystem().Exists(candidate))
+            return candidate;
+    }
+    return stored;   // no local copy — keep as-is (renders without the image)
+}
 
 StyleStore& StyleStore::Instance() {
     static StyleStore instance;
@@ -33,10 +64,30 @@ std::vector<StoredStyle> StyleStore::Get() const {
         if (auto s = StyleFromJson(v); s.ok())
             out.push_back(std::move(s.value()));
     }
+
+    // PORTABLE PATHS: re-attach background images saved on another machine to
+    // this machine's own copies (installer seed data) and persist the remap
+    // immediately, so every later reader — renderer, previews, the styles
+    // editor — sees a path that actually exists here. After the first heal
+    // the stored path exists locally and this whole pass is a no-op.
+    bool remapped = false;
+    for (StoredStyle& s : out) {
+        const std::string fixed = ReattachBackgroundImage(s.backgroundImage);
+        if (fixed != s.backgroundImage) {
+            s.backgroundImage = fixed;
+            remapped = true;
+        }
+    }
+    if (remapped) {
+        if (Save(out).ok())
+            Logger::Instance().Info("StyleStore: background image re-attached to this machine's copy (installed elsewhere path)", "StyleStore");
+        else
+            Logger::Instance().Warning("StyleStore: background image re-attached in memory but persistence failed", "StyleStore");
+    }
     return out;
 }
 
-Result<void> StyleStore::Save(const std::vector<StoredStyle>& styles) {
+Result<void> StyleStore::Save(const std::vector<StoredStyle>& styles) const {
     json::Value::Array arr;
     arr.reserve(styles.size());
     for (const StoredStyle& s : styles)
