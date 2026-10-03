@@ -1,0 +1,88 @@
+name: Build and publish Windows release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - RELEASE_NOTES.md
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install MinGW build tools
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.11.1'
+          host: windows
+          target: desktop
+          arch: win64_mingw
+          dir: C:/Qt
+          cache: true
+          tools: 'tools_cmake tools_ninja'
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      - name: Check release version and notes
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $settings = Get-Content 'qml/services/SettingsService.cpp' -Raw
+          $match = [regex]::Match($settings, 'kAppVersion\s*=\s*"([^"]+)"')
+          if (-not $match.Success) { throw 'Could not read the app version.' }
+          $version = $match.Groups[1].Value
+          $notes = Get-Content 'RELEASE_NOTES.md' -Raw
+          if ($notes -notmatch "(?m)^# VGRPresenter $([regex]::Escape($version))\s*$") {
+            throw "RELEASE_NOTES.md must start with '# VGRPresenter $version'."
+          }
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build installer and portable ZIP
+        shell: msys2 {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          export QT_PREFIX="$(cygpath -u "$QT_ROOT_DIR")"
+          export QT_BIN="$QT_PREFIX/bin"
+          export CMAKE_BIN="$(cygpath -u "$(command -v cmake)")"
+          export NINJA_BIN="$(cygpath -u "$(command -v ninja)")"
+          export MINGW_BIN=/c/msys64/ucrt64/bin
+          export MINGW_RUNTIME_BIN="$MINGW_BIN"
+          export QT_MINGW_BIN="$MINGW_BIN"
+          bash tools/make_installer.sh
+
+      - name: Publish release
+        shell: msys2 {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$APP_VERSION" \
+            "dist/VGRPresenter-Setup-$APP_VERSION.exe" \
+            dist/VGRPresenter-win64.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "VGRPresenter $APP_VERSION" \
+            --target "$GITHUB_SHA" \
+            --notes-file RELEASE_NOTES.md

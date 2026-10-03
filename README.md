@@ -85,24 +85,24 @@ this); only the packaged `dist/` zip is self-contained.
 
 ## Repository layout
 
-| Path | What |
-| --- | --- |
-| `src/PresentationEngine/` | The C++ engine: kernel, modules (display, render, broadcast, library, search, project…), the platform abstraction layer (`platform/`), unit tests |
-| `qml/` | The Qt Quick UI: screens (`screens/`), reusable components (`components/`), services the UI talks to (`services/` — the bridge to the engine), list models (`models/`) |
-| `assets/` | Brand assets: app icon, resource script, lockups |
-| `tools/` | Dev-cycle, portable packaging, version and release scripts |
+| Path                        | What                                                                                                                                                                            |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/PresentationEngine/` | The C++ engine: kernel, modules (display, render, broadcast, library, search, project…), the platform abstraction layer (`platform/`), unit tests                            |
+| `qml/`                    | The Qt Quick UI: screens (`screens/`), reusable components (`components/`), services the UI talks to (`services/` — the bridge to the engine), list models (`models/`) |
+| `assets/`                 | Brand assets: app icon, resource script, lockups                                                                                                                                |
+| `tools/`                  | Dev-cycle, portable packaging, version and release scripts                                                                                                                      |
 
 ## Platform status
 
-| Platform | State |
-| --- | --- |
-| Windows x64 | Shipping (portable zip) |
-| Linux | Engine platform layer exists; build + packaging being validated |
-| macOS | Engine platform layer is a stub — not ready |
+| Platform    | State                                                           |
+| ----------- | --------------------------------------------------------------- |
+| Windows x64 | Shipping (portable zip)                                         |
+| Linux       | Engine platform layer exists; build + packaging being validated |
+| macOS       | Engine platform layer is a stub — not ready                    |
 
 ## Releases
 
 Every release is a version tag with curated notes (new features, tweaks, bug
 fixes) and the portable zip attached. See the
 [releases page](https://github.com/Librazionpc/VGRPresenter/releases) —
-current release: **v0.0.1**.
+current release: **v0.0.3**.

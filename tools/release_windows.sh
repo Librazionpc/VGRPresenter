@@ -29,7 +29,7 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || (cd "$(dirname "$0")/.." && pwd))"
 SETTINGS="$ROOT/qml/services/SettingsService.cpp"
 ZIP="$ROOT/dist/VGRPresenter-win64.zip"
-NOTES="$ROOT/dist/RELEASE_NOTES.md"
+NOTES="$ROOT/RELEASE_NOTES.md"
 
 # ---- version -----------------------------------------------------------------
 if [ "${1:-}" = "--notes-only" ]; then
@@ -53,23 +53,14 @@ case "$VER" in *-*) PRERELEASE="--prerelease" ;; esac
 
 SETUP="$ROOT/dist/VGRPresenter-Setup-$VER.exe"
 
-# ---- notes skeleton (the FreeShow section format) ----------------------------
+# ---- notes ------------------------------------------------------------------
 if [ ! -f "$NOTES" ]; then
-    mkdir -p "$ROOT/dist"
-    cat > "$NOTES" <<'EOF'
-## ✨ New features:
-
-## 🔧 Tweaks:
-
-## 🐞 Bugfixes:
-
-EOF
-    echo "release_windows.sh: wrote a notes skeleton to dist/RELEASE_NOTES.md"
-    echo "  Fill in the three sections, then run this script again to publish."
+    echo "release_windows.sh: add RELEASE_NOTES.md at the repository root before publishing."
+    exit 1
 fi
 
 if [ "$NOTES_ONLY" = 1 ]; then
-    echo "release_windows.sh: notes skeleton ready at $NOTES"
+    echo "release_windows.sh: release notes are at $NOTES"
     exit 0
 fi
 

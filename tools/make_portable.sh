@@ -54,6 +54,7 @@ APP="appVGRPresenterUI.exe"
 CMAKE_BIN="${CMAKE_BIN:-C:/Qt/Tools/CMake_64/bin/cmake.exe}"
 MINGW_BIN="${MINGW_BIN:-/c/msys64/ucrt64/bin}"
 QT_BIN="${QT_BIN:-/c/Qt/6.11.1/mingw_64/bin}"
+QT_PREFIX="${QT_PREFIX:-C:/Qt/6.11.1/mingw_64}"
 # The MinGW runtime must match the toolchain that BUILT THE EXE: the app
 # compiles with msys2's GCC (C++26 — its libstdc++ has the newer symbols the
 # exe imports), and dev_cycle.sh launches it with MINGW_BIN FIRST on PATH —
@@ -103,7 +104,7 @@ if [ "$DO_BUILD" = 1 ]; then
             if ! PATH="$MINGW_BIN:$PATH" "$CMAKE_BIN" -S "$ROOT" -B "$RELEASE_BUILD_DIR" -G Ninja \
                     -DCMAKE_MAKE_PROGRAM="$NINJA_BIN" \
                     -DCMAKE_BUILD_TYPE=Release \
-                    -DCMAKE_PREFIX_PATH="C:/Qt/6.11.1/mingw_64" \
+                    -DCMAKE_PREFIX_PATH="$QT_PREFIX" \
                     -DCMAKE_C_COMPILER="C:/msys64/ucrt64/bin/gcc.exe" \
                     -DCMAKE_CXX_COMPILER="C:/msys64/ucrt64/bin/g++.exe"; then
                 echo "PORTABLE: FAIL configure"
