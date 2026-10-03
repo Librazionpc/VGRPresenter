@@ -51,13 +51,17 @@ Item {
     // ---- Real displays ----
     // OutputListModel enumerates QGuiApplication::screens(). Q_INVOKABLE
     // reads aren't binding-tracked, so this revision counter is what makes
-    // the map and its LIVE marker follow model changes while open.
+    // the map and its LIVE marker follow model changes while open. It also
+    // bumps on screensChanged (a monitor hot-plugged/unplugged, or re-moded)
+    // — WITHOUT that, a monitor plugged in while the app was running only
+    // showed up after a restart.
     property int displayRev: 0
     Connections {
         target: OutputListModel
         function onDataChanged() { root.displayRev++ }
         function onRowsInserted() { root.displayRev++ }
         function onRowsRemoved() { root.displayRev++ }
+        function onScreensChanged() { root.displayRev++ }
     }
     readonly property var displayList: { root.displayRev; return OutputListModel.displays() }
 

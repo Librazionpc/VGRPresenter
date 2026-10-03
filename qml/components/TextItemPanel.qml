@@ -17,8 +17,8 @@ import QtQuick
 // just reads as the same defaults EditableCanvasLabel already rendered
 // (16px, Medium weight, centered).
 //
-// Literal colors, not Theme.* — same AOT-compiler limitation as
-// SizeStyleCard.qml at this nesting depth.
+// Colors read Theme tokens, so a Light choice recolours this panel with the
+// rest of the app.
 Column {
     id: root
 
@@ -74,7 +74,7 @@ Column {
     readonly property string listStyle: root.meta.list ?? "none"
     readonly property real fontSize: root.meta.fontSize ?? 16
     readonly property real lineHeight: root.meta.lineHeight ?? 0
-    readonly property real letterSpacing: root.meta.letterSpacing ?? -2.0
+    readonly property real letterSpacing: root.meta.letterSpacing ?? 1.0
 
     // The largest font size at which this item's text still fits its box's
     // inner area (box minus padding). Measured from fitMeasure below: text
@@ -159,7 +159,7 @@ Column {
         width: 84
         height: 22
         radius: 5
-        color: "#6c5ce7"
+        color: Theme.accent
 
         Text {
             anchors.centerIn: parent
@@ -185,15 +185,15 @@ Column {
             width: 40
             height: 32
             radius: 8
-            color: toggle.active ? "#6c5ce7" : (toggleArea.containsMouse ? "#20222c" : "#1a1c26")
-            border.color: toggle.active ? "#6c5ce7" : "#2a2f3a"
+            color: toggle.active ? Theme.accent : (toggleArea.containsMouse ? Theme.hoverBg : Theme.inset)
+            border.color: toggle.active ? Theme.accent : Theme.border
             border.width: 1
             Behavior on color { ColorAnimation { duration: 100 } }
 
             Text {
                 anchors.centerIn: parent
                 text: toggle.label
-                color: toggle.active ? "#ffffff" : "#c8cdd9"
+                color: toggle.active ? "#ffffff" : Theme.textSecondary
                 font.family: "Segoe UI"
                 font.pixelSize: 15
                 font.bold: toggle.label === "B"
@@ -236,7 +236,7 @@ Column {
             width: parent.width
             height: 44
             radius: 8
-            color: "#161823"
+            color: Theme.card
 
             Row {
                 x: 14
@@ -246,7 +246,7 @@ Column {
                 IconGlyph { anchors.verticalCenter: parent.verticalCenter; name: "alignCenter"; color: "#e0399f"; width: 14; height: 14 }
                 Text {
                     text: qsTr("Align")
-                    color: "#eef1f8"
+                    color: Theme.textPrimary
                     font.family: "Segoe UI"
                     font.pixelSize: 14
                     font.weight: Font.Medium
@@ -257,7 +257,7 @@ Column {
                 x: parent.width - 28
                 anchors.verticalCenter: parent.verticalCenter
                 name: alignSection.expanded ? "chevronUp" : "chevronDown"
-                color: "#6b7280"
+                color: Theme.textMuted
                 width: 12; height: 12
             }
 
@@ -286,8 +286,8 @@ Column {
                 width: (parent.width - (alignToggle.siblingCount - 1) * 6) / alignToggle.siblingCount
                 height: 32
                 radius: 8
-                color: alignToggle.active ? "#6c5ce7" : (alignArea.containsMouse ? "#20222c" : "#1a1c26")
-                border.color: alignToggle.active ? "#6c5ce7" : "#2a2f3a"
+                color: alignToggle.active ? Theme.accent : (alignArea.containsMouse ? Theme.hoverBg : Theme.inset)
+                border.color: alignToggle.active ? Theme.accent : Theme.border
                 border.width: 1
                 Behavior on color { ColorAnimation { duration: 100 } }
 
@@ -296,7 +296,7 @@ Column {
                     name: alignToggle.icon
                     fit: true
                     width: 15; height: 15
-                    color: alignToggle.active ? "#ffffff" : "#c8cdd9"
+                    color: alignToggle.active ? "#ffffff" : Theme.textSecondary
                 }
 
                 MouseArea {
@@ -334,7 +334,7 @@ Column {
         width: parent.width
         height: 46
         radius: 8
-        color: "#161823"
+        color: Theme.card
 
         Row {
             id: fontRow
@@ -345,7 +345,7 @@ Column {
             Text {
                 anchors.verticalCenter: parent.verticalCenter
                 text: "Aa"
-                color: "#eef1f8"
+                color: Theme.textPrimary
                 font.family: "Segoe UI"
                 font.pixelSize: 16
                 font.weight: Font.DemiBold
@@ -354,7 +354,7 @@ Column {
                 id: fontFamilyLabel
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.fontFamily
-                color: "#c8cdd9"
+                color: Theme.textSecondary
                 font.family: "Segoe UI"
                 font.pixelSize: 14
                 elide: Text.ElideRight
@@ -363,7 +363,7 @@ Column {
             IconGlyph {
                 anchors.verticalCenter: parent.verticalCenter
                 name: "chevronDown"
-                color: "#6b7280"
+                color: Theme.textMuted
                 width: 10; height: 10
             }
         }
@@ -395,14 +395,14 @@ Column {
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     text: root.fontWeight
-                    color: "#8a94a6"
+                    color: Theme.textSecondary
                     font.family: "Segoe UI"
                     font.pixelSize: 13
                 }
                 IconGlyph {
                     anchors.verticalCenter: parent.verticalCenter
                     name: "chevronDown"
-                    color: "#6b7280"
+                    color: Theme.textMuted
                     width: 8; height: 8
                 }
             }
@@ -430,7 +430,7 @@ Column {
                 height: 22
                 radius: 11
                 color: root.target ? root.target.meta.color ?? "#ffffff" : "#ffffff"
-                border.color: "#3a4a7a"
+                border.color: Theme.borderSubtle
                 border.width: 1
             }
 
@@ -439,15 +439,15 @@ Column {
                 height: 24
                 width: 60
                 radius: 12
-                color: colorChangeArea.containsMouse ? "#20242f" : "#1a1c26"
-                border.color: "#2a3140"
+                color: colorChangeArea.containsMouse ? Theme.hoverBg : Theme.inset
+                border.color: Theme.borderSubtle
                 border.width: 1
                 Behavior on color { ColorAnimation { duration: 100 } }
 
                 Text {
                     anchors.centerIn: parent
                     text: qsTr("Change")
-                    color: "#aeb6c8"
+                    color: Theme.textSecondary
                     font.family: "Segoe UI"
                     font.pixelSize: 12
                     font.weight: Font.Medium
@@ -471,7 +471,7 @@ Column {
 
         Text {
             text: qsTr("CASE")
-            color: "#5c6475"
+            color: Theme.textMuted
             font.family: "Segoe UI"
             font.pixelSize: 10
             font.weight: Font.Bold
@@ -496,15 +496,15 @@ Column {
                     width: (parent.width - 24) / 4
                     height: 32
                     radius: 8
-                    color: caseBtn.active ? "#6c5ce7" : (caseArea.containsMouse ? "#20222c" : "#1a1c26")
-                    border.color: caseBtn.active ? "#6c5ce7" : "#2a2f3a"
+                    color: caseBtn.active ? Theme.accent : (caseArea.containsMouse ? Theme.hoverBg : Theme.inset)
+                    border.color: caseBtn.active ? Theme.accent : Theme.border
                     border.width: 1
                     Behavior on color { ColorAnimation { duration: 100 } }
 
                     Text {
                         anchors.centerIn: parent
                         text: caseBtn.modelData.label
-                        color: caseBtn.active ? "#ffffff" : "#c8cdd9"
+                        color: caseBtn.active ? "#ffffff" : Theme.textSecondary
                         font.family: "Segoe UI"
                         font.pixelSize: 14
                         font.weight: caseBtn.active ? Font.DemiBold : Font.Medium
@@ -528,7 +528,7 @@ Column {
 
         Text {
             text: qsTr("AUTO SIZE")
-            color: "#5c6475"
+            color: Theme.textMuted
             font.family: "Segoe UI"
             font.pixelSize: 10
             font.weight: Font.Bold
@@ -556,15 +556,15 @@ Column {
                     width: (parent.width - 16) / 3
                     height: 32
                     radius: 8
-                    color: sizeBtn.active ? "#6c5ce7" : (sizeArea.containsMouse ? "#20222c" : "#1a1c26")
-                    border.color: sizeBtn.active ? "#6c5ce7" : "#2a2f3a"
+                    color: sizeBtn.active ? Theme.accent : (sizeArea.containsMouse ? Theme.hoverBg : Theme.inset)
+                    border.color: sizeBtn.active ? Theme.accent : Theme.border
                     border.width: 1
                     Behavior on color { ColorAnimation { duration: 100 } }
 
                     Text {
                         anchors.centerIn: parent
                         text: sizeBtn.modelData.label
-                        color: sizeBtn.active ? "#ffffff" : "#c8cdd9"
+                        color: sizeBtn.active ? "#ffffff" : Theme.textSecondary
                         font.family: "Segoe UI"
                         font.pixelSize: 14
                         font.weight: sizeBtn.active ? Font.DemiBold : Font.Medium
@@ -639,7 +639,7 @@ Column {
             width: parent.width
             height: 44
             radius: 8
-            color: "#161823"
+            color: Theme.card
 
             Row {
                 x: 14
@@ -649,7 +649,7 @@ Column {
                 IconGlyph { anchors.verticalCenter: parent.verticalCenter; name: "listBullets"; color: "#e0399f"; width: 14; height: 14 }
                 Text {
                     text: qsTr("List")
-                    color: "#eef1f8"
+                    color: Theme.textPrimary
                     font.family: "Segoe UI"
                     font.pixelSize: 14
                     font.weight: Font.Medium
@@ -660,7 +660,7 @@ Column {
                 x: parent.width - 28
                 anchors.verticalCenter: parent.verticalCenter
                 name: listSection.expanded ? "chevronUp" : "chevronDown"
-                color: "#6b7280"
+                color: Theme.textMuted
                 width: 12; height: 12
             }
 
@@ -687,15 +687,15 @@ Column {
                     width: listBtn.modelData.key === "none" ? 64 : 48
                     height: 32
                     radius: 8
-                    color: listBtn.active ? "#6c5ce7" : (listArea.containsMouse ? "#20222c" : "#1a1c26")
-                    border.color: listBtn.active ? "#6c5ce7" : "#2a2f3a"
+                    color: listBtn.active ? Theme.accent : (listArea.containsMouse ? Theme.hoverBg : Theme.inset)
+                    border.color: listBtn.active ? Theme.accent : Theme.border
                     border.width: 1
                     Behavior on color { ColorAnimation { duration: 100 } }
 
                     Text {
                         anchors.centerIn: parent
                         text: listBtn.modelData.key === "none" ? qsTr("None") : listBtn.modelData.sample
-                        color: listBtn.active ? "#ffffff" : "#c8cdd9"
+                        color: listBtn.active ? "#ffffff" : Theme.textSecondary
                         font.family: "Segoe UI"
                         font.pixelSize: 14
                         font.weight: listBtn.active ? Font.DemiBold : Font.Medium
@@ -719,7 +719,7 @@ Column {
 
         Text {
             text: qsTr("POSITION & SIZE")
-            color: "#5c6475"
+            color: Theme.textMuted
             font.family: "Segoe UI"
             font.pixelSize: 10
             font.weight: Font.Bold
@@ -745,7 +745,7 @@ Column {
                     width: (parent.width - 24) / 4
                     height: 40
                     radius: 8
-                    color: "#161823"
+                    color: Theme.card
 
                     Column {
                         anchors.centerIn: parent
@@ -754,14 +754,14 @@ Column {
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
                             text: geomBox.modelData.label
-                            color: "#5c6475"
+                            color: Theme.textMuted
                             font.family: "Segoe UI"
                             font.pixelSize: 9
                         }
                         TextInput {
                             id: geomInput
                             anchors.horizontalCenter: parent.horizontalCenter
-                            color: "#eef1f8"
+                            color: Theme.textPrimary
                             font.family: "Segoe UI"
                             font.pixelSize: 14
                             font.weight: Font.Medium

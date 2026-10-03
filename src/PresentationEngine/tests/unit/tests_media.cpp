@@ -448,3 +448,80 @@ void TestMediaLibraryNestedFolders() {
         CHECK(again.Items(root + "/events/easter 2027/stage").size() == 2);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Empty-path safety (regression, 2026-10-01).
+//
+// WHY THIS TEST EXISTS: the app was crashing on GO LIVE with an NDI output
+// enabled, with five byte-identical crash records reading
+//
+//   signal=0 (filesystem error: cannot make absolute path: Invalid argument [])
+//
+// On Windows, std::filesystem::absolute() calls GetFullPathNameW, which
+// fails with ERROR_INVALID_PARAMETER (22) for an EMPTY path. The error_code
+// overload returns that as an error code (harmless); the THROWING overload
+// raises std::filesystem::filesystem_error, which escaped into
+// std::terminate and killed the process.
+//
+// The PAL's own Absolute() always used the error_code overload and so never
+// threw — but it turned an empty query into an Err::IoError, which callers
+// treat as fatal, and it made the "empty path" case look like a disk
+// failure in the log. Both are now handled explicitly: an empty path is a
+// question with no answer, answered with an empty string.
+//
+// The media library is the reachable path: MediaLibrary::Canonical("") and
+// Items("") both route an empty folder name into Absolute().
+// ---------------------------------------------------------------------------
+void TestEmptyPathSafety() {
+    namespace mm = bps::media;
+    auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
+
+    // Absolute("") is an empty string, not an error and never a throw.
+    {
+        auto abs = fs.Absolute("");
+        CHECK(abs.ok());
+        CHECK(abs.value().empty());
+    }
+
+    // Metadata("") reports "not a file, not a directory" — not an IoError.
+    {
+        auto meta = fs.Metadata("");
+        CHECK(meta.ok());
+        CHECK(!meta.value().isDirectory);
+        CHECK(!meta.value().isRegularFile);
+    }
+
+    // A normal path still resolves (the guard must not swallow real work).
+    {
+        const std::string root = "/tmp/bps_empty_path";
+        (void)fs.RemoveAll(root);
+        CHECK(fs.CreateDirectories(root).ok());
+        auto abs = fs.Absolute(root);
+        CHECK(abs.ok());
+        CHECK(!abs.value().empty());
+        (void)fs.RemoveAll(root);
+    }
+
+    // The media library: an empty folder name finds nothing and scans
+    // nothing, and must not take the process down on the way.
+    {
+        const std::string root = "/tmp/bps_empty_path_lib";
+        (void)fs.RemoveAll(root);
+        CHECK(fs.CreateDirectories(root).ok());
+        MakeFile(root + "/pic.png");
+
+        mm::MediaLibrary lib(root + "/state/media-folders.json");
+        CHECK(lib.Load().ok());
+        CHECK(lib.AddFolder(root).ok());
+        CHECK(lib.Scan(root).ok());                // items_ is filled by Scan, not AddFolder
+
+        // Canonical() is private; its empty-path guard is exercised through
+        // the public callers below (Scan/RemoveFolder/Subfolders all route
+        // their argument through it).
+        CHECK(lib.Items("").size() == 1);          // empty = "everything"
+        CHECK(!lib.Scan("").ok());                 // empty is not a library folder
+        CHECK(!lib.RemoveFolder("").ok());
+        CHECK(lib.Subfolders("").empty());
+        (void)fs.RemoveAll(root);
+    }
+}

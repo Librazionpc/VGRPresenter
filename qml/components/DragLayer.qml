@@ -57,7 +57,7 @@ Item {
         height: 28
         radius: 14
         color: "#e61a1c26"
-        border.color: "#ff4d3d"
+        border.color: Theme.accent
         border.width: 1
 
         Drag.dragType: Drag.Internal

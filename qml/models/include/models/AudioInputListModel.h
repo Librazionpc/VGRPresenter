@@ -97,10 +97,16 @@ class AudioInputListModel : public QAbstractListModel
     QML_SINGLETON
 
 public:
-    // C++ access to the QML-created singleton (null until QML constructs
-    // it) — the cross-model translation entry points below are only ever
-    // called from routing flows, which run after the screen exists.
-    static AudioInputListModel *Instance() { return s_instance; }
+    // C++ access to the singleton.
+    //
+    // EAGER, not lazy (fixed 2026-10-01). It used to be "null until QML
+    // constructs it", which quietly assumed every C++ reader runs after the
+    // Audio & Video screen exists — and the static row/stable-id translation
+    // entry points below are called from BusListModel's rebuild path, which
+    // runs at construction, before any screen. create() below hands QML the
+    // same static instance C++ reads, so existence is not a race.
+    static AudioInputListModel *Instance();
+    static AudioInputListModel *create(QQmlEngine *engine, QJSEngine *jsEngine);
 
     // Row <-> stable id. rowForStableId returns -1 when the id belongs to a
     // removed row — callers treat that as "no such route".

@@ -13,6 +13,9 @@ import QtQuick
 // second-by-second Timer + formatting logic here.
 Item {
     id: root
+    // Shared top-level modal layer: keep the scrim and card above the page
+    // so clicks and hover never reach the controls behind the dialog.
+    z: 30000
 
     property bool open: false
 
@@ -184,8 +187,8 @@ Item {
                             width: (parent.width - 8) / 2
                             height: 32
                             radius: 8
-                            color: fmtBtn.active ? "#6c5ce7" : (fmtArea.containsMouse ? "#20222c" : "#1a1c26")
-                            border.color: fmtBtn.active ? "#6c5ce7" : "#2a2f3a"
+                            color: fmtBtn.active ? Theme.accent : (fmtArea.containsMouse ? "#20222c" : "#1a1c26")
+                            border.color: fmtBtn.active ? Theme.accent : "#2a2f3a"
                             border.width: 1
                             Behavior on color { ColorAnimation { duration: 100 } }
 
@@ -239,8 +242,8 @@ Item {
                             width: (parent.width - 8) / 2
                             height: 32
                             radius: 8
-                            color: styleBtn.active ? "#6c5ce7" : (styleArea.containsMouse ? "#20222c" : "#1a1c26")
-                            border.color: styleBtn.active ? "#6c5ce7" : "#2a2f3a"
+                            color: styleBtn.active ? Theme.accent : (styleArea.containsMouse ? "#20222c" : "#1a1c26")
+                            border.color: styleBtn.active ? Theme.accent : "#2a2f3a"
                             border.width: 1
                             Behavior on color { ColorAnimation { duration: 100 } }
 
@@ -292,7 +295,7 @@ Item {
                             radius: 14
                             color: modelData
                             border.width: tintDot.active ? 2 : 1
-                            border.color: tintDot.active ? "#6c5ce7" : "#2a3140"
+                            border.color: tintDot.active ? Theme.accent : "#2a3140"
 
                             MouseArea {
                                 anchors.fill: parent
@@ -333,8 +336,8 @@ Item {
                             width: (parent.width - 8) / 2
                             height: 32
                             radius: 8
-                            color: bgBtn.active ? "#6c5ce7" : (bgArea.containsMouse ? "#20222c" : "#1a1c26")
-                            border.color: bgBtn.active ? "#6c5ce7" : "#2a2f3a"
+                            color: bgBtn.active ? Theme.accent : (bgArea.containsMouse ? "#20222c" : "#1a1c26")
+                            border.color: bgBtn.active ? Theme.accent : "#2a2f3a"
                             border.width: 1
                             Behavior on color { ColorAnimation { duration: 100 } }
 
@@ -387,7 +390,7 @@ Item {
                         width: 44
                         height: 24
                         radius: 12
-                        color: toggleTrack.on ? "#6c5ce7" : "#2a2f3a"
+                        color: toggleTrack.on ? Theme.accent : "#2a2f3a"
                         Behavior on color { ColorAnimation { duration: 100 } }
 
                         Rectangle {
@@ -451,7 +454,7 @@ Item {
                     width: 90
                     height: 32
                     radius: 9
-                    color: addArea.containsMouse ? "#5a4cd6" : "#6c5ce7"
+                    color: addArea.containsMouse ? Qt.darker(Theme.accent, 1.1) : Theme.accent
                     Behavior on color { ColorAnimation { duration: 100 } }
 
                     Text {

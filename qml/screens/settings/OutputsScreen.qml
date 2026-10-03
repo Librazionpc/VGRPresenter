@@ -247,6 +247,13 @@ Item {
                     readonly property bool ndiFeedIsThisRow: card.kind === "NDI"
                         && LiveOutputService.ndiSending
                         && LiveOutputService.ndiSendingOutputName === card.name
+                    // The FIRST enabled NDI output is the one being fed — while
+                    // it has not produced a frame yet it is WARMING UP, and the
+                    // row says so inline instead of the misleading "ready (go
+                    // live to send)" a not-yet-sending feed used to read as.
+                    readonly property bool ndiWarmingIsThisRow: card.kind === "NDI"
+                        && LiveOutputService.ndiWarming
+                        && LiveOutputService.ndiWarmingOutputName === card.name
                     // LIVE only while a GO LIVE session is actually running:
                     // an NDI row whose frames verifiably flow right now, or
                     // the on-air row DURING a live session. The active
@@ -340,10 +347,14 @@ Item {
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 6; height: 6; radius: 3
                                 visible: card.kind === "NDI"
-                                color: card.ndiFeedIsThisRow ? "#3ddc84" : Theme.textMuted
+                                color: card.ndiFeedIsThisRow ? "#3ddc84"
+                                     : (card.ndiWarmingIsThisRow ? Theme.warning : Theme.textMuted)
 
                                 SequentialAnimation on opacity {
-                                    running: card.ndiFeedIsThisRow
+                                    // Pulse while feeding OR warming — a still
+                                    // amber dot reads as "stuck"; the pulse says
+                                    // "working on it" for both states.
+                                    running: card.ndiFeedIsThisRow || card.ndiWarmingIsThisRow
                                     loops: Animation.Infinite
                                     NumberAnimation { from: 1; to: 0.3; duration: 700 }
                                     NumberAnimation { from: 0.3; to: 1; duration: 700 }
@@ -365,6 +376,8 @@ Item {
                                                 : "NDI · sending · " + LiveOutputService.ndiFramesSent
                                                   + " frames · " + (connected > 0 ? connected + " monitor(s)" : "")
                                         }
+                                        if (card.ndiWarmingIsThisRow)
+                                            return "NDI · warming up · waiting for the first frame"
                                         return "NDI · " + (EngineBridge.ndiAvailable
                                                           ? "ready (go live to send)"
                                                           : "runtime not installed")
@@ -375,7 +388,8 @@ Item {
                                             : "SDI · " + EngineBridge.sdiStatus
                                     return ""
                                 }
-                                color: card.ndiFeedIsThisRow ? "#3ddc84" : Theme.textMuted
+                                color: card.ndiFeedIsThisRow ? "#3ddc84"
+                                     : (card.ndiWarmingIsThisRow ? Theme.warning : Theme.textMuted)
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.textXs
                             }

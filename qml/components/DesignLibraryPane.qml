@@ -129,6 +129,8 @@ Item {
         objectName: "selfTestDesignCategoryMenu"
         visible: false
         z: 25
+        // Same as cardMenu: hug the rows rather than render as a 480 px slab.
+        fitContentWidth: true
         onItemActivated: (label) => {
             categoryCtxMenu.visible = false
             const cat = root.categoryMenuTarget
@@ -358,7 +360,7 @@ Item {
             height: 36
             width: newRow.width + 32
             radius: 18
-            color: newHover.hovered ? "#e5484d" : Theme.danger
+            color: newHover.hovered ? Qt.lighter(Theme.accent, 1.08) : Theme.accent
 
             // the soft shadow (drawn first, so it sits under the pill)
             Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 3; width: parent.width + 6; height: parent.height + 4; radius: 20; color: "#26000000" }
@@ -443,12 +445,20 @@ Item {
     }
 
     // ---- Right-click menu on a card: every action of the hover buttons ----------------------------------
-    // Edit / Rename / Duplicate, then "Move to ..." for each category (a tick marks where it is now), then Delete. Built when it
-    // opens, so it always lists the current categories.
+    // Edit / Rename / Duplicate, ONE "Move to" row (its category list lives in the flyout beside it —
+    // see below), then Delete. Built when it opens, so the flyout always lists the current categories.
     property var cardMenuDesign: null
-    property var cardMenuActions: ({})     // menu label -> "edit" | "rename" | "duplicate" | "delete" | "file:<category id>"
+    property var cardMenuActions: ({})     // menu label -> "edit" | "rename" | "duplicate" | "delete" | "move"
     function openCardMenu(design, source, mx, my) {
         root.menuDesign = ""                 // the "file in" popup, if it is open, gives way
+        moveMenu.closeFlyout()               // ...and so does a flyout from a previous menu
+        // ...and so does the CATEGORY context menu: opening one popup must
+        // DROP the other. Two open DropdownPanels both claim the pointer as
+        // AppCursor blockers; the stale one (still "visible") then covers the
+        // freshly-opened card menu's rect and blocks its rows from lighting
+        // up. openCategoryContextMenu already hides cardMenu this way; the
+        // reverse direction was missing.
+        categoryCtxMenu.visible = false
         const items = []
         const actions = {}
         const add = (label, action, extra) => {
@@ -459,18 +469,47 @@ Item {
         add(qsTr("Rename"), "rename")
         add(qsTr("Duplicate"), "duplicate")
         items.push({ divider: true })
-        add(qsTr("Move to Unlabeled"), "file:", design.category === "" ? { trailing: "\u2713" } : {})
-        const cats = service.categories
-        for (let i = 0; i < cats.length; ++i)
-            add(qsTr("Move to %1").arg(cats[i].name), "file:" + cats[i].id, design.category === cats[i].id ? { trailing: "\u2713" } : {})
+        // ONE row, whatever the library's category count: the chevron says a
+        // list opens beside it. A "Move to <name>" row per category (the old
+        // shape) made this menu as tall as the library is wide — past the
+        // window as soon as a few categories existed.
+        add(root.moveLabel, "move", { trailing: "\u203a" })
         items.push({ divider: true })
         add(qsTr("Delete"), "delete", { danger: true })
         root.cardMenuDesign = design
         root.cardMenuActions = actions
         cardMenu.model = items
-        cardMenu.openAt(source, mx, my, root)
-        // The panel's height is only known once its rows have laid out; placing it again then keeps a tall menu inside the window.
-        Qt.callLater(function () { if (cardMenu.visible) cardMenu.openAt(source, mx, my, root) })
+        cardMenu.openAt(source, mx, my, root.Window.contentItem)
+    }
+
+    // ---- the "Move to" flyout -------------------------------------------------------------
+    // The card menu's "Move to" row opens this panel BESIDE it: one row per
+    // category (Unlabeled first, a tick on the design's own), scrolling past
+    // `maxHeight`. It is a SUBMENU of the card menu — same open/close life,
+    // so it can never be left floating on its own — and its own list scrolls,
+    // so a library with dozens of categories is still fully reachable.
+    readonly property string moveLabel: qsTr("Move to")
+    property var moveRow: null            // the card menu's "Move to" row (the flyout's anchor)
+    function openMoveMenu(rowItem) {
+        const design = root.cardMenuDesign
+        if (!rowItem || !design)
+            return
+        root.moveRow = rowItem
+        const entry = (id, name, icon) => ({ label: name, icon: icon, payload: id,
+                                             trailing: design.category === id ? "\u2713" : "" })
+        moveMenu.model = [entry("", qsTr("Unlabeled"), "layers")]
+            .concat(service.categories.map((c) => entry(c.id, c.name, c.icon)))
+        moveMenu.openBeside(rowItem, root.Window.contentItem)
+    }
+    // Leaving the row into the flyout must not close it: the two are separate
+    // items with a gap between them, so the exit arms a short grace that only
+    // closes when the pointer has settled on NEITHER (the same pattern the
+    // menu bar's Settings flyout uses, and for the same reason).
+    Timer {
+        id: moveMenuGrace
+        interval: 260
+        onTriggered: if (!AppCursor.hovered(moveMenu) && !AppCursor.hovered(root.moveRow))
+                         moveMenu.closeFlyout()
     }
 
     // Any click or scroll outside the menu closes it. The menu floats at WINDOW level (DropdownPanel lifts itself there), so its
@@ -484,16 +523,51 @@ Item {
         else
             root.reload()
     }
+    // A flyout goes when its menu does — same open/close life, so it can never
+    // outlive the rows it belongs to.
+    Connections {
+        target: cardMenu
+        function onVisibleChanged() { if (!cardMenu.visible) moveMenu.closeFlyout() }
+    }
     DropdownPanel {
         id: cardMenu
         objectName: "selfTestDesignCardMenu"
         visible: false
         z: 25
+        // A context menu sizes to its rows ("Move to <project>" is the widest), not the
+        // 480 px default slab the menu bar's dropdowns use.
+        fitContentWidth: true
         maxHeight: 320
+        // Hovering the "Move to" row opens its category flyout beside it;
+        // moving onto any OTHER row drops it. The row item comes straight
+        // from the panel (its own position truth), not from a re-derivation
+        // of the row's coordinates. The exit grace timer lets the pointer
+        // cross into the flyout so the pair reads as one menu.
+        onItemHovered: (label, hovering, rowItem) => {
+            if (label === root.moveLabel) {
+                if (hovering) {
+                    moveMenuGrace.stop()
+                    root.openMoveMenu(rowItem)
+                } else {
+                    moveMenuGrace.restart()
+                }
+                return
+            }
+            if (hovering)
+                moveMenu.closeFlyout()
+        }
         onItemActivated: (label) => {
-            cardMenu.visible = false           // first: the change below rebuilds the grid this menu was opened from
             const action = root.cardMenuActions[label]
             const design = root.cardMenuDesign
+            // The "Move to" row is a SUBMENU, not an action: it opens the
+            // flyout and leaves this menu up (a click there means "show me
+            // the categories", so the list must not vanish as it appears).
+            if (action === "move") {
+                if (!moveMenu.visible)
+                    root.openMoveMenu(root.moveRow)
+                return
+            }
+            cardMenu.visible = false           // first: the change below rebuilds the grid this menu was opened from
             if (!action || !design)
                 return
             if (action === "edit") {
@@ -507,21 +581,39 @@ Item {
                 root.deleteName = design.name
                 root.deletingCategory = false
                 confirm.open()
-            } else if (action.indexOf("file:") === 0) {
-                service.setDesignCategory(design.id, action.substring(5))
             }
+        }
+    }
+    MenuCatcher { menu: moveMenu }
+    DropdownPanel {
+        id: moveMenu
+        objectName: "selfTestDesignMoveMenu"
+        visible: false
+        z: 25
+        fitContentWidth: true
+        // The categories' own scroller: past this the list scrolls (with its
+        // own AppScrollBar) instead of running past the window.
+        maxHeight: 320
+        // `payload` carries the category id, so a category whose name happens
+        // to match another can't file the design in the wrong place.
+        onItemPicked: (index, payload) => {
+            const design = root.cardMenuDesign
+            moveMenu.closeFlyout()
+            cardMenu.visible = false
+            if (design)
+                service.setDesignCategory(design.id, payload === undefined ? "" : payload)
         }
     }
 
     // ---- dialogs ---------------------------------------------------------------------------
     NameDialog {
         id: nameDialog
-        z: 30
+        z: 30000
         onAccepted: (text) => root.nameAccepted(text)
     }
     ConfirmDialog {
         id: confirm
-        z: 30
+        z: 30000
         title: root.deletingCategory ? qsTr("Delete category?") : qsTr("Delete %1?").arg(root.noun)
         message: root.deletingCategory
                  ? qsTr("“%1” is removed. Its %2s are kept and become unlabeled.").arg(root.deleteName, root.noun)

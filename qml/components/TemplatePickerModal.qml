@@ -18,6 +18,9 @@ import QtQuick.Controls
 // just enough for the All/Favorites tabs to be genuinely functional today.
 Item {
     id: root
+    // Shared top-level modal layer: keep the scrim and card above the page
+    // so clicks and hover never reach the controls behind the dialog.
+    z: 30000
 
     property bool open: false
     // "shows" | "media" | "scripture" — which category this picker is
@@ -262,7 +265,7 @@ Item {
                             id: catLabel
                             anchors.centerIn: parent
                             text: root.contentTypeLabel.toUpperCase() + " · " + root.templates.length
-                            color: "#ff4d3d"
+                            color: Theme.accent
                             font.family: "Segoe UI"
                             font.pixelSize: 10
                             font.weight: Font.Bold
@@ -500,7 +503,7 @@ Item {
                                     radius: 8
                                     color: tplRow.selected ? "#1a2240" : (rowArea.containsMouse ? "#191b24" : "#161823")
                                     border.width: tplRow.selected ? 1.5 : 1
-                                    border.color: tplRow.selected ? "#6c5ce7" : "#262a38"
+                                    border.color: tplRow.selected ? Theme.accent : "#262a38"
                                     Behavior on color { ColorAnimation { duration: 100 } }
 
                                     // A plain generic mark, not a redundant tiny render of the design - the actual preview is the
@@ -621,7 +624,7 @@ Item {
                     width: 120
                     height: 34
                     radius: 9
-                    color: useArea.containsMouse ? "#ff6b5a" : "#ff4d3d"
+                    color: useArea.containsMouse ? Theme.accentLight : Theme.accent
                     Behavior on color { ColorAnimation { duration: 100 } }
 
                     Text {

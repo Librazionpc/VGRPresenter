@@ -23,11 +23,14 @@ import QtQuick
 // Consumers just read `selection` on applied() and decide what to do with it
 // (this component owns no application state of its own beyond the picker UI).
 //
-// Literal colors throughout, not Theme.* — same AOT-compiler limitation as
-// DropdownPanel.qml at this nesting depth (instantiated from EditScreen.qml,
-// itself nested under Main.qml).
+// Colors read Theme tokens, so a Light choice recolours the modal with the
+// rest of the app. (The palette swatches themselves — the preset colours and
+// gradients — are CONTENT, not chrome, and keep their literal values.)
 Item {
     id: root
+    // Shared top-level modal layer: keep the scrim and card above the page
+    // so clicks and hover never reach the controls behind the dialog.
+    z: 30000
 
     property bool open: false
 
@@ -249,7 +252,7 @@ Item {
         height: 40
         radius: 8
         border.width: gswatch.selected ? 2 : 1
-        border.color: gswatch.selected ? "#6c5ce7" : "#2a3140"
+        border.color: gswatch.selected ? Theme.accent : Theme.borderSubtle
         gradient: Gradient {
             GradientStop { position: 0; color: gswatch.from }
             GradientStop { position: 1; color: gswatch.to }
@@ -293,8 +296,8 @@ Item {
         readonly property int chrome: 62 + footerRow.height + 34
         height: Math.max(248, Math.min(root.height - 80, chrome + content.height))
         radius: 14
-        color: "#15161d"
-        border.color: "#232530"
+        color: Theme.surface
+        border.color: Theme.border
         border.width: 1
         clip: true
 
@@ -313,7 +316,7 @@ Item {
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.title
-                color: "#eef0f6"
+                color: Theme.textPrimary
                 font.family: "Segoe UI"
                 font.pixelSize: 21
                 font.weight: Font.DemiBold
@@ -326,13 +329,13 @@ Item {
                 width: 28
                 height: 28
                 radius: 7
-                color: closeArea.containsMouse ? "#20222c" : "transparent"
+                color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
                 Behavior on color { ColorAnimation { duration: 100 } }
 
                 Text {
                     anchors.centerIn: parent
                     text: "✕"
-                    color: "#8a94a6"
+                    color: Theme.textSecondary
                     font.pixelSize: 14
                 }
 
@@ -372,7 +375,7 @@ Item {
                 Text {
                     width: parent.width
                     text: qsTr("Pick a color or gradient for the slide background")
-                    color: "#8a94a6"
+                    color: Theme.textSecondary
                     font.family: "Segoe UI"
                     font.pixelSize: 13
                     wrapMode: Text.Wrap
@@ -383,8 +386,8 @@ Item {
                 width: parent.width
                 height: 64
                 radius: 10
-                color: "#1a1c26"
-                border.color: "#2a3140"
+                color: Theme.inset
+                border.color: Theme.borderSubtle
                 border.width: 1
 
                 Row {
@@ -406,7 +409,7 @@ Item {
                             anchors.fill: parent
                             radius: 8
                             clip: true
-                            color: "#1a1c26"
+                            color: Theme.inset
 
                             Grid {
                                 columns: 6
@@ -417,7 +420,7 @@ Item {
                                         required property int index
                                         width: 6
                                         height: 6
-                                        color: (Math.floor(index / 6) + (index % 6)) % 2 === 0 ? "#2a2c38" : "#15161d"
+                                        color: (Math.floor(index / 6) + (index % 6)) % 2 === 0 ? Theme.borderSubtle : Theme.surface
                                     }
                                 }
                             }
@@ -426,7 +429,7 @@ Item {
                         Rectangle {
                             anchors.fill: parent
                             radius: 8
-                            border.color: "#6c5ce7"
+                            border.color: Theme.accent
                             border.width: 1.5
                             color: root.selection.kind === "color" && root.selection.color !== root.transparentValue
                                    ? root.fadedColor(root.selection.color) : "transparent"
@@ -452,14 +455,14 @@ Item {
                                     return qsTr("Transparent")
                                 return Qt.color(root.selection.color).a < 1 ? qsTr("Tint") : qsTr("Custom color")
                             }
-                            color: "#eef0f6"
+                            color: Theme.textPrimary
                             font.family: "Segoe UI"
                             font.pixelSize: 15
                             font.weight: Font.Medium
                         }
                         Text {
                             text: root.selection.kind === "gradient" ? root.selection.subtitle : root.selection.color
-                            color: "#5c6475"
+                            color: Theme.textMuted
                             font.family: "Segoe UI"
                             font.pixelSize: 12
                         }
@@ -474,7 +477,7 @@ Item {
 
                 Text {
                     text: qsTr("COLORS")
-                    color: "#5c6475"
+                    color: Theme.textMuted
                     font.family: "Segoe UI"
                     font.pixelSize: 10
                     font.weight: Font.Bold
@@ -506,9 +509,9 @@ Item {
                             // to the selection ring below.
                             color: colorSwatch.isSolid
                                    ? (colorSwatchArea.containsMouse ? Qt.lighter(modelData, 1.15) : modelData)
-                                   : (colorSwatchArea.containsMouse ? "#242633" : "#1a1c26")
+                                   : (colorSwatchArea.containsMouse ? Theme.hoverBg : Theme.inset)
                             border.width: colorSwatch.selected ? 2 : 1
-                            border.color: colorSwatch.selected ? "#6c5ce7" : "#2a3140"
+                            border.color: colorSwatch.selected ? Theme.accent : Theme.borderSubtle
                             Behavior on color { ColorAnimation { duration: 100 } }
                             Behavior on border.width { NumberAnimation { duration: 100 } }
 
@@ -525,7 +528,7 @@ Item {
                                         required property int index
                                         width: 10
                                         height: 10
-                                        color: (Math.floor(index / 4) + (index % 4)) % 2 === 0 ? "#2a2c38" : "#15161d"
+                                        color: (Math.floor(index / 4) + (index % 4)) % 2 === 0 ? Theme.borderSubtle : Theme.surface
                                     }
                                 }
                             }
@@ -571,7 +574,7 @@ Item {
 
                 Text {
                     text: qsTr("GRADIENTS")
-                    color: "#5c6475"
+                    color: Theme.textMuted
                     font.family: "Segoe UI"
                     font.pixelSize: 10
                     font.weight: Font.Bold
@@ -610,7 +613,7 @@ Item {
 
                 Text {
                     text: qsTr("CUSTOM COLOR")
-                    color: "#5c6475"
+                    color: Theme.textMuted
                     font.family: "Segoe UI"
                     font.pixelSize: 10
                     font.weight: Font.Bold
@@ -620,8 +623,8 @@ Item {
                     width: parent.width
                     height: 40
                     radius: 8
-                    color: "#1a1c26"
-                    border.color: "#2a3140"
+                    color: Theme.inset
+                    border.color: Theme.borderSubtle
                     border.width: 1
 
                     Row {
@@ -638,7 +641,7 @@ Item {
                             height: 20
                             radius: 5
                             color: root.customHex
-                            border.color: "#2a3140"
+                            border.color: Theme.borderSubtle
                             border.width: 1
                         }
 
@@ -647,7 +650,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             width: parent.width - 30
                             text: root.customHex
-                            color: "#c9cedd"
+                            color: Theme.textPrimary
                             font.family: "Segoe UI"
                             font.pixelSize: 14
                             selectByMouse: true
@@ -678,7 +681,7 @@ Item {
 
                 Text {
                     text: qsTr("CUSTOM GRADIENT")
-                    color: "#5c6475"
+                    color: Theme.textMuted
                     font.family: "Segoe UI"
                     font.pixelSize: 10
                     font.weight: Font.Bold
@@ -688,8 +691,8 @@ Item {
                     width: parent.width
                     height: 40
                     radius: 8
-                    color: "#1a1c26"
-                    border.color: "#2a3140"
+                    color: Theme.inset
+                    border.color: Theme.borderSubtle
                     border.width: 1
 
                     Row {
@@ -705,7 +708,7 @@ Item {
                             width: 20
                             height: 20
                             radius: 5
-                            border.color: "#2a3140"
+                            border.color: Theme.borderSubtle
                             border.width: 1
                             gradient: Gradient {
                                 GradientStop { position: 0; color: root.customGradFrom }
@@ -718,7 +721,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             width: 140
                             text: root.customGradFrom
-                            color: "#c9cedd"
+                            color: Theme.textPrimary
                             font.family: "Segoe UI"
                             font.pixelSize: 14
                             selectByMouse: true
@@ -737,7 +740,7 @@ Item {
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
                             text: "→"
-                            color: "#5c6475"
+                            color: Theme.textMuted
                             font.pixelSize: 14
                         }
 
@@ -746,7 +749,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             width: 140
                             text: root.customGradTo
-                            color: "#c9cedd"
+                            color: Theme.textPrimary
                             font.family: "Segoe UI"
                             font.pixelSize: 14
                             selectByMouse: true
@@ -788,14 +791,14 @@ Item {
                 width: 78
                 height: 34
                 radius: 8
-                color: cancelArea.containsMouse ? "#20222c" : "#1a1c26"
-                border.color: "#2a3140"
+                color: cancelArea.containsMouse ? Theme.hoverBg : Theme.inset
+                border.color: Theme.borderSubtle
                 border.width: 1
 
                 Text {
                     anchors.centerIn: parent
                     text: qsTr("Cancel")
-                    color: "#c9cedd"
+                    color: Theme.textPrimary
                     font.family: "Segoe UI"
                     font.pixelSize: 14
                     font.weight: Font.Medium
@@ -814,7 +817,7 @@ Item {
                 width: 78
                 height: 34
                 radius: 8
-                color: applyArea.containsMouse ? "#5a4cd6" : "#6c5ce7"
+                color: applyArea.containsMouse ? Qt.darker(Theme.accent, 1.15) : Theme.accent
                 Behavior on color { ColorAnimation { duration: 100 } }
 
                 Text {

@@ -143,17 +143,21 @@ Item {
         if (!root.hasUserData || !root.book)
             return
         root.noteVerse = v
-        noteInput.text = root.markFor(v).note || ""
+        // The draft TEXT is seeded by the editor TextInput itself when it
+        // becomes visible: it lives inside the verse-row delegate, and QML
+        // ids don't cross delegate boundaries — reading `noteInput` here
+        // threw "ReferenceError: noteInput is not defined" and aborted the
+        // whole call (the reported notes bug).
         if (root.notesOpen)
             root.refreshNotesRows()
     }
 
-    function saveNoteDraft() {
+    function saveNoteDraft(draft) {
         if (!root.hasUserData || root.noteVerse <= 0) {
             root.noteVerse = 0
             return
         }
-        root.userApi.setNote(root.refOfVerse(root.noteVerse), noteInput.text)
+        root.userApi.setNote(root.refOfVerse(root.noteVerse), draft)
         if (root.notesOpen)
             root.refreshNotesRows()
         root.noteVerse = 0
@@ -195,6 +199,16 @@ Item {
         return root.book ? root.adapter.preview(root.sourceId, root.book.id, root.chapterNumber, root.selected) : { blocks: [], background: "", reference: "", hasValues: true, slideCount: 0 }
     }
     readonly property string templateId: { root.engineRevision; return root.adapter.templateId() }
+    // The template's display name. Deliberately a property gated on
+    // engineRevision rather than a bare call in the row's own binding: the
+    // adapter's templateName() is a plain function, so a binding that calls it
+    // reads no notifyable property and NEVER re-evaluates. The template
+    // library itself loads asynchronously, after boot — and the default id is
+    // the same string before and after that load, so templateId never changes
+    // and the name computed in the pre-load pass stayed empty forever (the
+    // blank name space next to "Template"). engineRevision bumps on every
+    // adapter/service change, including the library finishing its load.
+    readonly property string templateName: { root.engineRevision; return root.adapter.templateName(root.templateId) }
     readonly property bool usingDefaultTemplate: root.templateId === root.adapter.defaultTemplateId()
     readonly property var options: SettingsService.values
 
@@ -208,12 +222,27 @@ Item {
             root.syncSources()
         }
     }
-    Component.onCompleted: root.syncSources()
+    // The engine boots (and reads its settings store) AFTER this UI is up, so
+    // at construction the remembered source key is not there yet — syncSources
+    // would fall through to the FIRST source and, through openSource, write it
+    // back as the remembered one (clobbering the user's choice). It runs once
+    // now (a no-op until the store lands; syncSources keeps its ready guard for
+    // the adapter's own pre-boot changed) and again via whenReady the moment the
+    // store is open — the one idiom for a pre-boot read.
+    Component.onCompleted: {
+        root.syncSources()
+        SettingsService.whenReady(root.syncSources)
+    }
 
     // ---- opening things ----
 
     // Keeps a valid Bible open: the one used last, else the first installed.
     function syncSources() {
+        // Wait for the engine's store: before it is up the remembered key reads
+        // as merely absent, and acting on that would stick the wrong source (see
+        // the SettingsService connection above, which calls back once it loads).
+        if (!SettingsService.ready)
+            return
         const list = root.sources
         if (list.length === 0) {
             root.sourceId = ""
@@ -795,13 +824,13 @@ Item {
                         required property var modelData
                         readonly property bool active: modelData.id === root.sourceId
                         width: sourceList.width; height: 29; radius: 6
-                        color: active ? "#1a1414" : (sourceHover.hovered ? "#16171e" : "transparent")
+                        color: active ? "#1a1414" : (sourceHoverPA.hovered ? "#16171e" : "transparent")
 
-                        Rectangle { visible: sourceRow.active; x: 0; y: 4; width: 3; height: 21; color: Theme.danger; radius: 1.5 }
+                        Rectangle { visible: sourceRow.active; x: 0; y: 4; width: 3; height: 21; color: Theme.accent; radius: 1.5 }
                         IconGlyph {
                             x: 10; anchors.verticalCenter: parent.verticalCenter
-                            name: "bookOpen"
-                            color: sourceRow.active ? Theme.danger : root.textDim
+                            name: "bible"
+                            color: sourceRow.active ? Theme.accent : root.textDim
                             width: 12; height: 12
                         }
                         Text {
@@ -811,7 +840,10 @@ Item {
                             elide: Text.ElideRight
                             font.family: Theme.fontFamily; font.pixelSize: 14
                         }
-                        HoverHandler { id: sourceHover; cursorShape: Qt.PointingHandCursor }
+                        // Position-truth hover (the verse rows' pattern) —
+                        // a HoverHandler's hovered suffers this build's
+                        // broken hover delivery, same as MouseArea.
+                        PositionHoverArea { id: sourceHoverPA; anchors.fill: parent; checkAncestors: false; showCursor: false }
                         TapHandler { onTapped: root.openSource(sourceRow.modelData.id) }
                     }
                 }
@@ -936,8 +968,8 @@ Item {
                         width: booksList.width; height: 28
                         Rectangle {
                             anchors.fill: parent; anchors.margins: 2; radius: 4
-                            color: bookRow.active ? "#1e1f28" : (bookHover.hovered ? "#1a1b23" : "transparent")
-                            Rectangle { visible: bookRow.active; x: 0; y: 4; width: 2; height: parent.height - 8; color: Theme.danger }
+                            color: bookRow.active ? "#1e1f28" : (bookHoverPA.hovered ? "#1a1b23" : "transparent")
+                            Rectangle { visible: bookRow.active; x: 0; y: 4; width: 2; height: parent.height - 8; color: Theme.accent }
                         }
                         Text {
                             x: 12; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 20
@@ -946,7 +978,7 @@ Item {
                             elide: Text.ElideRight
                             font.family: Theme.fontFamily; font.pixelSize: 16
                         }
-                        HoverHandler { id: bookHover; cursorShape: Qt.PointingHandCursor }
+                        PositionHoverArea { id: bookHoverPA; anchors.fill: parent; checkAncestors: false; showCursor: false }
                         TapHandler { onTapped: root.openBook(root.books.findIndex((b) => b.id === bookRow.modelData.id), 0) }
                     }
                 }
@@ -1005,8 +1037,8 @@ Item {
                         width: chapterList.width; height: 28
                         Rectangle {
                             anchors.fill: parent; anchors.margins: 2; radius: 4
-                            color: chapterRow.active ? "#1e1f28" : (chapterHover.hovered ? "#1a1b23" : "transparent")
-                            Rectangle { visible: chapterRow.active; x: 0; y: 4; width: 2; height: parent.height - 8; color: Theme.danger }
+                            color: chapterRow.active ? "#1e1f28" : (chapterHoverPA.hovered ? "#1a1b23" : "transparent")
+                            Rectangle { visible: chapterRow.active; x: 0; y: 4; width: 2; height: parent.height - 8; color: Theme.accent }
                         }
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
@@ -1019,7 +1051,7 @@ Item {
                             color: chapterRow.active ? Theme.textPrimary : root.textDim
                             font.family: Theme.fontFamily; font.pixelSize: 16
                         }
-                        HoverHandler { id: chapterHover; cursorShape: Qt.PointingHandCursor }
+                        PositionHoverArea { id: chapterHoverPA; anchors.fill: parent; checkAncestors: false; showCursor: false }
                         TapHandler { onTapped: root.openChapter(chapterRow.modelData, true) }
                     }
                 }
@@ -1084,7 +1116,7 @@ Item {
                             // header), which is exactly the "verse row stays highlighted
                             // after I click it" report.
                             color: verseRow.active ? "#2a2b35"
-                                                   : (verseHover.hovered ? "#16171e" : "transparent")
+                                                   : (verseHover.hovered ? "#1a1b23" : "transparent")
                         }
                         PositionHoverArea {
                             id: verseHover
@@ -1097,7 +1129,7 @@ Item {
                             x: 10; anchors.verticalCenter: parent.verticalCenter
                             width: 40; horizontalAlignment: Text.AlignRight
                             text: verseRow.modelData.number
-                            color: verseRow.marked ? "#f5c542" : Theme.danger
+                            color: verseRow.marked ? "#f5c542" : Theme.accent
                             font.family: Theme.fontFamily; font.pixelSize: 16; font.bold: true
                         }
                         Text {
@@ -1163,8 +1195,15 @@ Item {
                                 font.family: Theme.fontFamily; font.pixelSize: 13
                                 wrapMode: TextInput.Wrap
                                 clip: true
+                                // Seed on open + take focus HERE (delegate
+                                // scope can see its own id; the root's
+                                // functions can't).
+                                onVisibleChanged: if (visible) {
+                                    text = root.markFor(verseRow.modelData.number).note || ""
+                                    forceActiveFocus()
+                                }
                                 Keys.onEscapePressed: root.noteVerse = 0
-                                Keys.onReturnPressed: root.saveNoteDraft()
+                                Keys.onReturnPressed: root.saveNoteDraft(text)
                             }
                             Text {
                                 anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 6
@@ -1263,7 +1302,7 @@ Item {
                         Rectangle {
                             anchors.fill: parent; anchors.margins: 1; radius: 4
                             color: matchRow.active ? "#2a2b35" : (matchHover.hovered ? "#16171e" : "transparent")
-                            Rectangle { visible: matchRow.active; x: 0; y: 4; width: 2; height: parent.height - 8; color: Theme.danger }
+                            Rectangle { visible: matchRow.active; x: 0; y: 4; width: 2; height: parent.height - 8; color: Theme.accent }
                         }
                         Text {
                             x: 10; anchors.verticalCenter: parent.verticalCenter
@@ -1344,7 +1383,7 @@ Item {
                                     x: 6; y: 5
                                     width: 26; horizontalAlignment: Text.AlignRight
                                     text: modelData.number
-                                    color: Theme.danger
+                                    color: Theme.accent
                                     font.family: Theme.fontFamily; font.pixelSize: 14; font.bold: true
                                 }
                                 Text {
@@ -1494,9 +1533,10 @@ Item {
                             anchors.centerIn: parent
                             name: stepBtn.modelData.glyph
                             color: Theme.textPrimary
-                            width: 12; height: 12
+                            width: 13; height: 13
+                            fit: true
                         }
-                        HoverHandler { id: stepHover; cursorShape: Qt.PointingHandCursor }
+                        PositionHoverArea { id: stepHover; anchors.fill: parent; checkAncestors: false }
                         TapHandler { onTapped: root.stepAndPlay(stepBtn.modelData.dir) }
                     }
                 }
@@ -1522,7 +1562,7 @@ Item {
                         width: 13; height: 13
                         fit: true
                     }
-                    HoverHandler { id: playPickedHover; cursorShape: Qt.PointingHandCursor }
+                    PositionHoverArea { id: playPickedHover; anchors.fill: parent; checkAncestors: false }
                     TapHandler { onTapped: parent.isOurs ? LiveOutputService.stop() : root.playPicked() }
                 }
 
@@ -1542,7 +1582,7 @@ Item {
                         width: 13; height: 13
                         fit: true
                     }
-                    HoverHandler { id: starHover; cursorShape: Qt.PointingHandCursor }
+                    PositionHoverArea { id: starHover; anchors.fill: parent; checkAncestors: false }
                     TapHandler {
                         onTapped: {
                             if (!root.book || root.selected.length === 0)
@@ -1561,9 +1601,10 @@ Item {
                         anchors.centerIn: parent
                         name: "search"
                         color: Theme.textPrimary
-                        width: 12; height: 12
+                        width: 13; height: 13
+                        fit: true
                     }
-                    HoverHandler { id: searchHover; cursorShape: Qt.PointingHandCursor }
+                    PositionHoverArea { id: searchHover; anchors.fill: parent; checkAncestors: false }
                     TapHandler {
                         onTapped: {
                             root.searching = !root.searching
@@ -1758,11 +1799,16 @@ Item {
                         Column {
                             x: 12; anchors.verticalCenter: parent.verticalCenter
                             spacing: 2
-                            Text { text: qsTr("Template"); color: Theme.danger; font.family: Theme.fontFamily; font.pixelSize: 13 }
+                            Text { text: qsTr("Template"); color: Theme.accent; font.family: Theme.fontFamily; font.pixelSize: 13 }
                             Text {
                                 width: 150
-                                text: root.adapter.templateName(root.templateId)
-                                color: Theme.textPrimary; elide: Text.ElideRight
+                                // Same three states the Show screen's template row uses: nothing chosen,
+                                // a real name, or an id whose design is gone. Never a silently blank line.
+                                text: root.templateId === ""
+                                      ? qsTr("Default — no template")
+                                      : (root.templateName !== "" ? root.templateName : qsTr("Missing template"))
+                                color: root.templateId === "" ? Theme.textMuted : Theme.textPrimary
+                                elide: Text.ElideRight
                                 font.family: Theme.fontFamily; font.pixelSize: 16; font.weight: Font.DemiBold
                             }
                         }
@@ -1906,7 +1952,11 @@ Item {
                             OptionNumber { settingKey: root.adapter.optionsPrefix + ".longVersesTolerance"; step: 5 }
                         }
                         OptionToggle { settingKey: root.adapter.optionsPrefix + ".smartSplit" }
-                        OptionNumber { visible: root.options[root.adapter.optionsPrefix + ".smartSplit"] === false; settingKey: root.adapter.optionsPrefix + ".versesPerSlide" }
+                        // The max caps BOTH modes now — smart split packs by the
+                        // template box's capacity but never past this many — so
+                        // it stays visible with smart split on (it used to hide,
+                        // and was then silently ignored: the "max does nothing" gap).
+                        OptionNumber { settingKey: root.adapter.optionsPrefix + ".versesPerSlide" }
                     }
                 }
             }
@@ -1937,8 +1987,8 @@ Item {
                     Rectangle {
                         anchors.fill: parent; radius: width / 2
                         gradient: Gradient {
-                            GradientStop { position: 0.0; color: root.optionsOpen ? (optionsHover.hovered ? "#ff6a5c" : "#ff5a4b") : (optionsHover.hovered ? "#2a2d3b" : "#222533") }
-                            GradientStop { position: 1.0; color: root.optionsOpen ? "#e23f30" : "#181a24" }
+                            GradientStop { position: 0.0; color: root.optionsOpen ? (optionsHover.hovered ? Theme.accentLight : Theme.accent) : (optionsHover.hovered ? "#2a2d3b" : "#222533") }
+                            GradientStop { position: 1.0; color: root.optionsOpen ? "#5a50d6" : "#181a24" }
                         }
                         border.width: 1
                         border.color: root.optionsOpen ? "#ff8a7e" : "#34384a"
@@ -1985,7 +2035,7 @@ Item {
     }
     TemplatePickerModal {
         id: templatePicker
-        z: 30
+        z: 30000
         contentType: root.sourceId
         // "All" now that the list is the whole catalog, not just this tab's own content type - "Collections" (this tab's sidebar
         // label) would misname it once designs from every category are in the list.

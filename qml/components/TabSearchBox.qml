@@ -198,7 +198,7 @@ Item {
         scale: enlarge
         strokeWidth: 2 / enlarge
         name: "search"
-        color: "#f1f5f9"
+        color: Theme.textPrimary
     }
 
     TextInput {
@@ -209,7 +209,7 @@ Item {
         anchors.right: clearButton.left
         anchors.rightMargin: 4
         anchors.verticalCenter: parent.verticalCenter
-        color: "#f1f5f9"
+        color: Theme.textPrimary
         font.family: Theme.fontFamily
         font.pixelSize: 15
         font.weight: Font.DemiBold
@@ -332,7 +332,7 @@ Item {
             visible: input.text.length === 0
             anchors.verticalCenter: parent.verticalCenter
             text: input.activeFocus && root.focusedPlaceholder !== "" ? root.focusedPlaceholder : root.placeholder
-            color: "#f1f5f9"
+            color: Theme.textPrimary
             font: input.font
         }
     }
@@ -367,7 +367,7 @@ Item {
         anchors.rightMargin: 8
         anchors.verticalCenter: parent.verticalCenter
         width: 18; height: 18; radius: 9
-        color: clearArea.pressed ? "#2a2d3a" : "transparent"
+        color: clearArea.pressed ? Theme.hoverBg : "transparent"
         IconGlyph {
             anchors.centerIn: parent
             name: "close"
@@ -389,6 +389,6 @@ Item {
         anchors.bottom: parent.bottom
         height: 2
         radius: 1
-        color: "#ff4d3d"
+        color: Theme.accent
     }
 }

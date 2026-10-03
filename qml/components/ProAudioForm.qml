@@ -19,9 +19,8 @@ import "."
 // reference's aligned label rail. Controlled component: values are owned
 // by the caller; changes report through the *Edited signals only.
 //
-// Literal colors, not Theme.* — matches this file family's convention
-// (see EditScreen.qml/DropdownPanel.qml headers for the AOT depth-
-// resolution rationale).
+// Literal colors, pending migration to Theme.* (the old "AOT depth" rationale
+// is disproven — see DropdownPanel.qml's header).
 Column {
     id: root
 

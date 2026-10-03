@@ -28,8 +28,8 @@ import QtQuick
 // needs it. Re-adding a style field later means one property on
 // CanvasItemStyle + one row here — nothing else.
 //
-// Literal colors, not Theme.* — same house convention as DropdownPanel.qml/
-// LabeledSlider.qml at this nesting depth.
+// Every color reads a Theme token, so a Light choice recolours this card
+// with the rest of the app.
 Column {
     id: root
 
@@ -87,7 +87,7 @@ Column {
         width: parent.width
         height: 44
         radius: 8
-        color: "#161823"
+        color: Theme.card
 
         Row {
             x: 14
@@ -96,7 +96,7 @@ Column {
 
             Text {
                 text: qsTr("Size & Style")
-                color: "#eef1f8"
+                color: Theme.textPrimary
                 font.family: "Segoe UI"
                 font.pixelSize: 14
                 font.weight: Font.Medium
@@ -107,7 +107,7 @@ Column {
             x: parent.width - 28
             anchors.verticalCenter: parent.verticalCenter
             name: root.expanded ? "chevronUp" : "chevronDown"
-            color: "#6b7280"
+            color: Theme.textMuted
             width: 12; height: 12
         }
 
@@ -151,174 +151,223 @@ Column {
             onMoved: (v) => root.targets.forEach((t) => t.cornerRadius = v)
         }
 
-        // Border color row — same card language as EditScreen.qml's
-        // Background row (swatch + "Change" chip at the same x offsets,
-        // assuming the same 384px row width).
+        // ---- The Border section: ONE box for the whole group -------------
+        // The Border toggle row, its Width slider and the Line/Dotted/Dashed
+        // selector are one nested section — the border's OWN settings, as
+        // opposed to Padding/Corner Radius above, which describe the box
+        // itself. They used to be three loose controls with only the toggle
+        // row wearing a panel, so nothing said "these three belong together";
+        // the box is what says it, and it also makes the border-off dimming
+        // read as one section that is currently off rather than three
+        // unrelated controls that happen to be grey.
+        //
+        // The old all-in-one Border row is now the box's transparent hit area
+        // (a plain Item) so the row's label/swatch/Change/chevron keep the
+        // exact x offsets they share with EditScreen.qml's Background row —
+        // the columns line up straight down the card — while the box itself
+        // carries the fill.
         Rectangle {
+            id: borderSection
+
             width: parent.width
-            height: 46
+            // 8 top + the toggle row + 14 + the Width slider + 16 + the
+            // selector + 12 bottom. The gaps are the body Column's own 18
+            // trimmed slightly: inside one box the group reads as a unit, so
+            // it needs less air than three separate rows did.
+            height: borderRow.y + borderRow.height + 14 + widthSlider.height + 16 + styleRow.height + 12
             radius: 8
-            color: "#161823"
-            enabled: root.fillSupported
+            color: Theme.card
+
+            // The card-level "this kind of item shows no fill at all" dimming
+            // lives HERE (not on the row) so the box dims as a whole, exactly
+            // the way the old all-in-one row did. The border's own on/off
+            // dimming is separate, per control, below.
             opacity: root.fillSupported ? 1 : 0.4
             Behavior on opacity { NumberAnimation { duration: 100 } }
 
-            Text {
-                x: 14
-                anchors.verticalCenter: parent.verticalCenter
-                text: qsTr("Border")
-                color: "#eef1f8"
-                font.family: "Segoe UI"
-                font.pixelSize: 14
-            }
+            // The Border row — the box's header: label, the enable checkbox,
+            // the color swatch, the "Change" chip.
+            Item {
+                id: borderRow
 
-            // Enable checkbox — the swatch/Change chip below stay visible
-            // (so you can still see/prepare a color) but dimmed and inert
-            // until this is checked.
-            Rectangle {
-                id: borderCheckbox
-                x: 216
-                anchors.verticalCenter: parent.verticalCenter
-                height: 18
-                width: 18
-                radius: 4
-                color: root.borderEnabled ? "#6c5ce7" : "#1a1c26"
-                border.color: root.borderEnabled ? "#6c5ce7" : "#3a4050"
-                border.width: 1
-                Behavior on color { ColorAnimation { duration: 100 } }
+                x: 0
+                y: 8
+                width: parent.width
+                height: 46
+                enabled: root.fillSupported
 
                 Text {
-                    anchors.centerIn: parent
-                    visible: root.borderEnabled
-                    text: "✓"
-                    color: "#ffffff"
-                    font.pixelSize: 13
-                    font.weight: Font.Bold
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    anchors.margins: -4
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        root.notifyUndo()
-                        root.targets.forEach((t) => t.borderEnabled = !root.borderEnabled)
-                    }
-                }
-            }
-
-            Rectangle {
-                x: 256
-                anchors.verticalCenter: parent.verticalCenter
-                height: 24
-                width: 24
-                opacity: root.borderEnabled ? 1 : 0.4
-                border.color: "#3a4a7a"
-                border.width: 1
-                radius: 5
-                Behavior on opacity { NumberAnimation { duration: 100 } }
-                color: root.primary ? root.primary.borderColor : "#ffffff"
-            }
-
-            Rectangle {
-                x: 298
-                anchors.verticalCenter: parent.verticalCenter
-                height: 24
-                width: 60
-                opacity: root.borderEnabled ? 1 : 0.4
-                border.color: "#2a3140"
-                border.width: 1
-                color: borderChangeArea.containsMouse ? "#20242f" : "#1a1c26"
-                radius: 12
-                Behavior on color { ColorAnimation { duration: 100 } }
-                Behavior on opacity { NumberAnimation { duration: 100 } }
-
-                Text {
-                    anchors.centerIn: parent
-                    text: qsTr("Change")
-                    color: "#aeb6c8"
+                    x: 14
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("Border")
+                    color: Theme.textPrimary
                     font.family: "Segoe UI"
-                    font.pixelSize: 12
-                    font.weight: Font.Medium
+                    font.pixelSize: 14
                 }
 
-                MouseArea {
-                    id: borderChangeArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.changeBorderRequested()
-                }
-            }
-
-            Text {
-                x: 368
-                anchors.verticalCenter: parent.verticalCenter
-                color: "#6b7280"
-                font.family: "Segoe UI"
-                font.pixelSize: 16
-                text: "›"
-            }
-        }
-
-        LabeledSlider {
-            width: parent.width
-            enabled: root.fillSupported
-            opacity: (root.borderEnabled && root.fillSupported) ? 1 : 0.4
-            label: qsTr("Width")
-            value: root.primary ? root.primary.borderWidth : 2
-            minValue: 0
-            maxValue: 12
-            suffix: "px"
-            onDragStarted: root.notifyUndo()
-            onMoved: (v) => root.targets.forEach((t) => t.borderWidth = v)
-            Behavior on opacity { NumberAnimation { duration: 100 } }
-        }
-
-        // Line / Dotted / Dashed segmented selector.
-        Row {
-            width: parent.width
-            spacing: 8
-            enabled: root.fillSupported
-            opacity: (root.borderEnabled && root.fillSupported) ? 1 : 0.4
-            Behavior on opacity { NumberAnimation { duration: 100 } }
-
-            Repeater {
-                model: [
-                    { key: "line", label: qsTr("Line") },
-                    { key: "dotted", label: qsTr("Dotted") },
-                    { key: "dashed", label: qsTr("Dashed") }
-                ]
-                delegate: Rectangle {
-                    id: styleBtn
-                    required property var modelData
-                    readonly property bool active: root.borderStyle === styleBtn.modelData.key
-
-                    width: (parent.width - 16) / 3
-                    height: 32
-                    radius: 8
-                    color: styleBtn.active ? "#6c5ce7" : (styleArea.containsMouse ? "#20222c" : "#1a1c26")
-                    border.color: styleBtn.active ? "#6c5ce7" : "#2a3140"
+                // Enable checkbox — the swatch/Change chip stay visible
+                // (so you can still see/prepare a color) but dimmed and inert
+                // until this is checked. Like the cluster beside it, it hangs
+                // off the row's RIGHT edge rather than an absolute x — the
+                // card is width-agnostic (its consumer sizes it), so absolute
+                // offsets stop lining up the moment the row gets narrower.
+                Rectangle {
+                    id: borderCheckbox
+                    anchors.right: parent.right
+                    anchors.rightMargin: 150
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: 18
+                    width: 18
+                    radius: 4
+                    color: root.borderEnabled ? Theme.accent : Theme.inset
+                    border.color: root.borderEnabled ? Theme.accent : Theme.border
                     border.width: 1
                     Behavior on color { ColorAnimation { duration: 100 } }
 
                     Text {
                         anchors.centerIn: parent
-                        text: styleBtn.modelData.label
-                        color: styleBtn.active ? "#ffffff" : "#aeb6c8"
-                        font.family: "Segoe UI"
+                        visible: root.borderEnabled
+                        text: "✓"
+                        color: "#ffffff"
                         font.pixelSize: 13
+                        font.weight: Font.Bold
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -4
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            root.notifyUndo()
+                            root.targets.forEach((t) => t.borderEnabled = !root.borderEnabled)
+                        }
+                    }
+                }
+
+                Rectangle {
+                    anchors.right: parent.right
+                    anchors.rightMargin: 104
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: 24
+                    width: 24
+                    opacity: root.borderEnabled ? 1 : 0.4
+                    border.color: Theme.borderSubtle
+                    border.width: 1
+                    radius: 5
+                    Behavior on opacity { NumberAnimation { duration: 100 } }
+                    color: root.primary ? root.primary.borderColor : "#ffffff"
+                }
+
+                Rectangle {
+                    anchors.right: parent.right
+                    anchors.rightMargin: 26
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: 24
+                    width: 60
+                    opacity: root.borderEnabled ? 1 : 0.4
+                    border.color: Theme.borderSubtle
+                    border.width: 1
+                    color: borderChangeArea.containsMouse ? Theme.hoverBg : Theme.inset
+                    radius: 12
+                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on opacity { NumberAnimation { duration: 100 } }
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: qsTr("Change")
+                        color: Theme.textSecondary
+                        font.family: "Segoe UI"
+                        font.pixelSize: 12
                         font.weight: Font.Medium
                     }
 
                     MouseArea {
-                        id: styleArea
+                        id: borderChangeArea
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            root.notifyUndo()
-                            root.targets.forEach((t) => t.borderStyle = styleBtn.modelData.key)
+                        onClicked: root.changeBorderRequested()
+                    }
+                }
+
+                Text {
+                    anchors.right: parent.right
+                    anchors.rightMargin: 8
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: Theme.textMuted
+                    font.family: "Segoe UI"
+                    font.pixelSize: 16
+                    text: "›"
+                }
+            }
+
+            // The border's own settings, inset 14 so they line up with the
+            // row's label above and keep clear of the box's edges.
+            LabeledSlider {
+                id: widthSlider
+                x: 14
+                y: borderRow.y + borderRow.height + 14
+                width: parent.width - 28
+                enabled: root.fillSupported
+                opacity: (root.borderEnabled && root.fillSupported) ? 1 : 0.4
+                label: qsTr("Width")
+                value: root.primary ? root.primary.borderWidth : 2
+                minValue: 0
+                maxValue: 12
+                suffix: "px"
+                onDragStarted: root.notifyUndo()
+                onMoved: (v) => root.targets.forEach((t) => t.borderWidth = v)
+                Behavior on opacity { NumberAnimation { duration: 100 } }
+            }
+
+            // Line / Dotted / Dashed segmented selector.
+            Row {
+                id: styleRow
+                x: 14
+                y: widthSlider.y + widthSlider.height + 16
+                width: parent.width - 28
+                spacing: 8
+                enabled: root.fillSupported
+                opacity: (root.borderEnabled && root.fillSupported) ? 1 : 0.4
+                Behavior on opacity { NumberAnimation { duration: 100 } }
+
+                Repeater {
+                    model: [
+                        { key: "line", label: qsTr("Line") },
+                        { key: "dotted", label: qsTr("Dotted") },
+                        { key: "dashed", label: qsTr("Dashed") }
+                    ]
+                    delegate: Rectangle {
+                        id: styleBtn
+                        required property var modelData
+                        readonly property bool active: root.borderStyle === styleBtn.modelData.key
+
+                        width: (parent.width - 16) / 3
+                        height: 32
+                        radius: 8
+                        color: styleBtn.active ? Theme.accent : (styleArea.containsMouse ? Theme.hoverBg : Theme.inset)
+                        border.color: styleBtn.active ? Theme.accent : Theme.borderSubtle
+                        border.width: 1
+                        Behavior on color { ColorAnimation { duration: 100 } }
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: styleBtn.modelData.label
+                            color: styleBtn.active ? "#ffffff" : Theme.textSecondary
+                            font.family: "Segoe UI"
+                            font.pixelSize: 13
+                            font.weight: Font.Medium
+                        }
+
+                        MouseArea {
+                            id: styleArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                root.notifyUndo()
+                                root.targets.forEach((t) => t.borderStyle = styleBtn.modelData.key)
+                            }
                         }
                     }
                 }

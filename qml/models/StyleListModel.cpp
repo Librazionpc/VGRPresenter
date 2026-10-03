@@ -6,11 +6,40 @@
 #include "platform/PlatformAccessor.hpp"
 
 #include <QGuiApplication>
+#include <QJSEngine>
 #include <QScreen>
 #include <QDir>
 #include <algorithm>
 
 QPointer<StyleListModel> StyleListModel::s_instance = nullptr;
+
+// The one instance, for C++ AND QML.
+//
+// QML_SINGLETON alone lets QML construct the object itself, LAZILY, on the
+// first property access — which means a C++ reader that runs earlier gets
+// null and quietly does nothing. That was the reported bug: nothing in the
+// boot scene touched the Styles screen, StyleListModel::instance() stayed
+// null for the whole session, and every style-resolving read returned "no
+// style" (the monitor tile fell back to the transparency checkerboard and
+// the engine rendered unstyled). A warm-up property in Main.qml papered over
+// it; this removes the class of bug instead. create() hands QML the SAME
+// static object, so existence is no longer a question of who asked first.
+StyleListModel *StyleListModel::instance()
+{
+    static StyleListModel s;
+    return &s;
+}
+
+StyleListModel *StyleListModel::create(QQmlEngine *engine, QJSEngine *jsEngine)
+{
+    Q_UNUSED(engine)
+    Q_UNUSED(jsEngine)
+    // CppOwnership: this object outlives the QML engine and must never be
+    // deleted by it (same contract every service singleton follows).
+    StyleListModel *s = instance();
+    QJSEngine::setObjectOwnership(s, QJSEngine::CppOwnership);
+    return s;
+}
 
 namespace {
 
@@ -29,6 +58,9 @@ QString defaultRes()
 StyleListModel::StyleListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
+    Q_ASSERT_X(!s_instance || s_instance == this, "StyleListModel",
+               "a second StyleListModel was constructed — instance() would "
+               "silently rebind and every C++ reader would hold the wrong one");
     s_instance = this;
 
     // THE BOOT GAP (found live: "my styles don't show after a rebuild"): the

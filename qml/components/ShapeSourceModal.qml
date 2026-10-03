@@ -14,6 +14,9 @@ import QtQuick
 // picker only decides which shape TYPE it is, not its color.
 Item {
     id: root
+    // Shared top-level modal layer: keep the scrim and card above the page
+    // so clicks and hover never reach the controls behind the dialog.
+    z: 30000
 
     property bool open: false
 
@@ -144,7 +147,7 @@ Item {
                         height: 90
                         radius: 8
                         color: shapeCell.selected ? "#206c5ce7" : (cellArea.containsMouse ? "#20222c" : "#1a1c26")
-                        border.color: shapeCell.selected ? "#6c5ce7" : "#262a38"
+                        border.color: shapeCell.selected ? Theme.accent : "#262a38"
                         border.width: 1
                         Behavior on color { ColorAnimation { duration: 100 } }
 
@@ -216,7 +219,7 @@ Item {
                     width: 100
                     height: 32
                     radius: 9
-                    color: addArea.containsMouse ? "#5a4cd6" : "#6c5ce7"
+                    color: addArea.containsMouse ? Qt.darker(Theme.accent, 1.1) : Theme.accent
                     Behavior on color { ColorAnimation { duration: 100 } }
 
                     Text {

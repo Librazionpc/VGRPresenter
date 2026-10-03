@@ -59,10 +59,13 @@ class VideoSourceListModel : public QAbstractListModel
     QML_SINGLETON
 
 public:
-    // C++ access to the QML-created singleton (null until QML constructs
-    // it) — the cross-model translation entry points below are only ever
-    // called from routing flows, which run after the screen exists.
-    static VideoSourceListModel *Instance() { return s_instance; }
+    // C++ access to the singleton.
+    //
+    // EAGER, not lazy (fixed 2026-10-01) — see AudioInputListModel::Instance()'s
+    // comment: the static row/stable-id entry points below are reached from
+    // BusListModel's construction-time rebuild, before any QML screen exists.
+    static VideoSourceListModel *Instance();
+    static VideoSourceListModel *create(QQmlEngine *engine, QJSEngine *jsEngine);
 
     // Row <-> stable id. rowForStableId returns -1 when the id belongs to a
     // removed row — callers treat that as "no such route".

@@ -88,9 +88,9 @@ Item {
 
                 width: Math.max(64, (tabs.width - (OutputListModel.rowCount() - 1) * 4) / OutputListModel.rowCount())
                 height: parent.height
-                radius: 5
-                color: isCurrent ? "#1e1f28" : (tabArea.containsMouse ? "#181922" : "#14151d")
-                border.color: isCurrent ? "#34384a" : "#232530"
+                radius: 0
+                color: isCurrent ? Theme.activeBg : (tabArea.containsMouse ? Theme.hoverBg : Theme.panelBg)
+                border.color: isCurrent ? Theme.borderSubtle : Theme.border
                 border.width: 1
 
                 Row {
@@ -102,13 +102,13 @@ Item {
                     Rectangle {
                         anchors.verticalCenter: parent.verticalCenter
                         width: 7; height: 7; radius: 3.5
-                        color: tab.out.isEnabled ? "#6dff85" : "#5a5f72"
+                        color: tab.out.isEnabled ? Theme.success : Theme.textMuted
                     }
                     Text {
                         anchors.verticalCenter: parent.verticalCenter
                         width: Math.min(implicitWidth, tab.width - 30)
                         text: tab.out.name
-                        color: tab.isCurrent ? "#e2e8f0" : "#9aa0b5"
+                        color: tab.isCurrent ? Theme.textPrimary : Theme.textSecondary
                         elide: Text.ElideRight
                         font.family: "Segoe UI"
                         font.pixelSize: 11
@@ -133,7 +133,7 @@ Item {
         id: wall
 
         anchors.horizontalCenter: parent.horizontalCenter
-        y: tabs.height + 6
+        y: tabs.height
 
         readonly property int count: root._wallRev >= 0 ? OutputListModel.rowCount() : 0
         // Page capacity: a lone output gets a hero page of its own.
@@ -141,9 +141,10 @@ Item {
         readonly property int pageCount: Math.max(1, Math.ceil(count / perPage))
         readonly property real pageW: 376
         readonly property real slotW: count === 1 ? 376 : 182
-        // The tile's REAL height: pane + footer — the LED meters OVERLAY the
-        // pane (bottom-left), so nothing extra sits below it.
-        readonly property real slotH: 6 + (slotW - 12) * 9 / 16 + 6 + 16 + 6
+        // The tile's REAL height: 1px border + pane + 1px border — the name
+        // footer is gone and the meters/markers OVERLAY the pane, so nothing
+        // extra sits below it.
+        readonly property real slotH: 2 + (slotW - 2) * 9 / 16
 
         width: 376
         height: pageCount === 1 ? slotH
@@ -220,7 +221,7 @@ Item {
                 required property int index
 
                 width: 6; height: 6; radius: 3
-                color: index === wall.currentPage ? "#6c5ce7" : "#2b2e3d"
+                color: index === wall.currentPage ? Theme.accent : Theme.border
                 Behavior on color { ColorAnimation { duration: 120 } }
 
                 MouseArea {
@@ -260,8 +261,8 @@ Item {
         width: 376
         height: transportRow.height + 12
         radius: 8
-        color: "#14151d"
-        border.color: "#232530"
+        color: Theme.panelBg
+        border.color: Theme.border
         border.width: 1
 
         readonly property bool atStart: LiveOutputService.onAirIndex <= 0
@@ -297,20 +298,20 @@ Item {
             Rectangle {
                 anchors.fill: parent; radius: 8
                 color: {
-                    if (!toolBtn.enabled2) return "#1c1e29"
+                    if (!toolBtn.enabled2) return Theme.inset
                     if (toolBtn.danger)
                         return toolBtn.active
-                            ? (toolArea.containsMouse ? "#33ff4d3d" : "#26ff4d3d")
-                            : (toolArea.containsMouse ? "#262a3a" : "#1c1e29")
-                    return toolArea.containsMouse ? "#262a3a" : "#1c1e29"
+                            ? (toolArea.containsMouse ? Qt.alpha(Theme.danger, 0.20) : Qt.alpha(Theme.danger, 0.15))
+                            : (toolArea.containsMouse ? Theme.chip : Theme.inset)
+                    return toolArea.containsMouse ? Theme.chip : Theme.inset
                 }
                 border.color: {
-                    if (!toolBtn.enabled2) return "#262a3a"
+                    if (!toolBtn.enabled2) return Theme.chip
                     if (toolBtn.danger)
                         return toolBtn.active
-                            ? (toolArea.containsMouse ? "#66ff4d3d" : "#33ff4d3d")
-                            : (toolArea.containsMouse ? "#4a3a3a" : "#3a2e2e")
-                    return toolArea.containsMouse ? "#39405c" : "#262a3a"
+                            ? (toolArea.containsMouse ? Qt.alpha(Theme.danger, 0.40) : Qt.alpha(Theme.danger, 0.20))
+                            : (toolArea.containsMouse ? Qt.alpha(Theme.danger, 0.22) : Qt.alpha(Theme.danger, 0.14))
+                    return toolArea.containsMouse ? Theme.borderSubtle : Theme.chip
                 }
                 border.width: 1
                 Behavior on color { ColorAnimation { duration: 100 } }
@@ -319,7 +320,7 @@ Item {
                 anchors.centerIn: parent
                 name: toolBtn.icon
                 color: !toolBtn.enabled2 ? Theme.textMuted
-                     : (toolBtn.danger ? (toolBtn.active ? "#ff6b61" : "#c98f8a") : Theme.textPrimary)
+                     : (toolBtn.danger ? (toolBtn.active ? Theme.dangerLight : Theme.textMuted) : Theme.textPrimary)
                 width: 15; height: 15; fit: true
                 Behavior on color { ColorAnimation { duration: 100 } }
             }
@@ -405,16 +406,16 @@ Item {
                 width: parent.width; height: 28
                 Rectangle {
                     anchors.fill: parent; radius: 8
-                    color: clearAllArea.containsMouse ? "#2fff4d3d" : "#1cff4d3d"
-                    border.color: clearAllArea.containsMouse ? "#66ff4d3d" : "#33ff4d3d"
+                    color: clearAllArea.containsMouse ? Qt.alpha(Theme.accent, 0.18) : Qt.alpha(Theme.accent, 0.11)
+                    border.color: clearAllArea.containsMouse ? Qt.alpha(Theme.accent, 0.40) : Qt.alpha(Theme.accent, 0.20)
                     border.width: 1
                     Behavior on color { ColorAnimation { duration: 100 } }
                 }
                 Row {
                     anchors.centerIn: parent
                     spacing: 6
-                    IconGlyph { name: "clearIcon"; color: "#ff6b61"; width: 13; height: 13; anchors.verticalCenter: parent.verticalCenter }
-                    Text { text: qsTr("Clear all"); color: "#ff6b61"; font.family: "Segoe UI"; font.pixelSize: 12; font.weight: Font.Medium; anchors.verticalCenter: parent.verticalCenter }
+                    IconGlyph { name: "clearIcon"; color: Theme.dangerLight; width: 13; height: 13; anchors.verticalCenter: parent.verticalCenter }
+                    Text { text: qsTr("Clear all"); color: Theme.dangerLight; font.family: "Segoe UI"; font.pixelSize: 12; font.weight: Font.Medium; anchors.verticalCenter: parent.verticalCenter }
                 }
                 HoverHandler { id: clearAllArea; cursorShape: Qt.PointingHandCursor }
                 TapHandler {
@@ -534,5 +535,16 @@ Item {
 
     // The wall's total height must account for the dots row's visual space
     // even when the toolbar is hidden (hosts hang content +22 below).
-    onVisibleChanged: if (visible) root.height = tabs.height + wall.height + (toolbar.visible ? toolbar.height : 0)
+    //
+    // Qt.binding(), NOT a bare assignment: `root.height = ...` here would
+    // destroy the declarative height binding at the top of this file, and the
+    // wall would then stay frozen at whatever height it had when visibility
+    // last changed. Anything on air afterwards grew the toolbar INSIDE that
+    // frozen height, so the toolbar (and its per-layer tiles) drew on top of
+    // whatever the host had laid out below the wall — the Edit screen's SLIDE
+    // label and Background row were the visible casualties. Re-asserting the
+    // same expression as a binding keeps the recompute-on-show intent without
+    // killing the live dependency on toolbar.visible.
+    onVisibleChanged: if (visible)
+        root.height = Qt.binding(() => tabs.height + wall.height + (toolbar.visible ? toolbar.height : 0))
 }

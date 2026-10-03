@@ -74,7 +74,7 @@ Item {
                 id: newPillRow
                 anchors.centerIn: parent
                 spacing: 8
-                PlusGlyph { size: 14; thickness: 1.6; color: Theme.danger; anchors.verticalCenter: parent.verticalCenter }
+                PlusGlyph { size: 14; thickness: 1.6; color: Theme.accent; anchors.verticalCenter: parent.verticalCenter }
                 Text {
                     text: root.newLabel
                     color: Theme.textPrimary

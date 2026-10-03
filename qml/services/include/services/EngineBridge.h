@@ -165,6 +165,9 @@ public:
     // a screen can force a refresh when it opens). Safe before boot — yields
     // empty lists when the PAL has no backend installed.
     Q_INVOKABLE void refreshDevices();
+    // Refresh only capture/render devices; does not enumerate cameras,
+    // displays, open windows, or network sources on the GUI thread.
+    Q_INVOKABLE void refreshAudioDevices();
 
     // ---- Live input metering (see the inputLevels property) -------------
     // Taps are a SET keyed by device — the AV board keeps every device row
@@ -509,6 +512,7 @@ private:
     int ndiConnectedReceivers_ = -1;   // SDK connection count, poll-refreshed
     bool ndiFirewallPrompted_ = false;   // once per install (settings-backed)
     qint64 lastEnumerationMs_ = 0;   // throttles refreshDevices()
+    qint64 lastAudioEnumerationMs_ = 0; // throttles the audio-only picker refresh
     QString ndiStatus_;
     QString ndiState_ = QStringLiteral("unknown");
     QString ndiVersion_;

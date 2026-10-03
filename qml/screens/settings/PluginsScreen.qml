@@ -36,6 +36,13 @@ Item {
         { name: qsTr("MIDI Control"), version: "v0.9", tag: qsTr("hardware triggers"), enabled: false },
         { name: qsTr("Flow Automation"), version: "v1.0", tag: qsTr("service flows"), enabled: true }
     ]
+    // UI-only rows have no engine feature to flip (the registry only carries
+    // "ndi"), so their switch keeps HONEST LOCAL state here — keyed by name —
+    // while the toast says it isn't wired up. The merged `plugins` binding
+    // below reads this; the toggle writes it. (It used to assign straight to
+    // the read-only `plugins`, which threw "Cannot assign to read-only
+    // property 'plugins'" the moment one of these rows was switched.)
+    property var uiOnlyStates: ({})
     // Engine rows REPLACE their UI twin (no duplicates when the registry
     // grows); UI-only rows keep their local `enabled` flag.
     readonly property var plugins: {
@@ -52,7 +59,8 @@ Item {
             const row = root.uiPlugins[j]
             if (row.feature && engineIds[row.feature])
                 continue   // the engine row above already represents it
-            merged.push(row)
+            const local = root.uiOnlyStates[row.name]
+            merged.push(local === undefined ? row : Object.assign({}, row, { enabled: local }))
         }
         return merged
     }
@@ -290,11 +298,12 @@ Item {
                                             })
                                             return
                                         }
-                                        const index = pluginRow.index
                                         Qt.callLater(function () {
-                                            const copy = rootRef.plugins.slice()
-                                            copy[index] = Object.assign({}, copy[index], { enabled: !copy[index].enabled })
-                                            rootRef.plugins = copy
+                                            // Honest local flip (see uiOnlyStates): the row
+                                            // has no engine feature to turn on or off.
+                                            const states = Object.assign({}, rootRef.uiOnlyStates)
+                                            states[name] = want
+                                            rootRef.uiOnlyStates = states
                                             EventBus.notify(qsTr("Plugin enable/disable isn't wired up yet — this doesn't actually turn %1 on or off.").arg(name),
                                                             "warning", qsTr("Not implemented"),
                                                             "plugins.toggle.notImplemented")

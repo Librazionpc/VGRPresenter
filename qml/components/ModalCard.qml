@@ -16,6 +16,9 @@ import VGRPresenterUI
 // overlay first, then the card derives from header + flick + footer.
 Item {
     id: root
+    // Shared top-level modal layer: keep the scrim and card above the page
+    // so clicks and hover never reach the controls behind the dialog.
+    z: 30000
 
     property string title: ""
     property string subtitle: ""

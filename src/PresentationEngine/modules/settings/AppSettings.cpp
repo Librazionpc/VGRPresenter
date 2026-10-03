@@ -76,7 +76,8 @@ void AddSlideBuilderOptions(std::vector<SettingDef>& d, const std::string& p, co
     d.push_back(IntRange(p + ".longVersesChars", p, "Size", 100, 3, 1000, "Characters a " + one + " may have before it is divided"));
     d.push_back(IntRange(p + ".longVersesTolerance", p, "Tolerance", 0, 0, 100, "Percent past the size a cut may wait for a word end"));
     d.push_back(Bool(p + ".smartSplit", p, "Smart split", true, "As many " + many + " to a slide as the template's text box holds"));
-    d.push_back(IntRange(p + ".versesPerSlide", p, "Max " + many, 3, 1, 100));
+    d.push_back(IntRange(p + ".versesPerSlide", p, "Max " + many, 3, 1, 100,
+                         "A slide that would hold more than this many " + many + " is split into another slide - in both modes"));
     d.push_back(Text(p + ".template", p, "Template"));
 }
 
@@ -84,8 +85,19 @@ std::vector<SettingDef> BuildDefinitions() {
     std::vector<SettingDef> d;
 
     // ---- Appearance ----
-    d.push_back(Choice("appearance.theme", "appearance", "Theme", "dark", { C("dark", "Dark") }));
-    d.push_back(Choice("appearance.language", "appearance", "Language", "en-US", { C("en-US", "English (US)") }));
+    // Light/Dark are real now: the app's Theme singleton switches its whole
+    // token set on this value, so picking one recolours the interface live.
+    d.push_back(Choice("appearance.theme", "appearance", "Theme", "dark", {
+        C("dark", "Dark", "The app's own dark chrome."),
+        C("light", "Light", "A light version of the same chrome."),
+    }));
+    // The app's locale: dates, times and numbers follow it immediately (Qt's
+    // own CLDR data covers these), and a matching translation is picked up when
+    // one is installed, so nothing here depends on a .qm being shipped.
+    d.push_back(Choice("appearance.language", "appearance", "Language", "en-US", {
+        C("en-US", "English (US)"), C("en-GB", "English (UK)"),
+        C("de-DE", "Deutsch"), C("es-ES", "Espa\xc3\xb1" "ol"), C("fr-FR", "Fran\xc3\xa7" "ais"),
+    }));
     d.push_back(Bool("appearance.lockInMode", "appearance", "Lock In Mode", false,
                      "Keeps the engine focused on the live show: background work is paused and only errors interrupt you."));
     d.push_back(Choice("appearance.accent", "appearance", "Accent color", "purple", {
@@ -121,6 +133,15 @@ std::vector<SettingDef> BuildDefinitions() {
     }));
     d.push_back(Bool("backups.crashRecovery", "backups", "Crash recovery", true,
                      "Restores unsaved work after an unexpected exit"));
+    // What else a backup may carry beyond the open show. Each is opt-in, so a
+    // backup is only as large as the user asked for; the app copies whichever
+    // are on into the same dated backups folder (BackupStore).
+    d.push_back(Bool("backups.includeSettings", "backups", "Back up settings", false,
+                     "Your preferences, appearance and setup choices"));
+    d.push_back(Bool("backups.includeOverlays", "backups", "Back up overlays", false,
+                     "The overlay library you have built"));
+    d.push_back(Bool("backups.includeTemplates", "backups", "Back up templates", false,
+                     "The template library you have built"));
 
     // ---- Notifications & logs ----
     d.push_back(Bool("notifications.show", "notifications", "Show notifications", true,
@@ -148,6 +169,10 @@ std::vector<SettingDef> BuildDefinitions() {
     // ---- Scripture and The Table: the slide builder's options (FreeShow's scripture settings), each tab with its own keys and its own template ----
     AddSlideBuilderOptions(d, "scripture", "Verse", "Verses", "verse", "verses");
     AddSlideBuilderOptions(d, "table", "Paragraph", "Paragraphs", "paragraph", "paragraphs");
+    // Shows: the same option shape for the shows tab's template sidebar (its
+    // "line" wording) — the UI rows read these definitions for labels/ranges;
+    // the show-side slide builder consumes them as it lands.
+    AddSlideBuilderOptions(d, "shows", "Line", "Lines", "line", "lines");
 
     // ---- What the app remembers between runs (not shown as settings) ----
     d.push_back(Text("session.scriptureBible", "session", "Last Bible"));

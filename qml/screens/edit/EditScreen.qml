@@ -10,13 +10,15 @@ import "../../components"
 // screen, and the repeated slide-list / output-monitor rows built from data
 // (same content, less duplication) instead of copy-pasted blocks.
 //
-// Literal colors throughout, not Theme.* — same AOT-compiler limitation as
-// AppMenuBar.qml/DropdownPanel.qml at this nesting depth.
+// The screen chrome reads Theme tokens, so a Light choice recolours it with
+// the rest of the app. The canvas ITSELF is content (its stage ground, the
+// per-kind previews' own fallback fills and the camera/clock artwork) and
+// keeps literal values.
 Rectangle {
     id: root
 
     clip: true
-    color: "#12131a"
+    color: Theme.panelBg
 
     // Mock CRUD backend (qml/models/SlideListModel.cpp) — stands in for the
     // real show/slide data source. Seeded with the same ground-truth
@@ -833,7 +835,7 @@ Rectangle {
         height: 48
         // Everything between the two side panels (the window is no longer a fixed 1440 wide).
         width: root.width - 680
-        color: "#15161d"
+        color: Theme.surface
 
         Rectangle {
             id: mBack
@@ -841,13 +843,13 @@ Rectangle {
             y: 10
             height: 28
             width: 28
-            color: "#1e1f29"
+            color: Theme.activeBg
             radius: 7
 
             Text {
                 anchors.centerIn: parent
                 anchors.verticalCenterOffset: -2
-                color: "#eef0f6"
+                color: Theme.textPrimary
                 font.family: "Segoe UI"
                 font.pixelSize: 15
                 text: "‹"
@@ -866,7 +868,7 @@ Rectangle {
         Text {
             x: 50
             y: 14
-            color: "#eef0f6"
+            color: Theme.textPrimary
             font.family: "Segoe UI"
             font.pixelSize: 15
             font.weight: Font.Medium
@@ -878,14 +880,14 @@ Rectangle {
             y: 12
             height: 24
             width: 104
-            border.color: "#3a2230"
+            border.color: Qt.alpha(Theme.accent, 0.30)
             border.width: 1
-            color: "#2a1c24"
+            color: Qt.alpha(Theme.accent, 0.14)
             radius: 6
 
             Text {
                 anchors.centerIn: parent
-                color: "#ff4d3d"
+                color: Theme.accent
                 font.family: "Segoe UI"
                 font.pixelSize: 10
                 font.weight: Font.Medium
@@ -902,7 +904,7 @@ Rectangle {
             id: saveLabelText
             x: parent.width - 204   // right-aligned cluster: stays put at the bar's right end
             y: 17
-            color: "#5c6475"
+            color: Theme.textMuted
             font.family: "Segoe UI"
             font.pixelSize: 10
             // A design (overlay / template) has no Save: every settled edit is written to its library.
@@ -922,7 +924,7 @@ Rectangle {
             visible: root.designMode
             x: parent.width - 204
             y: 17
-            color: "#5c6475"
+            color: Theme.textMuted
             font.family: "Segoe UI"
             font.pixelSize: 10
             text: qsTr("Saves as you edit")
@@ -937,7 +939,7 @@ Rectangle {
         Text {
             x: parent.width - 122
             y: 17
-            color: fitArea.containsMouse ? "#c8cdd9" : "#5c6475"
+            color: fitArea.containsMouse ? Theme.textSecondary : Theme.textMuted
             font.family: "Segoe UI"
             font.pixelSize: 10
             text: qsTr("Fit")
@@ -963,10 +965,10 @@ Rectangle {
                 radius: 7
                 enabled: canvasHistory.canUndo
                 opacity: enabled ? 1 : 0.35
-                color: undoArea.containsMouse ? "#20242f" : "#1a1c26"
+                color: undoArea.containsMouse ? Theme.hoverBg : Theme.inset
                 Behavior on color { ColorAnimation { duration: 100 } }
 
-                Text { anchors.centerIn: parent; color: "#8a94a6"; font.pixelSize: 14; text: "↺" }
+                Text { anchors.centerIn: parent; color: Theme.textSecondary; font.pixelSize: 14; text: "↺" }
 
                 MouseArea {
                     id: undoArea
@@ -982,10 +984,10 @@ Rectangle {
                 radius: 7
                 enabled: canvasHistory.canRedo
                 opacity: enabled ? 1 : 0.35
-                color: redoArea.containsMouse ? "#20242f" : "#1a1c26"
+                color: redoArea.containsMouse ? Theme.hoverBg : Theme.inset
                 Behavior on color { ColorAnimation { duration: 100 } }
 
-                Text { anchors.centerIn: parent; color: "#8a94a6"; font.pixelSize: 14; text: "↻" }
+                Text { anchors.centerIn: parent; color: Theme.textSecondary; font.pixelSize: 14; text: "↻" }
 
                 MouseArea {
                     id: redoArea
@@ -999,12 +1001,12 @@ Rectangle {
                 height: 28
                 width: 34
                 radius: 7
-                color: zoomResetArea.containsMouse ? "#20242f" : "#1a1c26"
+                color: zoomResetArea.containsMouse ? Theme.hoverBg : Theme.inset
                 Behavior on color { ColorAnimation { duration: 100 } }
 
                 Text {
                     anchors.centerIn: parent
-                    color: "#8a94a6"
+                    color: Theme.textSecondary
                     font.family: "Segoe UI"
                     font.pixelSize: 12
                     text: Math.round(root.canvasZoom * 100) + "%"
@@ -1025,7 +1027,7 @@ Rectangle {
         y: 96
         height: 1
         width: root.width - 680
-        color: "#232530"
+        color: Theme.border
     }
 
     // ---- Canvas ----
@@ -1084,7 +1086,7 @@ Rectangle {
                 width: 2
                 height: 2
                 radius: 1
-                color: "#232530"
+                color: Theme.border
             }
         }
 
@@ -1474,10 +1476,10 @@ Rectangle {
                             PathRectangle { width: camContent.width; height: camContent.height; radius: 8 }
                         }
                     }
-                    Rectangle { x: 8; y: 8; width: 6; height: 6; radius: 3; color: "#ff4d3d" }   // the LIVE dot
+                    Rectangle { x: 8; y: 8; width: 6; height: 6; radius: 3; color: Theme.danger }   // the LIVE dot (red = live; the accent sweep only recolored SELECTIONS)
                     Text {
                         x: 18; y: 7
-                        color: "#e2e8f0"
+                        color: Theme.textPrimary
                         font.family: "Segoe UI"
                         font.pixelSize: 8
                         font.weight: Font.Medium
@@ -1488,7 +1490,7 @@ Rectangle {
                     Rectangle { x: 96; y: 10; width: 8; height: 8; radius: 4; color: "#0b1f17"; border.width: 1; border.color: "#1d5c46" }   // the lens
                     Text {
                         x: 10; y: 68
-                        color: "#eef0f6"
+                        color: Theme.textPrimary
                         font.family: "Segoe UI"
                         font.pixelSize: 9
                         font.weight: Font.Medium
@@ -1500,7 +1502,7 @@ Rectangle {
                     }
                     Text {
                         x: 68; y: 68
-                        color: "#5c6475"
+                        color: Theme.textMuted
                         font.family: "Segoe UI"
                         font.pixelSize: 9
                         text: qsTr("10:24:07")
@@ -1555,7 +1557,7 @@ Rectangle {
                         // Exactly the item's own background/border: a clock with a transparent background is just its digits
                         // (the Add Clock picker offers a dark box or none; the palette changes it afterwards).
                         color: canvasItemObject.style ? canvasItemObject.style.backgroundColor : "#12131a"
-                        border.color: canvasItemObject.style ? canvasItemObject.style.borderColor : "#3a4155"
+                        border.color: canvasItemObject.style ? canvasItemObject.style.borderColor : Theme.borderSubtle
                         border.width: (canvasItemObject.style && canvasItemObject.style.borderEnabled)
                             ? canvasItemObject.style.borderWidth : 0
                     }
@@ -1567,7 +1569,7 @@ Rectangle {
 
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            color: clockContent.tinted ? clockContent.cfg.color : "#9b8ff5"
+                            color: clockContent.tinted ? clockContent.cfg.color : Theme.accentLight
                             font.family: "Segoe UI"
                             font.weight: Font.DemiBold
                             font.pixelSize: Math.max(10, Math.min(clockContent.width, clockContent.height) * 0.22)
@@ -1576,7 +1578,7 @@ Rectangle {
                         Text {
                             visible: clockContent.showDate
                             anchors.horizontalCenter: parent.horizontalCenter
-                            color: clockContent.tinted ? Qt.alpha(clockContent.cfg.color, 0.7) : "#5c6475"
+                            color: clockContent.tinted ? Qt.alpha(clockContent.cfg.color, 0.7) : Theme.textMuted
                             font.family: "Segoe UI"
                             font.pixelSize: 10
                             text: Qt.formatDate(clockTicker.now, "dddd, MMMM d")
@@ -1597,14 +1599,14 @@ Rectangle {
                             anchors.fill: parent
                             radius: width / 2
                             color: clockContent.bare ? "transparent" : "#12131a"
-                            border.color: clockContent.tinted ? clockContent.cfg.color : "#3a4155"
+                            border.color: clockContent.tinted ? clockContent.cfg.color : Theme.borderSubtle
                             border.width: 2
                         }
                         Rectangle {
                             width: 4
                             height: parent.height * 0.24
                             radius: 2
-                            color: clockContent.tinted ? clockContent.cfg.color : "#eef1f8"
+                            color: clockContent.tinted ? clockContent.cfg.color : Theme.textPrimary
                             anchors.horizontalCenter: parent.horizontalCenter
                             anchors.bottom: parent.verticalCenter
                             transformOrigin: Item.Bottom
@@ -1614,7 +1616,7 @@ Rectangle {
                             width: 3
                             height: parent.height * 0.34
                             radius: 1.5
-                            color: clockContent.tinted ? clockContent.cfg.color : "#c8cdd9"
+                            color: clockContent.tinted ? clockContent.cfg.color : Theme.textSecondary
                             anchors.horizontalCenter: parent.horizontalCenter
                             anchors.bottom: parent.verticalCenter
                             transformOrigin: Item.Bottom
@@ -1624,7 +1626,7 @@ Rectangle {
                             visible: clockContent.showSeconds
                             width: 1.5
                             height: parent.height * 0.4
-                            color: clockContent.tinted ? clockContent.cfg.color : "#6c5ce7"
+                            color: clockContent.tinted ? clockContent.cfg.color : Theme.accent
                             anchors.horizontalCenter: parent.horizontalCenter
                             anchors.bottom: parent.verticalCenter
                             transformOrigin: Item.Bottom
@@ -1635,7 +1637,7 @@ Rectangle {
                             width: 6
                             height: 6
                             radius: 3
-                            color: clockContent.tinted ? clockContent.cfg.color : "#6c5ce7"
+                            color: clockContent.tinted ? clockContent.cfg.color : Theme.accent
                         }
                     }
 
@@ -1680,14 +1682,14 @@ Rectangle {
                         color: (canvasItemObject.style && canvasItemObject.style.backgroundColor.a > 0)
                             ? canvasItemObject.style.backgroundColor : "#12131a"
                         border.color: (canvasItemObject.style && canvasItemObject.style.borderEnabled)
-                            ? canvasItemObject.style.borderColor : "#3a4155"
+                            ? canvasItemObject.style.borderColor : Theme.borderSubtle
                         border.width: (canvasItemObject.style && canvasItemObject.style.borderEnabled)
                             ? canvasItemObject.style.borderWidth : 1
                     }
 
                     Text {
                         anchors.centerIn: parent
-                        color: "#9b8ff5"
+                        color: Theme.accentLight
                         font.family: "Segoe UI"
                         font.weight: Font.DemiBold
                         font.pixelSize: Math.max(10, Math.min(timerContent.width, timerContent.height) * 0.28)
@@ -1732,7 +1734,7 @@ Rectangle {
                     // The fill is exactly the item's background: "transparent" (picked in the colour palette) draws nothing,
                     // so outline-only frames work. A NEW shape is given a visible fill when it is added (shapeSourceModal).
                     readonly property color fillColor: shapeContent.st ? shapeContent.st.backgroundColor : "#3a3f55"
-                    readonly property color strokeColor: shapeContent.st ? shapeContent.st.borderColor : "#6c5ce7"
+                    readonly property color strokeColor: shapeContent.st ? shapeContent.st.borderColor : Theme.accent
                     readonly property real strokeWidth: (shapeContent.st && shapeContent.st.borderEnabled) ? shapeContent.st.borderWidth : 0
                     readonly property bool isCircle: shapeContent.shapeType === "circle"
                     readonly property bool isLine: shapeContent.shapeType === "line"
@@ -1851,8 +1853,8 @@ Rectangle {
                     }
                     visible: !["text", "camera", "clock", "timer", "shape", "vignette", "corners"].includes(canvasItemObject.modelData.kind)
                     anchors.fill: parent
-                    color: "#1a1c26"
-                    border.color: "#3a4155"
+                    color: Theme.inset
+                    border.color: Theme.borderSubtle
                     border.width: 1
                     radius: 6
 
@@ -1874,7 +1876,7 @@ Rectangle {
                             horizontalAlignment: Text.AlignHCenter
                             verticalAlignment: Text.AlignVCenter
                             visible: genericPlaceholder.typeInfo.icon === "text"
-                            color: "#9b8ff5"
+                            color: Theme.accentLight
                             font.pixelSize: 18
                             text: "Aa"
                         }
@@ -1882,14 +1884,14 @@ Rectangle {
                             anchors.centerIn: parent
                             visible: genericPlaceholder.typeInfo.icon !== "text"
                             name: genericPlaceholder.typeInfo.icon
-                            color: "#9b8ff5"
+                            color: Theme.accentLight
                             width: 16
                             height: 16
                         }
                     }
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            color: "#aeb6c8"
+                            color: Theme.textSecondary
                             font.family: "Segoe UI"
                             font.pixelSize: 13
                             font.weight: Font.Medium
@@ -1902,7 +1904,7 @@ Rectangle {
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
                             visible: canvasItemObject.modelData.text.length > 0
-                            color: "#5c6475"
+                            color: Theme.textMuted
                             font.family: "Segoe UI"
                             font.pixelSize: 10
                             text: canvasItemObject.modelData.text
@@ -1950,7 +1952,7 @@ Rectangle {
         width: mCanvas.width
         height: mCanvas.height
         visible: !root.hasActiveSlide
-        color: "#b012131a"
+        color: Qt.alpha(Theme.panelBg, 0.69)
 
         Column {
             anchors.centerIn: parent
@@ -1958,7 +1960,7 @@ Rectangle {
 
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
-                color: "#9aa0b5"
+                color: Theme.textSecondary
                 font.family: "Segoe UI"
                 font.pixelSize: 15
                 text: qsTr("No slides yet")
@@ -1967,7 +1969,7 @@ Rectangle {
                 width: 300
                 anchors.horizontalCenter: parent.horizontalCenter
                 horizontalAlignment: Text.AlignHCenter
-                color: "#5c6475"
+                color: Theme.textMuted
                 font.family: "Segoe UI"
                 font.pixelSize: 12
                 wrapMode: Text.Wrap
@@ -1979,7 +1981,7 @@ Rectangle {
                 height: 36
                 width: 140
                 radius: 18
-                color: emptyAddArea.containsMouse ? "#7a6cf0" : "#6c5ce7"
+                color: emptyAddArea.containsMouse ? Qt.lighter(Theme.accent, 1.08) : Theme.accent
                 Behavior on color { ColorAnimation { duration: 100 } }
 
                 Text {
@@ -2007,9 +2009,9 @@ Rectangle {
         y: root.height - 59
         height: 32
         width: 124
-        border.color: "#232530"
+        border.color: Theme.border
         border.width: 1
-        color: "#1a1c26"
+        color: Theme.inset
         radius: 8
 
         Row {
@@ -2017,7 +2019,7 @@ Rectangle {
             Text {
                 width: 41; height: parent.height
                 horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
-                color: zoomOutArea.containsMouse ? "#c8cdd9" : "#8a94a6"
+                color: zoomOutArea.containsMouse ? Theme.textSecondary : Theme.textSecondary
                 font.pixelSize: 14
                 text: "−"
                 Behavior on color { ColorAnimation { duration: 100 } }
@@ -2032,7 +2034,7 @@ Rectangle {
             Text {
                 width: 42; height: parent.height
                 horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
-                color: zoomLabelArea.containsMouse ? "#c8cdd9" : "#8a94a6"
+                color: zoomLabelArea.containsMouse ? Theme.textSecondary : Theme.textSecondary
                 font.family: "Segoe UI"
                 font.pixelSize: 12
                 text: Math.round(root.canvasZoom * 100) + "%"
@@ -2048,7 +2050,7 @@ Rectangle {
             Text {
                 width: 41; height: parent.height
                 horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
-                color: zoomInArea.containsMouse ? "#c8cdd9" : "#8a94a6"
+                color: zoomInArea.containsMouse ? Theme.textSecondary : Theme.textSecondary
                 font.pixelSize: 14
                 text: "+"
                 Behavior on color { ColorAnimation { duration: 100 } }
@@ -2070,7 +2072,7 @@ Rectangle {
         height: 46
         width: 46
         radius: 23
-        color: "#6c5ce7"
+        color: Theme.accent
         // Nothing to add content TO without an active slide — dim and inert.
         enabled: root.hasActiveSlide
         opacity: root.hasActiveSlide ? 1 : 0.35
@@ -2097,9 +2099,9 @@ Rectangle {
         height: 46
         // 7 chips x 48 + 6 gaps x 4 = 360 plus 14 of padding a side; an overlay has two more chips.
         width: contentTypeRow.width + 28
-        border.color: "#2a2f3a"
+        border.color: Theme.border
         border.width: 1
-        color: "#151824"
+        color: Theme.surface
         radius: 14
         visible: root.addMenuOpen
 
@@ -2124,8 +2126,8 @@ Rectangle {
                     width: 48
                     radius: 8
                     border.width: typeChip.active ? 1 : 0
-                    border.color: "#406c5ce7"
-                    color: typeChip.active ? "#206c5ce7" : "#1b1e2a"
+                    border.color: Qt.alpha(Theme.accent, 0.25)
+                    color: typeChip.active ? Qt.alpha(Theme.accent, 0.13) : Theme.inset
                     // NO Behavior animations here: at slow hand speed the
                     // 100ms fades on adjacent chips fired for every boundary
                     // crossing and read as shimmer/flicker ("slow down your
@@ -2148,7 +2150,7 @@ Rectangle {
                         width: parent.width
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
-                        color: typeChip.active ? "#9b8ff5" : "#9aa0b5"
+                        color: typeChip.active ? Theme.accentLight : Theme.textSecondary
                         font.family: "Segoe UI"
                         font.pixelSize: 14
                         // "text" keeps its Aa letters; every other kind
@@ -2161,7 +2163,7 @@ Rectangle {
                         y: 3
                         anchors.horizontalCenter: parent.horizontalCenter
                         name: typeChip.modelData.icon
-                        color: typeChip.active ? "#9b8ff5" : "#9aa0b5"
+                        color: typeChip.active ? Theme.accentLight : Theme.textSecondary
                         visible: typeChip.modelData.icon !== "text"
                         // Explicit box + origin, not implicit: with only
                         // implicitWidth/Height, the root-level scale below
@@ -2186,7 +2188,7 @@ Rectangle {
                         width: parent.width
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
-                        color: typeChip.active ? "#eef1f8" : "#6b7080"
+                        color: typeChip.active ? Theme.textPrimary : Theme.textMuted
                         font.family: "Segoe UI"
                         font.pixelSize: 9
                         text: typeChip.modelData.label
@@ -2258,9 +2260,9 @@ Rectangle {
         y: 48
         height: root.height - 48
         width: 280
-        border.color: "#232530"
+        border.color: Theme.border
         border.width: 1
-        color: "#12131a"
+        color: Theme.panelBg
 
         // Plain background cursor reset — declared FIRST (so every real
         // button below sits above it in z-order and still wins its own
@@ -2285,7 +2287,7 @@ Rectangle {
         Text {
             x: 12
             y: 12
-            color: "#5c6475"
+            color: Theme.textMuted
             font.family: "Segoe UI"
             font.pixelSize: 12
             text: qsTr("SLIDES · %1").arg(slideListRepeater.count)
@@ -2342,17 +2344,17 @@ Rectangle {
                 visible: !root.designMode
                 height: 36
                 width: 256
-                border.color: "#2a3140"
+                border.color: Theme.borderSubtle
                 border.width: 1
-                color: addSlideArea.containsMouse ? "#20242f" : "#1a1c26"
+                color: addSlideArea.containsMouse ? Theme.hoverBg : Theme.inset
                 radius: 8
                 Behavior on color { ColorAnimation { duration: 100 } }
 
                 Row {
                     anchors.centerIn: parent
                     spacing: 6
-                    Text { color: "#6c5ce7"; font.family: "Segoe UI"; font.pixelSize: 14; font.weight: Font.Medium; text: "+" }
-                    Text { color: "#8a94a6"; font.family: "Segoe UI"; font.pixelSize: 13; text: qsTr("Add slide") }
+                    Text { color: Theme.accent; font.family: "Segoe UI"; font.pixelSize: 14; font.weight: Font.Medium; text: "+" }
+                    Text { color: Theme.textSecondary; font.family: "Segoe UI"; font.pixelSize: 13; text: qsTr("Add slide") }
                 }
 
                 MouseArea {
@@ -2381,7 +2383,7 @@ Rectangle {
         y: 48
         height: root.height - 48
         width: 400
-        color: "#0f1015"
+        color: Theme.windowBg
         // Greyed with the canvas in the empty state — Background/Size & Style
         // target the active slide, which doesn't exist yet.
         enabled: root.hasActiveSlide
@@ -2421,7 +2423,7 @@ Rectangle {
                 id: tabItemsLabel
                 width: parent.width / 3
                 horizontalAlignment: Text.AlignHCenter
-                color: root.rightPanelTab === "items" ? "#ff4d3d" : "#8a94a6"
+                color: root.rightPanelTab === "items" ? Theme.accent : Theme.textSecondary
                 font.family: "Segoe UI"
                 font.pixelSize: 13
                 // Constant weight in every state — a weight that changes
@@ -2444,7 +2446,7 @@ Rectangle {
                 id: tabTextLabel
                 width: parent.width / 3
                 horizontalAlignment: Text.AlignHCenter
-                color: root.rightPanelTab === "text" ? "#ff4d3d" : "#8a94a6"
+                color: root.rightPanelTab === "text" ? Theme.accent : Theme.textSecondary
                 font.family: "Segoe UI"
                 font.pixelSize: 13
                 font.weight: Font.Medium // constant — see tabItemsLabel above
@@ -2462,7 +2464,7 @@ Rectangle {
                 id: tabSlideLabel
                 width: parent.width / 3
                 horizontalAlignment: Text.AlignHCenter
-                color: root.rightPanelTab === "slide" ? "#ff4d3d" : "#8a94a6"
+                color: root.rightPanelTab === "slide" ? Theme.accent : Theme.textSecondary
                 font.family: "Segoe UI"
                 font.pixelSize: 13
                 font.weight: Font.Medium // constant — see tabItemsLabel above
@@ -2481,7 +2483,7 @@ Rectangle {
             y: 40
             height: 3
             radius: 1.50
-            color: "#ff4d3d"
+            color: Theme.accent
             // Centered under the active label: each label is one eqzual cell
             // of the tab strip, so the underline is the label's text width
             // placed at the cell's horizontal center — it glides between
@@ -2500,47 +2502,88 @@ Rectangle {
             Behavior on x { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
             Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
         }
-        Rectangle { y: 43; height: 1; width: 400; color: "#232530" }
+        Rectangle { y: 43; height: 1; width: 400; color: Theme.border }
 
         // ITEMS tab content — Outputs grid + the selected item's Background/
         // Size & Style. Not literally "canvas items" despite the tab's
         // name (see rightPanelTab's header comment — this predates the tab
         // bar becoming interactive and hasn't been reorganized to match its
         // label); TEXT below is the first tab with real, distinct content.
-        Item {
-            id: itemsTabContent
-            anchors.fill: parent
+        // Scrollable, and that is load-bearing rather than a nicety: the
+        // wall's on-air toolbar (transport, Clear all, the per-layer tiles)
+        // adds 112px to the wall the moment anything is on air, which used to
+        // shove the SLIDE label / Background row / Size & Style card (pinned
+        // at fixed y offsets that assumed a toolbar-less wall) down INTO the
+        // toolbar and past the panel's bottom edge — the per-layer tiles and
+        // the Background row drew on top of each other, and the Line/Dotted/
+        // Dashed selector ended flush against the window's bottom border. The
+        // sections now hang off the wall's own (dynamic) bottom and the whole
+        // column scrolls when it doesn't fit — the same Flickable +
+        // AppScrollBar pattern the TEXT tab and leftPanel's slide list use.
+        Flickable {
+            id: itemsTabFlick
+            x: 0
+            y: 56
+            width: parent.width
+            height: rightPanel.height - 56 - 12
             visible: root.rightPanelTab === "items"
+            clip: true
+            contentWidth: width
+            contentHeight: itemsTabContent.height
+            boundsBehavior: Flickable.StopAtBounds
+
+            Item {
+                id: itemsTabContent
+                width: itemsTabFlick.width
+
+                // ONE gutter for the whole tab: the wall, the section label,
+                // the Background row and the Size & Style card all start at
+                // `inset` and stop `inset` short of the panel's right edge,
+                // so no pill or tile ever sits flush against the panel — and
+                // since the panel itself is flush against the window's right
+                // edge (rightPanel.x is root.width - 400), that one gutter is
+                // also what keeps the controls off the window border.
+                // 12 matches the wall's own design gutters: the wall must
+                // keep its 376 design width (its tiles and toolbar are laid
+                // out for exactly that), so its inset is the floor here.
+                readonly property int inset: 12
+                readonly property int rowWidth: width - inset * 2
 
         // The SAME wall the Show screen's right column renders — the shared
         // MonitorWall component (hero page for a lone output, 2×2 paging,
         // snap swipe, dots), not a private Grid hosting the tiles directly:
         // "the same monitors" had come to mean same tiles, different hosting,
         // which rendered visibly differently per surface (this tab stayed a
-        // flat 182px two-column grid while Show grew hero/paging). y=62
-        // keeps the tab's own top spacing; width matches the Show wall's
-        // 376 so tiles are pixel-identical across surfaces.
+        // flat 182px two-column grid while Show grew hero/paging). The y=8 is
+        // this row's own top spacing inside the tab; width matches the Show
+        // wall's 376 so tiles are pixel-identical across surfaces.
         MonitorWall {
-            x: 12
-            y: 62
-            width: 376
+            id: itemsMonitorWall
+            x: itemsTabContent.inset
+            y: 8
+            width: itemsTabContent.rowWidth
         }
 
         Text {
-            x: 16
-            y: 390
-            color: "#8a8fa3"
+            id: slideSectionLabel
+            x: itemsTabContent.inset + 4
+            // Anchored off the wall's REAL bottom — whatever height the wall
+            // currently reports, toolbar included. A fixed y is precisely
+            // what put this label on top of the per-layer tile row.
+            y: itemsMonitorWall.y + itemsMonitorWall.height + 18
+            color: Theme.textSecondary
             font.family: "Segoe UI"
             font.pixelSize: 12
             font.weight: Font.Bold
             text: qsTr("SLIDE")
         }
         Rectangle {
-            x: 8
-            y: 406
+            id: backgroundRow
+            x: itemsTabContent.inset
+            y: slideSectionLabel.y + slideSectionLabel.height + 8
             height: 46
-            width: 384
-            color: "#161823"
+            width: itemsTabContent.rowWidth
+            color: Theme.card
             radius: 8
             // Greyed out (not hidden — the row's meaning would otherwise
             // silently flip back to "slide background" while something's
@@ -2555,7 +2598,7 @@ Rectangle {
             Text {
                 x: 14
                 anchors.verticalCenter: parent.verticalCenter
-                color: "#eef1f8"
+                color: Theme.textPrimary
                 font.family: "Segoe UI"
                 font.pixelSize: 14
                 // Same row, two targets: the selected item's background when
@@ -2564,12 +2607,18 @@ Rectangle {
                 // Size & Style too (see that file's header comment).
                 text: root.primarySelectedItemStyle ? qsTr("Item Background") : qsTr("Background")
             }
+            // The swatch/Change/chevron cluster hangs off the row's RIGHT
+            // edge (same right margins as when this row was a fixed 384px:
+            // 104 / 26 / 8) instead of absolute x offsets — the row width now
+            // follows the tab's gutter, so absolute positions would push the
+            // cluster off the row's end.
             Rectangle {
-                x: 256
+                anchors.right: parent.right
+                anchors.rightMargin: 104
                 anchors.verticalCenter: parent.verticalCenter
                 height: 24
                 width: 24
-                border.color: "#3a4a7a"
+                border.color: Theme.borderSubtle
                 border.width: 1
                 radius: 5
                 // A flat swatch — the slide background is a solid color now
@@ -2578,19 +2627,20 @@ Rectangle {
                 color: root.primarySelectedItemStyle ? root.primarySelectedItemStyle.backgroundColor : slideStore.current.background
             }
             Rectangle {
-                x: 298
+                anchors.right: parent.right
+                anchors.rightMargin: 26
                 anchors.verticalCenter: parent.verticalCenter
                 height: 24
                 width: 60
-                border.color: "#2a3140"
+                border.color: Theme.borderSubtle
                 border.width: 1
-                color: changeArea.containsMouse ? "#20242f" : "#1a1c26"
+                color: changeArea.containsMouse ? Theme.hoverBg : Theme.inset
                 radius: 12
                 Behavior on color { ColorAnimation { duration: 100 } }
 
                 Text {
                     anchors.centerIn: parent
-                    color: "#aeb6c8"
+                    color: Theme.textSecondary
                     font.family: "Segoe UI"
                     font.pixelSize: 12
                     font.weight: Font.Medium
@@ -2609,9 +2659,10 @@ Rectangle {
                 }
             }
             Text {
-                x: 368
+                anchors.right: parent.right
+                anchors.rightMargin: 8
                 anchors.verticalCenter: parent.verticalCenter
-                color: "#6b7280"
+                color: Theme.textMuted
                 font.family: "Segoe UI"
                 font.pixelSize: 16
                 text: "›"
@@ -2620,9 +2671,9 @@ Rectangle {
 
         SizeStyleCard {
             id: sizeStyleCard
-            x: 8
-            y: 462
-            width: 384
+            x: itemsTabContent.inset
+            y: backgroundRow.y + backgroundRow.height + 10
+            width: itemsTabContent.rowWidth
             // Every selected object's style, in selection order — the card
             // displays the first one and applies changes to all of them.
             // canvasObjectByKey(k).style resolves correctly whether k is one
@@ -2637,7 +2688,24 @@ Rectangle {
                 root.bgModalOpen = true
             }
         }
-        } // itemsTabContent
+
+                // Bottom gutter: the card's last control (the Line/Dotted/
+                // Dashed tiles) keeps `inset` of breathing room below it
+                // instead of ending flush with the panel's bottom edge.
+                height: sizeStyleCard.y + sizeStyleCard.height + itemsTabContent.inset
+            }
+        }
+
+        AppScrollBar {
+            id: itemsTabScrollBar
+            // Sits in the tab's 12px right gutter (the content columns stop at
+            // 12 short of the panel width, so the bar never lies over a row).
+            x: itemsTabFlick.width - 10
+            y: itemsTabFlick.y
+            height: itemsTabFlick.height
+            flickable: itemsTabFlick
+            visible: itemsTabFlick.visible && itemsTabFlick.contentHeight > itemsTabFlick.height
+        }
 
         // TEXT tab content — typography + geometry for the selected text
         // item (see TextItemPanel.qml). No ground-truth capture of the
@@ -2692,7 +2760,7 @@ Rectangle {
             width: 384
             wrapMode: Text.Wrap
             visible: root.rightPanelTab === "text" && !(root.primarySelectedItem !== null && root.primarySelectedItem.kind === "text")
-            color: "#5c6475"
+            color: Theme.textMuted
             font.family: "Segoe UI"
             font.pixelSize: 13
             text: qsTr("Select a text item on the canvas to edit its formatting.")
@@ -2707,7 +2775,7 @@ Rectangle {
             width: 384
             horizontalAlignment: Text.AlignHCenter
             visible: root.rightPanelTab === "slide"
-            color: "#5c6475"
+            color: Theme.textMuted
             font.family: "Segoe UI"
             font.pixelSize: 13
             text: qsTr("Coming soon")

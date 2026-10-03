@@ -124,16 +124,15 @@ RecordingService::RecordingService(QObject *parent)
     s_instance = this;
 
     // The settings store opens when the engine boots (SettingsService::load);
-    // until then the blob read is deferred, not skipped — the first
-    // post-boot signal loads it (and a screen opened pre-boot still shows
-    // defaults, which loadConfig() merges over).
-    loadConfig();
+    // until then the blob read is deferred, not skipped — whenReady runs
+    // loadConfig() the moment the store is open (immediately if it already is),
+    // and a screen opened pre-boot shows defaults until then.
+    SettingsService::instance().whenReady([this] { loadConfig(); });
     connect(&SettingsService::instance(), &SettingsService::changed,
             this, [this] {
-                if (!configLoaded_)
-                    loadConfig();
-                // First REAL storage snapshot — the engine's disk monitor
-                // answers once its storage seam is up.
+                // Every settings change may move where recordings land, so the
+                // storage snapshot is re-read on each one (the engine's disk
+                // monitor answers once its storage seam is up).
                 refreshStorage();
             });
     refreshStorage();
@@ -175,7 +174,7 @@ void RecordingService::loadConfig()
 {
     SettingsService *store = SettingsService::instancePtr();
     if (!store || !store->ready())
-        return;   // pre-boot: defaults stand; the changed() signal re-reads
+        return;   // pre-boot: defaults stand; whenReady() re-reads once the store opens
     const QVariant stored = store->value(QLatin1String(kConfigKey));
     if (stored.isValid() && !stored.isNull()) {
         // Deep-merge: the screen's defaults stand for keys a previous run
@@ -184,7 +183,6 @@ void RecordingService::loadConfig()
         for (auto it = prev.begin(); it != prev.end(); ++it)
             config_.insert(it.key(), it.value());
     }
-    configLoaded_ = true;
 }
 
 void RecordingService::saveConfig()

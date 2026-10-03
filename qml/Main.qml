@@ -34,22 +34,6 @@ ApplicationWindow {
     // "show" | "edit" | "stage" — Stage has no screen yet, so its tab click
     // is accepted but doesn't switch the view.
     property string currentView: "show"
-    property real selfTestT6: 0   // (self-test probe timing scratch)
-    property real selfTestPillT: 0   // (stage 6c pill-search timing scratch)
-    property int selfTestStyleRow: -1   // (stage 8s test style row — restored after the grab)
-    // Singleton warm-up: QML singletons are created LAZILY — one no binding
-    // has touched yet simply doesn't exist, and the C++ side reads
-    // StyleListModel::instance() (the outputs model's roster relay, the
-    // boot-time engine style push, every styleBackground() role read) and
-    // gets null. Nothing in the boot scene touches the Styles screen, so
-    // this stayed null for a whole session: the output's assigned style
-    // resolved as "no style" everywhere — the monitor tile showed the
-    // transparency checkerboard over the style's colour/image and the
-    // engine rendered unstyled. Referencing both here forces them to exist
-    // while the root's properties bind — before any child (the monitor
-    // wall) is created — and OutputListModel's singleShot(0) retry then
-    // wires the relay against the now-real instance.
-    readonly property var _singletonWarmup: [StyleListModel.rowCount(), OutputListModel.rowCount()]
     // The window-level layer that carries a drag between panes (DragSource / DropArea); see DragLayer.qml.
     readonly property var dragLayer: dragLayerItem
 
@@ -74,6 +58,8 @@ ApplicationWindow {
         const boot = EngineBridge.bootSummary()
         if (boot !== "")
             EventBus.notify(boot, "success", qsTr("Engine"), "engine.boot")
+        else if (EngineBridge.bootError.length > 0)
+            EventBus.notify(EngineBridge.bootError, "error", qsTr("Engine failed to boot"), "engine.boot")
 
         // Search: the Bible files are read into the engine (background thread) so verses
         // can be found.
@@ -349,474 +335,13 @@ ApplicationWindow {
 
 
 
-    // ---- UI self-test scenario (TEMPORARY diagnostic, env-gated) ----------
-    // CRASH REPRO: the user typed "revel" in Quick search, picked the
-    // "Revelation 1:1" reference row, and the app died with an unhandled
-    // exception (crash.log signal=0 terminate). This scenario drives the
-    // exact flow — open dialog, type, log results, invoke the SAME choose()
-    // handler a row click runs — with a log line before and after each step,
-    // so the crashing step names itself in the output.
-    // TEMP: NDI toggle destroyed-delegate investigation — clicking the
-    // Plugins screen's NDI toggle threw "root is not defined" (a delegate
-    // destroyed mid-handler). Navigate to Settings > Plugins, find the real
-    // toggle, and fire its toggled() signal exactly like a real click would.
-    Timer {
-        id: selfTestNdiToggle1
-        running: typeof SelfTest !== "undefined"
-        interval: 1500
-        onTriggered: {
-            window.openSettings("plugins")
-            selfTestNdiToggle2.restart()
-        }
-    }
-    Timer {
-        id: selfTestNdiToggle2
-        interval: 1000
-        onTriggered: {
-            const toggle = SelfTest.findItem("selfTestNdiToggle")
-            console.log("[SELFTEST-NDI] toggle found:", toggle ? "yes" : "NO")
-            if (toggle) {
-                console.log("[SELFTEST-NDI] firing toggled() — simulated click")
-                toggle.toggled()
-                console.log("[SELFTEST-NDI] survived the click, no exception propagated")
-            }
-            selfTestNdiToggle3.restart()
-        }
-    }
-    Timer {
-        id: selfTestNdiToggle3
-        interval: 1500
-        onTriggered: {
-            console.log("[SELFTEST-NDI] pluginFeatures:", JSON.stringify(EngineBridge.pluginFeatures))
-            console.log("[SELFTEST-NDI] done — quitting")
-            SelfTest.quit()
-        }
-    }
-    Timer {
-        id: selfTestStage1
-        running: false // TEMP: yielded to selfTestNdiToggle1 above
-        interval: 1500
-        onTriggered: {
-            console.log("[SELFTEST] stage 1: open Quick search (Ctrl+K flow)")
-            window.currentView = "show"
-            quickSearch.openSearch()
-            selfTestStage2.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage2
-        interval: 700
-        onTriggered: {
-            console.log("[SELFTEST] stage 2: type 'revelation 1:1'")
-            SelfTest.type("revelation 1:1")
-            selfTestStage3.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage3
-        interval: 900
-        onTriggered: {
-            console.log("[SELFTEST] stage 3: results after debounce —", JSON.stringify(quickSearch.results))
-            SelfTest.grab("", "shot_quick_revel.png")
-            selfTestStage4.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage4
-        interval: 400
-        onTriggered: {
-            // The user's crash: picking the REFERENCE row (Revelation 1:1), which
-            // carries no bookId — openVerseAt resolves the title through the pane's
-            // adapter. Find that row (kind=bible, bookId empty/undefined).
-            let pick = quickSearch.results.find(
-                (r) => r.kind === "bible" && (r.bookId === undefined || r.bookId === ""))
-            if (!pick) pick = quickSearch.results[0]
-            console.log("[SELFTEST] stage 4: PICK", pick ? pick.kind + "/" + pick.title : "nothing",
-                        "(crash step)")
-            if (pick) quickSearch.choose(pick)
-            console.log("[SELFTEST] stage 4: choose() returned without crashing")
-            selfTestStage4b.restart()
-        }
-    }
-    // Hover-peek probe: the REAL cursor onto the popup's second row — the verses
-    // column must swap to that sermon's paragraphs while the hover lasts, and
-    // return to the open chapter when the cursor leaves the popup.
-    Timer {
-        id: selfTestStage4b
-        interval: 800
-        onTriggered: {
-            console.log("[SELFTEST] stage 4b: after the pick — view =", window.currentView,
-                        "scripture pane book =",
-                        (function () { const p = SelfTest.findItem("selfTestScripturePane");
-                                       return p ? (p.book ? p.book.name + " ch" + p.chapterNumber : "no book") : "no pane" })())
-            SelfTest.grab("", "shot_quick_picked.png")
-            selfTestStage4c.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage4c
-        interval: 400
-        onTriggered: {
-            console.log("[SELFTEST] stage 4c: pick survived — now the code-query check")
-            quickSearch.openSearch()
-            selfTestStage5.restart()
-        }
-    }
-    // A repeating heartbeat through the SAME event loop the app runs on: if the
-    // loop is alive these tick; the last tick before a terminate/hang names the
-    // window where it died. (Stage 2's log vanished while the process stayed
-    // alive — this distinguishes "event loop dead" from "stage never fired".)
-    Timer {
-        id: selfTestHeartbeat
-        running: typeof SelfTest !== "undefined"
-        interval: 500
-        repeat: true
-        // (If this fires after quit() — into the dying window — it kills the
-        // teardown with an exception; the visible-guard keeps it inert there.)
-        onTriggered: if (window.visible) console.log("[SELFTEST] heartbeat")
-    }
-    Timer {
-        id: selfTestStage5
-        interval: 1200   // (async search: request + worker round-trip needs a beat)
-        onTriggered: {
-            console.log("[SELFTEST] stage 5: type '47-'")
-            SelfTest.type("47-")
-            selfTestStage6.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage6
-        interval: 1600   // (type '47-' + debounce 140ms + async worker round-trip)
-        onTriggered: {
-            const kinds = {}
-            for (const r of quickSearch.results)
-                kinds[r.kind] = (kinds[r.kind] || 0) + 1
-            console.log("[SELFTEST] stage 6: '47-' results —", JSON.stringify(kinds),
-                        "first:", quickSearch.results.length ? quickSearch.results[0].kind + "/" + quickSearch.results[0].title : "none")
-            // GLOW + LAG probe, async-shaped: request, WAIT for the rows to
-            // arrive (stage 6b), then verify — the old probe read the dialog
-            // synchronously and measured the PREVIOUS query's stale rows.
-            window.selfTestT6 = Date.now()
-            quickSearch.query = "then friend"
-            quickSearch.refresh()
-            selfTestStage6b.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage6b
-        interval: 1500
-        onTriggered: {
-            // GROUP AUDIT: user call — "friend shows only Bible, not sermon".
-            // Log the full kind breakdown + each row's first 60 chars so the
-            // missing group is identifiable from the log alone.
-            {
-                const kinds = {}
-                for (const r of quickSearch.results)
-                    kinds[r.kind] = (kinds[r.kind] || 0) + 1
-                console.log("[SELFTEST] stage 6b-groups:", JSON.stringify(kinds))
-                for (const r of quickSearch.results)
-                    console.log("[SELFTEST]   row:", r.kind, "|", String(r.title).slice(0, 60))
-            }
-            // THE NO-HOVER TEST: the yellow glow must land inside the VISIBLE
-            // snippet of EVERY row. The engine anchors snippets so the resolved
-            // words sit within the 120-char cap; a row whose match words are all
-            // past the cap is the "swallowed highlight" bug.
-            const words = String(quickSearch.highlightSource || "then friends")
-                              .toLowerCase().split(/\s+/).filter((w) => w.length >= 2)
-            let glowOk = 0, glowBad = [], detail = []
-            for (const r of quickSearch.results) {
-                if (r.kind !== "table" && r.kind !== "bible") continue
-                const low = String(r.text || "").toLowerCase()
-                const at = words.map((w) => low.indexOf(w)).filter((p) => p >= 0)
-                if (at.length > 0) {
-                    glowOk++
-                    detail.push(r.title.split(" · ")[0] + "@" + Math.min.apply(null, at))
-                } else {
-                    glowBad.push(r.title)
-                }
-            }
-            console.log("[SELFTEST] stage 6b: 'then friend' arrived in",
-                        (Date.now() - window.selfTestT6) + "ms", "rows:", quickSearch.results.length,
-                        "— GLOW (no hover)", glowOk + "/" + (glowOk + glowBad.length), "visible",
-                        glowBad.length ? "SWALLOWED: " + glowBad.slice(0, 3).join(" | ")
-                                       : "(word positions: " + detail.slice(0, 4).join(", ") + ")")
-            SelfTest.grab("", "shot_glow_then_friends.png")
-            selfTestStage6c.restart()
-        }
-    }
-    // Stage 6c: The Table PILL search, now ASYNC (the Quick-search pattern).
-    // runSearch must return in ~0 GUI time (the heavy scan is on a worker
-    // thread) and the rows must arrive via the token-guarded signal.
-    Timer {
-        id: selfTestStage6c
-        interval: 1800
-        onTriggered: {
-            console.log("[SELFTEST] stage 6c: The Table pill search (async) — 'then friend'")
-            const pane = SelfTest.findItem("selfTestTablePane")
-            if (!pane) { console.log("[SELFTEST] stage 6c: pane NOT FOUND"); selfTestStage7.restart(); return }
-            window.selfTestPillT = Date.now()
-            const disp0 = Date.now()
-            pane.runSearch("then friend")
-            console.log("[SELFTEST] stage 6c: runSearch dispatched in", (Date.now() - disp0) + "ms (GUI thread — must be ~0)")
-            selfTestPillCheck.restart()
-        }
-    }
-    Timer {
-        id: selfTestPillCheck
-        interval: 1500
-        onTriggered: {
-            const pane = SelfTest.findItem("selfTestTablePane")
-            if (!pane) { selfTestStage7.restart(); return }
-            const n = pane.searchResults ? pane.searchResults.length : -1
-            const first = n > 0 ? pane.searchResults[0].reference : "none"
-            console.log("[SELFTEST] stage 6c-results:", n, "rows, first:", first,
-                        "— arrived", (Date.now() - window.selfTestPillT) + "ms after dispatch",
-                        n > 0 && String(pane.searchResults[0].snippet || "").indexOf("Then, friends") >= 0 ? "(verbatim lead)" : "")
-            selfTestStage7.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage7
-        interval: 9000
-        onTriggered: {
-            quickSearch.query = "god"
-            const s0 = Date.now()
-            quickSearch.refresh()
-            const s1 = Date.now()
-            quickSearch.query = "then friend"
-            quickSearch.refresh()
-            const s2 = Date.now()
-            quickSearch.query = "the"
-            quickSearch.refresh()
-            const s3 = Date.now()
-            console.log("[SELFTEST] stage 7 STEADY (GUI-thread dispatch — what typing feels): 'god' =", (s1 - s0) + "ms",
-                        "'then friend' =", (s2 - s1) + "ms", "'the' =", (s3 - s2) + "ms")
-            selfTestStage8.restart()
-        }
-    }
-    // Monitor-wall rendering audit (style backgrounds vs checkerboards —
-    // the output-preview regression): grabs the wall's pixels + logs every
-    // output's style/color/image state so the PNG can be interpreted.
-    Timer {
-        id: selfTestStage8
-        interval: 300
-        onTriggered: {
-            const roster = OutputListModel.rowCount()
-            const ai = OutputListModel.activeIndex()
-            // (typeof only — no method call: calling rowCount() here would
-            // force-instantiate the singleton and mask the warm-up fix.)
-            console.log("[SELFTEST] stage 8: roster =", roster, "active =", ai,
-                        "styles singleton:", (typeof StyleListModel !== "undefined") ? "defined" : "NOT DEFINED")
-            const state = []
-            for (let i = 0; i < roster; ++i) {
-                const o = OutputListModel.getOutput(i)
-                const bg = OutputListModel.styleBackground(i)
-                state.push({ name: o.name, styleId: o.styleId, active: o.active,
-                             color: bg.color, image: bg.image, hasImage: bg.hasImage })
-            }
-            console.log("[SELFTEST] stage 8a state:", JSON.stringify(state))
-            const wall = SelfTest.findItem("selfTestMonitorWall")
-            console.log("[SELFTEST] stage 8a wall:", wall ? "found" : "NOT FOUND")
-            SelfTest.grab("selfTestMonitorWall", "shot_monitor_wall.png")
-            // (quit() DESTROYS the window while grabToImage's async render is
-            // still in flight — quit one beat later, after the save lands.)
-            selfTestStage8s.restart()
-        }
-    }
-    // Stage 8s: PROVE the styled path — a real style with a solid bg colour
-    // assigned to the active output. The dataChanged relay must repaint the
-    // wall: checkerboard gone, the colour showing.
-    Timer {
-        id: selfTestStage8s
-        interval: 300
-        onTriggered: {
-            try {
-                const row = StyleListModel.rowCount()
-                window.selfTestStyleRow = row
-                StyleListModel.addStyle()
-                StyleListModel.setBackgroundColor(row, "#1064b0")
-                OutputListModel.setStyle(0, StyleListModel.getStyle(row).id)
-                console.log("[SELFTEST] stage 8s: style", StyleListModel.getStyle(row).id,
-                            "bg #1064b0 assigned to output 0")
-            } catch (e) { console.log("[SELFTEST] stage 8s THREW:", e) }
-            selfTestStage8c.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage8c
-        interval: 700
-        onTriggered: {
-            try {
-                const ai = OutputListModel.activeIndex()
-                const bg = OutputListModel.styleBackground(ai)
-                console.log("[SELFTEST] stage 8c styled state:", JSON.stringify(bg))
-                SelfTest.grab("selfTestMonitorWall", "shot_monitor_wall_styled.png")
-            } catch (e) { console.log("[SELFTEST] stage 8c THREW:", e) }
-            selfTestStage8b.restart()
-        }
-    }
-    Timer {
-        id: selfTestStage8b
-        interval: 1200
-        onTriggered: {
-            // Restore exactly what the stage touched (no test residue left in
-            // the user's saved roster/styles).
-            try {
-                if (window.selfTestStyleRow >= 0) {
-                    OutputListModel.setStyle(0, "")
-                    StyleListModel.removeStyle(window.selfTestStyleRow)
-                    window.selfTestStyleRow = -1
-                }
-            } catch (e) { console.log("[SELFTEST] cleanup failed:", e) }
-            selfTestHeartbeat.running = false
-            SelfTest.quit()
-        }
-    }
-    Timer {
-        id: selfTestStage4d
-        running: false
-        interval: 9999999
-    }
-
-
-
-
-
-
-    // ---- SELFTEST: video preview pane scenario (env-gated by the same
-    // VGR_SELFTEST=1 the driver uses; inert in normal runs). Drives the REAL
-    // UI into the Add Source dialog's video preview and grabs the pane —
-    // pixel truth for "is the live camera actually rendering".
-    Timer {
-        id: selfTestPreviewStage1
-        running: false // TEMP: yielded to selfTestNdiToggle1 above
-        interval: 1500
-        onTriggered: {
-            console.log("[SELFTEST-PREVIEW] stage 1: open Settings > Audio & Video")
-            window.openSettings("av")
-            selfTestPreviewStage2.restart()
-        }
-    }
-    Timer {
-        id: selfTestPreviewStage2
-        interval: 800
-        onTriggered: {
-            console.log("[SELFTEST-PREVIEW] stage 2: open Add Source dialog")
-            const screen = SelfTest.findItem("audioVideoScreen")
-            if (screen && screen.openAddSource) {
-                screen.openAddSource("video")
-                console.log("[SELFTEST-PREVIEW] openAddSource(video) invoked")
-            } else {
-                console.log("[SELFTEST-PREVIEW] FAIL: audioVideoScreen not found")
-            }
-            selfTestPreviewStage3.restart()
-        }
-    }
-    // ALL-SOURCES sweep: every camera, then every display, then every open
-    // window — each picked through the REAL dialog path, warmed up, logged
-    // with the pane's live status, and pixel-grabbed. Per-source ground
-    // truth for the whole preview chain (cams/boards/windows share it).
-    property int selfTestCamIndex: -1
-    property var selfTestCamLabels: []      // [{label, kind}] — kind: camera|screen
-    property bool selfTestSweepDone: false
-    function selfTestPickNextCam() {
-        const screen = SelfTest.findItem("audioVideoScreen")
-        selfTestCamIndex++
-        if (!screen || !screen.selfTestPickVideoSource
-                || selfTestCamIndex >= selfTestCamLabels.length) {
-            console.log("[SELFTEST-PREVIEW] sweep done over", selfTestCamLabels.length, "source(s)")
-            selfTestSweepDone = true
-            return
-        }
-        const entry = selfTestCamLabels[selfTestCamIndex]
-        console.log("[SELFTEST-PREVIEW] picking", entry.kind, selfTestCamIndex, ":", entry.label)
-        screen.selfTestPickVideoSource(entry.label, entry.kind)
-        selfTestPreviewStage4.restart()
-    }
-    Timer {
-        id: selfTestPreviewStage3
-        interval: 500
-        onTriggered: {
-            const entries = []
-            const cams = EngineBridge.videoDevices
-            for (let i = 0; i < cams.length; ++i) {
-                const l = String(cams[i].label || "")
-                // NDI virtual cams crash their driver when opened as MF
-                // capture devices — they are served by the NDI pipeline,
-                // not this tap; the sweep must not exercise them.
-                if (l !== "" && !/ndi/i.test(l)) entries.push({label: l, kind: "camera"})
-            }
-            // Screens: displays + open windows, same pane chain.
-            const scr = EngineBridge.screenDevices
-            for (let i = 0; i < scr.length; ++i) {
-                const l = String(scr[i].label || "")
-                if (l !== "") entries.push({label: l, kind: "screen"})
-            }
-            window.selfTestCamLabels = entries
-            window.selfTestCamIndex = -1
-            console.log("[SELFTEST-PREVIEW] stage 3: sweeping", entries.length,
-                        "source(s):", JSON.stringify(entries))
-            window.selfTestPickNextCam()
-        }
-    }
-    // Second window grab 2.5 s after cam 0's — if the live frame MOVES
-    // between the two window shots, rendering + streaming both work.
-    Timer {
-        id: selfTestPreviewStage4b
-        interval: 2500
-        running: false
-        onTriggered: {
-            console.log("[SELFTEST-PREVIEW] stage 4b: motion witness grab")
-            const paneItem = SelfTest.findItem("selfTestPreviewPane")
-            if (paneItem) {
-                // Window-space rect of the pane — the pixel-diff target
-                // between shot_window_0.png and this grab.
-                const r = paneItem.mapToItem(null, 0, 0, paneItem.width, paneItem.height)
-                console.log("[SELFTEST-PREVIEW] pane rect: x=" + Math.round(r.x) + " y=" + Math.round(r.y)
-                            + " w=" + Math.round(r.width) + " h=" + Math.round(r.height))
-            }
-            SelfTest.grab("", "shot_window_0_late.png")
-        }
-    }
-    Timer {
-        id: selfTestPreviewStage4
-        interval: 4000   // tap warm-up + several pump ticks per camera
-        running: false
-        onTriggered: {
-            if (window.selfTestSweepDone)
-                return
-            const entry = window.selfTestCamIndex < window.selfTestCamLabels.length
-                          ? window.selfTestCamLabels[window.selfTestCamIndex] : null
-            const label = entry ? entry.label : "?"
-            const shot = "shot_src_" + window.selfTestCamIndex + "_"
-                         + (entry ? entry.kind : "?") + ".png"
-            const paneItem = SelfTest.findItem("selfTestPreviewPane")
-            const frameImg = SelfTest.findItem("selfTestPreviewPaneImage")
-            console.log("[SELFTEST-PREVIEW] stage 4: grabbing", shot, "for", label,
-                        "pane:", (paneItem ? "alive" : "MISSING"),
-                        "image:", frameImg
-                            ? ("status=" + frameImg.status + " size=" + frameImg.sourceSize.width + "x" + frameImg.sourceSize.height
-                               + " src=" + String(frameImg.source).slice(0, 48) + " vis=" + frameImg.visible) : "MISSING")
-            // Pixel truth at three levels: the Image element alone, the
-            // pane subtree, and the WHOLE WINDOW (what a user actually
-            // sees). If the window shot shows the camera but the pane shot
-            // is dark, the defect is grab compositing, not the app.
-            SelfTest.grab("selfTestPreviewPaneImage",
-                          "shot_img_" + window.selfTestCamIndex + "_"
-                          + (entry ? entry.kind : "?") + ".png")
-            SelfTest.grab("selfTestPreviewPane", shot)
-            SelfTest.grab("", "shot_window_" + window.selfTestCamIndex + ".png")
-            if (window.selfTestCamIndex === 0)
-                selfTestPreviewStage4b.restart()   // motion witness for cam 0
-            window.selfTestPickNextCam()
-        }
-    }
 
     // ---- Settings overlay ----
     // Shared ModalScrim: click-dismisses, and consumes wheel events so a
     // modal's scroll never leaks into the Flickables on the page behind.
     ModalScrim {
         id: settingsScrim
+        z: 30000
         visible: false
         // ModalScrim's #99000000 is exactly the 0.6 black this overlay
         // always used — no visual change, just the shared behavior.
@@ -824,7 +349,6 @@ ApplicationWindow {
 
         ModalShell {
             id: settingsShell
-            objectName: "selfTestSettingsShell"
             anchors.centerIn: parent
             currentKey: window.settingsSection
             onSectionSelected: (key) => window.settingsSection = key
@@ -945,12 +469,48 @@ ApplicationWindow {
         z: 10000
     }
 
-    // The boot splash — its own frameless always-on-top WINDOW (a Window
-    // declaration inside this tree instantiates it top-level; anchors/z are
-    // meaningless for it): just the brand card centered on the screen, no
-    // backdrop, floating over the app while the engine boots (deferred in
-    // main.cpp — the kernel starts only once this has painted). It reveals
-    // on boot success OR failure (a failed boot must still open the app)
-    // with a minimum on-screen beat, so a fast boot never strobes.
-    BootSplash {}
+    // ---- Settings-inset self-test (VGR_SELFTEST=1 only) ----------------------
+    // Renders Settings · General and grabs each section card to a PNG, so
+    // tools/selftest/measure_insets.py can assert every card shares one set of
+    // insets (the 20px padding the Appearance / Startup cards define). This is
+    // the automated guard against the layout drift that let the Settings
+    // sections slip to 14px - screenshot truth, not a property trace, because
+    // a padding mistake is invisible to every geometry-independent check.
+    //
+    // Armed only when main.cpp exported SelfTestInsets true (VGR_ENABLE_SELFTEST
+    // build + BOTH VGR_SELFTEST=1 and VGR_INSETS_TEST=1): a plain VGR_SELFTEST=1
+    // run (the NDI probes) never opens Settings or quits early, and a normal
+    // launch never runs a single stage.
+    Timer {
+        id: selfTestInsetsOpen
+        running: typeof SelfTestInsets !== "undefined" && SelfTestInsets
+        interval: 2500          // let the first QML frame land before the inset capture
+        onTriggered: {
+            window.settingsSection = "general"
+            settingsScrim.visible = true
+            selfTestInsetsGrab.restart()
+        }
+    }
+    Timer {
+        id: selfTestInsetsGrab
+        interval: 1000          // let the General screen lay out and paint
+        onTriggered: {
+            const cards = ["selfTestCardAppearance", "selfTestCardStartup",
+                           "selfTestCardPreferences", "selfTestCardBackups",
+                           "selfTestCardNotifications", "selfTestCardLibraries",
+                           "selfTestCardReset"]
+            console.log("[SELFTEST-INSETS] grabbing", cards.length, "section cards")
+            for (let i = 0; i < cards.length; ++i)
+                SelfTest.grab(cards[i], "insets_" + cards[i] + ".png")
+            selfTestInsetsDone.restart()
+        }
+    }
+    Timer {
+        id: selfTestInsetsDone
+        interval: 1500          // let every async grab's saveToFile() land
+        onTriggered: {
+            console.log("[SELFTEST-INSETS] done - cards grabbed to insets_*.png")
+            SelfTest.quit()
+        }
+    }
 }

@@ -50,9 +50,19 @@ Item {
     }
 
     // Underneath everything, so the actions on the preview (which sit above it) get their clicks.
+    //
+    // checkAncestors: false — the same posture the Scripture/The Table rows
+    // (ReferencePane) and the shows rows use. The default (true) walks EVERY
+    // ancestor's visible/enabled to decide "is this shown"; inside the library
+    // grid one of those ancestors can read hidden/disabled while the card is
+    // plainly on screen, which left `hover.hovered` stuck false — the card
+    // never lit and its hover action row (Edit / File / Rename / Duplicate /
+    // Delete) never appeared. Geometry alone is the truth here; the open-
+    // popup case is still handled by AppCursor.blocked() in PositionHoverArea.
     PositionHoverArea {
         id: hover
         anchors.fill: parent
+        checkAncestors: false
         showCursor: false
     }
 
@@ -121,6 +131,11 @@ Item {
                         name: actionBtn.icon
                         color: "#c7cdd8"
                         width: 12; height: 12
+                        // All five actions are on the 24 grid now (penTool /
+                        // folder / fileText / copy / close), so `fit` lines
+                        // them all up in the 12px box — without it `copy`
+                        // (14px natural) sat bigger than its neighbours.
+                        fit: true
                     }
                     PositionHoverArea {
                         id: actHover
@@ -153,7 +168,9 @@ Item {
                     onActivated: root.renameRequested()
                 }
                 CardAction {
-                    icon: "layers"
+                    // "copy" (the two overlapping frames) - what Duplicate means.
+                    // "layers" read as stacking, which is the Unlabeled concept.
+                    icon: "copy"
                     tip: qsTr("Duplicate")
                     objectName: "selfTestDesignDuplicate_" + root.design.name
                     onActivated: root.duplicateRequested()
@@ -208,7 +225,7 @@ Item {
                 radius: 4
                 color: "#0f1015"
                 border.width: 1
-                border.color: "#6c5ce7"
+                border.color: Theme.accent
             }
             TextInput {
                 id: nameEdit

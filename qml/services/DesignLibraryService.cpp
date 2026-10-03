@@ -275,6 +275,14 @@ int DesignLibraryService::restoreDefaults()
     return int(restored.value());
 }
 
+void DesignLibraryService::reload()
+{
+    if (!library_)
+        return;   // built pre-boot; the boot-retry target will read the file then
+    (void)library_->Load();
+    emit changed();
+}
+
 // ---------------------------------------------------------------------------
 // Content - what the Edit screen's canvas flushes through
 // ---------------------------------------------------------------------------

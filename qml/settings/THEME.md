@@ -8,10 +8,14 @@ value in this one file and every screen/component that references
 `Theme.<name>` picks it up automatically.
 
 - **Colors** — brand (`accent`, `accentLight`), semantic (`danger`,
-  `success`, `warning`, `info`, each with a `*Light` variant), neutrals
-  (`windowBg` → `border`/`borderSubtle`), text (`textPrimary` →
+  `dangerLight`, `success`, `warning`, `info`, each with a `*Light`
+  variant, plus the fixed-red `liveBg`/`liveBgOnAir` GO LIVE pill),
+  neutrals (`windowBg` → `border`/`borderSubtle`), app chrome
+  (`hoverBg`, `activeBg`, `iconChrome`), text (`textPrimary` →
   `textMuted`), and the Settings nav rail's own set
-  (`iconMuted` → `toggleOffTrack`).
+  (`iconMuted` → `toggleOffTrack`). Every neutral is a live
+  `dark ? <dark> : <light>` binding, so the whole token set follows the
+  Appearance > Theme choice.
 - **Spacing** — `space1` (4px) through `space6` (24px) plus `space8` (32px).
 - **Radius** — `radiusSm`/`radiusMd`/`radiusLg`/`radiusXl`.
 - **Type** — `fontFamily` ("Segoe UI" — Windows' own system UI font, always present, the same reasoning FreeShow's own app UI uses its OS's native font instead of shipping one) and `textXs` → `textXxl` pixel sizes.
@@ -31,49 +35,57 @@ icon is monochrome and takes its color from whoever uses it
 already refactors for free along with the rest of the palette. Only the
 icon *shapes themselves* (adding a new one, swapping which SVG a name maps
 to) require editing `IconGlyph.qml` directly — that's asset content, not a
-theme value, so it isn't a candidate for the config-file treatment.
+theme value, so it isn't a candidate for the config-file treatment.## The chrome reads tokens now (the old "AOT depth" story was wrong)
 
-## The catch: some files can't read `Theme.*` at all
+Earlier docs (and comments in the chrome files themselves) claimed Qt
+6.11.1's QML AOT compiler "cannot resolve the `Theme` singleton at deeper
+nesting levels," so the app chrome — title bar, tab strip, menu bar,
+dropdowns — hardcoded its own dark hex with `// Theme.<token>` mirror
+comments. **That diagnosis was wrong.** The real cause was that
+`qt_add_qml_module` does not infer `pragma Singleton` from the file, so the
+generated `qmldir` registered `Theme` as an *ordinary type*; `Theme.border`
+then read a static property off a type object and came back `undefined`.
+Depth only *looked* correlated because the shallow screens happened to be
+the ones that imported the module explicitly.
 
-Qt 6.11.1's QML AOT compiler fails to resolve the `Theme` singleton at
-deeper nesting levels (confirmed repeatedly this project — not a one-off
-fluke). A handful of files sit at that depth and had no choice but to
-hardcode literal values instead, each with a comment naming the `Theme.*`
-token it has to be kept in sync with by hand, e.g.:
+That is fixed at its root in `CMakeLists.txt`:
 
-```qml
-color: "#232530" // Theme.border
+```cmake
+set_source_files_properties("…/qml/settings/Theme.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 ```
 
-**Editing `Theme.qml` does NOT update these** — they're a second copy of
-the value, not a reference to it. A real palette refactor has two steps,
-not one:
+The generated `qmldir` now lists `singleton Theme 1.0 …`, and the chrome
+files ([AppHeader.qml](../screens/main/AppHeader.qml),
+[ViewTabs.qml](../screens/main/ViewTabs.qml),
+[AppMenuBar.qml](../screens/main/AppMenuBar.qml),
+[HeaderStatus.qml](../screens/main/HeaderStatus.qml),
+[WindowControls.qml](../screens/main/WindowControls.qml),
+[DropdownPanel.qml](../components/DropdownPanel.qml)) read `Theme.*`
+directly. A Light choice recolours them with the rest of the app.
 
-1. Edit `Theme.qml`.
-2. Grep for every literal mirror and update each one to match:
-   ```
-   grep -rn "// Theme\." qml/
-   ```
-   As of this writing that's 37 spots across 14 files — heaviest in
-   `components/DropdownPanel.qml` (20, the whole file), with one or two
-   each in `AppMenuBar.qml`, `AppHeader.qml`, `HeaderStatus.qml`,
-   `ViewTabs.qml`, `NavRail.qml`, `LabeledSlider.qml`,
-   `BackgroundColorModal.qml`, `DraggableCanvasText.qml`,
-   `SnapGuideLines.qml`, `SizeStyleCard.qml`, `TextItemPanel.qml`,
-   `SlideListItem.qml`, and `EditScreen.qml`.
+The Edit screen and its components are migrated: `EditScreen.qml`,
+`BackgroundColorModal.qml`, `TextItemPanel.qml`, `MediaLibraryPane.qml`,
+`MonitorWall.qml`, and `SizeStyleCard.qml` read `Theme.*` for every piece of
+chrome. The migration rule that mattered there was chrome-vs-content:
+backgrounds, borders, hover washes, text tones, accents and semantic status
+hues became tokens, while genuinely per-item CONTENT — the colour/gradient
+palette swatches, an item's own chosen background/border/text colour, the
+camera/clock artwork, the canvas stage ground — kept its literal values
+(those are data the user picks, not app chrome, and must not be recoloured
+by the app theme).
 
-If a future Qt version fixes the AOT resolution bug, these can all
-switch back to plain `Theme.*` references and this step disappears — don't
-"fix" it by adding more literals elsewhere in the meantime.
+Outside those, smaller counts of raw hex remain in a handful of components
+(e.g. `LabeledSlider.qml`'s `#aeb6c8` change-chip label, the per-kind source
+modals) — the same chrome-vs-content rule applies, and they need no nesting
+workaround. (`NavRail.qml` is already fully tokenised.)
 
-## The other catch: the raw Figma-export screens
+## The other catch: the raw Figma-export screen
 
-`VGRPresenterMainScreen.qml` (~340 raw `"#hex"` colors) and
-`EditScreen.qml` (~80) predate `Theme.qml` and were never migrated — they're
-literal Figma-to-QML export output, not built against the design system at
-all, and **none of their colors are commented as `Theme.*` mirrors** (so
-step 2's grep won't find them). A refactor that needs to reach into these
-two files is a separate, much bigger pass: mapping each literal to the
-closest semantic `Theme.*` token by hand, not a find-and-replace. Flagging
-this now so it isn't a surprise mid-refactor — not attempting it as part of
-this doc.
+`VGRPresenterMainScreen.qml` (~340 raw `"#hex"` colors) predates
+`Theme.qml` and was never migrated — it's literal Figma-to-QML export
+output, not built against the design system at all, and **none of its
+colors are commented as `Theme.*` mirrors** (so step 2's grep won't find
+them). A refactor that needs to reach into it is a separate, much bigger
+pass: mapping each literal to the closest semantic `Theme.*` token by hand,
+not a find-and-replace. Flagging this now so it isn't a surprise
+mid-refactor — not attempting it as part of this doc.

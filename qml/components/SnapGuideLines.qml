@@ -7,8 +7,8 @@ import QtQuick
 // snapMove/snapResize last returned and drop this on top of the canvas it
 // should span.
 //
-// Literal colors, not Theme.* — same house convention as DropdownPanel.qml
-// at this nesting depth.
+// Literal colors, pending migration to Theme.* (the old "AOT nesting" reason
+// is disproven — see DropdownPanel.qml's header).
 Item {
     id: root
 

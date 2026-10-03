@@ -52,6 +52,16 @@ struct Snapshot {
     unsigned coreCount = 0;
     uint64_t gpuVramTotalBytes = 0; // best effort; 0 = no GPU backend reported
     uint64_t gpuVramUsedBytes = 0;
+
+    // ---- Live health (best effort; -1 = this backend cannot measure it) ----
+    // The Settings resource-health surface reads these. A backend that has no
+    // way to measure one leaves it at -1 rather than reporting a plausible 0,
+    // so the UI can say "not measured" honestly.
+    double gpuPct = -1.0;       // GPU engine utilization (percent, 0..100)
+    double cpuPerfPct = -1.0;   // % Processor Performance: 100 = nominal clock;
+                                // below 100 means the CPU is being held under
+                                // its nominal speed (power / thermal throttling)
+    double cpuTempC = -1.0;     // package / thermal-zone temperature, celsius
 };
 
 // ---------------------------------------------------------------------------

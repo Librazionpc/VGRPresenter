@@ -90,9 +90,13 @@ Window {
     // explicitly since displayFor() is a plain Q_INVOKABLE, not a role
     // read, same defensive pattern used throughout this codebase for
     // invokable reads inside a binding (see OutputMonitorTile.qml's
-    // styleBg/stylePulse comment for the same reasoning).
+    // styleBg/stylePulse comment for the same reasoning). Also tracks
+    // OutputListModel.screensRevision: a hot-plugged/unplugged monitor or a
+    // display-mode change re-evaluates this (and the x/y/width/height below)
+    // so the window tracks its monitor LIVE instead of only at next bind.
     readonly property var displayInfo: {
         void root.outputScreenName
+        void OutputListModel.screensRevision
         return root.outputScreenName !== "" ? OutputListModel.displayFor(root.outputIndex) : ({})
     }
     readonly property bool hasDisplay: root.displayInfo.width !== undefined

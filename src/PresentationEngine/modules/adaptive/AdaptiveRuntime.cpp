@@ -544,6 +544,13 @@ void AdaptiveRuntime::OnPowerChanged(const events::PowerChanged& e) {
     } catch (...) {
     }
     power_.Update(true, onBattery, pct);
+    // RE-READ the hardware view: the AC/battery state is part of the profiled
+    // hardware (hasBattery / onBattery / batteryPercent), and it feeds the
+    // recommended profile and the Battery row of the Smart Config report.
+    // Without this the snapshot kept whatever the boot refresh saw, so
+    // unplugging the charger left the Settings card reading "Plugged in"
+    // forever — correct at boot, never again.
+    RefreshHardware(hardware_, hwSnapshot_, caps_, gpu_);
     if (onBattery) {
         // Battery saver quality profile (docs/specs/16 §14).
         modes_.SetMode(UserMode::Battery);
@@ -556,6 +563,9 @@ void AdaptiveRuntime::OnBatteryLow(const events::BatteryLow& e) {
     modes_.SetMode(UserMode::Battery);
     Logger::Instance().Warning("AdaptiveRuntime: battery low (" + e.detail + ") — throttling",
                                "Adaptive");
+    // Same as OnPowerChanged: the profiled battery reading moved, so the live
+    // report must be re-read rather than left on the boot-time value.
+    RefreshHardware(hardware_, hwSnapshot_, caps_, gpu_);
     (void)ApplyOptimization("battery-low");
 }
 

@@ -5,6 +5,9 @@ import VGRPresenterUI
 // Caller supplies title/body/button labels and reacts to confirmed()/dismissed().
 Item {
     id: root
+    // Shared top-level modal layer: keep the scrim and card above the page
+    // so clicks and hover never reach the controls behind the dialog.
+    z: 30000
 
     property string title: ""
     property string message: ""

@@ -86,6 +86,7 @@ signals:
 private:
     explicit ProjectService(QObject *parent = nullptr);
     void load();
+    void restoreLastProject();
     void refresh();
     void report(const QString &message) const;
 

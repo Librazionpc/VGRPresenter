@@ -10,7 +10,9 @@ import "../../components"
 // Hover comes from PositionHoverArea (pointer-position truth) — this build never
 // delivers hover-exit to MouseAreas, so a containsMouse wash would stick.
 //
-// Literal colors, not Theme.* — same AOT limitation as AppMenuBar.qml at this depth.
+// Colors read the Theme singleton: caption glyphs use iconChrome and the hover
+// wash is a textPrimary overlay (light in dark, dark in light), so the title-bar
+// buttons recolour with the app.
 Item {
     id: root
 
@@ -36,7 +38,7 @@ Item {
         id: btn
         property bool danger: false
         readonly property bool hovered: hoverArea.hovered
-        readonly property color glyphColor: btn.danger && btn.hovered ? "#ffffff" : "#c9d1e0"
+        readonly property color glyphColor: btn.danger && btn.hovered ? "#ffffff" : Theme.iconChrome
         default property alias glyph: glyphHolder.data
         signal activated()
 
@@ -45,7 +47,7 @@ Item {
 
         Rectangle {
             anchors.fill: parent
-            color: btn.hovered ? (btn.danger ? "#e5534b" : "#1fffffff") : "transparent"
+            color: btn.hovered ? (btn.danger ? Theme.danger : Qt.alpha(Theme.textPrimary, 0.12)) : "transparent"
             Behavior on color { ColorAnimation { duration: 90 } }
         }
         Item {
@@ -105,7 +107,7 @@ Item {
                 y: 2
                 width: 8
                 height: 8
-                color: "#12131a"
+                color: Theme.panelBg
                 border.width: 1
                 border.color: maximizeButton.glyphColor
             }

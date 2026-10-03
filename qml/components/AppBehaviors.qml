@@ -34,14 +34,26 @@ Item {
 
     // ---- start-up ----------------------------------------------------------------------------------------------
 
+    // WAIT FOR THE ENGINE'S STORE, not a fixed delay. start() reads the
+    // preferences and the last session out of SettingsService, and those only
+    // carry the user's choices once the store has been read (its load runs on
+    // bootedChanged). SettingsService.whenReady is the one idiom
+    // for a pre-boot read; the timer below then gives the scene a beat to settle
+    // before the last show/screen comes back. (A bare fixed delay read the
+    // engine's DEFAULTS on a slow boot - startMinimized false, lastShowPath "",
+    // recovery path "" - so Start minimized, Restore last session, Open last
+    // project and crash recovery were silently ignored.)
+    Component.onCompleted: SettingsService.whenReady(function() { startTimer.start() })
+
     Timer {
         id: startTimer
-        interval: 700       // the screens and the engine are up
-        running: true
+        interval: 700       // the screens are up (the STORE is what we wait for)
         onTriggered: root.start()
     }
 
     function start() {
+        if (root.started)
+            return          // never run twice (a late store load must not re-open a show)
         const lastShow = String(root.values["session.lastShowPath"] ?? "")
         const lastView = String(root.values["session.lastView"] ?? "")
 
@@ -121,12 +133,26 @@ Item {
 
     // ---- automatic backups ---------------------------------------------------------------------------------------
 
+    // True while any of the "back up this too" categories is selected — the
+    // timer must run for those even when no show is open.
+    readonly property bool backupsAnythingElse: root.values["backups.includeSettings"] === true
+                                                || root.values["backups.includeOverlays"] === true
+                                                || root.values["backups.includeTemplates"] === true
+
     Timer {
         interval: Math.max(1, Number(root.values["backups.intervalMinutes"] ?? 30)) * 60 * 1000
         repeat: true
-        running: root.values["backups.automatic"] === true && ShowService.hasShow && ShowService.showPath !== ""
-        // The saved file as it is on disk; the engine skips a copy identical to the newest one, so an unchanged show adds nothing.
-        onTriggered: SettingsService.backupShow(ShowService.showPath)
+        running: root.values["backups.automatic"] === true
+                 && ((ShowService.hasShow && ShowService.showPath !== "") || root.backupsAnythingElse)
+        onTriggered: {
+            // The saved file as it is on disk; the engine skips a copy identical
+            // to the newest one, so an unchanged show adds nothing.
+            if (ShowService.showPath !== "")
+                SettingsService.backupShow(ShowService.showPath)
+            // Then whichever categories the user selected (settings / overlays /
+            // templates), each also skipped when unchanged.
+            SettingsService.backupCategories()
+        }
     }
 
     // ---- crash recovery ------------------------------------------------------------------------------------------

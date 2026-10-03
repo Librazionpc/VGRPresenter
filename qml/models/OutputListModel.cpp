@@ -2,12 +2,14 @@
 #include "StyleListModel.h"
 #include "services/DesignLibraryService.h"
 #include "services/EngineBridge.h"
+#include "services/EventBus.h"
 #include "services/SettingsService.h"
 #include "services/ShowConverter.h"
 #include "modules/presentation/PresentationTypes.hpp"
 #include "modules/project/OutputStore.hpp"
 
 #include <QGuiApplication>
+#include <QJSEngine>
 #include <QScreen>
 #include <QTimer>
 #include <QFile>
@@ -40,10 +42,29 @@ bool isScreenTransport(const OutputItem &o)
 
 QPointer<OutputListModel> OutputListModel::s_instance = nullptr;
 
+// The one instance, for C++ AND QML — see the header for why this is eager.
+OutputListModel *OutputListModel::instance()
+{
+    static OutputListModel s;
+    return &s;
+}
+
+OutputListModel *OutputListModel::create(QQmlEngine *engine, QJSEngine *jsEngine)
+{
+    Q_UNUSED(engine)
+    Q_UNUSED(jsEngine)
+    OutputListModel *s = instance();
+    QJSEngine::setObjectOwnership(s, QJSEngine::CppOwnership);
+    return s;
+}
+
 
 OutputListModel::OutputListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
+    Q_ASSERT_X(!s_instance || s_instance == this, "OutputListModel",
+               "a second OutputListModel was constructed — instance() would "
+               "silently rebind and every C++ reader would hold the wrong one");
     s_instance = this;
 
     // THE BOOT GAP (found live: "my saved styles/outputs don't show after a
@@ -64,6 +85,12 @@ OutputListModel::OutputListModel(QObject *parent)
     // TemplateLibraryService the spec's baked template blocks come from) may
     // not exist yet when this constructor runs — so retry once the event loop
     // starts (by then the QML load has created every singleton).
+    //
+    // StyleListModel is NO LONGER part of that retry dance: as of 2026-10-01
+    // it is an eager C++ singleton (create() hands QML the same static
+    // instance), so connectToStyleRoster() below always finds it on the first
+    // call. The other two still need the retry — TemplateLibraryService and
+    // the engine boot genuinely are not ready at construction.
     connectToStyleRoster();
     connectToTemplateLibrary();
     connectToEngineBoot();
@@ -72,6 +99,13 @@ OutputListModel::OutputListModel(QObject *parent)
         connectToTemplateLibrary();
         connectToEngineBoot();
     });
+
+    // ---- Monitor hot-plug (found live: plugging an HDMI monitor while the
+    // app was running never updated the display picker — displays() re-reads
+    // QGuiApplication::screens() on demand, but nothing told the QML side to
+    // re-read). This wires the set changes (screenAdded/screenRemoved) and
+    // each screen's mode changes (resolution/refresh) into screensChanged().
+    trackScreens();
 }
 
 // Re-reads the roster from the engine's OutputStore — at construction AND on
@@ -281,6 +315,10 @@ void OutputListModel::connectToStyleRoster()
 {
     if (styleRosterConnected_)
         return;
+    // Eager singleton since 2026-10-01 — this can only be null if something
+    // constructed a SECOND OutputListModel (the Q_ASSERT in the constructor
+    // catches that in debug builds). The guard stays because a null
+    // dereference here would be a silent style-less render, not a crash.
     StyleListModel *styles = StyleListModel::instance();
     if (!styles)
         return;
@@ -592,10 +630,12 @@ void OutputListModel::setRefresh(int index, const QString &refresh)
     if (m_outputs[index].refresh == trimmed)
         return;
 
+    const QString previous = m_outputs[index].refresh;
     m_outputs[index].refresh = trimmed;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { RefreshRole });
     saveRoster();
+    notifyFrameRateChanged(index, previous, trimmed);
 }
 
 void OutputListModel::setTestPattern(int index, const QString &pattern)
@@ -702,6 +742,81 @@ QVariantMap OutputListModel::displayFor(int index) const
     return {};
 }
 
+int OutputListModel::screensRevision() const
+{
+    return m_screensRevision;
+}
+
+void OutputListModel::trackScreens()
+{
+    QGuiApplication *guiApp = qobject_cast<QGuiApplication *>(QCoreApplication::instance());
+    if (!guiApp)
+        return;   // OutputListModel is a QML singleton — it only ever exists under a GUI app
+    connect(guiApp, &QGuiApplication::screenAdded, this, [this](QScreen *s) {
+        trackScreen(s);
+        screensChangedNow();
+    });
+    connect(guiApp, &QGuiApplication::screenRemoved, this, [this](QScreen *) {
+        screensChangedNow();
+    });
+    const QList<QScreen *> screens = QGuiApplication::screens();
+    for (QScreen *s : screens)
+        trackScreen(s);
+}
+
+void OutputListModel::trackScreen(QScreen *screen)
+{
+    if (!screen)
+        return;
+    // The connection dies with the QScreen when it is unplugged; a re-plug
+    // is a NEW QScreen object, wired in from screenAdded above. No
+    // Qt::UniqueConnection here — that flag is only legal with member-
+    // function-pointer slots, and these are lambdas (passing it anyway
+    // makes Qt log "unique connections require a pointer to member
+    // function of a QObject subclass" at every launch and then IGNORE it).
+    // trackScreen() runs once per screen object, so duplicates can't occur.
+    connect(screen, &QScreen::geometryChanged, this, [this](const QRect &) {
+        screensChangedNow();
+    });
+    connect(screen, &QScreen::refreshRateChanged, this, [this](qreal) {
+        screensChangedNow();
+    });
+}
+
+void OutputListModel::screensChangedNow()
+{
+    // FreeShow's "resolution derives from the display": a bound row's
+    // res/refresh re-snaps to its display's current mode whenever the
+    // display set or any display's mode changes (a projector switched to 4K
+    // mid-service, a monitor re-plugged at a different resolution).
+    // screenName is KEPT when a display disappears (see the header comment)
+    // — a row whose monitor is gone simply stops matching and keeps its
+    // binding for when the monitor returns.
+    for (int i = 0; i < m_outputs.size(); ++i) {
+        const QString target = m_outputs.at(i).screenName;
+        if (target.isEmpty() || m_outputs.at(i).onAirOnly)
+            continue;
+        for (const QScreen *screen : QGuiApplication::screens()) {
+            if (screen->name() != target)
+                continue;
+            const QRect g = screen->geometry();
+            const QString res = QStringLiteral("%1×%2").arg(g.width()).arg(g.height());
+            const QString refresh = QStringLiteral("%1 Hz").arg(qRound(screen->refreshRate()));
+            if (m_outputs.at(i).res == res && m_outputs.at(i).refresh == refresh)
+                break;
+            const QString previousRefresh = m_outputs.at(i).refresh;
+            m_outputs[i].res = res;
+            m_outputs[i].refresh = refresh;
+            emit dataChanged(index(i), index(i), { ResRole, RefreshRole });
+            saveRoster();
+            notifyFrameRateChanged(i, previousRefresh, refresh);
+            break;
+        }
+    }
+    ++m_screensRevision;
+    emit screensChanged();
+}
+
 void OutputListModel::setScreenName(int index, const QString &screenName)
 {
     if (index < 0 || index >= m_outputs.size())
@@ -726,11 +841,13 @@ void OutputListModel::setScreenName(int index, const QString &screenName)
             if (screen->name() != screenName)
                 continue;
             const QRect g = screen->geometry();
+            const QString previousRefresh = m_outputs[index].refresh;
             m_outputs[index].res = QStringLiteral("%1×%2").arg(g.width()).arg(g.height());
             m_outputs[index].refresh = QStringLiteral("%1 Hz").arg(qRound(screen->refreshRate()));
             const QModelIndex changed = this->index(index);
             emit dataChanged(changed, changed, { ScreenNameRole, ResRole, RefreshRole });
             saveRoster();
+            notifyFrameRateChanged(index, previousRefresh, m_outputs[index].refresh);
             return;
         }
     }
@@ -777,6 +894,25 @@ void OutputListModel::setFullscreenOutput(int index, bool fullscreen)
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { FullscreenOutputRole });
     saveRoster();
+}
+
+// A frame-rate change is worth telling the operator about: NDI/HDMI/SDI rows
+// all carry a Refresh rate, and a mid-service move (or a projector re-snapping
+// to a new mode) is exactly the kind of silent change this toast makes
+// visible. Fires only on a real rate→rate move — a blank side is "no rate
+// yet" (a fresh/unassigned row), not a change.
+void OutputListModel::notifyFrameRateChanged(int row, const QString &oldRate, const QString &newRate)
+{
+    if (row < 0 || row >= m_outputs.size() || oldRate == newRate)
+        return;
+    if (oldRate.isEmpty() || newRate.isEmpty())
+        return;
+    const OutputItem &item = m_outputs.at(row);
+    EventBus::instance().notify(
+        QStringLiteral("%1 (%2) frame rate: %3 → %4")
+            .arg(item.name, item.kind, oldRate, newRate),
+        QStringLiteral("info"), QStringLiteral("Outputs"),
+        QStringLiteral("outputs.framerate.changed"));
 }
 
 // ---------------------------------------------------------------------------

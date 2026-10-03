@@ -4,6 +4,26 @@ import QtQuick
 QtObject {
     id: theme
 
+    // ---- Theme (Settings > General > Appearance > Theme) ----
+    // The ENGINE owns the choice ("appearance.theme": "dark" | "light"). This
+    // singleton only turns it into token values, so every token below is a LIVE
+    // binding: picking Light in Settings recolours every surface that reads a
+    // Theme token, with no restart. Until the engine is up the choice reads
+    // undefined and the app stays dark (its default).
+    //
+    // Every surface follows the choice now, including the app chrome (title
+    // bar, tab strip, menu bar, dropdowns): those files used to carry their
+    // own dark hex literals because this singleton was registered as an
+    // ORDINARY type rather than a singleton (see QT_QML_SINGLETON_TYPE in
+    // CMakeLists.txt), so `Theme.*` resolved to undefined and they isolated
+    // themselves. With the registration fixed they read tokens like any
+    // other surface.
+    readonly property string themeName: {
+        const v = SettingsService.values["appearance.theme"]
+        return v === undefined || v === null ? "dark" : String(v)
+    }
+    readonly property bool dark: themeName !== "light"
+
     // ---- Brand ----
     // The accent is the user's choice (Settings > General > Accent color): the ENGINE keeps it and SettingsService hands the colours over,
     // so every Theme.accent / accentLight / accentSoft in the interface follows the choice. (Purple until the engine is up.)
@@ -12,8 +32,16 @@ QtObject {
     readonly property color accentSoft: Qt.alpha(SettingsService.accent, 0.15)   // the tint behind a selected chip or row
 
     // ---- Semantic ----
+    // Deliberately the SAME in both themes: these are fixed status hues, and
+    // every one of them is drawn on its own tinted or neutral chip rather than
+    // directly on the page ground. (The on-air output windows do not read Theme
+    // at all, so a light app theme can never lighten the stage output.)
     readonly property color danger: "#ff4d3d"
     readonly property color dangerLight: "#ff6b61"
+    // GO LIVE is red in BOTH themes (a live switch reads as red the way a
+    // recording dot does), so these are fixed semantic hues, not neutrals.
+    readonly property color liveBg: "#b03630"        // GO LIVE pill, at rest
+    readonly property color liveBgOnAir: "#7a2a24"   // GO LIVE pill, on air
     readonly property color success: "#4ade80"
     readonly property color successLight: "#7ee2a8"
     readonly property color warning: "#f5c26b"
@@ -21,32 +49,39 @@ QtObject {
     readonly property color infoLight: "#8ecbff"
 
     // ---- Neutrals ----
-    // Every value below is pulled directly from the Figma-to-Qt export
-    // (VGRPresenter_Main_Screen.qml) rather than approximated by hand, so
-    // there's exactly one place to read/import a color from instead of
-    // re-typing hex values at each call site.
-    readonly property color windowBg: "#0f1015"   // app root background
-    readonly property color panelBg: "#12131a"    // app-header / side columns
-    readonly property color rowBg: "#16171e"      // list rows, cards, hero bg
-    readonly property color surface: "#15161d"    // Settings modal surface
-    readonly property color card: "#191b24"       // Settings card background
-    readonly property color inset: "#1a1c26"      // input/inset fields
-    readonly property color chip: "#232733"       // neutral tag chips
-    readonly property color border: "#232530"     // borders, dividers, hover bg
-    readonly property color borderSubtle: "#2c3140"
+    // The dark values are the Figma-to-Qt export's own, pulled directly
+    // (VGRPresenter_Main_Screen.qml) rather than approximated by hand. The light
+    // counterparts keep the same relationships - ground darkest, cards above it,
+    // insets recessed - inverted for a light ground.
+    readonly property color windowBg: dark ? "#0f1015" : "#f4f5f8"   // app root background
+    readonly property color panelBg: dark ? "#12131a" : "#ffffff"    // app-header / side columns
+    readonly property color rowBg: dark ? "#16171e" : "#ffffff"      // list rows, cards, hero bg
+    readonly property color surface: dark ? "#15161d" : "#ffffff"    // Settings modal surface
+    readonly property color card: dark ? "#191b24" : "#ffffff"       // Settings card background
+    readonly property color inset: dark ? "#1a1c26" : "#f1f2f6"      // input/inset fields
+    readonly property color chip: dark ? "#232733" : "#e8eaf0"       // neutral tag chips
+    readonly property color border: dark ? "#232530" : "#e2e5ec"     // borders, dividers, hover bg
+    readonly property color borderSubtle: dark ? "#2c3140" : "#d7dbe4"
+    // ---- App chrome (title bar, tab strip, menu bar, dropdowns) ----
+    // These close the last gap Light mode had: the chrome files at one point
+    // hardcoded their own dark shades, so picking Light recoloured the settings
+    // screens and left the header/menus dark. Their families live here now.
+    readonly property color hoverBg: dark ? "#1c1d26" : "#eceef3"     // pill / menu-row hover wash
+    readonly property color activeBg: dark ? "#1e1f29" : "#e9ebf1"    // active tab pill
+    readonly property color iconChrome: dark ? "#b4bccb" : "#5a6272"  // header icon at rest
 
-    readonly property color textPrimary: "#e2e8f0"
-    readonly property color textSecondary: "#8a94a6"
-    readonly property color textMuted: "#5c6475"
+    readonly property color textPrimary: dark ? "#e2e8f0" : "#16181f"
+    readonly property color textSecondary: dark ? "#8a94a6" : "#5b6472"
+    readonly property color textMuted: dark ? "#5c6475" : "#7b8496"
 
     // ---- Nav rail (Settings) ----
-    readonly property color iconMuted: "#8b93a7"      // unselected nav/glyph icon
-    readonly property color navLabelMuted: "#c7cdd8"  // unselected nav item label
-    readonly property color navChipBg: "#1b1d27"      // unselected icon-chip background
-    readonly property color railDivider: "#23252f"    // nav rail edge line
-    readonly property color footerSupport: "#6f7788"  // nav rail "Support" text
-    readonly property color footerVersion: "#4a5060"  // nav rail version text
-    readonly property color toggleOffTrack: "#2a2f3a" // ToggleSwitch off-state track
+    readonly property color iconMuted: dark ? "#8b93a7" : "#6b7484"      // unselected nav/glyph icon
+    readonly property color navLabelMuted: dark ? "#c7cdd8" : "#3a4150"  // unselected nav item label
+    readonly property color navChipBg: dark ? "#1b1d27" : "#eceef3"      // unselected icon-chip background
+    readonly property color railDivider: dark ? "#23252f" : "#e2e5ec"    // nav rail edge line
+    readonly property color footerSupport: dark ? "#6f7788" : "#6b7484"  // nav rail "Support" text
+    readonly property color footerVersion: dark ? "#4a5060" : "#8b93a7"  // nav rail version text
+    readonly property color toggleOffTrack: dark ? "#2a2f3a" : "#d3d7e0" // ToggleSwitch off-state track
 
     // ---- Spacing scale ----
     readonly property int space1: 4

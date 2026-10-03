@@ -204,10 +204,11 @@ Rectangle {
         return false
     }
 
-    // Caller sets width (or anchors); height follows as pane + footer (the
-    // meters OVERLAY the pane — see below).
+    // Caller sets width (or anchors); height follows as border + pane +
+    // border (the meters and the taken-input marker OVERLAY the pane — see
+    // below). No footer: the pane seats flush under the wall's tab pill.
     implicitWidth: 182
-    implicitHeight: 6 + previewPane.height + 6 + 16 + 6
+    implicitHeight: 2 + previewPane.height
 
     // ---- Program-mix meters (the Main Output's L/R LED strips) ------------
     // The strips OVERLAY the preview pane's bottom-left and only appear when
@@ -233,7 +234,8 @@ Rectangle {
     opacity: root.isEnabled ? 1 : 0.45
     Behavior on opacity { NumberAnimation { duration: 120 } }
 
-    // 16:9 preview pane — always inset 6px, always the right aspect. On air:
+    // 16:9 preview pane — flush inside the 1px border, always the right
+    // aspect. On air:
     // the on-air slide drawn block-true (DesignPreview — the SAME renderer the
     // ReferencePane preview uses, so it "renders perfectly" by construction),
     // with the distributed frame taking over for media content. The style's
@@ -241,12 +243,12 @@ Rectangle {
     // styled output shows ITS look, not the transparency checkerboard.
     Rectangle {
         id: previewPane
-        x: 6
-        y: 6
-        width: parent.width - 12
+        x: 1
+        y: 1
+        width: parent.width - 2
         height: width * 9 / 16
         clip: true
-        radius: 4
+        radius: 7
         // The style's colour (the engine's OutputStyleSpec): the pane's base.
         color: root.styleBg.color !== "" ? root.styleBg.color : "transparent"
         // The style's background IMAGE above the colour, under the content —
@@ -287,12 +289,12 @@ Rectangle {
                 width: 34; height: 34; radius: 17
                 color: "transparent"
                 border.width: 2.4
-                border.color: "#6c5ce7"
+                border.color: Theme.accent
             }
             Rectangle {
                 anchors.centerIn: parent
                 width: 10; height: 10; radius: 5
-                color: "#6c5ce7"
+                color: Theme.accent
             }
         }
 
@@ -332,12 +334,12 @@ Rectangle {
                 width: 34; height: 34; radius: 17
                 color: "transparent"
                 border.width: 2.4
-                border.color: "#6c5ce7"
+                border.color: Theme.accent
             }
             Rectangle {
                 anchors.centerIn: parent
                 width: 10; height: 10; radius: 5
-                color: "#6c5ce7"
+                color: Theme.accent
             }
         }
 
@@ -625,62 +627,56 @@ Rectangle {
         anchors.rightMargin: 4
     }
 
-    // Footer: output name — anchored below the pane, full width (the meters
-    // overlay the pane; the footer sits where it always sat).
-    Item {
-        x: 6
-        y: previewPane.y + previewPane.height + 6
-        width: parent.width - 12
-        height: 16
-
-        Text {
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            color: "#e2e8f0"
-            font.family: "Segoe UI"
-            font.pixelSize: 13
-            font.weight: Font.Medium
-            text: root.name
-        }
-
-    // Taken-input marker: purple dot + label, so the layer's presence
-    // reads even when the feed is hidden behind on-air content. The MEDIA
-    // layer gets the same treatment (a play glyph + its name) — a monitor
-    // op must see WHY the output shows a video.
-    Row {
-        anchors.right: parent.right
-        anchors.verticalCenter: parent.verticalCenter
-        spacing: 4
+    // Taken-input marker (the old name footer's right side): purple dot /
+    // play glyph + label, so the layer's presence reads even when the feed
+    // is hidden behind on-air content — a monitor op must see WHY the
+    // output shows a video. Overlaid on the pane's top-right on a dark
+    // chip, so it stays readable over video; the name footer is gone and
+    // the pane seats flush under the wall's tab pill.
+    Rectangle {
+        anchors.top: previewPane.top
+        anchors.topMargin: 4
+        anchors.right: previewPane.right
+        anchors.rightMargin: 4
+        width: markerRow.width + 12
+        height: markerRow.height + 6
+        radius: 9
         visible: root.inputTaken || root.mediaOnAir
+        color: "#b3101219"
 
-        Rectangle {
-            anchors.verticalCenter: parent.verticalCenter
-            width: 16; height: 16; radius: 8
-            color: root.mediaOnAir ? "#1d2a4d" : "#2a2450"
-            visible: root.mediaOnAir
-            IconGlyph {
-                anchors.centerIn: parent
-                name: "play"
-                color: "#8fb4ff"
-                fit: true
-                width: 8; height: 8
+        Row {
+            id: markerRow
+            anchors.centerIn: parent
+            spacing: 4
+
+            Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                width: 16; height: 16; radius: 8
+                color: root.mediaOnAir ? "#1d2a4d" : "#2a2450"
+                visible: root.mediaOnAir
+                IconGlyph {
+                    anchors.centerIn: parent
+                    name: "play"
+                    color: "#8fb4ff"
+                    fit: true
+                    width: 8; height: 8
+                }
+            }
+            Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                width: 6; height: 6; radius: 3
+                color: Theme.accent
+                visible: root.inputTaken
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Math.min(implicitWidth, 110)
+                elide: Text.ElideRight
+                color: "#9aa0b5"
+                font.family: "Segoe UI"
+                font.pixelSize: 10
+                text: root.mediaOnAir ? LiveOutputService.mediaName : LiveOutputService.inputLabel
             }
         }
-        Rectangle {
-            anchors.verticalCenter: parent.verticalCenter
-            width: 6; height: 6; radius: 3
-            color: "#6c5ce7"
-            visible: root.inputTaken
-        }
-        Text {
-            anchors.verticalCenter: parent.verticalCenter
-            width: Math.min(implicitWidth, 110)
-            elide: Text.ElideRight
-            color: "#9aa0b5"
-            font.family: "Segoe UI"
-            font.pixelSize: 10
-            text: root.mediaOnAir ? LiveOutputService.mediaName : LiveOutputService.inputLabel
-        }
-    }
     }
 }

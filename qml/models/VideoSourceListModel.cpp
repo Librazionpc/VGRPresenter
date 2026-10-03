@@ -7,14 +7,35 @@
 
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QJSEngine>
 #include <QJsonObject>
 #include <QTimer>
 
 #include <algorithm>
 
+// The one instance, for C++ AND QML — see the header for why this is eager.
+VideoSourceListModel *VideoSourceListModel::Instance()
+{
+    static VideoSourceListModel s;
+    return &s;
+}
+
+VideoSourceListModel *VideoSourceListModel::create(QQmlEngine *engine, QJSEngine *jsEngine)
+{
+    Q_UNUSED(engine)
+    Q_UNUSED(jsEngine)
+    VideoSourceListModel *s = Instance();
+    QJSEngine::setObjectOwnership(s, QJSEngine::CppOwnership);
+    return s;
+}
+
 VideoSourceListModel::VideoSourceListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
+    Q_ASSERT_X(!s_instance || s_instance == this, "VideoSourceListModel",
+               "a second VideoSourceListModel was constructed — Instance() "
+               "would silently rebind and every C++ reader would hold the "
+               "wrong one");
     s_instance = this;
 
     // Starts EMPTY — no seeded cards. Cameras/screens come from the ENGINE's

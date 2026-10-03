@@ -17,6 +17,9 @@ import QtQuick
 // (e.g. label it) — this component doesn't own canvas state.
 Item {
     id: root
+    // Shared top-level modal layer: keep the scrim and card above the page
+    // so clicks and hover never reach the controls behind the dialog.
+    z: 30000
 
     property bool open: false
 
@@ -193,7 +196,7 @@ Item {
                         radius: 10
                         color: "#0d0f16"
                         border.width: sourceCard.selected ? 1.5 : 1
-                        border.color: sourceCard.selected ? "#6c5ce7" : "#262a38"
+                        border.color: sourceCard.selected ? Theme.accent : "#262a38"
                         opacity: sourceCard.isOffline ? 0.6 : 1
                         Behavior on border.color { ColorAnimation { duration: 100 } }
 
@@ -306,7 +309,7 @@ Item {
                     radius: 10
                     enabled: root.selectedSource !== null
                     opacity: root.selectedSource !== null ? 1 : 0.4
-                    color: addArea.containsMouse ? "#5a4cd6" : "#6c5ce7"
+                    color: addArea.containsMouse ? Qt.darker(Theme.accent, 1.1) : Theme.accent
                     Behavior on color { ColorAnimation { duration: 100 } }
 
                     Text {

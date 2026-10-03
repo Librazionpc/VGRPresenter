@@ -11,6 +11,7 @@ namespace bps::presentation {
 struct OutputStyleSpec;
 }
 
+class QScreen;
 class SettingsService;
 
 // One content toggle in an output's edit dialog — which canvas item kinds
@@ -133,9 +134,15 @@ public:
     Q_ENUM(Role)
 
     explicit OutputListModel(QObject *parent = nullptr);
-    // Model-to-model callers (StyleListModel::removeStyle) use this
-    // null-safe accessor — QML singletons are constructed lazily.
-    static OutputListModel *instance() { return s_instance; }
+    // Model-to-model callers (StyleListModel::removeStyle) use this.
+    //
+    // EAGER, not lazy (fixed 2026-10-01). QML_SINGLETON alone lets QML build
+    // the object itself on first property access, so a C++ reader running
+    // earlier got null and silently did nothing. create() below hands QML the
+    // same static instance C++ reads, so the two cannot disagree about
+    // whether it exists.
+    static OutputListModel *instance();
+    static OutputListModel *create(QQmlEngine *engine, QJSEngine *jsEngine);
 
     int rowCount(const QModelIndex &parent = QModelIndex()) const override;
     QVariant data(const QModelIndex &index, int role) const override;
@@ -171,6 +178,14 @@ public:
 
     // ---- Physical displays (FreeShow's Screens.svelte: real displays, not
     // a mock map) ----
+    // Bumps on every monitor hot-plug, unplug and display-mode change.
+    // screensAdded()/screensRemoved() only fire the SIGNAL — this property
+    // is what lets a QML binding depend on it (OutputWindow's geometry,
+    // ScreenForm's map re-evaluate against it). A binding cannot track a
+    // bare signal.
+    Q_PROPERTY(int screensRevision READ screensRevision NOTIFY screensChanged)
+    int screensRevision() const;
+
     // One entry per QScreen: { name, label, x, y, width, height, refresh } —
     // geometry in its native pixels so the form's mini-map can lay the tiles
     // out relative to each other exactly like the desktop.
@@ -227,8 +242,36 @@ public:
 
 signals:
     void activeStyleChanged();
+    // A monitor was hot-plugged, unplugged, or its mode (resolution /
+    // refresh) changed. QML: ScreenForm bumps its displayRev on this;
+    // OutputWindow tracks screensRevision (property, not this signal —
+    // a binding can't depend on a bare signal) to re-read its screen's
+    // geometry live.
+    void screensChanged();
 
 private:
+    // Re-snaps every screen-bound row's res/refresh to its display's CURRENT
+    // mode (FreeShow's "resolution derives from the display" contract) and
+    // emits screensChanged(). Fired by QGuiApplication::screenAdded/
+    // screenRemoved and each QScreen's geometry/refresh-rate change. The
+    // screenName of a row whose monitor was unplugged is deliberately KEPT:
+    // displayFor() returns {} while the display is gone (its OutputWindow
+    // hides itself via hasDisplay), and when the monitor comes back with the
+    // same name (Windows display names are stable, \\.\DISPLAYn) the binding
+    // resumes with no user action — which is exactly what a mid-service
+    // unplug needs.
+    void screensChangedNow();
+    // Wires QGuiApplication::screenAdded/screenRemoved + every currently
+    // attached screen into screensChangedNow(). Called once from the
+    // constructor (the singleton never dies, so one wiring is enough).
+    void trackScreens();
+    // Wires one screen's geometryChanged/refreshRateChanged into
+    // screensChangedNow(). Idempotent (UniqueConnection); the connection
+    // dies with the QScreen when it is unplugged.
+    void trackScreen(QScreen *screen);
+
+    int m_screensRevision = 0;
+
     // Style lookup helpers over StyleListModel::instance() (null-safe).
     QString styleIdAt(int row) const;
     QString styleNameAt(int row) const;
@@ -247,6 +290,11 @@ private:
     // on-air look changed" relay funnels into). No-op before the roster is
     // adopted.
     void pushActiveEngineStyle();
+    // Toast when an output's Refresh rate actually changes (Settings · Outputs
+    // edit, or a display-mode re-snap) — the operator's cue that NDI/HDMI/SDI
+    // output cadence moved. oldRate/newRate are the display strings ("60 Hz");
+    // a blank side is "no rate yet" and is deliberately silent.
+    void notifyFrameRateChanged(int row, const QString &oldRate, const QString &newRate);
     // Id → row through StyleListModel::rowForId (-1 = unknown id).
     int styleRowForId(const QString &styleId) const;
 

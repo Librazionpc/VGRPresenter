@@ -1,11 +1,13 @@
 import QtQuick
 import QtQuick.Shapes
+import VGRPresenterUI
 
 // The app's TITLE BAR + tab strip, in two rows. The window is
 // frameless, so the top row (32 px) is the title bar: the logo + File/Edit/View/Help
 // menu (AppMenuBar, drawn over its left side), the connection status and the window's
 // own minimize/maximize/close buttons. The second row, under the line, holds the
-// Search button (far left), the Show/Edit/Stage tabs (centre) and Settings (far right). Drag the empty strip to move the
+// Search button (far left), the Show/Edit/Stage tabs (centre) and GO LIVE at the far right
+// (with Settings just inside it). Drag the empty strip to move the
 // window; double-click it to maximize/restore (both handled by the OS via
 // startSystemMove, so edge-snapping works).
 // Shared by every screen — instantiated once in Main.qml instead of once
@@ -20,8 +22,11 @@ import QtQuick.Shapes
 // The right-hand cluster is anchored to the window's right edge (window buttons, then
 // status), so it stays put at any window width; the tabs stay centred.
 //
-// Literal colors, not Theme.* — same AOT-compiler limitation as
-// AppMenuBar.qml at this nesting depth.
+// Colors read the Theme singleton (title-bar ground, borders, icon and text
+// tones), so the header recolours with the rest of the app when Light is
+// chosen. It carried literal hex here only while Theme was registered as an
+// ordinary type and `Theme.*` resolved to undefined — a registration bug now
+// fixed in CMakeLists.txt (QT_QML_SINGLETON_TYPE), not an AOT/nesting limit.
 Rectangle {
     id: root
 
@@ -32,9 +37,9 @@ Rectangle {
     height: titleRowHeight + tabRowHeight
     width: 1440
 
-    border.color: "#232530"
+    border.color: Theme.border
     border.width: 1
-    color: "#12131a"
+    color: Theme.panelBg
 
     property string activeTab: "show"
     signal tabSelected(string tab)
@@ -66,8 +71,10 @@ Rectangle {
         }
     }
 
-    // GO LIVE sits directly beside Settings (user call). Reads the shared
-    // live service; no signal needed — it calls it directly.
+    // GO LIVE holds the tab row's EXTREME right end, with Settings directly
+    // beside it on its left (user call — the two used to be the other way
+    // round). Reads the shared live service; no signal needed — it calls it
+    // directly.
     readonly property bool live: LiveOutputService.live
 
     // The one on-air switch: red pill, GO LIVE / STOP (the transport arrows
@@ -76,14 +83,18 @@ Rectangle {
     // (below) — was icon-left/text-right, the odd one out in the row.
     Item {
         id: goLiveButton
-        anchors.right: settingsButton.left
-        anchors.rightMargin: 18
+        // The end of the row is the live switch's now, so this is the item
+        // PAIRED with parent.right and Settings chains off it. (Anchoring each
+        // to the other's left is a binding loop — neither would have a fixed
+        // edge to resolve from.)
+        anchors.right: parent.right
+        anchors.rightMargin: 12
         y: root.titleRowHeight + (root.tabRowHeight - height) / 2
         width: Math.max(goLiveLabel.implicitWidth, pillGoLive.width) + 12
         height: 52
 
         function baseColor() {
-            return root.live ? "#7a2a24" : "#b03630"
+            return root.live ? Theme.liveBgOnAir : Theme.liveBg
         }
 
         Rectangle {
@@ -101,7 +112,7 @@ Rectangle {
             Rectangle {
                 anchors.centerIn: parent
                 width: 8; height: 8; radius: 4
-                color: root.live ? "#ff6b61" : "#ffffff"
+                color: root.live ? Theme.dangerLight : "#ffffff"
                 // On air: the dot pulses (a quiet "this is live" tell).
                 SequentialAnimation on opacity {
                     running: root.live
@@ -123,7 +134,7 @@ Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
             y: 32
             text: root.live ? qsTr("STOP") : qsTr("GO LIVE")
-            color: root.live ? "#ff6b61" : "#e2e8f0"
+            color: root.live ? Theme.dangerLight : Theme.textPrimary
             font.family: "Segoe UI"
             font.pixelSize: 13
             font.weight: Font.DemiBold
@@ -159,7 +170,7 @@ Rectangle {
             width: 60
             height: 30
             radius: 8
-            color: searchHover.hovered ? "#1c1d26" : "transparent"
+            color: searchHover.hovered ? Theme.hoverBg : "transparent"
             Behavior on color { ColorAnimation { duration: 100 } }
 
             // (IconGlyph's search icon is a fixed 10.5 px, so the large one is drawn here.)
@@ -172,7 +183,7 @@ Rectangle {
                 height: 24
                 preferredRendererType: Shape.CurveRenderer
                 scale: 0.83
-                property color stroke: searchHover.hovered ? "#e2e8f0" : "#b4bccb"
+                property color stroke: searchHover.hovered ? Theme.textPrimary : Theme.iconChrome
                 ShapePath {
                     fillColor: "transparent"
                     strokeColor: searchGlyph.stroke
@@ -201,7 +212,7 @@ Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
             y: 32
             text: qsTr("Search")
-            color: searchHover.hovered ? "#e2e8f0" : "#8a94a6"
+            color: searchHover.hovered ? Theme.textPrimary : Theme.textSecondary
             font.family: "Segoe UI"
             font.pixelSize: 15
             font.bold: true
@@ -223,13 +234,13 @@ Rectangle {
         y: 9
     }
 
-    // Settings - the extreme RIGHT of the tab row, mirroring Search on the left: the gear in
-    // a pill is the click target, the label a caption under it. Opens the Settings dialog
-    // (Main.qml owns the dialog).
+    // Settings - second from the right now (GO LIVE took the end), still mirroring Search on
+    // the left: the gear in a pill is the click target, the label a caption under it. Opens the
+    // Settings dialog (Main.qml owns the dialog).
     Item {
         id: settingsButton
-        anchors.right: parent.right
-        anchors.rightMargin: 12
+        anchors.right: goLiveButton.left
+        anchors.rightMargin: 18
         y: root.titleRowHeight + (root.tabRowHeight - height) / 2
         width: Math.max(settingsLabel.implicitWidth, pillGear.width) + 12
         height: 52
@@ -244,7 +255,7 @@ Rectangle {
             radius: 8
             // Position truth - containsMouse latches forever in this build
             // (KNOWN_ISSUES.md).
-            color: gearHover.hovered ? "#1c1d26" : "transparent"
+            color: gearHover.hovered ? Theme.hoverBg : "transparent"
             Behavior on color { ColorAnimation { duration: 100 } }
 
             // A 24 px box holding the gear. IconGlyph is a plain Item that needs an explicit
@@ -267,7 +278,7 @@ Rectangle {
                     scale: enlarge
                     strokeWidth: 2 / enlarge
                     name: "settings"
-                    color: gearHover.hovered ? "#e2e8f0" : "#b4bccb"
+                    color: gearHover.hovered ? Theme.textPrimary : Theme.iconChrome
                 }
             }
             PositionHoverArea {
@@ -281,7 +292,7 @@ Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
             y: 32
             text: qsTr("Settings")
-            color: gearHover.hovered ? "#e2e8f0" : "#8a94a6"
+            color: gearHover.hovered ? Theme.textPrimary : Theme.textSecondary
             font.family: "Segoe UI"
             font.pixelSize: 15
             font.bold: true

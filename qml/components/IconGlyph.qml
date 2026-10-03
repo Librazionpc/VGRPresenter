@@ -19,7 +19,7 @@ Item {
     // such as folder or search: their natural size is not a 24 grid.)
     property bool fit: false
     // The glyphs drawn on the Lucide 24-unit grid (the ones `fit` can scale). The others are hand-sized.
-    readonly property bool grid24: ["camera", "mic", "micOff", "volume2", "clock", "play", "bookOpen", "wrench", "music", "star", "info", "cash", "lock", "sliders", "zoomIn", "gridView", "listView", "textLines", "download", "pencil", "flag", "link", "typeCase", "blend", "ban", "copy", "trash", "alignLeft", "alignCenter", "alignRight", "alignJustify", "alignTop", "alignMiddle", "alignBottom", "listBullets", "transition", "locked", "unlocked", "image", "overlays", "audio", "slide", "scripture", "timerFill", "previous", "next"].indexOf(name) >= 0
+    readonly property bool grid24: ["camera", "mic", "micOff", "volume2", "clock", "play", "bookOpen", "wrench", "music", "star", "info", "cash", "lock", "sliders", "zoomIn", "gridView", "listView", "textLines", "download", "pencil", "flag", "link", "typeCase", "blend", "ban", "copy", "trash", "alignLeft", "alignCenter", "alignRight", "alignJustify", "alignTop", "alignMiddle", "alignBottom", "listBullets", "transition", "locked", "unlocked", "image", "overlays", "audio", "slide", "scripture", "timerFill", "previous", "next", "shows", "newShow", "media", "template", "bible", "book", "calendar", "overlay", "layoutDashboard", "layers", "folder", "penTool", "fileText", "close", "presentation", "home", "cpu", "activity", "memoryStick", "thermometer", "gauge"].indexOf(name) >= 0
     implicitWidth: 14
     implicitHeight: 14
 
@@ -37,6 +37,13 @@ Item {
             case "clearIcon": return clearIconC
             case "chevronDown": return chevronDownC
             case "chevronUp": return chevronUpC
+            case "shows": return showsC
+            case "newShow": return newShowC
+            case "media": return mediaC
+            case "template": return templateC
+            case "bible": return bibleC
+            case "overlay": return overlayC
+            case "home": return homeC
             case "check": return checkC
             case "arrowLeft": return arrowLeftC
             case "sliders": return slidersC
@@ -100,11 +107,21 @@ Item {
             case "slide": return slideC
             case "scripture": return scriptureC
             case "timerFill": return timerFillC
+            case "cpu": return cpuC
+            case "activity": return activityC
+            case "memoryStick": return memoryStickC
+            case "thermometer": return thermometerC
+            case "gauge": return gaugeC
             default: return dotC
             }
     }
 
-    // Hand-sized glyphs: the loaded item is resized to this box and centred in it.
+    // Hand-sized glyphs: the loaded item is resized to this box, and the glyph
+    // centres ITSELF inside that box (StrokeIcon/FillIcon carry the Shape
+    // alignment properties that do it — see their own comments; the rectangle /
+    // row based glyphs below centre with anchors). Do not "fix" a glyph that
+    // looks high by sizing its box to the glyph: the box is meant to be the
+    // icon's target size, and the centring belongs to the glyph.
     Loader {
         active: !root.grid24
         anchors.fill: parent
@@ -132,6 +149,21 @@ Item {
     // A stroked-path icon at its natural size, centered in the glyph box.
     component StrokeIcon: Shape {
         anchors.centerIn: parent
+
+        // These paths are written in ABSOLUTE coordinates (an 8 x 4.5 chevron
+        // is literally "M 0 0 L 4 4.5 L 8 0"), and Shape.fillMode defaults to
+        // NoResize — "the shape is rendered at its native size, independent of
+        // the size of the item", aligned top-left. Combined with the Loader
+        // above (which resizes its item to the glyph's box), that left every
+        // path glyph's ink in its box's TOP-LEFT corner instead of its middle:
+        // the section-header chevrons read ~3.75 px high in their 12 px boxes
+        // (and every other glyph sat high/left by half the difference between
+        // its ink and its box). These two properties centre the shape in the
+        // item, which is what every hand-sized glyph actually wants.
+        // (Qt 6.7+; this builds against 6.11.)
+        horizontalAlignment: Shape.AlignHCenter
+        verticalAlignment: Shape.AlignVCenter
+
         property alias svgPath: svgElement.path
         preferredRendererType: Shape.CurveRenderer
         ShapePath {
@@ -159,6 +191,119 @@ Item {
         StrokeIcon {
             width: 8; height: 4.5
             svgPath: "M 0 4.5 L 4 0 L 8 4.5"
+        }
+    }
+
+    // ---- The app's own icon assets (qml/assets/*.svg), on the 24 grid -------
+    // Tabler "library" (shows icon.svg) and "library-plus" (new show add.svg):
+    // two stacked cards holding the lines of a rundown, the second with a plus.
+    // Rebuilt from the assets' own path data rather than loaded through Image:
+    // an SVG drawn as an Image can't be recoloured (its currentColor resolves to
+    // black), and every glyph in this app has to follow root.color. The strings
+    // below are the assets' verbatim - Qt's PathSvg takes Tabler's relative
+    // commands, implicit repetition and leading-dot numbers (checked against its
+    // own parser) - so a re-exported asset only ever means swapping the string
+    // here, never touching a call site.
+    Component {
+        id: showsC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24, like the other 24-grid glyphs
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M7 5.667a2.667 2.667 0 0 1 2.667 -2.667h8.666a2.667 2.667 0 0 1 2.667 2.667v8.666a2.667 2.667 0 0 1 -2.667 2.667h-8.666a2.667 2.667 0 0 1 -2.667 -2.667l0 -8.666 M4.012 7.26a2.005 2.005 0 0 0 -1.012 1.737v10c0 1.1 .9 2 2 2h10c.75 0 1.158 -.385 1.5 -1 M11 7h5 M11 10h6 M11 13h3" }
+            }
+        }
+    }
+
+    Component {
+        id: newShowC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M7 5.667a2.667 2.667 0 0 1 2.667 -2.667h8.666a2.667 2.667 0 0 1 2.667 2.667v8.666a2.667 2.667 0 0 1 -2.667 2.667h-8.666a2.667 2.667 0 0 1 -2.667 -2.667l0 -8.666 M4.012 7.26a2.005 2.005 0 0 0 -1.012 1.737v10c0 1.1 .9 2 2 2h10c.75 0 1.158 -.385 1.5 -1 M11 10h6 M14 7v6" }
+            }
+        }
+    }
+
+    // Tabler "brand-zalando" (media icon.svg): a play mark inside a rounded
+    // frame. The Media tab's own mark - that tab carried a generic layout glyph.
+    Component {
+        id: mediaC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M7.531 21c-.65 0 -1 -.15 -1.196 -.27c-.266 -.157 -.753 -.563 -1.197 -1.747a20.583 20.583 0 0 1 -1.137 -6.983c.015 -2.745 .436 -5.07 1.137 -6.975c.444 -1.2 .93 -1.605 1.197 -1.763c.192 -.103 .545 -.262 1.195 -.262c.244 0 .532 .022 .871 .075a19.093 19.093 0 0 1 6.425 2.475h.007a19.572 19.572 0 0 1 5.287 4.508c.783 .99 .879 1.627 .879 1.942c0 .315 -.096 .953 -.879 1.943a19.571 19.571 0 0 1 -5.287 4.5h-.007a19.041 19.041 0 0 1 -6.425 2.474a5.01 5.01 0 0 1 -.871 .083" }
+            }
+        }
+    }
+
+    // Tabler "template" (template.svg): a title bar over a boxed block with
+    // three stacked lines beside it. The Templates tab's own mark - that tab
+    // carried the generic "layoutTemplate" glyph before.
+    Component {
+        id: templateC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24, like the other 24-grid glyphs
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M4 5a1 1 0 0 1 1 -1h14a1 1 0 0 1 1 1v2a1 1 0 0 1 -1 1h-14a1 1 0 0 1 -1 -1l0 -2 M4 13a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v6a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -6 M14 12l6 0 M14 16l6 0 M14 20l6 0" }
+            }
+        }
+    }
+
+    // Tabler "brand-booking" (bible .svg): the app's own Scripture mark - the
+    // open book with the lettered page, from the asset of that name. Scripture
+    // wore the generic shared "bookOpen" before, which The Table also uses, so
+    // the two tabs read alike; this gives Scripture its own mark.
+    Component {
+        id: bibleC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24, like the other 24-grid glyphs
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M4 18v-9.5a4.5 4.5 0 0 1 4.5 -4.5h7a4.5 4.5 0 0 1 4.5 4.5v7a4.5 4.5 0 0 1 -4.5 4.5h-9.5a2 2 0 0 1 -2 -2 M8 12h3.5a2 2 0 1 1 0 4h-3.5v-7a1 1 0 0 1 1 -1h1.5a2 2 0 1 1 0 4h-1.5 M16 16l.01 0" }
+            }
+        }
+    }
+
+    // Tabler "layers-intersect" (overlay.svg): two overlapping rounded frames -
+    // an overlay laid over what is behind it. The Overlays tab's own mark,
+    // from the asset of that name (it wore the shared hand-sized "layers"
+    // glyph, the last tab still off the 24 grid).
+    Component {
+        id: overlayC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24, like the other 24-grid glyphs
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M8 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -8 M4 10a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -8" }
+            }
         }
     }
 
@@ -379,18 +524,28 @@ Item {
         }
     }
 
+    // Migrated onto the 24 grid (DesignCard's action row, beside the 24-grid
+    // `copy`). Non-square ink: the LONGER side is mapped to 24 so the aspect
+    // is preserved; see layoutDashboardC for the rationale.
     Component {
         id: fileTextC
         StrokeIcon {
-            width: 9.4; height: 11.7
+            width: 24; height: 24
+            scale: 11.7 / 24
+            transform: Scale { origin.x: 12; origin.y: 12; xScale: 24 / 11.7; yScale: 24 / 11.7 }
             svgPath: "M 5.832748214543292 0.0000018391015343012394 L 1.1665496429086584 0.0000018391015343012394 C 0.857161430045253 0.000001839101534560312 0.5604449142148962 0.12292792327306676 0.3416744244025606 0.34173783280375647 C 0.12290393459022503 0.5605477423344462 0 0.8573176880143871 0 1.1667616487815597 L 0 10.50084079108426 C 7.770781637552681e-16 10.810284751851432 0.12290393459022503 11.107054454126303 0.3416744244025606 11.325864363656992 C 0.5604449142148962 11.544674273187681 0.857161430045253 11.667600631713867 1.1665496429086584 11.667600631713867 L 8.16584750036061 11.667600631713867 C 8.475235713224015 11.667600631713867 8.771951950927262 11.544674273187681 8.990722440739598 11.325864363656992 C 9.209492930551933 11.107054454126303 9.332397143269267 10.810284751851432 9.332397143269267 10.50084079108426 L 9.332397143269267 3.5002814691293875 M 5.832748214543292 0.0000018391015343012394 C 6.0173863024544305 -0.00029746767182602134 6.200259639097429 0.03593935412302619 6.370836837218325 0.10662550357299545 C 6.54141403533922 0.1773116530229647 6.696325141755713 0.28105059413306155 6.8266487862035605 0.41186811896367437 L 8.919438462878793 2.5050354118636258 C 9.050582660519416 2.635424613314577 9.15459853557324 2.790509345490457 9.225478407782875 2.961332571283399 C 9.296358279992509 3.132155797076341 9.332697579926656 3.3153321431432974 9.332397143269267 3.5002814691293875 M 5.832748214543292 0.0000018391015343012394 L 5.832748214543292 2.91689960157402 C 5.832748214543292 3.071621581957606 5.894200320901958 3.2200064330950413 6.003585565808126 3.3294113878603864 C 6.112970810714294 3.4388163426257314 6.261328929565918 3.500279521888824 6.416023035997621 3.500279521888824 L 9.332397143269267 3.5002814691293875 M 3.499648928725975 4.083659442203628 L 2.3330992858173167 4.083659442203628 M 6.99929785745195 6.417179123462844 L 2.3330992858173167 6.417179123462844 M 6.99929785745195 8.75069880472206 L 2.3330992858173167 8.75069880472206"
         }
     }
 
+    // Migrated onto the 24 grid (SidebarRow's default icon, and DesignCard's
+    // action row beside the 24-grid `copy`). Non-square ink; see
+    // layoutDashboardC for the rationale.
     Component {
         id: folderC
         StrokeIcon {
-            width: 10; height: 8.5
+            width: 24; height: 24
+            scale: 10 / 24
+            transform: Scale { origin.x: 12; origin.y: 12; xScale: 24 / 10; yScale: 24 / 10 }
             svgPath: "M 9.000720119476318 8.499600410461426 C 9.265957839884104 8.499600410461426 9.520331908527533 8.394248327357413 9.70788328766148 8.206720769808003 C 9.895434666795426 8.019193212258592 10.000800132751465 7.76485145259315 10.000800132751465 7.499647420995375 L 10.000800132751465 2.4998824736651253 C 10.000800132751465 2.2346784420673504 9.895434666795426 1.9803364439945363 9.70788328766148 1.7928088864451264 C 9.520331908527533 1.6052813288957164 9.265957839884104 1.499929484199076 9.000720119476318 1.4999294841990751 L 5.050404257789614 1.4999294841990751 C 4.88314763384626 1.5015690884029609 4.718150847492366 1.4612370481826689 4.570516048065656 1.382624951857371 C 4.422881248638946 1.3040128555320731 4.297323905889595 1.1896316818227821 4.205336379521941 1.0499505912578784 L 3.800304241195681 0.4499788929411967 C 3.7092421211747113 0.31172033445717184 3.5852740548150748 0.19823011889391834 3.439524701151231 0.11969253977249268 C 3.293775347487387 0.04115496065106704 3.1308046404061924 0.000027259436074827047 2.965237153523253 0 L 1.0000800132751464 0 C 0.7348422928673612 2.2203416648959308e-16 0.48046798578627514 0.1053518446966413 0.2929166066523294 0.2928794022460512 C 0.10536522751838362 0.4804069597954611 2.2206237144109995e-16 0.7347489578682751 0 0.99995298946605 L 0 7.499647420995375 C 2.2206237144109995e-16 7.76485145259315 0.10536522751838362 8.019193212258592 0.2929166066523294 8.206720769808003 C 0.48046798578627514 8.394248327357413 0.7348422928673612 8.499600410461426 1.0000800132751464 8.499600410461426 L 9.000720119476318 8.499600410461426 Z"
         }
     }
@@ -453,26 +608,52 @@ Item {
         }
     }
 
+    // Migrated onto the 24 grid: it is the templates' "Presentation" CATEGORY
+    // icon, sharing a SidebarRow with the 24-grid music / book / bookOpen. Its
+    // non-square ink maps its LONGER side to 24; see layoutDashboardC.
     Component {
         id: presentationC
         StrokeIcon {
-            width: 11.7; height: 10.5
+            width: 24; height: 24
+            scale: 11.7 / 24
+            transform: Scale { origin.x: 12; origin.y: 12; xScale: 24 / 11.7; yScale: 24 / 11.7 }
             svgPath: "M 0 0 L 11.667600631713867 0 M 11.084220600128175 0 L 11.084220600128175 6.416666666666667 C 11.084220600128175 6.726085916161537 10.961294218155647 7.02283191929261 10.74248426689028 7.241624355316163 C 10.523674315624913 7.460416791339716 10.226904556745712 7.583333333333334 9.917460536956789 7.583333333333334 L 1.7501400947570802 7.583333333333334 C 1.440696074968156 7.583333333333334 1.1439260379116805 7.460416791339716 0.9251160866463125 7.241624355316163 C 0.7063061353809446 7.02283191929261 0.5833800315856936 6.726085916161537 0.5833800315856934 6.416666666666667 L 0.5833800315856934 0 M 2.916900157928467 10.5 L 5.833800315856934 7.583333333333334 L 8.7507004737854 10.5"
         }
     }
 
+    // Migrated onto the 24 grid (DesignCard's action row, beside `copy`).
     Component {
         id: penToolC
         StrokeIcon {
-            width: 11.4; height: 11.4
+            width: 24; height: 24
+            scale: 11.4 / 24
+            transform: Scale { origin.x: 12; origin.y: 12; xScale: 24 / 11.4; yScale: 24 / 11.4 }
             svgPath: "M 9.333336671193441 6.416670004526774 L 8.531253337860107 2.4068369070688886 C 8.50943664740771 2.2977416093150778 8.456877244015535 2.197160332153241 8.379773457845053 2.116955856482188 C 8.30266967167457 2.0367513808111353 8.204237341880798 1.9802688965573907 8.096086502075195 1.9541700879732768 L 0.7204201519489288 0.01633692920828859 C 0.6232530710597833 -0.007155869000901777 0.5216789630552133 -0.005283617414534092 0.42544368406136834 0.021774165332317352 C 0.32920840506752336 0.0488319480791688 0.24154157812396687 0.10016722604632378 0.17085440208514532 0.17085440208514532 C 0.10016722604632378 0.24154157812396687 0.0488319480791688 0.32920840506752336 0.021774165332317352 0.42544368406136834 C -0.005283617414534092 0.5216789630552133 -0.007155869000901777 0.6232530710597833 0.01633692920828859 0.7204201519489288 L 1.9541700879732768 8.096086502075195 C 1.9802688965573907 8.204237341880798 2.0367513808111353 8.30266967167457 2.116955856482188 8.379773457845053 C 2.197160332153241 8.456877244015535 2.2977416093150778 8.50943664740771 2.4068369070688886 8.531253337860107 L 6.416670004526774 9.333336671193441 M 0.17488606770833334 0.17488606770833334 L 4.425052881240845 4.425052881240845 M 7.995661973953248 11.254161675771078 C 7.886270823578041 11.363519795238972 7.737924533585708 11.424954414367676 7.583245436350505 11.424954414367676 C 7.428566339115302 11.424954414367676 7.28022004912297 11.363519795238972 7.170828898747763 11.254161675771078 L 6.245661973953247 10.3289958635966 C 6.1363038544853525 10.219604713221392 6.074869791666667 10.07125786691904 6.074869791666667 9.916578769683838 C 6.074869791666667 9.761899672448635 6.1363038544853525 9.613552826146286 6.245661973953247 9.504161675771078 L 9.504161675771078 6.245661973953247 C 9.613552826146286 6.1363038544853525 9.761899672448635 6.074869791666667 9.916578769683838 6.074869791666667 C 10.07125786691904 6.074869791666667 10.219604713221392 6.1363038544853525 10.3289958635966 6.245661973953247 L 11.254161675771078 7.170828898747763 C 11.363519795238972 7.28022004912297 11.424954414367676 7.428566339115302 11.424954414367676 7.583245436350505 C 11.424954414367676 7.737924533585708 11.363519795238972 7.886270823578041 11.254161675771078 7.995661973953248 L 7.995661973953248 11.254161675771078 Z M 6.416666666666667 5.25 C 6.416666666666667 5.89433217048645 5.89433217048645 6.416666666666667 5.25 6.416666666666667 C 4.605667759974797 6.416666666666667 4.083333333333334 5.89433217048645 4.083333333333334 5.25 C 4.083333333333334 4.605667759974797 4.605667759974797 4.083333333333334 5.25 4.083333333333334 C 5.89433217048645 4.083333333333334 6.416666666666667 4.605667759974797 6.416666666666667 5.25 Z"
         }
     }
 
+    // Tabler "home" (home.svg, the FILLED variant): a house with a door. The
+    // header's Preview tab wears it — the screen whose centre is the live
+    // preview of whatever you pick — from the asset of that name.
+    Component {
+        id: homeC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24, like the other 24-grid glyphs
+            svgPath: "M12.707 2.293l9 9c.63 .63 .184 1.707 -.707 1.707h-1v6a3 3 0 0 1 -3 3h-1v-7a3 3 0 0 0 -2.824 -2.995l-.176 -.005h-2a3 3 0 0 0 -3 3v7h-1a3 3 0 0 1 -3 -3v-6h-1c-.89 0 -1.337 -1.077 -.707 -1.707l9 -9a1 1 0 0 1 1.414 0m.293 11.707a1 1 0 0 1 1 1v7h-4v-7a1 1 0 0 1 .883 -.993l.117 -.007z"
+        }
+    }
+
+    // Migrated onto the 24 grid (it sits in a SidebarRow beside the 24-grid
+    // `camera`): the Figma path is in its own 10.5-unit space, so it is scaled
+    // up to fill the 24 grid and the item scaled back down by the same ratio.
+    // Ink is unchanged when drawn naturally, but `fit` and the 24-grid box
+    // math now apply, so mixed icon rows line up.
     Component {
         id: layoutDashboardC
         StrokeIcon {
-            width: 10.5; height: 10.5
+            width: 24; height: 24
+            scale: 10.5 / 24
+            transform: Scale { origin.x: 12; origin.y: 12; xScale: 24 / 10.5; yScale: 24 / 10.5 }
             svgPath: "M 0.5833333333333334 0 L 3.5 0 C 3.822166085243225 0 4.083333333333334 0.2611672133207321 4.083333333333334 0.5833333333333334 L 4.083333333333334 4.666666666666667 C 4.083333333333334 4.988833030064901 3.822166085243225 5.25 3.5 5.25 L 0.5833333333333334 5.25 C 0.2611672133207321 5.25 0 4.988833030064901 0 4.666666666666667 L 0 0.5833333333333334 C 0 0.2611672133207321 0.2611672133207321 0 0.5833333333333334 0 Z M 7 0 L 9.916666666666668 0 C 10.238832751909893 0 10.5 0.2611672133207321 10.5 0.5833333333333334 L 10.5 2.3333333333333335 C 10.5 2.6554994185765586 10.238832751909893 2.916666666666667 9.916666666666668 2.916666666666667 L 7 2.916666666666667 C 6.677833879987399 2.916666666666667 6.416666666666667 2.6554994185765586 6.416666666666667 2.3333333333333335 L 6.416666666666667 0.5833333333333334 C 6.416666666666667 0.2611672133207321 6.677833879987399 0 7 0 Z M 7 5.25 L 9.916666666666668 5.25 C 10.238832751909893 5.25 10.5 5.511167213320733 10.5 5.833333333333334 L 10.5 9.916666666666668 C 10.5 10.238833030064901 10.238832751909893 10.5 9.916666666666668 10.5 L 7 10.5 C 6.677833879987399 10.5 6.416666666666667 10.238833030064901 6.416666666666667 9.916666666666668 L 6.416666666666667 5.833333333333334 C 6.416666666666667 5.511167213320733 6.677833879987399 5.25 7 5.25 Z M 0.5833333333333334 7.583333333333334 L 3.5 7.583333333333334 C 3.822166085243225 7.583333333333334 4.083333333333334 7.844500546654067 4.083333333333334 8.166666666666668 L 4.083333333333334 9.916666666666668 C 4.083333333333334 10.238832751909893 3.822166085243225 10.5 3.5 10.5 L 0.5833333333333334 10.5 C 0.2611672133207321 10.5 0 10.238832751909893 0 9.916666666666668 L 0 8.166666666666668 C 0 7.844500546654067 0.2611672133207321 7.583333333333334 0.5833333333333334 7.583333333333334 Z"
         }
     }
@@ -485,10 +666,14 @@ Item {
         }
     }
 
+    // Migrated onto the 24 grid (the library sidebars' "Unlabeled" / category
+    // rows, beside 24-grid neighbours like `camera`).
     Component {
         id: layersC
         StrokeIcon {
-            width: 10; height: 10
+            width: 24; height: 24
+            scale: 10 / 24
+            transform: Scale { origin.x: 12; origin.y: 12; xScale: 24 / 10; yScale: 24 / 10 }
             svgPath: "M 0.0000015314757755390289 5.000278976449238 C -0.00023512876514027623 5.095917759515399 0.026961329721227757 5.18961825530497 0.07836567302484124 5.270268748323481 C 0.12977001632845472 5.350919241341992 0.20322565130542775 5.415136167108725 0.29002179218127533 5.455304287007916 L 4.59032304632981 7.410413290501365 C 4.719932692581259 7.469102322109991 4.860573368090874 7.499460922236807 5.002851840615138 7.499460922236807 C 5.145130313139402 7.499460922236807 5.285770988649016 7.469102322109991 5.415380634900465 7.410413290501365 L 9.705681526079536 5.460304680431668 C 9.794191517372253 5.420521940963324 9.869213728001565 5.355845214214658 9.921598975406486 5.274160910360928 C 9.973984222811406 5.192476606507198 10.001468921167021 5.0973144040666485 10.000702262862545 5.000278976449238 M 0.0000015314757755390289 7.500418464673856 C -0.00023512876514027623 7.596057247740017 0.026961329721227757 7.689757743529589 0.07836567302484124 7.7704082365481 C 0.12977001632845472 7.851058729566611 0.20322565130542775 7.9152756553333425 0.29002179218127533 7.955443775232534 L 4.59032304632981 9.910552778725984 C 4.719932692581259 9.96924181033461 4.860573368090874 9.999600410461426 5.002851840615138 9.999600410461426 C 5.145130313139402 9.999600410461426 5.285770988649016 9.96924181033461 5.415380634900465 9.910552778725984 L 9.705681526079536 7.960444168656287 C 9.794191517372253 7.920661429187943 9.869213728001565 7.855984702439277 9.921598975406486 7.774300398585547 C 9.973984222811406 7.692616094731817 10.001468921167021 7.597453892291266 10.000702262862545 7.500418464673856 M 5.415605240931281 0.09018364043596945 C 5.285314832159944 0.030754669011861947 5.143780590645831 0 5.000576214332642 0 C 4.857371838019453 0 4.71583759650534 0.030754669011861947 4.585547187734003 0.09018364043596945 L 0.3002472380521089 2.0402923697216075 C 0.2115156733272523 2.0794165007246286 0.13607525467340595 2.1434974234558193 0.08311329194254313 2.2247308749741763 C 0.030151329211680324 2.3059643264925334 0.0019532617881602207 2.4008448738217876 0.0019532617881602207 2.497817876992162 C 0.0019532617881602207 2.5947908801625363 0.030151329211680324 2.6896716659236724 0.08311329194254313 2.7709051174420294 C 0.13607525467340595 2.8521385689603864 0.2115156733272523 2.9162192532596958 0.3002472380521089 2.955343384262717 L 4.590547652360626 4.910452149324285 C 4.720838061131963 4.969881120748393 4.862372302646076 5.00063662427184 5.005576678959265 5.0006366242718405 C 5.148781055272455 5.00063662427184 5.290315296786567 4.969881120748393 5.420605705557905 4.910452149324285 L 9.710906119866422 2.9603437776864694 C 9.799637684591278 2.9212196466834484 9.87507858011568 2.857138723952257 9.928040542846542 2.7759052724339 C 9.981002505577404 2.694671820915543 10.009200096130371 2.599791273586289 10.009200096130371 2.5028182704159145 C 10.009200096130371 2.40584526724554 9.981002505577404 2.310964481484404 9.928040542846542 2.229731029966047 C 9.87507858011568 2.14849757844769 9.799637684591278 2.084416894148381 9.710906119866422 2.04529276314536 L 5.415605240931281 0.09018364043596945 Z"
         }
     }
@@ -501,19 +686,28 @@ Item {
         }
     }
 
+    // Tabler "book" (book.svg, the FILLED variant): the closed book The Table
+    // wears, from the asset of that name. This replaces the hand-sized 8 x 10
+    // stroked book the "book" name used to hold - nothing referenced it, and a
+    // closed book is what the tab wants - so it now lives on the 24 grid with
+    // every other tab glyph and scales with `fit`. Filled, hence FillIcon.
     Component {
         id: bookC
-        StrokeIcon {
-            width: 8; height: 10
-            svgPath: "M 0 8.750700116157532 L 0 1.250100016593933 C 0 0.9185528735353785 0.13168287360881692 0.600585053019023 0.3660799060149884 0.36614581792482565 C 0.6004769384211599 0.13170658283062833 0.9183875198123062 0 1.2498749792575836 0 L 7.499249875545502 0 C 7.631844862303547 0 7.759009477781546 0.05268261375919181 7.852768286274113 0.1464583033261647 C 7.94652709476668 0.24023399289313757 7.999199867248535 0.3674211464336806 7.999199867248535 0.5000400066375732 L 7.999199867248535 9.50076012611389 C 7.999199867248535 9.633378986317783 7.94652709476668 9.76056649751481 7.852768286274113 9.854342187081784 C 7.759009477781546 9.948117876648757 7.631844862303547 10.000800132751465 7.499249875545502 10.000800132751465 L 1.2498749792575836 10.000800132751465 C 0.9183875198123062 10.000800132751465 0.6004769384211599 9.869093549920835 0.3660799060149884 9.634654314826639 C 0.13168287360881692 9.400215079732442 0 9.082247259216086 0 8.750700116157532 Z M 0 8.750700116157532 C 0 8.419152973098978 0.13168287360881692 8.101185152582621 0.3660799060149884 7.866745917488424 C 0.6004769384211599 7.632306682394226 0.9183875198123062 7.5006000995635995 1.2498749792575836 7.500600099563598 L 7.999199867248535 7.500600099563598"
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24, like the other 24-grid glyphs
+            svgPath: "M21.5 5.134a1 1 0 0 1 .493 .748l.007 .118v13a1 1 0 0 1 -1.5 .866a8 8 0 0 0 -7.5 -.266v-15.174a10 10 0 0 1 8.5 .708m-10.5 -.707l.001 15.174a8 8 0 0 0 -7.234 .117l-.327 .18l-.103 .044l-.049 .016l-.11 .026l-.061 .01l-.117 .006h-.042l-.11 -.012l-.077 -.014l-.108 -.032l-.126 -.056l-.095 -.056l-.089 -.067l-.06 -.056l-.073 -.082l-.064 -.089l-.022 -.036l-.032 -.06l-.044 -.103l-.016 -.049l-.026 -.11l-.01 -.061l-.004 -.049l-.002 -13.068a1 1 0 0 1 .5 -.866a10 10 0 0 1 8.5 -.707"
         }
     }
 
+    // Tabler "calendar-event" (calendar-event.svg, the FILLED variant): the
+    // Calendar tab's mark. Replaces the hand-sized 9 x 10 stroked calendar this
+    // name used to hold, so - like book / shows / media / template / bible - it
+    // lives on the 24 grid and scales with `fit`. Filled, hence FillIcon.
     Component {
         id: calendarC
-        StrokeIcon {
-            width: 9; height: 10
-            svgPath: "M 2.5 0 L 2.5 2.000160026550293 M 6.5 0 L 6.5 2.000160026550293 M 0 4.000320053100586 L 9 4.000320053100586 M 1 1.0000800132751464 L 8 1.0000800132751464 C 8.552285194396973 1.0000800132751464 9 1.4478310592719992 9 2.000160026550293 L 9 9.000720119476318 C 9 9.553049504020509 8.552285194396973 10.000800132751465 8 10.000800132751465 L 1 10.000800132751465 C 0.44771522283554077 10.000800132751465 0 9.553049504020509 0 9.000720119476318 L 0 2.000160026550293 C 0 1.4478310592719992 0.44771522283554077 1.0000800132751464 1 1.0000800132751464 Z"
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24, like the other 24-grid glyphs
+            svgPath: "M16 2a1 1 0 0 1 .993 .883l.007 .117v1h1a3 3 0 0 1 2.995 2.824l.005 .176v12a3 3 0 0 1 -2.824 2.995l-.176 .005h-12a3 3 0 0 1 -2.995 -2.824l-.005 -.176v-12a3 3 0 0 1 2.824 -2.995l.176 -.005h1v-1a1 1 0 0 1 1.993 -.117l.007 .117v1h6v-1a1 1 0 0 1 1 -1m3 8h-14v8.625c0 .705 .386 1.286 .883 1.366l.117 .009h12c.513 0 .936 -.53 .993 -1.215l.007 -.16zm-9 4a1 1 0 0 1 1 1v2a1 1 0 0 1 -1 1h-2a1 1 0 0 1 -1 -1v-2a1 1 0 0 1 1 -1z"
         }
     }
 
@@ -540,11 +734,26 @@ Item {
     // Filled (not stroked) icons.
     component FillIcon: Shape {
         anchors.centerIn: parent
+        // Same centring as StrokeIcon above — a filled path is just as likely
+        // to be smaller than the box it is loaded into.
+        horizontalAlignment: Shape.AlignHCenter
+        verticalAlignment: Shape.AlignVCenter
         property alias svgPath: svgElement.path
         preferredRendererType: Shape.CurveRenderer
         ShapePath {
             fillColor: root.color
             strokeColor: "transparent"
+            // ShapePath defaults to OddEvenFill, but every one of these paths is an
+            // SVG's verbatim data and SVG's default rule is the NON-ZERO winding one
+            // (none of our assets set fill-rule). The two agree on a simple cut-out —
+            // a hole drawn with the opposite winding, which is how Material's icons do
+            // it — but they disagree the moment two subpaths overlap in the SAME
+            // direction, which is what Tabler's filled assets do (a filled page plus
+            // the outline it sits in). There, odd-even empties whatever is covered
+            // twice and the glyph comes out with holes in it instead of solid; the
+            // winding rule fills it the way the asset is drawn. Hence the rule below:
+            // it is what makes a `fill="currentColor"` asset render filled.
+            fillRule: ShapePath.WindingFill
             PathSvg { id: svgElement }
         }
     }
@@ -670,11 +879,16 @@ Item {
         Rectangle { anchors.centerIn: parent; width: 9; height: 9; radius: 1.5; color: root.color }
     }
 
+    // Migrated onto the 24 grid (DesignCard's action row, beside the 24-grid
+    // `copy`). Not a path but two bars, so they are authored here directly in
+    // 24-space and the item scaled 12/24: the natural 12px X is unchanged, and
+    // `fit` now applies like every other glyph.
     Component {
         id: closeC
         Item {
-            Rectangle { anchors.centerIn: parent; width: 12; height: 1.5; radius: 0.75; color: root.color; rotation: 45 }
-            Rectangle { anchors.centerIn: parent; width: 12; height: 1.5; radius: 0.75; color: root.color; rotation: -45 }
+            scale: 12 / 24
+            Rectangle { anchors.centerIn: parent; width: 24; height: 3; radius: 1.5; color: root.color; rotation: 45 }
+            Rectangle { anchors.centerIn: parent; width: 24; height: 3; radius: 1.5; color: root.color; rotation: -45 }
         }
     }    Component {
         id: dotC
@@ -941,6 +1155,86 @@ Item {
         FillIcon {
             width: 24; height: 24; scale: 0.5833
             svgPath: "M19.03,7.39l1.42-1.42c-0.43-0.51-0.9-0.99-1.41-1.41l-1.42,1.42C16.07,4.74,14.12,4,12,4c-4.97,0-9,4.03-9,9 c0,4.97,4.02,9,9,9s9-4.03,9-9C21,10.88,20.26,8.93,19.03,7.39z M13,14h-2V8h2V14z M9,1h6v2H9z"
+        }
+    }
+
+    // ---- Resource-health glyphs (Lucide 24 grid, stroke 2) -----------------
+    // The CPU / GPU-load / memory / temperature / throttle marks the Settings
+    // resource-health modal wears. Lucide "cpu", "activity", "memory-stick",
+    // "thermometer", "gauge" — the rects in the source assets are written here
+    // as path subpaths, since a StrokeIcon carries one PathSvg.
+    Component {
+        id: cpuC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 12 20 L 12 22 M 12 2 L 12 4 M 17 20 L 17 22 M 17 2 L 17 4 M 2 12 L 4 12 M 2 17 L 4 17 M 2 7 L 4 7 M 20 12 L 22 12 M 20 17 L 22 17 M 20 7 L 22 7 M 7 20 L 7 22 M 7 2 L 7 4 M 6 4 L 18 4 A 2 2 0 0 1 20 6 L 20 18 A 2 2 0 0 1 18 20 L 6 20 A 2 2 0 0 1 4 18 L 4 6 A 2 2 0 0 1 6 4 Z M 9 8 L 15 8 A 1 1 0 0 1 16 9 L 16 15 A 1 1 0 0 1 15 16 L 9 16 A 1 1 0 0 1 8 15 L 8 9 A 1 1 0 0 1 9 8 Z" }
+            }
+        }
+    }
+
+    Component {
+        id: activityC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 22 12 L 19.52 12 A 2 2 0 0 0 17.59 13.46 L 15.24 21.82 A 0.25 0.25 0 0 1 14.76 21.82 L 9.24 2.18 A 0.25 0.25 0 0 0 8.76 2.18 L 6.41 10.54 A 2 2 0 0 1 4.49 12 L 2 12" }
+            }
+        }
+    }
+
+    Component {
+        id: memoryStickC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 12 12 L 12 10 M 12 18 L 12 16 M 16 12 L 16 10 M 16 18 L 16 16 M 2 11 L 3.5 11 M 20 18 L 20 16 M 20.5 11 L 22 11 M 4 18 L 4 16 M 8 12 L 8 10 M 8 18 L 8 16 M 4 6 L 20 6 A 2 2 0 0 1 22 8 L 22 14 A 2 2 0 0 1 20 16 L 4 16 A 2 2 0 0 1 2 14 L 2 8 A 2 2 0 0 1 4 6 Z" }
+            }
+        }
+    }
+
+    Component {
+        id: thermometerC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 14 4 L 14 14.54 A 4 4 0 1 1 10 14.54 L 10 4 A 2 2 0 0 1 14 4 Z" }
+            }
+        }
+    }
+
+    Component {
+        id: gaugeC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833 // 14/24
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 12 14 L 16 10 M 3.34 19 A 10 10 0 1 1 20.66 19" }
+            }
         }
     }
 

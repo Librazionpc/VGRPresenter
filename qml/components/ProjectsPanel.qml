@@ -31,7 +31,7 @@ Item {
     readonly property color cDarker: "#191923"
     readonly property color cDarkest: "#12121c"
     readonly property color cText: "#f0f0ff"
-    readonly property color cSecondary: "#E64934"
+    readonly property color cSecondary: Theme.accent
     readonly property string mono: "Consolas"
 
     readonly property bool inProject: ProjectService.activeProjectId !== ""
@@ -109,11 +109,13 @@ Item {
 
     function typeIcon(type) {
         switch (type) {
-        case "show": return "presentation"
+        // The shows glyph (qml/assets/shows icon.svg, added to IconGlyph) fronts every show
+        // in this list; a project row keeps the document mark below.
+        case "show": return "shows"
         case "media": case "image": case "video": return "play"
         case "audio": return "music"
         case "overlay": return "layers"
-        case "scripture": return "bookOpen"
+        case "scripture": return "bible"
         case "camera": return "camera"
         case "screen": case "ndi": return "presentation"
         case "pdf": return "fileText"
@@ -235,13 +237,17 @@ Item {
     }
     function closeMenus() { menu.visible = false; root.dropdown = ""; root.addMenuOpen = false }
 
-    // A project: FreeShow's red document.
+    // A project: FreeShow's document icon, in the app's accent purple rather
+    // than FreeShow's own red (that red was the last non-purple accent left in
+    // this panel and read as a foreign colour next to the purple selections and
+    // buttons; the inner bars keep the same darkened-relative-to-the-body shade
+    // the red version used).
     component ProjectDoc: Item {
         width: 16; height: 20
-        Rectangle { anchors.fill: parent; radius: 3; color: "#d8412f" }
-        Rectangle { x: 3; y: 6; width: 10; height: 1.6; radius: 0.8; color: "#5e1710" }
-        Rectangle { x: 3; y: 10; width: 10; height: 1.6; radius: 0.8; color: "#5e1710" }
-        Rectangle { x: 3; y: 14; width: 6; height: 1.6; radius: 0.8; color: "#5e1710" }
+        Rectangle { anchors.fill: parent; radius: 3; color: root.cSecondary }
+        Rectangle { x: 3; y: 6; width: 10; height: 1.6; radius: 0.8; color: Qt.darker(root.cSecondary, 2.2) }
+        Rectangle { x: 3; y: 10; width: 10; height: 1.6; radius: 0.8; color: Qt.darker(root.cSecondary, 2.2) }
+        Rectangle { x: 3; y: 14; width: 6; height: 1.6; radius: 0.8; color: Qt.darker(root.cSecondary, 2.2) }
     }
 
     // The panel itself.
@@ -296,7 +302,7 @@ Item {
                                 readonly property real indent: 8 * modelData.depth
                                 x: indent; width: card.width - indent
                                 height: isFolder ? 34 : 28
-                                color: root.dropFolder === modelData.id ? "#30E64934" : (active ? root.cDarkest : (treeHover.hovered ? "#0dffffff" : Qt.rgba(1, 1, 1, 0.01 * modelData.depth)))
+                                color: root.dropFolder === modelData.id ? "#306C5CE7" : (active ? root.cDarkest : (treeHover.hovered ? "#0dffffff" : Qt.rgba(1, 1, 1, 0.01 * modelData.depth)))
                                 opacity: modelData.archived ? 0.55 : 1
 
                                 // an indented row keeps a line down its left, like FreeShow's
@@ -648,7 +654,7 @@ Item {
     component AddPill: Rectangle {
         id: pill
         property string label: ""
-        property string glyph: ""      // an IconGlyph name, or "project" for the red document
+        property string glyph: ""      // an IconGlyph name, or "project" for the accent-purple document
         property string hint: ""       // a small icon at the right
         signal picked()
         width: parent ? parent.width : 190; height: 35; radius: 17.5
@@ -687,8 +693,8 @@ Item {
             AddPill { visible: !root.inProject; label: qsTr("Import"); glyph: "download"; hint: "folder"; onPicked: root.addChosen("import") }
 
             // in a project: Show, Scripture, Media | Import | Section
-            AddPill { visible: root.inProject; label: qsTr("Show"); glyph: "presentation"; hint: "search"; onPicked: root.addChosen("show") }
-            AddPill { visible: root.inProject; label: qsTr("Scripture"); glyph: "bookOpen"; hint: "search"; onPicked: root.addChosen("scripture") }
+            AddPill { visible: root.inProject; label: qsTr("Show"); glyph: "shows"; hint: "search"; onPicked: root.addChosen("show") }
+            AddPill { visible: root.inProject; label: qsTr("Scripture"); glyph: "bible"; hint: "search"; onPicked: root.addChosen("scripture") }
             AddPill { visible: root.inProject; label: qsTr("Media"); glyph: "layoutTemplate"; hint: "search"; onPicked: root.addChosen("media") }
             Item { visible: root.inProject; width: 1; height: 6 }
             AddPill { visible: root.inProject; label: qsTr("Import"); glyph: "download"; onPicked: root.addChosen("import") }
@@ -706,14 +712,14 @@ Item {
 
         // the soft shadow of a floating button
         Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 2; width: parent.width + 4; height: width; radius: width / 2; color: "#40000000" }
-        // the ring: 160deg #8000f0 -> #9000f0 (10%) -> #b300f0 (20%) -> #d100db (35%) -> the accent
+        // Derive the whole ring from the chosen accent; fixed violet stops made
+        // most of this button stay purple when the user picked another color.
         Rectangle {
             anchors.fill: parent; radius: width / 2
             gradient: Gradient {
-                GradientStop { position: 0.0; color: "#8000f0" }
-                GradientStop { position: 0.10; color: "#9000f0" }
-                GradientStop { position: 0.20; color: "#b300f0" }
-                GradientStop { position: 0.35; color: "#d100db" }
+                GradientStop { position: 0.0; color: Theme.accentLight }
+                GradientStop { position: 0.25; color: root.cSecondary }
+                GradientStop { position: 0.65; color: Qt.darker(root.cSecondary, 1.25) }
                 GradientStop { position: 1.0; color: root.cSecondary }
             }
             Rectangle {

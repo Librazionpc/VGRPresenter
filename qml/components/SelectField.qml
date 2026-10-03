@@ -74,6 +74,9 @@ Item {
                 anchors.right: parent.right
                 anchors.rightMargin: 12
                 anchors.verticalCenter: parent.verticalCenter
+                // Optical centering: the chevron glyph's mass sits ~2px high
+                // in its em box, so a geometric center reads as high.
+                anchors.verticalCenterOffset: 2
                 name: "chevronDown"
                 color: Theme.textMuted
                 width: 12; height: 12

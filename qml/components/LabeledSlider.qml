@@ -13,9 +13,9 @@ import QtQuick
 // AppScrollBar.qml) keeps the drag and the declarative thumb position from
 // fighting.
 //
-// Literal colors, not Theme.* — matches this file family's convention
-// (see EditScreen.qml/DropdownPanel.qml headers) even though this specific
-// component isn't itself affected by the AOT singleton-resolution issue.
+// Literal colors, pending migration to Theme.* — the "AOT singleton-
+// resolution" reason once given for this file family is disproven (see
+// DropdownPanel.qml's header).
 Item {
     id: root
 
@@ -77,7 +77,7 @@ Item {
                 width: parent.width * root.pct
                 height: parent.height
                 radius: 2
-                color: "#6c5ce7"
+                color: Theme.accent
             }
 
             MouseArea {
@@ -104,7 +104,7 @@ Item {
             radius: 7
             anchors.verticalCenter: parent.verticalCenter
             color: "#ffffff"
-            border.color: "#6c5ce7"
+            border.color: Theme.accent
             border.width: 2
 
             Binding {

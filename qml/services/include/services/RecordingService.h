@@ -127,5 +127,4 @@ private:
     // The active engine session id + the profile it rides.
     QString recordingId_;
     QString profileId_;
-    bool configLoaded_ = false;   // deferred until the settings store is ready
 };

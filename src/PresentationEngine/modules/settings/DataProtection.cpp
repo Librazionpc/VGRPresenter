@@ -122,6 +122,16 @@ size_t BackupStore::Prune(std::string_view show, size_t keepLast) const {
     return removed;
 }
 
+Result<void> BackupStore::Remove(std::string_view path) const {
+    auto& fs = platform::PlatformAccessor::Get().Filesystem();
+    // Only a path this store itself enumerated may be removed — so a stray or
+    // hand-typed path can never delete a file outside the backups folder.
+    for (const BackupInfo& b : List())
+        if (b.path == path)
+            return fs.Remove(path);
+    return Error::Make(Err::NotFound, kModule, std::format("'{}' is not a backup in '{}'", path, directory_));
+}
+
 // ---------------------------------------------------------------------------
 // RecoveryStore
 // ---------------------------------------------------------------------------

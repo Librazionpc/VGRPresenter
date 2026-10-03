@@ -23,6 +23,9 @@ import QtQuick
 // wants a different set can still override `items` directly.
 Item {
     id: root
+    // Shared top-level modal layer: keep the scrim and card above the page
+    // so clicks and hover never reach the controls behind the dialog.
+    z: 30000
 
     property bool open: false
 
@@ -189,7 +192,7 @@ Item {
                             width: tabLabel.implicitWidth + 24
                             radius: 8
                             color: tabBtn.active ? "#296c5ce7" : (tabArea.containsMouse ? "#1e2029" : "transparent")
-                            border.color: tabBtn.active ? "#6c5ce7" : "transparent"
+                            border.color: tabBtn.active ? Theme.accent : "transparent"
                             border.width: 1
                             Behavior on color { ColorAnimation { duration: 100 } }
 
@@ -293,7 +296,7 @@ Item {
                         clip: true
                         color: mediaCard.selected ? "#1a2240" : "#161823"
                         border.width: mediaCard.selected ? 1.5 : 1
-                        border.color: mediaCard.selected ? "#6c5ce7" : "#262a38"
+                        border.color: mediaCard.selected ? Theme.accent : "#262a38"
                         Behavior on border.color { ColorAnimation { duration: 100 } }
                         Behavior on color { ColorAnimation { duration: 100 } }
 
@@ -454,7 +457,7 @@ Item {
                     radius: 10
                     enabled: root.selectedItem !== null
                     opacity: root.selectedItem !== null ? 1 : 0.4
-                    color: insertArea.containsMouse ? "#5a4cd6" : "#6c5ce7"
+                    color: insertArea.containsMouse ? Qt.darker(Theme.accent, 1.1) : Theme.accent
                     Behavior on color { ColorAnimation { duration: 100 } }
 
                     Text {

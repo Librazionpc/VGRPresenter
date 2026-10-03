@@ -1,14 +1,17 @@
 import QtQuick
 import QtQuick.Shapes
+import VGRPresenterUI
 
 // The Show / Edit / Stage tab switcher in the app header. Extracted out of
 // VGRPresenterMainScreen.qml (which stays a static, byte-faithful copy of
 // the Figma export) so hover/click interactivity lives in one small,
 // focused file — same pattern as AppMenuBar.qml.
 //
-// Colors are literals, not Theme.* — see AppMenuBar.qml's header comment:
-// at this nesting depth (Main -> VGRPresenterMainScreen -> ViewTabs) Qt
-// 6.11.1's AOT compiler cannot resolve the Theme singleton at all.
+// Colors read the Theme singleton, so the tab strip recolours with the app
+// when Light is chosen. It carried literal hex only while Theme was
+// registered as an ordinary type and `Theme.*` resolved to undefined (fixed
+// via QT_QML_SINGLETON_TYPE in CMakeLists.txt), not because of any
+// nesting/AOT limit.
 Item {
     id: root
 
@@ -28,6 +31,11 @@ Item {
         property string tabKey: ""
         property string label: ""
         property string iconPath: ""
+        // An IconGlyph NAME. When set it REPLACES the inline Shape path above —
+        // the icon bank is the single source for the app's icons, so a tab whose
+        // mark already lives there (Preview's house) draws from it rather than
+        // carrying its own copy of the path in this file.
+        property string glyph: ""
         property real iconShapeX: 1.75
         property real iconShapeY: 1.75
         property real iconShapeWidth: 10.50
@@ -62,8 +70,8 @@ Item {
             height: 30
             radius: 8
             border.width: 1
-            border.color: tabRoot.isActive ? "#232530" : "transparent"
-            color: tabRoot.isActive ? "#1e1f29" : (tabRoot.isHover ? "#181a24" : "transparent")
+            border.color: tabRoot.isActive ? Theme.border : "transparent"
+            color: tabRoot.isActive ? Theme.activeBg : (tabRoot.isHover ? Theme.hoverBg : "transparent")
             Behavior on color { ColorAnimation { duration: 100 } }
 
             // 24 px icon box, centred in the pill.
@@ -73,7 +81,22 @@ Item {
                 width: 24
                 height: 24
 
+                // The tab's mark from the ICON BANK when it names one (Preview's
+                // "home"), otherwise the inline path below. An 18px `fit: true`
+                // draws the Tabler house at ~14.5 px of ink — the same footprint
+                // the inline play / pencil reach through their iconScale.
+                IconGlyph {
+                    visible: tabRoot.glyph !== ""
+                    anchors.centerIn: parent
+                    name: tabRoot.glyph
+                    color: (tabRoot.isActive || tabRoot.isHover) ? Theme.accent : Theme.textSecondary
+                    width: 18; height: 18
+                    fit: true
+                    Behavior on color { ColorAnimation { duration: 100 } }
+                }
+
                 Shape {
+                    visible: tabRoot.glyph === ""
                     width: tabRoot.iconShapeWidth
                     height: tabRoot.iconShapeHeight
                     transformOrigin: Item.TopLeft
@@ -83,7 +106,7 @@ Item {
 
                     ShapePath {
                         fillColor: tabRoot.filledIcon ? strokeColor : "#00000000"
-                        strokeColor: (tabRoot.isActive || tabRoot.isHover) ? "#6c5ce7" : "#8a94a6"
+                        strokeColor: (tabRoot.isActive || tabRoot.isHover) ? Theme.accent : Theme.textSecondary
                         strokeWidth: tabRoot.iconStroke / tabRoot.iconScale
                         capStyle: ShapePath.RoundCap
                         joinStyle: ShapePath.RoundJoin
@@ -93,7 +116,7 @@ Item {
                     }
                     ShapePath {
                         fillColor: "#00000000"
-                        strokeColor: (tabRoot.isActive || tabRoot.isHover) ? "#6c5ce7" : "#8a94a6"
+                        strokeColor: (tabRoot.isActive || tabRoot.isHover) ? Theme.accent : Theme.textSecondary
                         strokeWidth: tabRoot.linePath === "" ? 0 : 2 / tabRoot.iconScale
                         capStyle: ShapePath.RoundCap
                         Behavior on strokeColor { ColorAnimation { duration: 100 } }
@@ -124,7 +147,7 @@ Item {
             // and below the caption. Was y: 33, which pushed the caption's
             // descenders onto the row's bottom border.
             y: 30
-            color: tabRoot.isActive ? "#e2e8f0" : (tabRoot.isHover ? "#c7cdd8" : "#8a94a6")
+            color: tabRoot.isActive ? Theme.textPrimary : (tabRoot.isHover ? Theme.navLabelMuted : Theme.textSecondary)
             font.family: "Segoe UI"
             font.pixelSize: 15
             // One weight for every tab: mixing Bold and DemiBold shifts the glyphs by a pixel.
@@ -135,15 +158,18 @@ Item {
         }
     }
 
-    // Show: a play triangle (filled, softly rounded by the stroke).
+    // Preview: a house, from the icon bank (IconGlyph "home", qml/assets/
+    // home.svg) — it no longer carries its own play-triangle path here.
+    // The caption is "Preview", not "Show": the screen it opens is the one
+    // whose centre is the live preview of whatever you pick, and "Show" is
+    // this app's word for the show ENTITY (a rundown in the library), so the
+    // tab read as "open a show" instead of "go to the preview". tabKey stays
+    // "show" - it is the routing key (Main.currentView / activeTab), not a label.
     TabButton {
         tabKey: "show"
-        label: "Show"
+        label: "Preview"
         width: 84
-        iconScale: 1
-        filledIcon: true
-        iconShapeWidth: 24; iconShapeHeight: 24
-        iconPath: "M 5.4 4.7 L 19.8 12 L 5.4 19.3 Z"
+        glyph: "home"
     }
     // Edit: a pencil with an underline (24 px grid).
     TabButton {

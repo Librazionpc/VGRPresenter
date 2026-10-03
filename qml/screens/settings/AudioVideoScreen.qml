@@ -46,9 +46,8 @@ Item {
     }
 
     // ---- Self-test hook (VGR_SELFTEST scenarios only): mimic the Add
-    // dialog's device pick without poking pixels — sets the same state the
-    // SelectField's onValuePicked handler sets, so the pane's live chain
-    // (start tap → pump → frames) runs exactly as a real user's pick.
+    // dialog's video-device pick without poking pixels. This changes the
+    // selection state only; Settings does not start audio capture.
     // kind selects the row type: "camera" (default) or "screen" — screens
     // sweep displays AND open windows through the same pane.
     function selfTestPickVideoSource(label, kind) {
@@ -56,15 +55,11 @@ Item {
         root.addSourceKind = kind || "camera"
         root.addSourceSublabel = label
         root.addSourceShown = true
-        syncAudioMeter()
     }
 
-    // ---- Live input metering (the channel rows' real VU feed) -------------
-    // Taps are a SET keyed by device: the board keeps every device row
-    // metered while this screen exists, and the dialogs just read their own
-    // device's snapshot from the published list. onInputLevelsChanged is NOT
-    // wired to re-resolution — resolution happens inside the bridge on every
-    // enumeration, so a hot-plugged device re-binds by itself.
+    // ---- Read-only access to Media-owned input meter snapshots ------------
+    // Opening Settings must not start capture. If a Media monitor is already
+    // active, these snapshots can still feed the routing board.
     readonly property var audioMeterList: EngineBridge.inputLevels
     function meterSnapshotFor(label) {
         const want = label === undefined ? "" : String(label).trim()
@@ -115,8 +110,8 @@ Item {
         }
         return mix * (b.level / 100)
     }
-    // The dialog feed: the device being edited (Add dialog with no pick yet
-    // meters the default input — the empty label).
+    // The dialogs can read a Media-owned tap for the selected device. Merely
+    // opening or editing a source here never starts WASAPI capture.
     readonly property var audioMeterSnapshot: {
         if (root.editAudioIndex >= 0 && root.editAudioKind === "device")
             return root.meterSnapshotFor(root.editAudioSublabel)
@@ -134,29 +129,13 @@ Item {
         return s && s.layout !== undefined ? s.layout : ""
     }
 
-    function openAudioMeter(label) {
-        EngineBridge.startInputMeter(label === undefined ? "" : String(label))
+    // This screen only reads meter snapshots. WASAPI capture is started by
+    // explicit monitoring controls in Media, never by opening Settings or its
+    // source-edit forms.
+    function cleanupAudioVideoPreviews() {
+        EngineBridge.stopAllVideoPreviews()
     }
-    function closeAudioMeter(label) {
-        EngineBridge.stopInputMeter(label === undefined ? "" : String(label))
-    }
-    // Ensure the taps the CURRENT dialog state wants (device rows only —
-    // media/NDI carry no WASAPI device). Taps are idempotent per device, so
-    // re-calling after a re-pick just adds/releases the difference.
-    function syncAudioMeter() {
-        if (root.editAudioIndex >= 0 && root.editAudioKind === "device")
-            root.openAudioMeter(root.editAudioSublabel)
-        else if (root.addSourceShown && root.addSourceType === "audio"
-                 && root.addSourceKind === "device")
-            root.openAudioMeter(root.addSourceSublabel)   // empty pick → default input
-    }
-    // The whole screen's taps — Component.onDestruction (a screen can be
-    // destroyed while the app lives) and shutdown both land here.
-    function closeAllAudioMeters() {
-        EngineBridge.stopAllInputMeters()
-        EngineBridge.stopAllVideoPreviews()   // camera taps too (board + dialogs)
-    }
-    Component.onDestruction: root.closeAllAudioMeters()
+    Component.onDestruction: root.cleanupAudioVideoPreviews()
 
     // ---- Routing matrix modal — shared by the Add + Edit audio dialogs.
     // Which dialog opened it decides where Apply lands: edit writes the
@@ -168,7 +147,7 @@ Item {
         // ABOVE the Edit/Add dialogs (declared before them, and QML siblings
         // stack in declaration order — the modal opened UNDER the edit dialog
         // and looked like "nothing happened"). z beats declaration order.
-        z: 50
+        z: 30001
         busRev: root.modelsRev
         onApplied: (autoRoute, routes) => {
             if (root.routingModalFor === "edit" && root.editAudioIndex >= 0) {
@@ -195,7 +174,7 @@ Item {
     property string mediaPickTarget: ""   // "" | "editAudio" | "addSourceAudio" | "editVideo" | "addSourceVideo"
     MediaSourceModal {
         id: settingsMediaPicker
-        z: 60
+        z: 30001
         open: root.mediaPickTarget !== ""
         fixedKind: root.mediaPickTarget === "editVideo" || root.mediaPickTarget === "addSourceVideo"
                    ? "video" : "audio"
@@ -273,9 +252,8 @@ Item {
         root.editAudioChannels = data.channels !== undefined ? data.channels : 2
         root.editAudioGains = data.channelGains !== undefined ? data.channelGains : []
         root.editAudioSelectedEffect = ""
-        // Real metering for device rows — the tap's live channel layout
-        // (mono/stereo/multi) re-renders the channel rows below.
-        root.syncAudioMeter()
+        // A Media-owned meter, if present, may supply live channel layout
+        // (mono/stereo/multi); opening this editor does not start capture.
     }
     function saveEditAudio() {
         if (root.editAudioIndex < 0)
@@ -290,8 +268,6 @@ Item {
         root.editAudioIndex = -1
         // Dialog closed — release the dialog's tap (the board rows' taps stay;
         // they live with the screen, not the dialog).
-        if (root.editAudioKind === "device")
-            root.closeAudioMeter(root.editAudioSublabel)
     }
 
     // ---- Add Source dialog ----
@@ -516,12 +492,10 @@ Item {
         root.addSourceEffects = AudioInputListModel.defaultEffectsTemplate()
         root.addSourceSelectedEffect = ""
         root.addSourceShown = true
-        // Real roster, fresh from the engine (a camera plugged in since boot
-        // shows up the moment the dialog opens).
-        EngineBridge.refreshDevices()
-        // Audio + device kind meters the default input until a Source pick
-        // re-targets the tap (syncAudioMeter is the single switchboard).
-        root.syncAudioMeter()
+        // Audio dialogs need only the quick audio roster. Video's broader
+        // Media Foundation/window/NDI discovery stays on the video path.
+        if (type === "audio") EngineBridge.refreshAudioDevices()
+        else EngineBridge.refreshDevices()
     }
 
     function submitAddSource() {
@@ -555,8 +529,6 @@ Item {
                                          root.addSourceVideoMode)
         }
         root.addSourceShown = false
-        if (root.addSourceType === "audio" && root.addSourceKind === "device")
-            root.closeAudioMeter(root.addSourceSublabel)   // the dialog's tap only
     }
 
     // ---- Edit Video Source dialog ----
@@ -1215,15 +1187,8 @@ Item {
                                 elide: Text.ElideRight
                             }
 
-                            // LIVE board meter — the row's own device tap
-                            // (started below, once per device row), PRE-fader:
-                            // a board row meters its SOURCE (the dialogs'
-                            // channel strips meter the post-fader chain). The
-                            // old post-fader math made a row with a low stored
-                            // level (e.g. 10%) invisible even with strong
-                            // signal — raw × 0.1 reads as dead. Media/NDI rows
-                            // keep the stored fader value: no device, no tap,
-                            // no fake signal.
+                            // Read the shared Media meter if it is already active; this Settings row
+                            // never opens its own capture tap.
                             LevelTrack {
                                 x: 28; y: 48
                                 width: board.colW - 90
@@ -1235,13 +1200,6 @@ Item {
                                 }
                                 // Color follows the VALUE (VU zones) — the
                                 // old hardcoded green read "safe" at 100.
-                            }
-                            // This row's device tap — ensure-on-row-created.
-                            // Idempotent in the bridge; the empty-sublabel
-                            // case (media/NDI) never calls it.
-                            Component.onCompleted: {
-                                if (inRow.sublabel !== "")
-                                    root.openAudioMeter(inRow.sublabel)
                             }
 
                             Text {
@@ -2013,6 +1971,8 @@ Item {
     // ---- Delete confirm — one dialog serves all three columns.
     ConfirmDialog {
         id: rowDeleteDialog
+        // Sits over an open source/bus editor when Delete is pressed there.
+        z: 30010
         shown: root.deleteTargetIndex >= 0
         title: root.deleteTargetType === "bus" ? qsTr("Delete bus?")
              : root.deleteTargetType === "video" ? qsTr("Delete source?")
@@ -2046,8 +2006,6 @@ Item {
         // already active" — a tap orphaned by an earlier cancelled edit,
         // still running from a previous visit to this screen.
         onCancelled: {
-            if (root.editAudioKind === "device")
-                root.closeAudioMeter(root.editAudioSublabel)
             root.editAudioIndex = -1
         }
         onAccepted: root.saveEditAudio()
@@ -2110,7 +2068,6 @@ Item {
                                     root.editAudioKind = modelData.key
                                     root.editAudioSublabel = buf[modelData.key] !== undefined
                                                               ? buf[modelData.key] : ""
-                                    root.syncAudioMeter()   // non-device kinds un-meter
                                 }
                             }
                         }
@@ -2134,16 +2091,13 @@ Item {
                     sourceOptions: root.audioSourceOptions(root.editAudioKind)
                     onSourcePicked: (v) => {
                         root.editAudioSublabel = root.resolveAudioSourcePick(v, root.editAudioSublabel, "editAudio")
-                        root.syncAudioMeter()   // re-target the tap at the new device
                     }
                     delayMs: root.editAudioDelayMs
                     volume: root.editAudioLevel
                     muted: root.editAudioMuted
                     channels: root.editAudioEffectiveChannels
-                    // REAL telemetry — the engine's WASAPI tap for this row's
-                    // device, not a volume-slider echo. While metering, the
-                    // tap's live layout (mono/stereo/multi) re-renders the
-                    // channel rows to match the capture format.
+                    // Read shared meter telemetry only when Media has already
+                    // opened a tap for this device. Settings never starts one.
                     meterLevels: root.audioMeterLevels
                     meterLayout: root.audioMeterLayout
                     // Per-channel gain knobs read the model row; a moved knob
@@ -2216,8 +2170,6 @@ Item {
                     // (same path as the context menu's Delete). Same
                     // release-the-tap fix as Cancel above — deleting the row
                     // out from under a running meter tap orphaned it too.
-                    if (root.editAudioKind === "device")
-                        root.closeAudioMeter(root.editAudioSublabel)
                     root.removeAudioFixingRoutes(root.editAudioIndex)
                     root.editAudioIndex = -1
                 }
@@ -2563,8 +2515,6 @@ Item {
         // Same cancel-leaks-the-tap bug as Edit Audio's dialog above — see
         // its comment.
         onCancelled: {
-            if (root.addSourceType === "audio" && root.addSourceKind === "device")
-                root.closeAudioMeter(root.addSourceSublabel)
             root.addSourceShown = false
         }
         onAccepted: root.submitAddSource()
@@ -2587,7 +2537,6 @@ Item {
                     onPicked: {
                         root.addSourceType = modelData.key
                         root.addSourceKind = modelData.key === "audio" ? "device" : "camera"
-                        root.syncAudioMeter()   // video rows never meter
                     }
                 }
             }
@@ -2641,7 +2590,6 @@ Item {
                                     root.addSourceKind = modelData.key
                                     root.addSourceSublabel = buf[modelData.key] !== undefined
                                                               ? buf[modelData.key] : ""
-                                    root.syncAudioMeter()
                                 }
                             }
                         }
@@ -2664,7 +2612,6 @@ Item {
                     sourceOptions: root.audioSourceOptions(root.addSourceKind)
                     onSourcePicked: (v) => {
                         root.addSourceSublabel = root.resolveAudioSourcePick(v, root.addSourceSublabel, "addSourceAudio")
-                        root.syncAudioMeter()
                     }
                     delayMs: root.addSourceDelayMs
                     volume: root.addSourceLevel

@@ -89,6 +89,9 @@ public:
     Q_INVOKABLE bool deleteCategory(const QString &id);
     // Brings back the shipped designs that were deleted. Returns how many came back (the caller says so).
     Q_INVOKABLE int restoreDefaults();
+    // Re-reads the library from its file — used after a backup was restored over
+    // it. No-op before the library was ever built.
+    void reload();
 
     // ---- content: what the Edit screen's canvas edits while this design is open ----
     // Replaces the whole canvas (background + blocks) - the flush when an edit settles.

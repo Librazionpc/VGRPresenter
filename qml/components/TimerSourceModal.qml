@@ -9,6 +9,9 @@ import QtQuick
 // application state of its own beyond the picker UI.
 Item {
     id: root
+    // Shared top-level modal layer: keep the scrim and card above the page
+    // so clicks and hover never reach the controls behind the dialog.
+    z: 30000
 
     property bool open: false
 
@@ -148,8 +151,8 @@ Item {
                             width: (parent.width - 16) / 3
                             height: 32
                             radius: 8
-                            color: modeBtn.active ? "#6c5ce7" : (modeArea.containsMouse ? "#20222c" : "#1a1c26")
-                            border.color: modeBtn.active ? "#6c5ce7" : "#2a2f3a"
+                            color: modeBtn.active ? Theme.accent : (modeArea.containsMouse ? "#20222c" : "#1a1c26")
+                            border.color: modeBtn.active ? Theme.accent : "#2a2f3a"
                             border.width: 1
                             Behavior on color { ColorAnimation { duration: 100 } }
 
@@ -204,7 +207,7 @@ Item {
                             height: 48
                             radius: 8
                             color: fieldBox.focused ? "#1f6c5ce7" : "#1a1c26"
-                            border.color: fieldBox.focused ? "#6c5ce7" : "#2a2f3a"
+                            border.color: fieldBox.focused ? Theme.accent : "#2a2f3a"
                             border.width: fieldBox.focused ? 1.5 : 1
                             Behavior on color { ColorAnimation { duration: 100 } }
 
@@ -274,7 +277,7 @@ Item {
                         width: 44
                         height: 24
                         radius: 12
-                        color: toggleTrack.on ? "#6c5ce7" : "#2a2f3a"
+                        color: toggleTrack.on ? Theme.accent : "#2a2f3a"
                         Behavior on color { ColorAnimation { duration: 100 } }
 
                         Rectangle {
@@ -338,7 +341,7 @@ Item {
                     width: 100
                     height: 32
                     radius: 9
-                    color: addArea.containsMouse ? "#5a4cd6" : "#6c5ce7"
+                    color: addArea.containsMouse ? Qt.darker(Theme.accent, 1.1) : Theme.accent
                     Behavior on color { ColorAnimation { duration: 100 } }
 
                     Text {

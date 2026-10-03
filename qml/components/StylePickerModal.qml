@@ -13,6 +13,9 @@ import VGRPresenterUI
 // FreeShow's picker has.
 Item {
     id: root
+    // Shared top-level modal layer: keep the scrim and card above the page
+    // so clicks and hover never reach the controls behind the dialog.
+    z: 30000
 
     property bool open: false
     // Selection by the style's STABLE id ("" = the None card). Ids survive
@@ -149,7 +152,7 @@ Item {
                     radius: 10
                     color: "#0d0f16"
                     border.width: selected ? 1.5 : 1
-                    border.color: selected ? "#6c5ce7" : "#262a38"
+                        border.color: selected ? Theme.accent : "#262a38"
                     Behavior on border.color { ColorAnimation { duration: 100 } }
 
                     Rectangle {
@@ -223,7 +226,7 @@ Item {
                         radius: 10
                         color: "#0d0f16"
                         border.width: styleCard.selected ? 1.5 : 1
-                        border.color: styleCard.selected ? "#6c5ce7" : "#262a38"
+                        border.color: styleCard.selected ? Theme.accent : "#262a38"
                         Behavior on border.color { ColorAnimation { duration: 100 } }
 
                         // Preview "slide" — the style's real background when it
@@ -322,7 +325,7 @@ Item {
                     width: 90
                     height: 34
                     radius: 9
-                    color: selectArea.containsMouse ? "#5a4cd6" : "#6c5ce7"
+                    color: selectArea.containsMouse ? Qt.darker(Theme.accent, 1.1) : Theme.accent
                     Behavior on color { ColorAnimation { duration: 100 } }
 
                     Text {

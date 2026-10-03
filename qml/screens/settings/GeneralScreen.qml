@@ -23,9 +23,8 @@ import "../../components"
 // scrollbar declared inside a Flickable would scroll away with the
 // content. ModalShell drops this whole Item into its content area.
 //
-// Theme tokens throughout: this file sits shallow enough in the tree for
-// the AOT compiler to resolve the singleton (see the depth rule notes in
-// DropdownPanel.qml).
+// Theme tokens throughout, so it follows the Appearance > Theme choice with
+// the rest of the app.
 Item {
     id: root
 
@@ -54,6 +53,31 @@ Item {
         return ""
     }
     function flip(key) { SettingsService.setValue(key, !root.values[key]) }
+
+    // A backup's engine stamp ("yyyymmdd-hhmmss") as a person reads a time, and
+    // a byte count as KB/MB. Shared by the open-show row and the all-shows
+    // browser below so both format identically.
+    function backupStampText(stamp) {
+        const s = String(stamp)
+        if (s.length !== 15 || s.charAt(8) !== "-")
+            return s
+        const d = new Date(Number(s.substr(0, 4)), Number(s.substr(4, 2)) - 1, Number(s.substr(6, 2)),
+                           Number(s.substr(9, 2)), Number(s.substr(11, 2)))
+        return Qt.formatDateTime(d, "d MMM yyyy, hh:mm")
+    }
+    function backupSizeText(bytes) {
+        const kb = Number(bytes) / 1024
+        return kb < 1024 ? Math.max(1, Math.round(kb)) + qsTr(" KB") : (kb / 1024).toFixed(1) + qsTr(" MB")
+    }
+    // A backup's category as a person reads it (the browser row's title and the
+    // restore dialogs). "show" is not a real category here — those rows name
+    // the show itself.
+    function backupCategoryLabel(category) {
+        return category === "settings" ? qsTr("Settings")
+             : category === "overlays" ? qsTr("Overlays")
+             : category === "templates" ? qsTr("Templates")
+             : String(category)
+    }
 
     Flickable {
         id: flick
@@ -179,6 +203,7 @@ Item {
                 // accent swatches. Built explicitly (not a Repeater)
                 // because each row's right-hand control differs.
                 Rectangle {
+                    objectName: "selfTestCardAppearance"   // inset self-test grab target
                     width: (parent.width - 16) / 2
                     height: appearanceCol.height + 40
                     radius: Theme.radiusLg
@@ -224,9 +249,9 @@ Item {
                         }
 
                         ChoiceRow { settingKey: "appearance.theme" }
-                        Rectangle { width: parent.width; height: 1; color: Theme.border }
+                        Rectangle { x: 2; width: parent.width - 2; height: 1; color: Theme.border }
                         ChoiceRow { settingKey: "appearance.language" }
-                        Rectangle { width: parent.width; height: 1; color: Theme.border }
+                        Rectangle { x: 2; width: parent.width - 2; height: 1; color: Theme.border }
 
                         // Lock In Mode — a toggle row.
                         Item {
@@ -250,7 +275,7 @@ Item {
                                 onToggled: root.flip("appearance.lockInMode")
                             }
                         }
-                        Rectangle { width: parent.width; height: 1; color: Theme.border }
+                        Rectangle { x: 2; width: parent.width - 2; height: 1; color: Theme.border }
 
                         // Accent color — the engine's swatches, the selected one
                         // wrapped in a ring (with a 2px gap, like the reference).
@@ -306,6 +331,7 @@ Item {
 
                 // Startup card — the toggles, the autosave interval and the updates row.
                 Rectangle {
+                    objectName: "selfTestCardStartup"   // inset self-test grab target
                     width: (parent.width - 16) / 2
                     height: startupCol.height + 40
                     radius: Theme.radiusLg
@@ -354,7 +380,7 @@ Item {
                                         onToggled: root.flip(startRow.modelData)
                                     }
                                 }
-                                Rectangle { width: startRow.width; height: 1; color: Theme.border }
+                                Rectangle { x: 2; width: startRow.width - 2; height: 1; color: Theme.border }
                             }
                         }
 
@@ -378,7 +404,7 @@ Item {
                                 enabled: root.values["startup.autosave"] === true
                             }
                         }
-                        Rectangle { width: parent.width; height: 1; color: Theme.border }
+                        Rectangle { x: 2; width: parent.width - 2; height: 1; color: Theme.border }
 
                         // Check for updates — the version in use + a button, not a toggle.
                         Item {
@@ -584,7 +610,13 @@ Item {
                 property string title: ""
                 default property alias rows: sectionCol.data
                 width: layout.width
-                height: sectionCol.height + 36
+                // The SAME 20px internal padding as the Appearance / Startup cards
+                // above, so every card on the page shares one set of insets: title
+                // at y: 20, rows at y: 51 (= 20 + the ~21px title + its 10px gap -
+                // exactly where those cards put their first row), and 20px under the
+                // last row. (It used to be 14px top and bottom, which read a step
+                // tighter than the two cards above it.)
+                height: sectionCol.height + sectionCol.y + 20
                 radius: Theme.radiusLg
                 color: Theme.card
                 border.color: Theme.border
@@ -592,7 +624,7 @@ Item {
 
                 Text {
                     x: 20
-                    y: 14
+                    y: 20
                     text: section.title
                     color: Theme.textPrimary
                     font.family: Theme.fontFamily
@@ -603,7 +635,7 @@ Item {
                 Column {
                     id: sectionCol
                     x: 20
-                    y: 44
+                    y: 51
                     width: parent.width - 40
                     spacing: 0
                 }
@@ -664,13 +696,158 @@ Item {
                 }
                 Rectangle {
                     visible: !prefRow.last
-                    width: prefRow.width
+                    // Start at the row label's left edge, not the section's
+                    // padded edge (the divider used to lead the text by 2px).
+                    x: 2
+                    width: prefRow.width - 2
+                    height: 1
+                    color: Theme.border
+                }
+            }
+
+            // The OPEN SHOW's dated backups. The engine has always kept them (DataProtection's BackupStore)
+            // and could list them (SettingsService.backupsOf), but nothing ever showed one - they were
+            // write-only. This row is the read side: it lists them and hands one back as a NEW show.
+            component BackupRow: Column {
+                id: backupRow
+                property bool last: false
+                width: parent.width
+
+                // Backups are keyed by the SOURCE FILE's name without its extension (the engine's
+                // completeBaseName) - NOT by the show document's title, which usually differs. Deriving it
+                // from the path is what makes the list actually find this show's copies.
+                readonly property string fileStem: {
+                    const p = String(ShowService.showPath ?? "")
+                    if (p === "")
+                        return ""
+                    // The file name (after the last separator) without its extension — the character-class
+                    // regex a path split usually uses reads badly inside a QML string, so index arithmetic it is.
+                    const slash = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"))
+                    const file = slash >= 0 ? p.substring(slash + 1) : p
+                    const dot = file.lastIndexOf(".")
+                    return dot > 0 ? file.substring(0, dot) : file
+                }
+                readonly property string title: ShowService.hasShow && String(ShowService.showName ?? "") !== ""
+                                                ? String(ShowService.showName) : backupRow.fileStem
+                // Re-read from the engine when the list is opened and after a restore (backups are taken on
+                // a timer, so there is no signal to bind to; reading on demand is always current).
+                property var backups: []
+                function refresh() {
+                    backupRow.backups = backupRow.fileStem !== "" ? SettingsService.backupsOf(backupRow.fileStem) : []
+                }
+                Component.onCompleted: refresh()
+                Connections {
+                    target: ShowService
+                    function onShowChanged() { backupRow.refresh() }
+                }
+
+                // Stamp/size formatting lives on the root now (backupStampText /
+                // backupSizeText) — the all-shows browser formats the same way.
+
+                // Copies a backup out as a NEW library show; the show it came from is never touched.
+                function restore(backupPath) {
+                    const name = qsTr("%1 (backup)").arg(backupRow.title)
+                    const target = ShowService.newLibraryShowPath("", name)
+                    if (target === "" || !SettingsService.restoreBackup(backupPath, target)) {
+                        EventBus.notify(qsTr("That backup could not be restored."), "error", qsTr("Backups"), "settings.backups.restore")
+                        return
+                    }
+                    ShowService.refreshLibrary()
+                    backupRow.refresh()
+                    EventBus.notify(qsTr("Restored \"%1\" as a new show.").arg(name), "info", qsTr("Backups"), "settings.backups.restored")
+                }
+
+                Item {
+                    width: backupRow.width
+                    height: 52
+
+                    Column {
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 2
+
+                        Text {
+                            text: backupRow.fileStem === "" ? qsTr("Backups")
+                                                             : qsTr("Backups of \"%1\"").arg(backupRow.title)
+                            color: Theme.textPrimary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.textSm
+                        }
+                        Text {
+                            text: backupRow.fileStem === "" ? qsTr("Open a show to see its backups.")
+                                : (backupRow.backups.length === 0 ? qsTr("None yet — a copy is taken while it is open.")
+                                                                  : qsTr("%n saved copy(s).", "", backupRow.backups.length))
+                            color: Theme.textMuted
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.textXs
+                        }
+                    }
+
+                    Rectangle {
+                        id: restoreBtn
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Math.max(72, restoreText.width + 24)
+                        height: 26
+                        radius: Theme.radiusSm
+                        // Nothing to hand back with an empty list: dimmed and inert.
+                        opacity: backupRow.backups.length > 0 ? 1 : 0.45
+                        color: restoreArea.containsMouse ? Theme.chip : Theme.inset
+                        border.color: Theme.border
+                        border.width: 1
+                        Behavior on color { ColorAnimation { duration: 100 } }
+
+                        Text {
+                            id: restoreText
+                            anchors.centerIn: parent
+                            text: qsTr("Restore")
+                            color: Theme.textSecondary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 12
+                        }
+                        MouseArea {
+                            id: restoreArea
+                            anchors.fill: parent
+                            enabled: backupRow.backups.length > 0
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            // Re-read first: the list is only as current as the moment it opens.
+                            onClicked: {
+                                backupRow.refresh()
+                                backupMenu.openAt(restoreBtn, restoreBtn.width - backupMenu.width, restoreBtn.height + 4, root.Window.contentItem)
+                            }
+                        }
+                    }
+
+                    // The engine's own list, newest first; the trailing text is that copy's size.
+                    DropdownPanel {
+                        id: backupMenu
+                        visible: false
+                        fitContentWidth: true
+                        maxHeight: 320
+                        model: backupRow.backups.map((b) => ({ label: root.backupStampText(b.stamp),
+                                                               trailing: root.backupSizeText(b.sizeBytes),
+                                                               payload: b.path }))
+                        onItemPicked: (index, payload) => {
+                            backupMenu.visible = false
+                            backupRow.restore(payload)
+                        }
+                    }
+                    MenuCatcher { menu: backupMenu }
+                }
+
+                Rectangle {
+                    visible: !backupRow.last
+                    // Inset like PrefRow's divider: start at the row text's
+                    // left edge rather than 2px to its left.
+                    x: 2
+                    width: backupRow.width - 2
                     height: 1
                     color: Theme.border
                 }
             }
 
             SettingsSection {
+                objectName: "selfTestCardPreferences"   // inset self-test grab target
                 title: qsTr("Preferences")
                 PrefRow { key: "preferences.startMinimized" }
                 PrefRow { key: "preferences.restoreLastSession" }
@@ -678,14 +855,22 @@ Item {
             }
 
             SettingsSection {
+                objectName: "selfTestCardBackups"   // inset self-test grab target
                 title: qsTr("Backups & recovery")
                 PrefRow { key: "backups.automatic"; sub: root.choiceText("backups.intervalMinutes") }
                 PrefRow { choiceKey: "backups.intervalMinutes" }
                 PrefRow { choiceKey: "backups.keepLast" }
-                PrefRow { key: "backups.crashRecovery"; sub: root.definitions["backups.crashRecovery"].description; last: true }
+                PrefRow { key: "backups.crashRecovery"; sub: root.definitions["backups.crashRecovery"].description }
+                // What else a backup carries beyond the open show — each opt-in,
+                // so the user decides how much a backup takes.
+                PrefRow { key: "backups.includeSettings"; sub: root.definitions["backups.includeSettings"].description }
+                PrefRow { key: "backups.includeOverlays"; sub: root.definitions["backups.includeOverlays"].description }
+                PrefRow { key: "backups.includeTemplates"; sub: root.definitions["backups.includeTemplates"].description }
+                BackupRow { last: true }
             }
 
             SettingsSection {
+                objectName: "selfTestCardNotifications"   // inset self-test grab target
                 title: qsTr("Notifications & logs")
                 PrefRow { key: "notifications.show" }
                 PrefRow { choiceKey: "notifications.logLevel"; last: true }
@@ -752,13 +937,67 @@ Item {
                 }
             }
 
+            // EVERY backup, not just the open show's (the row in "Backups &
+            // recovery" above): a show copy restores as a new show, a settings /
+            // overlays / templates copy rolls back over its live file — or any
+            // of them can be deleted. The list lives in the browser modal at the
+            // root, which reads it on open.
             SettingsSection {
+                title: qsTr("All backups")
+                ActionRow {
+                    label: qsTr("Browse every saved copy")
+                    buttonText: qsTr("Browse…")
+                    onActivated: backupsBrowser.open()
+                }
+                Rectangle {
+                    x: 2
+                    width: parent.width - 2
+                    height: 1
+                    color: Theme.border
+                }
+                // The backups live outside the app's document folders, so the browser
+                // below is not the only way to reach them: hand the OS file manager
+                // the folder itself (SettingsService.backupDirectory()).
+                ActionRow {
+                    label: qsTr("Open the backups folder")
+                    buttonText: qsTr("Open")
+                    onActivated: {
+                        if (!SettingsService.openBackupDirectory())
+                            EventBus.notify(qsTr("The backups folder is not ready yet."), "warning", qsTr("Backups"), "settings.backups.openFolder")
+                    }
+                }
+                Rectangle {
+                    x: 2
+                    width: parent.width - 2
+                    height: 1
+                    color: Theme.border
+                }
+                // Takes the same copies the automatic timer would, on demand:
+                // the open show (if any) plus whichever categories are on.
+                ActionRow {
+                    label: qsTr("Back up the open show and everything selected")
+                    buttonText: qsTr("Back up now")
+                    onActivated: {
+                        let made = 0
+                        if (ShowService.showPath !== "" && SettingsService.backupShow(ShowService.showPath) !== "")
+                            ++made
+                        made += SettingsService.backupCategories()
+                        EventBus.notify(made > 0 ? qsTr("Made %n new saved copy(s).", "", made)
+                                                 : qsTr("Everything selected is already saved."),
+                                        "info", qsTr("Backups"), "settings.backups.now")
+                    }
+                }
+            }
+
+            SettingsSection {
+                objectName: "selfTestCardLibraries"   // inset self-test grab target
                 title: qsTr("Libraries")
                 RestoreRow { label: qsTr("Restore default overlays"); service: OverlayLibraryService }
                 RestoreRow { label: qsTr("Restore default templates"); service: TemplateLibraryService }
             }
 
             SettingsSection {
+                objectName: "selfTestCardReset"   // inset self-test grab target
                 title: qsTr("Reset")
                 ActionRow {
                     label: qsTr("Reset all settings to their defaults")
@@ -781,5 +1020,273 @@ Item {
         y: Theme.space3
         height: parent.height - Theme.space6
         flickable: flick
+    }
+
+    // ---- The all-shows backups browser --------------------------------------
+    // EVERY backup the engine holds (the modal the "All backups" card opens),
+    // newest first. Read on each open — backups are taken on a timer, so there
+    // is no signal to bind to. Restore hands a copy back as a NEW show; Delete
+    // removes the copy after the confirm dialog below.
+    ModalCard {
+        id: backupsBrowser
+        title: qsTr("Backups")
+        subtitle: qsTr("Every saved copy the engine has taken, newest first.")
+        cardWidth: 620
+        showSave: false
+        cancelText: qsTr("Close")
+        onCancelled: backupsBrowser.close()
+
+        property var rows: []
+        // The row a Delete is waiting to confirm (drives the dialog below).
+        property var pendingDelete: null
+        // The settings/overlays/templates row a Restore is waiting to confirm.
+        property var pendingRestore: null
+
+        function reload() { backupsBrowser.rows = SettingsService.allBackups() }
+        onShownChanged: if (backupsBrowser.shown) backupsBrowser.reload()
+
+        // A category copy (settings / overlays / templates) rolls back OVER its
+        // live file, so it goes through the confirm dialog below. A show copy
+        // only ever ADDS a new show (the engine refuses to overwrite one), so it
+        // needs no confirm and restores straight away.
+        function restore(row) {
+            if (!row)
+                return
+            if (row.category !== "show") {
+                backupsBrowser.pendingRestore = row
+                return
+            }
+            const name = qsTr("%1 (backup)").arg(row.show)
+            const target = ShowService.newLibraryShowPath("", name)
+            if (target === "" || !SettingsService.restoreBackup(row.path, target)) {
+                EventBus.notify(qsTr("That backup could not be restored."), "error", qsTr("Backups"), "settings.backups.restore")
+                return
+            }
+            ShowService.refreshLibrary()
+            backupsBrowser.reload()
+            EventBus.notify(qsTr("Restored \"%1\" as a new show.").arg(name), "info", qsTr("Backups"), "settings.backups.restored")
+        }
+
+        // Puts a settings/overlays/templates copy back in place (the engine also
+        // reloads whatever reads it). Only reached after the confirm dialog.
+        function restoreCategory(row) {
+            if (!row)
+                return
+            if (!SettingsService.restoreCategoryBackup(row.path)) {
+                EventBus.notify(qsTr("That backup could not be restored."), "error", qsTr("Backups"), "settings.backups.restore")
+                return
+            }
+            backupsBrowser.reload()
+            EventBus.notify(qsTr("%1 was put back from its backup.").arg(root.backupCategoryLabel(row.category)),
+                            "info", qsTr("Backups"), "settings.backups.restored")
+        }
+
+        // Reveals THIS copy in the OS file manager (Explorer/Finder select it;
+        // a desktop without that opens the folder).
+        function showInFolder(row) {
+            if (!row || SettingsService.showBackupInFolder(row.path))
+                return
+            EventBus.notify(qsTr("That backup could not be shown in the file manager."),
+                            "warning", qsTr("Backups"), "settings.backups.showInFolder")
+        }
+
+        function remove(row) {
+            if (row && SettingsService.deleteBackup(row.path)) {
+                backupsBrowser.reload()
+                EventBus.notify(qsTr("Deleted a backup of \"%1\".").arg(row.show), "info", qsTr("Backups"), "settings.backups.deleted")
+            } else {
+                EventBus.notify(qsTr("That backup could not be deleted."), "error", qsTr("Backups"), "settings.backups.deleteRefused")
+            }
+        }
+
+        Column {
+            width: parent.width
+            spacing: Theme.space2
+
+            Text {
+                visible: backupsBrowser.rows.length === 0
+                width: parent.width
+                text: qsTr("No backups yet. A copy is taken while a show is open.")
+                color: Theme.textMuted
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textSm
+            }
+
+            Repeater {
+                model: backupsBrowser.rows
+
+                delegate: Rectangle {
+                    id: backupItem
+                    required property var modelData
+                    width: parent.width
+                    height: 46
+                    radius: Theme.radiusSm
+                    color: rowHover.containsMouse ? Theme.inset : "transparent"
+                    Behavior on color { ColorAnimation { duration: 100 } }
+
+                    // Hover-only wash under the row (no button accepted), so it
+                    // never eats the Restore/Delete clicks above it.
+                    MouseArea {
+                        id: rowHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        acceptedButtons: Qt.NoButton
+                    }
+
+                    Column {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 1
+
+                        Text {
+                            text: backupItem.modelData.category === "show"
+                                  ? backupItem.modelData.show
+                                  : root.backupCategoryLabel(backupItem.modelData.category)
+                            color: Theme.textPrimary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.textSm
+                        }
+                        Text {
+                            text: root.backupStampText(backupItem.modelData.stamp) + "  ·  "
+                                  + root.backupSizeText(backupItem.modelData.sizeBytes)
+                            color: Theme.textMuted
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.textXs
+                        }
+                    }
+
+                    Row {
+                        anchors.right: parent.right
+                        anchors.rightMargin: 6
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 6
+
+                        Rectangle {
+                            width: Math.max(96, revealLbl.width + 20)
+                            height: 26
+                            radius: Theme.radiusSm
+                            color: revealArea.containsMouse ? Theme.chip : Theme.inset
+                            border.color: Theme.border
+                            border.width: 1
+                            Behavior on color { ColorAnimation { duration: 100 } }
+
+                            Text {
+                                id: revealLbl
+                                anchors.centerIn: parent
+                                text: qsTr("Show in folder")
+                                color: Theme.textSecondary
+                                font.family: Theme.fontFamily
+                                font.pixelSize: 12
+                            }
+                            MouseArea {
+                                id: revealArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backupsBrowser.showInFolder(backupItem.modelData)
+                            }
+                        }
+
+                        Rectangle {
+                            width: Math.max(64, restoreLbl.width + 20)
+                            height: 26
+                            radius: Theme.radiusSm
+                            color: restoreArea.containsMouse ? Theme.chip : Theme.inset
+                            border.color: Theme.border
+                            border.width: 1
+                            Behavior on color { ColorAnimation { duration: 100 } }
+
+                            Text {
+                                id: restoreLbl
+                                anchors.centerIn: parent
+                                text: qsTr("Restore")
+                                color: Theme.textSecondary
+                                font.family: Theme.fontFamily
+                                font.pixelSize: 12
+                            }
+                            MouseArea {
+                                id: restoreArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backupsBrowser.restore(backupItem.modelData)
+                            }
+                        }
+
+                        Rectangle {
+                            width: Math.max(56, deleteLbl.width + 20)
+                            height: 26
+                            radius: Theme.radiusSm
+                            color: deleteArea.containsMouse ? Qt.alpha(Theme.danger, 0.16) : "transparent"
+                            border.color: Theme.border
+                            border.width: 1
+                            Behavior on color { ColorAnimation { duration: 100 } }
+
+                            Text {
+                                id: deleteLbl
+                                anchors.centerIn: parent
+                                text: qsTr("Delete")
+                                color: Theme.dangerLight
+                                font.family: Theme.fontFamily
+                                font.pixelSize: 12
+                            }
+                            MouseArea {
+                                id: deleteArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backupsBrowser.pendingDelete = backupItem.modelData
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // A settings/overlays/templates restore REPLACES the live file, so it is
+    // confirmed first. Driven off pendingRestore, same contract as the delete
+    // dialog below.
+    ConfirmDialog {
+        id: restoreCategoryConfirm
+        shown: backupsBrowser.pendingRestore !== null
+        title: qsTr("Put this backup back?")
+        message: backupsBrowser.pendingRestore
+                 ? qsTr("Your current %1 will be replaced by the copy from %2. This cannot be undone.")
+                       .arg(root.backupCategoryLabel(backupsBrowser.pendingRestore.category))
+                       .arg(root.backupStampText(backupsBrowser.pendingRestore.stamp))
+                 : ""
+        confirmLabel: qsTr("Restore")
+        cancelLabel: qsTr("Cancel")
+        confirmVariant: "danger"
+        onConfirmed: {
+            const row = backupsBrowser.pendingRestore
+            backupsBrowser.pendingRestore = null
+            backupsBrowser.restoreCategory(row)
+        }
+        onDismissed: backupsBrowser.pendingRestore = null
+    }
+
+    // Delete is destructive — confirm before removing the copy. Driven off
+    // pendingDelete so the browser closes the dialog by clearing it.
+    ConfirmDialog {
+        id: deleteBackupConfirm
+        shown: backupsBrowser.pendingDelete !== null
+        title: qsTr("Delete this backup?")
+        message: backupsBrowser.pendingDelete
+                 ? qsTr("The saved copy of \"%1\" from %2 will be removed. This cannot be undone.")
+                       .arg(backupsBrowser.pendingDelete.show)
+                       .arg(root.backupStampText(backupsBrowser.pendingDelete.stamp))
+                 : ""
+        confirmLabel: qsTr("Delete")
+        cancelLabel: qsTr("Cancel")
+        confirmVariant: "danger"
+        onConfirmed: {
+            const row = backupsBrowser.pendingDelete
+            backupsBrowser.pendingDelete = null
+            backupsBrowser.remove(row)
+        }
+        onDismissed: backupsBrowser.pendingDelete = null
     }
 }

@@ -15,8 +15,9 @@ import VGRPresenterUI
 // the first state_changed on the engine's own bus, so this populates even
 // before the QML engine finishes loading.)
 //
-// Literal colors, not Theme.* — same AOT-compiler limitation documented in
-// AppMenuBar.qml applies at this nesting depth.
+// Colors read the Theme singleton. The status hues are the theme's semantic
+// tokens (success / warning / danger) and the neutral label uses textSecondary,
+// so the light/dark choice recolours the label with the rest of the chrome.
 Item {
     id: root
 
@@ -52,10 +53,10 @@ Item {
 
     // Indicator color by kernel state: green Running, amber transitional
     // (Booting/Starting/CrashRecovery), grey shut down, red anything else.
-    readonly property color indicatorColor: kernelUp ? "#3ddc84"
-        : (kernelState === "ShuttingDown" || kernelState === "Stopped") ? "#8a94a6"
-        : (kernelState === "Booting" || kernelState === "Starting" || kernelState === "CrashRecovery") ? "#f5a623"
-        : "#e5534b"
+    readonly property color indicatorColor: kernelUp ? Theme.success
+        : (kernelState === "ShuttingDown" || kernelState === "Stopped") ? Theme.textSecondary
+        : (kernelState === "Booting" || kernelState === "Starting" || kernelState === "CrashRecovery") ? Theme.warning
+        : Theme.danger
 
     Rectangle {
         id: quickStats
@@ -90,7 +91,7 @@ Item {
             x: 22
             height: 13
             width: 59
-            color: root.kernelUp ? "#8a94a6" : "#c8a06a"
+            color: root.kernelUp ? Theme.textSecondary : Theme.warning
             font.family: "Segoe UI"
             font.pixelSize: 13
             font.weight: Font.Normal

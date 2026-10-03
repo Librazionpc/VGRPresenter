@@ -188,6 +188,21 @@ Result<uint64_t> FilesystemImpl::FileSize(std::string_view path) const {
 }
 
 Result<std::string> FilesystemImpl::Absolute(std::string_view path) const {
+    // An EMPTY path is not an error to report — it is the caller asking a
+    // question with no answer, and the honest reply is the empty string.
+    // std::filesystem::absolute() disagrees: on Windows it calls
+    // GetFullPathNameW, which fails with ERROR_INVALID_PARAMETER (22) for an
+    // empty string. The error_code overload below does NOT throw, so this
+    // function itself was never the problem — but it returned a Result the
+    // callers treat as fatal, and worse, callers that reached for the
+    // THROWING overload died here instead (see HardenAbsolute below).
+    //
+    // Measured on this toolchain (GCC 15.2 MinGW, -std=c++26):
+    //   fs::absolute(fs::path(""), ec) -> ec=22 'Invalid argument', result=''
+    //   fs::absolute(fs::path(""))     -> throws filesystem_error
+    //     "filesystem error: cannot make absolute path: Invalid argument []"
+    if (path.empty()) return std::string();
+
     std::error_code ec;
     auto abs = fs::absolute(fs::path(path), ec);
     if (ec) return FsError("absolute", path, ec);
@@ -215,6 +230,15 @@ std::string FilesystemImpl::Extension(std::string_view path) const {
 }
 
 Result<IFilesystem::FileMetadata> FilesystemImpl::Metadata(std::string_view path) const {
+    // Empty path: no file has no metadata. Reporting IoError here made an
+    // "is this thing a file?" probe on an empty string look like a disk
+    // failure in the log; the honest answer is "not a file, not a directory".
+    if (path.empty()) {
+        FileMetadata none;
+        none.isDirectory = false;
+        none.isRegularFile = false;
+        return none;
+    }
     std::error_code ec;
     auto st = fs::status(fs::path(path), ec);
     if (ec) return FsError("status", path, ec);

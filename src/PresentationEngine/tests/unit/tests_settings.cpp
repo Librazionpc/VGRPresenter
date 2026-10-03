@@ -33,6 +33,10 @@ void TestAppSettings() {
     CHECK(s.GetBool("preferences.restoreLastSession") && !s.GetBool("preferences.closeToTray") && !s.GetBool("preferences.startMinimized"));
     CHECK(s.GetBool("backups.automatic") && s.GetInt("backups.intervalMinutes") == 30 && s.GetInt("backups.keepLast") == 10);
     CHECK(s.GetBool("backups.crashRecovery") && s.GetBool("notifications.show") && s.GetString("notifications.logLevel") == "info");
+    // The extra categories a backup may carry: opt-in, so a fresh store backs up
+    // only the show.
+    CHECK(!s.GetBool("backups.includeSettings") && !s.GetBool("backups.includeOverlays")
+          && !s.GetBool("backups.includeTemplates"));
     CHECK(s.Profile() == "performance" && s.Mode() == "smart");
     CHECK(s.GetInt("smart.gpuBudgetPct") == 80 && s.GetInt("smart.cpuBudgetPct") == 60);
 
@@ -136,41 +140,87 @@ void TestSmartConfig() {
     namespace ad = bps::adaptive;
 
     // ---- what the report says about a strong machine, a modest one, and a laptop on battery ----
+    // Rows are looked up BY KEY, not by position: the report grows as the
+    // engine learns to see more of the machine, and a test pinned to row 3
+    // breaks every time it does.
+    const auto rowOf = [](const st::HardwareReport& r, const char* key) {
+        for (const auto& row : r.rows)
+            if (row.key == key) return row;
+        return st::HardwareRow{};
+    };
+
     ad::HardwareInfo strong;
     strong.coreCount = 12; strong.totalRamBytes = 32ull << 30;
     strong.gpuDetected = true; strong.gpuName = "NVIDIA GeForce RTX 4060"; strong.gpuVramTotalBytes = 8ull << 30;
     strong.displayCount = 3;
+    strong.diskTotalBytes = 512ull << 30; strong.diskFreeBytes = 200ull << 30; strong.storageIsSsd = true;
     const auto report = st::BuildHardwareReport(strong, true, { 4, 2 });
-    CHECK(report.rows.size() == 4);
-    CHECK(report.rows[0].key == "gpu" && report.rows[0].ok && report.rows[0].value == "NVIDIA GeForce RTX 4060 · 8 GB");
-    CHECK(report.rows[1].key == "encoder" && report.rows[1].ok && report.rows[1].value == "NVENC available");
-    CHECK(report.rows[2].key == "audio" && report.rows[2].ok && report.rows[2].value == "4 outputs, 2 inputs");
-    CHECK(report.rows[3].key == "displays" && report.rows[3].ok && report.rows[3].value == "3 connected");
+    CHECK(rowOf(report, "cpu").ok && rowOf(report, "cpu").value == "12 cores");
+    CHECK(rowOf(report, "memory").ok && rowOf(report, "memory").value == "32 GB");
+    CHECK(rowOf(report, "gpu").ok && rowOf(report, "gpu").value == "NVIDIA GeForce RTX 4060 · 8 GB");
+    CHECK(rowOf(report, "storage").value == "SSD · 200 GB free of 512 GB");
+    CHECK(rowOf(report, "encoder").ok && rowOf(report, "encoder").value == "NVENC available");
+    CHECK(rowOf(report, "audio").ok && rowOf(report, "audio").value == "4 outputs, 2 inputs");
+    CHECK(rowOf(report, "displays").ok && rowOf(report, "displays").value == "3 connected");
+    // A desktop has no battery row (nothing to say about one).
+    CHECK(rowOf(report, "battery").key.empty());
     CHECK(report.recommendedProfile == "performance" && !report.headline.empty() && !report.detail.empty());
+    // 32 GB and 12 cores are worth knowing, not things to fix.
+    CHECK(report.advice.size() == 2);
+    CHECK(report.adviceSummary == "No problems detected for this machine.");
 
     ad::HardwareInfo modest;
     modest.coreCount = 2; modest.totalRamBytes = 4ull << 30; modest.displayCount = 1;
     const auto lean = st::BuildHardwareReport(modest, false, { 1, 0 });
-    CHECK(!lean.rows[0].ok && lean.rows[0].value.find("Not detected") != std::string::npos);
-    CHECK(!lean.rows[1].ok && lean.rows[1].value == "Software encoding only");
-    CHECK(lean.rows[2].value == "1 output, 0 inputs" && lean.rows[3].value == "1 connected");
+    CHECK(!rowOf(lean, "cpu").ok && rowOf(lean, "cpu").value == "2 cores");
+    CHECK(!rowOf(lean, "memory").ok && rowOf(lean, "memory").value == "4 GB");
+    CHECK(!rowOf(lean, "gpu").ok && rowOf(lean, "gpu").value.find("Not detected") != std::string::npos);
+    CHECK(rowOf(lean, "storage").key.empty());   // no volume reported: no storage row
+    CHECK(!rowOf(lean, "encoder").ok && rowOf(lean, "encoder").value == "Software encoding only");
+    CHECK(rowOf(lean, "audio").value == "1 output, 0 inputs" && rowOf(lean, "displays").value == "1 connected");
     CHECK(lean.recommendedProfile == "balanced");
-    CHECK(!st::BuildHardwareReport(modest, false, { 0, 0 }).rows[2].ok);
-    { ad::HardwareInfo none; none.displayCount = 0; CHECK(st::BuildHardwareReport(none, false, {}).rows[3].value == "None found"); }
+    // Three things to fix (memory, GPU, cores) and one to know (no encoder).
+    CHECK(lean.adviceSummary == "3 things to look at before going live.");
+    CHECK(!st::BuildHardwareReport(modest, false, { 0, 0 }).advice.empty());
+    {
+        ad::HardwareInfo none; none.displayCount = 0;
+        const auto bare = st::BuildHardwareReport(none, false, {});
+        CHECK(rowOf(bare, "cpu").value == "Not detected" && rowOf(bare, "memory").value == "Not detected");
+        CHECK(rowOf(bare, "displays").value == "None found" && !rowOf(bare, "displays").ok);
+        // No display is something to act on; the summary counts it.
+        CHECK(bare.adviceSummary.find("to look at") != std::string::npos);
+    }
 
     ad::HardwareInfo laptop = strong;
-    laptop.hasBattery = true; laptop.onBattery = true;
+    laptop.hasBattery = true; laptop.onBattery = true; laptop.batteryPercent = 40;
     CHECK(st::RecommendProfile(laptop) == "powerSaver");
+    {
+        const auto onBattery = st::BuildHardwareReport(laptop, true, {});
+        CHECK(rowOf(onBattery, "battery").value == "On battery · 40%");
+        CHECK(onBattery.adviceSummary == "1 thing to look at before going live.");
+    }
     laptop.onBattery = false;
     CHECK(st::RecommendProfile(laptop) == "performance");
+    CHECK(rowOf(st::BuildHardwareReport(laptop, true, {}), "battery").value == "Plugged in · 40%");
+    {
+        // Thermals appear only when the backend exposes a temperature.
+        ad::HardwareInfo warm = strong; warm.thermalCelsius = 91.0;
+        const auto hot = st::BuildHardwareReport(warm, true, {});
+        CHECK(rowOf(hot, "thermal").value == "91 °C" && !rowOf(hot, "thermal").ok);
+        CHECK(rowOf(hot, "thermal").key == "thermal");
+        ad::HardwareInfo cool = strong; cool.thermalCelsius = 55.4;
+        CHECK(rowOf(st::BuildHardwareReport(cool, true, {}), "thermal").ok);
+    }
     ad::HardwareInfo fewCores = strong; fewCores.coreCount = 2;
     CHECK(st::RecommendProfile(fewCores) == "balanced");
-    ad::HardwareInfo amd = strong; amd.gpuName = "AMD Radeon RX 7800"; CHECK(st::BuildHardwareReport(amd, true, {}).rows[1].value == "AMF available");
-    ad::HardwareInfo intel = strong; intel.gpuName = "Intel Arc"; CHECK(st::BuildHardwareReport(intel, true, {}).rows[1].value == "Quick Sync available");
+    ad::HardwareInfo amd = strong; amd.gpuName = "AMD Radeon RX 7800"; CHECK(rowOf(st::BuildHardwareReport(amd, true, {}), "encoder").value == "AMF available");
+    ad::HardwareInfo intel = strong; intel.gpuName = "Intel Arc"; CHECK(rowOf(st::BuildHardwareReport(intel, true, {}), "encoder").value == "Quick Sync available");
 
-    // The report for this machine always has its four rows and a valid recommendation.
+    // The report for this machine always describes the essentials and offers advice.
     const auto here = st::CurrentHardwareReport();
-    CHECK(here.rows.size() == 4);
+    CHECK(!rowOf(here, "cpu").key.empty() && !rowOf(here, "memory").key.empty() && !rowOf(here, "gpu").key.empty());
+    CHECK(!rowOf(here, "displays").key.empty());
+    CHECK(!here.advice.empty() && !here.adviceSummary.empty());
     CHECK(here.recommendedProfile == "performance" || here.recommendedProfile == "balanced" || here.recommendedProfile == "powerSaver");
 
     // ---- the settings, put to work in the adaptive runtime ----
@@ -279,6 +329,17 @@ void TestDataProtection() {
     CHECK(backups.List("Youth").size() == 2);                        // another show's backups are left alone
     CHECK(backups.Prune("Sunday Service", 10) == 0);
     CHECK(backups.Prune("Sunday Service", 0) == 2 && backups.List("Sunday Service").empty());
+
+    // ---- Remove: one named backup, and only one of this store's own ----
+    const auto youthLeft = backups.List("Youth");
+    CHECK(youthLeft.size() == 2);
+    CHECK(backups.Remove(youthLeft[0].path).ok() && backups.List("Youth").size() == 1);
+    // a path the store did not enumerate is refused — the stray notes.txt and
+    // odd__name.vgr written above (and a real show file) must survive.
+    CHECK(!backups.Remove(kRoot + "/backups/notes.txt").ok());
+    CHECK(!backups.Remove(kRoot + "/backups/odd__name.vgr").ok());
+    CHECK(!backups.Remove(youth).ok());
+    CHECK(Fs().IsRegularFile(kRoot + "/backups/notes.txt") && Fs().IsRegularFile(youth));
 
     // ---- recovery ----
     st::RecoveryStore recovery(kRoot + "/recovery");

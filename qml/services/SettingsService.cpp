@@ -7,22 +7,30 @@
 #include "modules/presentation/PresentationEngine.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
 #include "platform/PlatformAccessor.hpp"
+#include "services/DesignLibraryService.h"
 #include "services/EngineBridge.h"
 #include "services/EventBus.h"
 
 #include <QCoreApplication>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFileInfo>
 #include <QJSEngine>
+#include <QLocale>
+#include <QProcess>
 #include <QQmlEngine>
 #include <QSettings>
+#include <QTranslator>
+#include <QUrl>
+
+#include <utility>
 
 namespace bs = bps::settings;
 
 namespace {
 
 // One place the app's version is written for the Settings screens (the nav rail and menus still carry their own copy).
-constexpr const char *kAppVersion = "0.0.3";
+constexpr const char *kAppVersion = "0.0.4";
 
 QString qstr(const std::string &s) { return QString::fromStdString(s); }
 
@@ -86,8 +94,11 @@ SettingsService &SettingsService::instance()
 
 SettingsService *SettingsService::create(QQmlEngine *engine, QJSEngine *jsEngine)
 {
-    Q_UNUSED(engine)
     Q_UNUSED(jsEngine)
+
+    // Kept only so a language change can re-translate the UI: retranslate()
+    // re-evaluates every qsTr binding in the engine.
+    instance().qmlEngine_ = engine;
     QJSEngine::setObjectOwnership(&instance(), QJSEngine::CppOwnership);
     return &instance();
 }
@@ -112,6 +123,13 @@ SettingsService::SettingsService(QObject *parent) : QObject(parent)
 }
 
 QString SettingsService::appVersion() const { return QString::fromLatin1(kAppVersion); }
+
+QString SettingsService::theme() const
+{
+    // Before the engine is up (or on a fresh store) this is the engine's own
+    // default, so the Theme singleton has a value to switch on from the start.
+    return settings_ ? qstr(settings_->GetString("appearance.theme")) : QStringLiteral("dark");
+}
 
 void SettingsService::report(const QString &message, const QString &level) const
 {
@@ -140,6 +158,8 @@ void SettingsService::load()
             report(tr("The engine could not apply that setting (%1).").arg(qstr(applied.error().message)));
         if (key == "startup.launchAtLogin")
             applyLaunchAtLogin();
+        else if (key == "appearance.language")
+            applyLanguage();
         emit valueChanged(qstr(key));
         emit changed();
     });
@@ -147,7 +167,16 @@ void SettingsService::load()
     refreshValues();
     refreshHardware();
     applyLaunchAtLogin();
+    applyLanguage();
     emit changed();
+
+    // The store is open: run everything that deferred a pre-boot read to
+    // whenReady(). After changed(), so the bindings the callbacks are about to
+    // read have already been refreshed from the store.
+    std::vector<std::function<void()>> pending = std::move(pendingReady_);
+    pendingReady_.clear();
+    for (const auto &callback : pending)
+        callback();
 }
 
 void SettingsService::refreshValues()
@@ -226,6 +255,29 @@ int SettingsService::resetAll()
     return settings_ ? static_cast<int>(settings_->ResetAll()) : 0;
 }
 
+void SettingsService::whenReady(std::function<void()> callback)
+{
+    if (!callback)
+        return;
+    // Already open (the common case for anything built after boot): act now.
+    if (ready()) {
+        callback();
+        return;
+    }
+    // Defer to the end of load(). If the store never opens, the callback simply
+    // never runs - which is the honest outcome, not a read of defaults.
+    pendingReady_.push_back(std::move(callback));
+}
+
+void SettingsService::whenReady(const QJSValue &callback)
+{
+    if (!callback.isCallable())
+        return;
+    // A QJSValue is implicitly shared and this is the GUI thread (where the
+    // store loads), so holding it until the deferred call is safe.
+    whenReady(std::function<void()>([callback]() { callback.call(); }));
+}
+
 QVariantMap SettingsService::caps() const
 {
     const bs::ResourceCaps c = settings_ ? settings_->EffectiveCaps() : bs::AppSettings::CapsFor("performance");
@@ -252,9 +304,17 @@ void SettingsService::refreshHardware()
         rows.append(QVariantMap{ { QStringLiteral("key"), qstr(r.key) }, { QStringLiteral("label"), qstr(r.label) },
                                  { QStringLiteral("value"), qstr(r.value) }, { QStringLiteral("ok"), r.ok } });
     hardwareRows_ = rows;
+
+    QVariantList advice;
+    for (const bs::AdviceRow &a : report.advice)
+        advice.append(QVariantMap{ { QStringLiteral("key"), qstr(a.key) }, { QStringLiteral("severity"), qstr(a.severity) },
+                                   { QStringLiteral("text"), qstr(a.text) } });
+    hardwareAdvice_ = advice;
+
     recommendedProfile_ = qstr(report.recommendedProfile);
     hardwareHeadline_ = qstr(report.headline);
     hardwareDetail_ = qstr(report.detail);
+    hardwareAdviceSummary_ = qstr(report.adviceSummary);
     emit hardwareChanged();
 }
 
@@ -266,9 +326,58 @@ void SettingsService::applyRecommendedProfile()
         setValue(QStringLiteral("resources.profile"), recommendedProfile_);
 }
 
+QVariantMap SettingsService::capsFor(const QString &profile) const
+{
+    const bs::ResourceCaps c = bs::AppSettings::CapsFor(profile.toStdString());
+    return { { QStringLiteral("gpu"), c.gpuPct }, { QStringLiteral("cpu"), c.cpuPct } };
+}
+
 // ---------------------------------------------------------------------------
 // Starting with the OS (the one setting only the app itself can carry out)
 // ---------------------------------------------------------------------------
+
+void SettingsService::applyLanguage()
+{
+    if (!settings_)
+        return;
+
+    const QString tag = qstr(settings_->GetString("appearance.language"));
+    const QLocale locale(tag.isEmpty() ? QStringLiteral("en-US") : tag);
+
+    // The DEFAULT locale is the half that takes effect with nothing installed:
+    // dates, times and numbers follow it at once (Qt carries its own CLDR data
+    // for every locale), so picking Deutsch renames the shows list's days and
+    // months immediately.
+    QLocale::setDefault(locale);
+
+    // The string half: any translation installed for the choice is put in force.
+    // The app ships none yet (its strings are still English-only), so this
+    // normally finds nothing - dropping vgrpresenter_<locale>.qm (e.g.
+    // vgrpresenter_de_DE.qm) into the app's "translations" folder is what
+    // starts translating the UI's qsTr strings.
+    if (translator_) {
+        QCoreApplication::removeTranslator(translator_.get());
+        translator_.reset();
+    }
+    const QString file = QStringLiteral("vgrpresenter_") + locale.name();
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QString dirs[] = { appDir + QStringLiteral("/translations"), QStringLiteral(":/i18n") };
+    for (const QString &dir : dirs) {
+        auto candidate = std::make_unique<QTranslator>();
+        if (candidate->load(file, dir)) {
+            QCoreApplication::installTranslator(candidate.get());
+            translator_ = std::move(candidate);
+            break;
+        }
+    }
+
+    // Re-evaluate every qsTr binding (a no-op when nothing was installed) and
+    // tell locale-dependent formatters the locale moved.
+    if (qmlEngine_)
+        qmlEngine_->retranslate();
+    ++localeRevision_;
+    emit localeChanged();
+}
 
 void SettingsService::applyLaunchAtLogin()
 {
@@ -298,6 +407,42 @@ QString SettingsService::backupDirectory() const
     return qstr(bps::platform::PlatformAccessor::Get().Filesystem().Join(dataDir_, "backups"));
 }
 
+bool SettingsService::openBackupDirectory() const
+{
+    const QString dir = backupDirectory();
+    if (dir.isEmpty())
+        return false;
+    auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    if (!fs.Exists(dir.toStdString()))   // never taken a backup: show an empty folder
+        (void)fs.CreateDirectories(dir.toStdString());
+    return QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+}
+
+bool SettingsService::showBackupInFolder(const QString &path) const
+{
+    if (path.isEmpty())
+        return false;
+    // Same posture as the other backup paths: only something this store's own
+    // folder holds is revealed.
+    const QString dir = backupDirectory();
+    if (dir.isEmpty() || !path.startsWith(dir + QLatin1Char('/')))
+        return false;
+    if (!QFileInfo::exists(path))
+        return false;
+#if defined(Q_OS_WIN)
+    // Explorer's /select highlights the file in its folder.
+    return QProcess::startDetached(QStringLiteral("explorer.exe"),
+                                   { QStringLiteral("/select,") + QDir::toNativeSeparators(path) });
+#elif defined(Q_OS_MACOS)
+    // Finder's -R reveals (selects) the file.
+    return QProcess::startDetached(QStringLiteral("open"), { QStringLiteral("-R"), path });
+#else
+    // No portable "select a file" on Linux desktops — opening the enclosing
+    // folder is still the honest answer to "where is this one?".
+    return QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+#endif
+}
+
 QString SettingsService::backupShow(const QString &showFile)
 {
     if (!settings_ || showFile.isEmpty())
@@ -322,6 +467,118 @@ QVariantList SettingsService::backupsOf(const QString &showName) const
         out.append(QVariantMap{ { QStringLiteral("path"), qstr(b.path) }, { QStringLiteral("stamp"), qstr(b.stamp) },
                                 { QStringLiteral("sizeBytes"), static_cast<qlonglong>(b.sizeBytes) } });
     return out;
+}
+
+QVariantList SettingsService::allBackups() const
+{
+    QVariantList out;
+    if (dataDir_.empty())
+        return out;
+    const bs::BackupStore store(backupDirectory().toStdString());
+    for (const bs::BackupInfo &b : store.List()) {   // no show filter = every show's
+        const QString show = qstr(b.show);
+        // A category backup's file name is the category itself ("settings",
+        // "overlays", "templates"); anything else is a show's copy.
+        const QString category = (show == QLatin1String("settings") || show == QLatin1String("overlays")
+                                  || show == QLatin1String("templates")) ? show : QStringLiteral("show");
+        out.append(QVariantMap{ { QStringLiteral("path"), qstr(b.path) }, { QStringLiteral("show"), show },
+                                { QStringLiteral("category"), category },
+                                { QStringLiteral("stamp"), qstr(b.stamp) },
+                                { QStringLiteral("sizeBytes"), static_cast<qlonglong>(b.sizeBytes) } });
+    }
+    return out;
+}
+
+int SettingsService::backupCategories()
+{
+    if (!settings_ || dataDir_.empty())
+        return 0;
+    const auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    const bs::BackupStore store(backupDirectory().toStdString());
+    const auto keepLast = static_cast<size_t>(settings_->GetInt("backups.keepLast"));
+    struct Category { const char *key; const char *file; const char *name; };
+    const Category categories[] = {
+        { "backups.includeSettings", "settings.json", "settings" },
+        { "backups.includeOverlays",  "overlays.json",  "overlays" },
+        { "backups.includeTemplates", "templates.json", "templates" },
+    };
+    int made = 0;
+    for (const Category &c : categories) {
+        if (!settings_->GetBool(c.key))
+            continue;
+        const std::string file = fs.Join(dataDir_, c.file);
+        if (!fs.IsRegularFile(file))
+            continue;   // never written yet — nothing to copy
+        if (auto copy = store.CreateIfChanged(file); copy.ok() && !copy.value().empty())
+            ++made;
+        (void)store.Prune(c.name, keepLast);
+    }
+    return made;
+}
+
+bool SettingsService::restoreCategoryBackup(const QString &backupPath)
+{
+    if (backupPath.isEmpty() || dataDir_.empty())
+        return false;
+    // Only a path inside this store's own folder is accepted (the same posture
+    // deleteBackup takes), so a stray path can never be copied over anything.
+    const QString dir = backupDirectory();
+    if (dir.isEmpty() || !backupPath.startsWith(dir + QLatin1Char('/')))
+        return false;
+    // The backup's base name is "<name>__<stamp>": resolve the live file it is a
+    // copy of, and refuse anything that is not one of the three categories.
+    const QString stem = QFileInfo(backupPath).completeBaseName();
+    const int sep = stem.indexOf(QLatin1String("__"));
+    const QString name = sep >= 0 ? stem.left(sep) : stem;
+    QString live;
+    if (name == QLatin1String("settings"))
+        live = QStringLiteral("settings.json");
+    else if (name == QLatin1String("overlays"))
+        live = QStringLiteral("overlays.json");
+    else if (name == QLatin1String("templates"))
+        live = QStringLiteral("templates.json");
+    else
+        return false;   // a show backup goes through restoreBackup instead
+    auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    const std::string target = fs.Join(dataDir_, live.toStdString());
+    // Over the live file: Copy refuses an existing destination, so drop the old
+    // one first (the backup itself is left untouched).
+    if (fs.Exists(target))
+        (void)fs.Remove(target);
+    if (auto copied = fs.Copy(backupPath.toStdString(), target); !copied.ok()) {
+        report(qstr(copied.error().message));
+        return false;
+    }
+    // Bring what reads the file back in line with what was restored.
+    if (name == QLatin1String("settings")) {
+        // Re-read the store, then apply it the same way load() does (minus
+        // re-subscribing, which was done once): the engine's adaptive runtime
+        // and the start-with-Windows / language side effects follow the restored
+        // values, and every binding behind `changed` re-reads.
+        (void)settings_->Load();
+        (void)bs::ApplyToEngine(*settings_, bps::adaptive::AdaptiveRuntime::Instance());
+        refreshValues();
+        applyLaunchAtLogin();
+        applyLanguage();
+        emit changed();
+    } else if (name == QLatin1String("overlays")) {
+        DesignLibraryService::overlays().reload();
+    } else {
+        DesignLibraryService::templates().reload();
+    }
+    return true;
+}
+
+bool SettingsService::deleteBackup(const QString &path)
+{
+    if (dataDir_.empty() || path.isEmpty())
+        return false;
+    const bs::BackupStore store(backupDirectory().toStdString());
+    if (auto removed = store.Remove(path.toStdString()); !removed.ok()) {
+        report(qstr(removed.error().message));
+        return false;
+    }
+    return true;
 }
 
 QString SettingsService::recoveryPath() const
@@ -358,6 +615,25 @@ void SettingsService::clearRecovery()
         return;
     const auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
     (void)bs::RecoveryStore(fs.Join(dataDir_, "recovery")).Clear();
+}
+
+bool SettingsService::restoreBackup(const QString &backupPath, const QString &target)
+{
+    if (backupPath.isEmpty() || target.isEmpty())
+        return false;
+    // NOT const: IFilesystem::Copy is a non-const member (unlike Exists/Join,
+    // which are const), so a const reference cannot call it.
+    auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    // Never over an existing file: a restore ADDS a show, it does not replace one.
+    if (fs.Exists(target.toStdString())) {
+        report(tr("There is already a file with that name."));
+        return false;
+    }
+    if (auto copied = fs.Copy(backupPath.toStdString(), target.toStdString()); !copied.ok()) {
+        report(qstr(copied.error().message));
+        return false;
+    }
+    return true;
 }
 
 bool SettingsService::restoreRecovery(const QString &target)

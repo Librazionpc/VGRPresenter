@@ -3,8 +3,8 @@ import QtQuick.Shapes
 import VGRPresenterUI
 
 // One movable/resizable text object on the slide canvas (title, verse,
-// reference, ...). Literal colors, not Theme.* — AOT singleton-resolution
-// limitation at this nesting depth.
+// reference, ...). Literal colors, pending migration to Theme.* (the old
+// "AOT singleton-resolution" reason is disproven — see DropdownPanel.qml).
 Item {
     id: root
 
@@ -146,7 +146,7 @@ Item {
     Rectangle {
         id: selectionOutline
         anchors.fill: parent
-        border.color: "#6c5ce7"
+        border.color: Theme.accent
         border.width: 2
         color: "#146c5ce7"
         radius: root.styleCornerRadius
@@ -323,7 +323,7 @@ Item {
             height: 7
             radius: 1
             color: "#ffffff"
-            border.color: "#6c5ce7"
+            border.color: Theme.accent
             border.width: 1
             x: (isRight ? root.width : 0) - width / 2
             y: (isBottom ? root.height : 0) - height / 2
@@ -359,7 +359,7 @@ Item {
             height: 7
             radius: 1
             color: "#ffffff"
-            border.color: "#6c5ce7"
+            border.color: Theme.accent
             border.width: 1
             x: (isLeft ? 0 : isRight ? root.width : root.width / 2) - width / 2
             y: (isTop ? 0 : isBottom ? root.height : root.height / 2) - height / 2

@@ -31,6 +31,31 @@
 #include <QVideoFrame>
 #include <QVideoSink>
 #include <cstring>
+
+// ---------------------------------------------------------------------------
+// NDI progress notes are NOT toasts.
+//
+// main.cpp's message handler turns every qWarning into a UI toast via
+// EventBus. That is right for real problems, and wrong for the NDI feed's
+// own narration: "sending started", "frames flowing", "2 monitor(s)
+// connected", "waiting for the first frame" — five toasts on every GO LIVE,
+// none of them actionable, all of them covering the screen the operator is
+// trying to work in.
+//
+// They still belong in the ENGINE LOG (that is the file you read when NDI
+// misbehaves), so they keep their level and their text — they just stop
+// being published as events. qCWarning with a category makes that a property
+// of the call site instead of a list of string prefixes to maintain in
+// main.cpp: the handler recognises the category and skips the publish.
+//
+// Everything that IS actionable keeps qWarning and therefore still toasts:
+// "NDI SendFrame FAILED", "NDI is not usable", "media player error",
+// "file not found", every selftest FAIL line.
+// ---------------------------------------------------------------------------
+#include <QLoggingCategory>
+
+Q_LOGGING_CATEGORY(lcNdiProgress, "vgr.ndi.progress");
+
 #include <utility>
 
 namespace pl = bps::presentation;
@@ -286,7 +311,7 @@ void LiveOutputService::ndiWorkerSendFrame(QObject *worker, void *providerVoid,
         svc.ndiFramesSent_ = provider->FramesSent();
         if (!svc.ndiFirstFrameLogged_) {
             svc.ndiFirstFrameLogged_ = true;
-            qWarning("LiveOutputService: NDI frames flowing as '%s' — discovery on a receiving monitor can take 10-30s",
+            qCWarning(lcNdiProgress, "LiveOutputService: NDI frames flowing as '%s' — discovery on a receiving monitor can take 10-30s",
                      provider->SenderName().c_str());
         }
         svc.ndiSendFailedLogged_ = false;
@@ -298,7 +323,7 @@ void LiveOutputService::ndiWorkerSendFrame(QObject *worker, void *providerVoid,
             if (!svc.ndiSlowLogged_) {
                 svc.ndiSlowLogged_ = true;
                 svc.ndiFastStreak_ = 0;
-                qWarning("LiveOutputService: NDI send is slow (%lld ms, sender '%s') — frames are coalescing (latest-wins), the UI is unaffected",
+                qCWarning(lcNdiProgress, "LiveOutputService: NDI send is slow (%lld ms, sender '%s') — frames are coalescing (latest-wins), the UI is unaffected",
                          sendMs, provider->SenderName().c_str());
             }
         } else if (++svc.ndiFastStreak_ >= 30) {
@@ -329,11 +354,48 @@ qulonglong LiveOutputService::ndiFramesSent() const
     std::lock_guard<std::mutex> lock(ndiStateMutex_);
     return ndiFramesSent_;
 }
+bool LiveOutputService::ndiWarming() const
+{
+    std::lock_guard<std::mutex> lock(ndiStateMutex_);
+    return ndiWarming_;
+}
+QString LiveOutputService::ndiWarmingOutputName() const
+{
+    std::lock_guard<std::mutex> lock(ndiStateMutex_);
+    return ndiWarmingOutput_;
+}
+void LiveOutputService::setNdiWarming(bool on, const QString &name)
+{
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(ndiStateMutex_);
+        if (ndiWarming_ != on || (on && ndiWarmingOutput_ != name)) {
+            ndiWarming_ = on;
+            ndiWarmingOutput_ = on ? name : QString();
+            changed = true;
+        }
+    }
+    if (changed)
+        emit ndiChanged();
+}
 
 LiveOutputService::LiveOutputService(QObject *parent)
     : QObject(parent)
 {
     s_instance = this;
+
+    // IDLE PREVIEW: while a show is open but nothing is on air, ask the engine
+    // to keep producing frames (LiveOutputController::StartIdlePreview) so the
+    // Settings resource meters breathe instead of reading zero. Idempotent and
+    // a no-op while live, so a plain 1Hz nudge is all it takes — the controller
+    // owns the worker's lifetime (and stops it seconds after no show is open).
+    previewTimer_ = new QTimer(this);
+    previewTimer_->setInterval(1000);
+    connect(previewTimer_, &QTimer::timeout, this, []() {
+        if (EngineBridge::instance().booted())
+            (void)bps::live::LiveOutputController::Instance().StartIdlePreview();
+    });
+    previewTimer_->start();
 }
 
 LiveOutputService &LiveOutputService::instance()
@@ -1375,6 +1437,10 @@ void LiveOutputService::pollTick()
     // the next GO LIVE.
     pollTickRecheckNdi();
 
+    // Watch the NDI feed's real send rate against its configured Refresh rate
+    // (drift warning + the runtime halving/restore toasts).
+    checkNdiFeedRate();
+
     // The engine's loop advances slides itself; mirror the runtime's state.
     auto &pres = pl::PresentationEngine::Instance();
     const pl::Slide *slide = pres.CurrentSlide();
@@ -1447,8 +1513,19 @@ void LiveOutputService::pushNdiFrame()
     }
     // Feature switch off: the sender can't exist (the BroadcastEngine
     // refuses NDI-shaped sends). Log it ONCE per outage so "my NDI monitor
-    // shows nothing" has a reason in the log.
-    if (want && !EngineBridge::instance().ndiAvailable()) {
+    // shows nothing" has a reason in the log — and then STOP, before any
+    // frame is copied or queued.
+    //
+    // This used to only LOG the gate and fall through to the send. The
+    // worker then called the provider's SendFrame, the BroadcastEngine
+    // refused it ("NDI is switched off"), and the failure surfaced as a
+    // misleading "NDI SendFrame FAILED — check the engine log" plus a
+    // spurious reset of the sending state. Worse, the provider's lazy sender
+    // creation ran first: an enabled NDI output row with the NDI feature OFF
+    // (a real configuration — the row outlives the feature toggle) tried to
+    // build an SDK sender it was not allowed to have, every single tick.
+    const bool ndiUsable = EngineBridge::instance().ndiAvailable();
+    if (want && !ndiUsable) {
         if (!ndiGateLogged_) {
             ndiGateLogged_ = true;
             qWarning("LiveOutputService: NDI output requested but NDI is not usable (%s) — no frames will be sent",
@@ -1456,6 +1533,19 @@ void LiveOutputService::pushNdiFrame()
         }
     } else {
         ndiGateLogged_ = false;
+    }
+    if (want && !ndiUsable) {
+        // Tear the feed state down and stop. The gate re-opens by itself:
+        // ndiGateLogged_ and this early return both clear the moment the
+        // feature is switched back on, and the next tick resumes sending.
+        if (ndiSending_) {
+            std::lock_guard<std::mutex> lock(ndiStateMutex_);
+            ndiSending_ = false;
+            ndiSendingOutput_.clear();
+        }
+        setNdiWarming(false, QString());   // NDI unusable: nothing is warming
+        emit ndiChanged();
+        return;
     }
 
     auto *provider = []() -> bps::display::NdiDisplayProvider * {
@@ -1469,6 +1559,7 @@ void LiveOutputService::pushNdiFrame()
             ndiSendingOutput_.clear();
             emit ndiChanged();
         }
+        setNdiWarming(false, QString());   // no NDI row wants feeding
         return;
     }
 
@@ -1490,9 +1581,21 @@ void LiveOutputService::pushNdiFrame()
         // "NDI broken" when it was "NDI warming up".
         if (!ndiWaitLogged_) {
             ndiWaitLogged_ = true;
-            qWarning("LiveOutputService: NDI output '%s' waiting for buffer '%s' (live loop warming up)",
+            qCWarning(lcNdiProgress, "LiveOutputService: NDI output '%s' waiting for buffer '%s' (live loop warming up)",
                      qUtf8Printable(ndiOutputName), buffer.c_str());
+            // EXPLICIT toast (not the qWarning→toast path — these progress
+            // lines are category-suppressed in main.cpp): the operator needs
+            // to know the feed is WARMING UP, not broken, when a receiver
+            // shows nothing for the first second or two after GO LIVE. One
+            // per outage, re-armed once frames flow.
+            EventBus::instance().notify(
+                QStringLiteral("NDI output '%1' is warming up — waiting for the live loop's first frame. Sending starts automatically.").arg(ndiOutputName),
+                QStringLiteral("info"), QStringLiteral("NDI"), QStringLiteral("outputs.ndi.warmingUp"));
         }
+        // The live loop has not registered the buffer yet (GO LIVE just
+        // pressed): an enabled NDI row WANTS feeding and has no frame on the
+        // wire — the inline "warming up" state Settings · Outputs shows.
+        setNdiWarming(true, ndiOutputName);
         if (ndiSending()) {
             {
                 std::lock_guard<std::mutex> lock(ndiStateMutex_);
@@ -1510,8 +1613,12 @@ void LiveOutputService::pushNdiFrame()
     if (frame.empty()) {
         if (!ndiWaitLogged_) {
             ndiWaitLogged_ = true;
-            qWarning("LiveOutputService: NDI output waiting for the live loop's first rendered frame");
+            qCWarning(lcNdiProgress, "LiveOutputService: NDI output waiting for the live loop's first rendered frame");
+            EventBus::instance().notify(
+                QStringLiteral("NDI output '%1' is warming up — waiting for the live loop's first frame. Sending starts automatically.").arg(ndiOutputName),
+                QStringLiteral("info"), QStringLiteral("NDI"), QStringLiteral("outputs.ndi.warmingUp"));
         }
+        setNdiWarming(true, ndiOutputName);   // buffer exists, no frame yet
         return;
     }
 
@@ -1547,9 +1654,19 @@ void LiveOutputService::pushNdiFrame()
         // engine here reuses its buffer for the next frame, so one owned copy
         // is the minimum honest handoff). The old code made TWO (a wrapping
         // QImage + copy()) — the wrap alone is the single allocation now.
-        QImage owned = QImage(reinterpret_cast<const uchar *>(frame.pixels.data()),
-                              frame.width, frame.height,
-                              frame.width * 4, QImage::Format_RGBA8888).copy();
+        //
+        // The wrap is NAMED, not inlined as a prvalue with .copy() on the end:
+        // GCC 15.2 (this MinGW toolchain, -std=c++26) fails to parse
+        // `QImage(...).copy()` — "expected ',' or ';' before '.' token". The
+        // same line is accepted once the temporary has a name (or is bound to
+        // a reference). Behaviour is identical: the named QImage is a
+        // non-owning wrap of the engine's buffer, copy() is the deep copy.
+        // Repro pinned in tools/ndi_copy_repro.cpp — do not "tidy" this back
+        // into one expression without re-testing on this compiler.
+        const QImage wrapped(reinterpret_cast<const uchar *>(frame.pixels.data()),
+                             frame.width, frame.height,
+                             frame.width * 4, QImage::Format_RGBA8888);
+        QImage owned = wrapped.copy();
 
         // The Output row's own name IS the network-visible NDI source name —
         // re-resolved per tick (a mid-session rename lands next session;
@@ -1579,11 +1696,12 @@ void LiveOutputService::pushNdiFrame()
             ndiSendingOutput_ = ndiOutputName;   // the pill's LIVE row (rename-safe)
             if (!ndiSending_) {
                 ndiSending_ = true;
-                qWarning("LiveOutputService: NDI program sending started (%s)",
+                qCWarning(lcNdiProgress, "LiveOutputService: NDI program sending started (%s)",
                          qUtf8Printable(senderName.isEmpty() ? QStringLiteral("VGR Program") : senderName));
             }
         }
         ndiWaitLogged_ = false;   // frames are flowing — the waiting notes re-arm
+        setNdiWarming(false, QString());   // on the wire: no longer warming
         emit ndiChanged();
 
         // Connected-monitor telemetry, every 10th tick (the SDK's own count;
@@ -1595,7 +1713,7 @@ void LiveOutputService::pushNdiFrame()
             if (connected != ndiReceiversSeen_) {   // -1 = provider can't tell — stays silent
                 const bool first = ndiReceiversSeen_ < 0;
                 ndiReceiversSeen_ = connected;
-                qWarning("LiveOutputService: NDI sender '%s' %s %d monitor(s) connected",
+                qCWarning(lcNdiProgress, "LiveOutputService: NDI sender '%s' %s %d monitor(s) connected",
                          qUtf8Printable(senderName.isEmpty() ? QStringLiteral("VGR Program") : senderName),
                          first ? "currently has" : (connected > 0 ? "now has" : "has NO monitors left —"),
                          connected);
@@ -1704,6 +1822,14 @@ void LiveOutputService::stopNdiSendClock()
     if (ndiSendTimer_)
         ndiSendTimer_->stop();
     ndiSendFps_ = 0.0f;
+    // The drift watch's window dies with the clock — a fresh session must not
+    // measure across the gap between two feeds.
+    ndiDriftClock_.invalidate();
+    ndiDriftSlowWindows_ = 0;
+    ndiDriftWarned_ = false;
+    ndiRateTier_ = -1;
+    ndiLastConfiguredFps_ = 0.0f;
+    setNdiWarming(false, QString());   // off air: nothing is warming
 }
 
 void LiveOutputService::ndiSendTick()
@@ -1736,6 +1862,112 @@ void LiveOutputService::pollTickRecheckNdi()
         return;
     if ((!ndiSendTimer_ || !ndiSendTimer_->isActive()) && ndiConfiguredFps() > 0.0f)
         startNdiSendClock();
+}
+
+// ---- Output frame-rate watch -----------------------------------------------
+// One measured number drives two things, both off the GUI thread's 10Hz poll
+// (the counters live behind ndiStateMutex_, so nothing here touches the
+// worker's state directly):
+//
+//  1. a RUNTIME RATE-CHANGE toast — the feed stepping DOWN to (about) half
+//     under backpressure, or recovering to the configured rate. The halving
+//     is implicit now (the in-flight cap drops the next tick when the worker
+//     is still mid-send; the old explicit half-rate flag was retired), so it
+//     is observed from the actual send rate rather than a flag.
+//  2. a SUSTAINED DRIFT warning for a rate that is neither the configured
+//     rate nor a clean half — the "cannot keep up at all" case.
+//
+// A window whose CONFIGURED rate just changed is rebaselined silently: the
+// Settings · Outputs refresh-rate toast already covers a settings-only
+// change, so this watcher must not add a second toast for it.
+void LiveOutputService::checkNdiFeedRate()
+{
+    const bool sending = ndiSending();
+    const qulonglong frames = ndiFramesSent();
+
+    // A stopped feed has no rate to measure: drop the window and every streak
+    // so the next session starts clean and cannot inherit a toast.
+    if (!sending) {
+        ndiDriftClock_.invalidate();
+        ndiDriftFrames_ = frames;
+        ndiDriftSlowWindows_ = 0;
+        ndiDriftWarned_ = false;
+        ndiRateTier_ = -1;
+        ndiLastConfiguredFps_ = 0.0f;
+        return;
+    }
+
+    if (!ndiDriftClock_.isValid()) {
+        ndiDriftFrames_ = frames;   // first sample establishes the baseline
+        ndiDriftClock_.start();
+        return;
+    }
+    const qint64 elapsed = ndiDriftClock_.elapsed();
+    if (elapsed < kDriftWindowMs)
+        return;
+
+    // Roll the window (defensive on the counter: it never decreases, but a
+    // provider reset mid-session would, and must not read as a negative rate).
+    const qulonglong delta = frames >= ndiDriftFrames_ ? frames - ndiDriftFrames_ : 0;
+    ndiDriftFrames_ = frames;
+    ndiDriftClock_.restart();
+
+    const float configured = ndiConfiguredFps();
+    if (configured <= 0.0f) {
+        ndiRateTier_ = -1;
+        ndiLastConfiguredFps_ = 0.0f;
+        return;
+    }
+
+    const double measured = double(delta) * 1000.0 / double(elapsed);
+
+    // Did the SETTING move since the last window? (Compared before we store
+    // it.) True means the rate change came from Settings, not the wire.
+    const bool configuredChanged = ndiLastConfiguredFps_ > 0.0f
+                                   && !qFuzzyCompare(configured, ndiLastConfiguredFps_);
+    ndiLastConfiguredFps_ = configured;
+
+    const QString name = ndiSendingOutputName();
+    const QString label = name.isEmpty() ? QStringLiteral("NDI") : name;
+
+    // ---- 1. runtime rate-change toast (on a real step) -------------------
+    const int tier = measured >= configured * 0.75 ? 0
+                   : (measured >= configured * 0.35 && measured <= configured * 0.7 ? 1 : 2);
+    const int previousTier = ndiRateTier_;
+    ndiRateTier_ = tier;
+    if (!configuredChanged && previousTier >= 0 && tier != previousTier) {
+        if (previousTier == 0 && tier == 1) {
+            EventBus::instance().notify(
+                QStringLiteral("NDI feed '%1' dropped to about %2 fps (about half of %3 Hz) — the sender is running behind. It returns to full rate automatically.")
+                    .arg(label).arg(qRound(measured)).arg(qRound(configured)),
+                QStringLiteral("warning"), QStringLiteral("Outputs"),
+                QStringLiteral("outputs.ndi.rateReduced"));
+        } else if (previousTier == 1 && tier == 0) {
+            EventBus::instance().notify(
+                QStringLiteral("NDI feed '%1' is back at the configured rate (about %2 Hz).")
+                    .arg(label).arg(qRound(configured)),
+                QStringLiteral("success"), QStringLiteral("Outputs"),
+                QStringLiteral("outputs.ndi.rateRestored"));
+        }
+    }
+
+    // ---- 2. sustained drift warning --------------------------------------
+    // A clean backoff half (tier 1) is already announced by the change toast
+    // above, so the warning here is reserved for the genuinely-stuck feed
+    // (tier 2), sustained across consecutive windows.
+    if (tier != 2) {
+        ndiDriftSlowWindows_ = 0;
+        ndiDriftWarned_ = false;
+        return;
+    }
+    if (++ndiDriftSlowWindows_ < kDriftWindowsToWarn || ndiDriftWarned_)
+        return;
+    ndiDriftWarned_ = true;
+    EventBus::instance().notify(
+        QStringLiteral("NDI output '%1' is running at about %2 fps but is set to %3 Hz — the feed can't keep up. Lower the refresh rate or check the machine's load.")
+            .arg(label).arg(qRound(measured)).arg(qRound(configured)),
+        QStringLiteral("warning"), QStringLiteral("Outputs"),
+        QStringLiteral("outputs.framerate.drift"));
 }
 
 // The network-visible NDI source name: "<AppName> . <Row name>" ("VGRPresenter
@@ -1800,7 +2032,7 @@ void LiveOutputService::armNdiSenderForSession()
         if (!name.isEmpty())
             provider->SetSenderName(name.toStdString());
         provider->ResetSender();
-        qWarning("LiveOutputService: NDI sender reset for this live session — it will broadcast as '%s' once frames flow",
+        qCWarning(lcNdiProgress, "LiveOutputService: NDI sender reset for this live session — it will broadcast as '%s' once frames flow",
                  qUtf8Printable(senderName));
     }, Qt::QueuedConnection);
 }

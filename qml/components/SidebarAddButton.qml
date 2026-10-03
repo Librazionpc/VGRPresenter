@@ -27,7 +27,7 @@ Rectangle {
             preferredRendererType: Shape.CurveRenderer
             ShapePath {
                 fillColor: "transparent"
-                strokeColor: Theme.danger
+                strokeColor: Theme.accent
                 strokeWidth: 2
                 capStyle: ShapePath.RoundCap
                 PathSvg { path: "M 0 4.08 L 8.17 4.08 M 4.08 0 L 4.08 8.17" }

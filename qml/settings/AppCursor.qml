@@ -82,6 +82,65 @@ QtObject {
         pointerMoved()
     }
 
+    // ---- pointer blockers (open popups claim the pointer) --------------------
+    // Emitted when a blocker is registered or dropped, so the PositionHoverAreas
+    // a newly-opened popup covers recompute AT ONCE — they otherwise recompute
+    // only on pointer movement, which leaves a card washed while the pointer
+    // sits still over the menu.
+    signal blockersChanged()
+
+    // The open popups/menus that CLAIM the pointer while visible (DropdownPanel
+    // registers itself). hovered() above is pure geometry and cannot see that
+    // something is painted ON TOP of an item, so without this an open context
+    // menu over a design card left the CARD reporting hovered too (its border
+    // lit, its action row showed) simply because the pointer was over its rect —
+    // the menu did not behave as its own popup. A blocker's OWN rows are exempt
+    // (a row is a descendant of its panel), so menus keep their row hover.
+    property var _blockers: []
+    function pushBlocker(item) {
+        if (!item || _blockers.indexOf(item) >= 0)
+            return
+        _blockers = _blockers.concat([item])
+        blockersChanged()
+    }
+    function popBlocker(item) {
+        const i = _blockers.indexOf(item)
+        if (i < 0)
+            return
+        const kept = _blockers.slice()
+        kept.splice(i, 1)
+        _blockers = kept
+        blockersChanged()
+    }
+    // Is `item` itself, or one of its ancestors, `top`?
+    function _isSelfOrAncestorOf(top, item) {
+        let o = item
+        while (o) {
+            if (o === top)
+                return true
+            o = o.parent
+        }
+        return false
+    }
+    // True when a VISIBLE blocker covers the pointer and `item` is not part of
+    // it — neither the blocker itself nor one of its descendants.
+    function blocked(item) {
+        if (!item || _blockers.length === 0)
+            return false
+        for (let i = 0; i < _blockers.length; ++i) {
+            const b = _blockers[i]
+            // Effectively shown, not merely visible: true — a panel left open
+            // inside a hidden pane must not claim the pointer for its rect.
+            if (!b || !_eligible(b))
+                continue
+            if (_isSelfOrAncestorOf(b, item) || _isSelfOrAncestorOf(item, b))
+                continue
+            if (hovered(b))
+                return true
+        }
+        return false
+    }
+
     // Is the current pointer position inside `item` (its local geometry)?
     // Deterministic, no event history involved. Destroyed/dead items read
     // as not-hovered (same defensive posture as _eligible).

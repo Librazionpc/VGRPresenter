@@ -15,6 +15,9 @@ import VGRPresenterUI
 // in sync with it.
 Item {
     id: root
+    // Shared top-level modal layer: keep the scrim and card above the page
+    // so clicks and hover never reach the controls behind the dialog.
+    z: 30000
 
     // The saved show's path — the caller opens it on the Edit screen.
     signal showCreated(string path)

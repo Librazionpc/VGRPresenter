@@ -2,8 +2,11 @@
 
 // Settings > General > Backups & recovery, as the engine does it.
 //
-//   BackupStore    dated copies of a show file in one folder, newest kept: "<show>__<yyyymmdd-hhmmss>.<ext>". Create() copies a
-//                  file in, Prune() drops all but the newest N of that show, List() reads them back (newest first).
+//   BackupStore    dated copies of a file in one folder, newest kept: "<name>__<yyyymmdd-hhmmss>.<ext>". Create() copies a
+//                  file in, Prune() drops all but the newest N of that name, List() reads them back (newest first). The
+//                  app points it at the open show's file, and — when the user asks — settings.json / overlays.json /
+//                  templates.json, so one store holds every kind of copy (the "name" is the show's file stem or the
+//                  category, which is how the backups browser tells them apart).
 //   RecoveryStore  where an unexpected exit's unsaved work is kept: the app writes the open show to Path() while it has
 //                  unsaved changes, and Clear()s it on a clean save or exit. If Info() finds one on the next start, the
 //                  last run did not end cleanly and there is something to restore.
@@ -46,6 +49,11 @@ public:
 
     // Keeps the newest `keepLast` backups OF THAT SHOW and removes the rest. Returns how many were removed.
     size_t Prune(std::string_view show, size_t keepLast) const;
+
+    // Removes ONE backup by its path. Only a path this store itself enumerated
+    // is accepted, so a stray or hand-typed path can never delete a file outside
+    // the backups folder.
+    Result<void> Remove(std::string_view path) const;
 
     const std::string& Directory() const noexcept { return directory_; }
 

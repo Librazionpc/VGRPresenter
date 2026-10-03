@@ -83,9 +83,22 @@ void ProjectService::load()
         report(tr("The projects could not be read (%1).").arg(qstr(loaded.error().message)));
     refresh();
     EngineBridge::write(QStringLiteral("info"), QStringLiteral("Projects"), QStringLiteral("Project library loaded: %1 folders and projects (%2)").arg(tree_.size()).arg(qstr(platform.Paths().UserDataDir()) + "/projects.json"));
-    // The project that was open last time comes back.
+    // The project that was open last time comes back — but only once the
+    // engine's settings store has been read. This load and SettingsService::load
+    // both wait on the SAME engine-boot signal, and the connection order between
+    // them is not fixed, so reading `session.lastProject` right here can see the
+    // engine's default "" and the user's project would never reopen. whenReady
+    // is the one idiom for that: it runs the restore now if the store is already
+    // open, else once it opens.
+    SettingsService::instance().whenReady([this]() { if (library_) restoreLastProject(); });
+}
+
+// Reopens the project that was open at the last exit (its id lives in the
+// settings store). A no-op when there was none, or it is gone from the library.
+void ProjectService::restoreLastProject()
+{
     const QString last = SettingsService::instance().value(QStringLiteral("session.lastProject")).toString();
-    if (!last.isEmpty() && library_->Get(last.toStdString()).ok())
+    if (!last.isEmpty() && library_ && library_->Get(last.toStdString()).ok())
         openProject(last);
 }
 

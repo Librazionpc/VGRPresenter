@@ -32,9 +32,12 @@ import VGRPresenterUI
 // enables hover (its containsMouse would just latch uselessly).
 //
 // Arbitration note: like the MouseAreas it replaces, recompute reads the
-// point independently — two overlapping areas would both report hovered.
-// Every surface rewired onto this (menu labels, logo, tabs, gear, dropdown
-// rows) is non-overlapping by construction, so nothing regresses.
+// point independently — two SIBLING areas would both report hovered. Every
+// surface rewired onto this (menu labels, logo, tabs, gear, dropdown rows)
+// is non-overlapping by construction, so nothing regresses. Areas that are
+// merely STACKED (a card with an open menu over it) are settled by
+// AppCursor.blocked() below: an open popup claims the pointer, so the surface
+// under it stops reporting hovered and the menu reads as its own popup.
 Item {
     id: root
 
@@ -83,7 +86,7 @@ Item {
 
     function _recompute() {
         const inside = AppCursor.windowHovered && root.shownChain
-                       && AppCursor.hovered(root)
+                       && AppCursor.hovered(root) && !AppCursor.blocked(root)
         if (inside !== root.hovered) {
             root.hovered = inside
             if (inside)
@@ -110,6 +113,9 @@ Item {
     Connections {
         target: AppCursor
         function onPointerMoved() { root._recompute() }
+        // A popup opening/closing over this area must settle it immediately —
+        // the pointer may be perfectly still over the menu.
+        function onBlockersChanged() { root._recompute() }
     }
 
     Component.onCompleted: _recompute()

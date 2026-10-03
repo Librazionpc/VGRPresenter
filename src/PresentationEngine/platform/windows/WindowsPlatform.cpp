@@ -4,12 +4,161 @@
 #include <windows.h>
 #include <iphlpapi.h>
 #include <netioapi.h>
+#include <pdh.h>
+// PDH_MORE_DATA (the "buffer too small" result PdhGetFormattedCounterArrayW's
+// size probe returns) lives in pdhmsg.h — pdh.h alone does not define it.
+#include <pdhmsg.h>
 #include <tlhelp32.h>
 
+#include <mutex>
 #include <set>
 #include <sstream>
+#include <vector>
 
 namespace bps::platform {
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// Live health counters (PDH)
+// ---------------------------------------------------------------------------
+// The three "how is this machine doing right now" numbers the Settings health
+// surface shows: GPU engine utilization, the CPU's actual speed as a percent of
+// its nominal clock (% Processor Performance — below 100 means the part is
+// being held under nominal, i.e. power/thermal throttling), and a best-effort
+// package temperature from the ACPI thermal zones. PDH is Windows' documented
+// performance-counter API; nothing here is required for the engine to run, so
+// any failure just leaves the field at its -1 "not measured" default instead of
+// failing the Sample() the ResourceManager also depends on.
+class HealthCounters {
+public:
+    struct Values {
+        double gpuPct = -1.0;
+        double cpuPerfPct = -1.0;
+        double cpuTempC = -1.0;
+    };
+
+    Values Read()
+    {
+        Values v;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!Ensure())
+            return v;
+        if (PdhCollectQueryData(query_) != ERROR_SUCCESS)
+            return v;
+        if (gpu_) {
+            // Several engine instances share one GPU; their sum can pass 100
+            // when engines run concurrently. Left at -1 when no instance
+            // reported (the honest "not measured").
+            const double gpu = Sum(gpu_);
+            if (gpu >= 0.0)
+                v.gpuPct = Clamp(gpu, 0.0, 100.0);
+        }
+        if (perf_)
+            v.cpuPerfPct = Single(perf_);
+        if (temp_) {
+            const double kelvin = Max(temp_);
+            // ACPI reports Kelvin; anything outside a plausible range is noise.
+            if (kelvin > 200.0 && kelvin < 400.0)
+                v.cpuTempC = kelvin - 273.15;
+        }
+        return v;
+    }
+
+private:
+    bool Ensure()
+    {
+        if (ready_)
+            return true;
+        if (failed_)
+            return false;
+        if (PdhOpenQueryW(nullptr, 0, &query_) != ERROR_SUCCESS) {
+            failed_ = true;
+            return false;
+        }
+        // English counter names, regardless of the UI language.
+        gpu_ = Add(L"\\GPU Engine(*)\\Utilization Percentage");
+        perf_ = Add(L"\\Processor Information(_Total)\\% Processor Performance");
+        temp_ = Add(L"\\Thermal Zone Information(*)\\Temperature");
+        if (!gpu_ && !perf_ && !temp_) {
+            PdhCloseQuery(query_);
+            query_ = nullptr;
+            failed_ = true;
+            return false;
+        }
+        PdhCollectQueryData(query_);   // baseline for the rate counters
+        ready_ = true;
+        return true;
+    }
+
+    PDH_HCOUNTER Add(const wchar_t *path)
+    {
+        PDH_HCOUNTER h = nullptr;
+        return PdhAddEnglishCounterW(query_, path, 0, &h) == ERROR_SUCCESS ? h : nullptr;
+    }
+
+    static double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+    // A wildcard counter's instances (GPU Engine: one per active engine;
+    // thermal zones: one per zone).
+    template <typename Fn>
+    void ForEach(PDH_HCOUNTER counter, Fn fn)
+    {
+        DWORD size = 0;
+        DWORD type = 0;
+        if (PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &size, &type, nullptr) != PDH_MORE_DATA || size == 0)
+            return;
+        std::vector<BYTE> buf(size);
+        auto *items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W *>(buf.data());
+        if (PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &size, &type, items) != ERROR_SUCCESS)
+            return;
+        const size_t count = size / sizeof(PDH_FMT_COUNTERVALUE_ITEM_W);
+        for (size_t i = 0; i < count; ++i)
+            if (items[i].FmtValue.CStatus == ERROR_SUCCESS)
+                fn(items[i].FmtValue.doubleValue);
+    }
+
+    double Sum(PDH_HCOUNTER counter)
+    {
+        double total = 0.0;
+        bool any = false;
+        ForEach(counter, [&](double x) { total += x; any = true; });
+        return any ? total : -1.0;
+    }
+
+    double Max(PDH_HCOUNTER counter)
+    {
+        double best = -1.0;
+        bool any = false;
+        ForEach(counter, [&](double x) { if (!any || x > best) best = x; any = true; });
+        return any ? best : -1.0;
+    }
+
+    // A counter with no instances (e.g. the _Total processor one).
+    double Single(PDH_HCOUNTER counter)
+    {
+        PDH_FMT_COUNTERVALUE v{};
+        if (PdhGetFormattedCounterValue(counter, PDH_FMT_DOUBLE, nullptr, &v) != ERROR_SUCCESS)
+            return -1.0;
+        return v.CStatus == ERROR_SUCCESS ? v.doubleValue : -1.0;
+    }
+
+    std::mutex mutex_;
+    PDH_HQUERY query_ = nullptr;
+    PDH_HCOUNTER gpu_ = nullptr;
+    PDH_HCOUNTER perf_ = nullptr;
+    PDH_HCOUNTER temp_ = nullptr;
+    bool ready_ = false;
+    bool failed_ = false;
+};
+
+HealthCounters &Health()
+{
+    static HealthCounters counters;
+    return counters;
+}
+
+} // namespace
 
 std::string WindowsPlatform::OsVersion() const { return environment_.Current().osVersion; }
 
@@ -104,6 +253,12 @@ Snapshot WindowsPlatform::Sample() {
 
     // The main graphics adapter's own video memory, from DXGI (asked once; see WindowsGpu.cpp).
     s.gpuVramTotalBytes = win::PrimaryGpu().vramBytes;
+
+    // Live health (GPU %, CPU speed vs nominal, package temperature) from PDH.
+    const HealthCounters::Values health = Health().Read();
+    s.gpuPct = health.gpuPct;
+    s.cpuPerfPct = health.cpuPerfPct;
+    s.cpuTempC = health.cpuTempC;
     return s;
 }
 

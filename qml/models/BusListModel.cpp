@@ -11,9 +11,27 @@
 
 #include "modules/production/ProductionEngine.hpp"
 
+#include <QJSEngine>
+
 #include <algorithm>
 #include <cstring>
 #include <set>
+
+// The one instance, for C++ AND QML — see the header for why this is eager.
+BusListModel *BusListModel::Instance()
+{
+    static BusListModel s;
+    return &s;
+}
+
+BusListModel *BusListModel::create(QQmlEngine *engine, QJSEngine *jsEngine)
+{
+    Q_UNUSED(engine)
+    Q_UNUSED(jsEngine)
+    BusListModel *s = Instance();
+    QJSEngine::setObjectOwnership(s, QJSEngine::CppOwnership);
+    return s;
+}
 
 // The engine owns the buses. Every row here is a live view of bus nodes in
 // the kernel's production graph (docs/specs/27 — ProductionEngine owns the
@@ -149,6 +167,9 @@ private:
 BusListModel::BusListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
+    Q_ASSERT_X(!s_instance || s_instance == this, "BusListModel",
+               "a second BusListModel was constructed — Instance() would "
+               "silently rebind and every C++ reader would hold the wrong one");
     s_instance = this;
     pruneOrphanSourceNodes();
     rebuildFromGraph();

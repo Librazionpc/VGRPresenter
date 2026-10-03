@@ -396,7 +396,7 @@ Item {
 
                         Rectangle {
                             anchors.fill: parent
-                            color: !tabItem.selected && tabHover.hovered ? "#14151c" : "transparent"
+                            color: !tabItem.selected && tabHover.hovered ? Theme.hoverBg : "transparent"
                         }
                         Row {
                             anchors.centerIn: parent
@@ -429,7 +429,7 @@ Item {
                             visible: tabItem.selected
                             anchors.bottom: parent.bottom
                             width: parent.width; height: 2
-                            color: Theme.danger
+                            color: Theme.accent
                         }
                         PositionHoverArea {
                             id: tabHover
@@ -609,9 +609,9 @@ Item {
                             width: (inputCards.width - 16) / 3
                             height: 8 + (width - 16) * 9 / 16 + 6 + 32 + 8
                             radius: 6
-                            color: cardHover.hovered ? "#1e1f28" : "#16171e"
+                            color: cardHover.hovered ? Theme.activeBg : Theme.rowBg
                             border.width: taken ? 2 : 1
-                            border.color: taken ? "#6c5ce7" : "transparent"
+                            border.color: taken ? Theme.accent : "transparent"
 
                             PositionHoverArea {
                                 id: cardHover
@@ -686,11 +686,11 @@ Item {
                                 x: 8; y: 10
                                 width: 24; height: 24
                                 radius: 5
-                                color: kind === "audio" ? "#173326" : "#3a1e18"
+                                color: kind === "audio" ? Qt.alpha(Theme.success, 0.16) : Qt.alpha(Theme.danger, 0.16)
                                 IconGlyph {
                                     anchors.centerIn: parent
                                     name: root.inputTabs[root.inputTab].icon
-                                    color: kind === "audio" ? "#6fe0a0" : "#ff8d7f"
+                                    color: kind === "audio" ? Theme.successLight : Theme.dangerLight
                                     fit: true
                                     strokeWidth: 2
                                     width: 14; height: 14
@@ -730,9 +730,9 @@ Item {
                                 height: width * 9 / 16
                                 radius: 4
                                 clip: true
-                                color: "#0d0f14"
+                                color: Theme.windowBg
                                 border.width: 1
-                                border.color: card.taken ? "#3d3f6e" : "#232530"
+                                border.color: card.taken ? Qt.alpha(Theme.accent, 0.45) : Theme.border
 
                                 // RECEIVING (video): the live feed (the same
                                 // provider frames the monitor tile shows — the
@@ -805,10 +805,10 @@ Item {
                                             readonly property bool active: pill.level > 0.1
                                             readonly property color glowColor: root.levelGlowColor(pill.level)
 
-                                            color: pill.muted ? "#241a1c" : "#171922"
+                                            color: pill.muted ? Qt.alpha(Theme.danger, 0.16) : Theme.inset
                                             border.width: pill.active ? 2 : 1
-                                            border.color: pill.muted ? "#7a3a38"
-                                                        : pill.active ? pill.glowColor : "#33364a"
+                                            border.color: pill.muted ? Qt.alpha(Theme.danger, 0.55)
+                                                        : pill.active ? pill.glowColor : Theme.borderSubtle
                                             Behavior on border.color { ColorAnimation { duration: 120 } }
                                             Behavior on color { ColorAnimation { duration: 120 } }
 
@@ -830,7 +830,7 @@ Item {
                                             Text {
                                                 anchors.centerIn: parent
                                                 text: pill.chLabel
-                                                color: pill.muted ? "#a05a56" : (pill.active ? pill.glowColor : "#8a90a5")
+                                                color: pill.muted ? Qt.alpha(Theme.dangerLight, 0.7) : (pill.active ? pill.glowColor : Theme.textSecondary)
                                                 font.family: Theme.fontFamily
                                                 font.pixelSize: 12; font.bold: true
                                                 Behavior on color { ColorAnimation { duration: 120 } }
@@ -844,7 +844,7 @@ Item {
                                                 width: 26; height: 2
                                                 rotation: 45
                                                 radius: 1
-                                                color: "#ff6b61"
+                                                color: Theme.dangerLight
                                             }
 
                                             Behavior on scale { NumberAnimation { duration: 80 } }
@@ -878,7 +878,7 @@ Item {
                                         width: 26; height: 26; radius: 13
                                         color: "transparent"
                                         border.width: 2.2
-                                        border.color: "#6c5ce7"
+                                        border.color: Theme.accent
                                     }
                                 }
                                 // UNREACHABLE: the source can't be resolved — the
@@ -910,7 +910,7 @@ Item {
                                     IconGlyph {
                                         anchors.centerIn: parent
                                         name: root.inputTabs[root.inputTab].icon
-                                        color: "#6a6f82"
+                                        color: Theme.textMuted
                                         fit: true; strokeWidth: 2
                                         width: 22; height: 22
                                     }
@@ -922,7 +922,7 @@ Item {
                                         height: 2.5
                                         rotation: 45
                                         radius: 1.25
-                                        color: "#ff6b61"
+                                        color: Theme.dangerLight
                                     }
                                     Text {
                                         anchors.top: parent.bottom
@@ -931,7 +931,7 @@ Item {
                                         text: audioCard
                                             ? qsTr("muted — device disconnected")
                                             : qsTr("can't reach — window closed or device gone")
-                                        color: "#8a90a5"
+                                        color: Theme.textSecondary
                                         font.family: Theme.fontFamily; font.pixelSize: 9
                                     }
                                 }
@@ -947,7 +947,7 @@ Item {
                                     IconGlyph {
                                         anchors.horizontalCenter: parent.horizontalCenter
                                         name: root.inputTabs[root.inputTab].icon
-                                        color: "#4a5068"
+                                        color: Theme.textMuted
                                         fit: true; strokeWidth: 2
                                         width: 20; height: 20
                                     }
@@ -958,7 +958,7 @@ Item {
                                                ? qsTr("click = preview here · double-click = output")
                                                : qsTr("click = live meter"))
                                             : qsTr("idle")
-                                        color: cardHover.hovered ? "#a9b6d8" : "#565c72"
+                                        color: cardHover.hovered ? Theme.iconChrome : Theme.textMuted
                                         font.family: Theme.fontFamily; font.pixelSize: 10
                                     }
                                 }
@@ -990,10 +990,10 @@ Item {
 
                                             width: 38; height: 38
                                             radius: 19
-                                            color: card.busMuted ? "#241a1c" : "#171922"
+                                            color: card.busMuted ? Qt.alpha(Theme.danger, 0.16) : Theme.inset
                                             border.width: busPill.active ? 2 : 1
-                                            border.color: card.busMuted ? "#7a3a38"
-                                                        : busPill.active ? busPill.glowColor : "#33364a"
+                                            border.color: card.busMuted ? Qt.alpha(Theme.danger, 0.55)
+                                                        : busPill.active ? busPill.glowColor : Theme.borderSubtle
                                             Behavior on border.color { ColorAnimation { duration: 120 } }
                                             Behavior on color { ColorAnimation { duration: 120 } }
 
@@ -1012,7 +1012,7 @@ Item {
                                             Text {
                                                 anchors.centerIn: parent
                                                 text: busPill.chLabel
-                                                color: card.busMuted ? "#a05a56" : (busPill.active ? busPill.glowColor : "#8a90a5")
+                                                color: card.busMuted ? Qt.alpha(Theme.dangerLight, 0.7) : (busPill.active ? busPill.glowColor : Theme.textSecondary)
                                                 font.family: Theme.fontFamily
                                                 font.pixelSize: 12; font.bold: true
                                                 Behavior on color { ColorAnimation { duration: 120 } }
@@ -1023,7 +1023,7 @@ Item {
                                                 width: 26; height: 2
                                                 rotation: 45
                                                 radius: 1
-                                                color: "#ff6b61"
+                                                color: Theme.dangerLight
                                             }
 
                                             Behavior on scale { NumberAnimation { duration: 80 } }
@@ -1050,7 +1050,7 @@ Item {
                                     IconGlyph {
                                         anchors.horizontalCenter: parent.horizontalCenter
                                         name: "camera"
-                                        color: card.busMuted ? "#5a5f72" : "#8f7ff0"
+                                        color: card.busMuted ? Theme.textMuted : Theme.accentLight
                                         fit: true; strokeWidth: 2
                                         width: 22; height: 22
                                     }
@@ -1063,7 +1063,7 @@ Item {
                                             return n === 1 ? qsTr("1 video source routed")
                                                            : qsTr("%1 video sources routed").arg(n)
                                         }
-                                        color: "#8a90a5"
+                                        color: Theme.textSecondary
                                         font.family: Theme.fontFamily; font.pixelSize: 10
                                     }
                                     Text {
@@ -1071,7 +1071,7 @@ Item {
                                         text: card.busMuted
                                               ? qsTr("MUTED — click to open")
                                               : qsTr("OPEN — click to mute")
-                                        color: card.busMuted ? "#ff8d7f" : "#9aa0b5"
+                                        color: card.busMuted ? Theme.dangerLight : Theme.textSecondary
                                         font.family: Theme.fontFamily; font.pixelSize: 10; font.bold: card.busMuted
                                     }
                                 }
@@ -1130,12 +1130,12 @@ Item {
 
                                             width: 20; height: 20
                                             radius: 10
-                                            color: !vidPill.capable ? "#15161c"
-                                                 : vidAudioRow.storedMuted ? "#241a1c" : "#171922"
+                                            color: !vidPill.capable ? Theme.windowBg
+                                                 : vidAudioRow.storedMuted ? Qt.alpha(Theme.danger, 0.16) : Theme.inset
                                             border.width: 1
-                                            border.color: !vidPill.capable ? "#2a2c38"
-                                                        : vidAudioRow.storedMuted ? "#7a3a38"
-                                                        : vidPill.active ? vidPill.glowColor : "#33364a"
+                                            border.color: !vidPill.capable ? Theme.borderSubtle
+                                                        : vidAudioRow.storedMuted ? Qt.alpha(Theme.danger, 0.55)
+                                                        : vidPill.active ? vidPill.glowColor : Theme.borderSubtle
                                             opacity: vidPill.capable ? 1 : 0.55
                                             Behavior on border.color { ColorAnimation { duration: 120 } }
 
@@ -1154,9 +1154,9 @@ Item {
                                             Text {
                                                 anchors.centerIn: parent
                                                 text: vidPill.chLabel
-                                                color: !vidPill.capable ? "#4a4f5f"
-                                                     : vidAudioRow.storedMuted ? "#a05a56"
-                                                     : (vidPill.active ? vidPill.glowColor : "#8a90a5")
+                                                color: !vidPill.capable ? Theme.textMuted
+                                                     : vidAudioRow.storedMuted ? Qt.alpha(Theme.dangerLight, 0.7)
+                                                     : (vidPill.active ? vidPill.glowColor : Theme.textSecondary)
                                                 font.family: Theme.fontFamily
                                                 font.pixelSize: 8; font.bold: true
                                             }
@@ -1166,7 +1166,7 @@ Item {
                                                 width: 14; height: 1.5
                                                 rotation: 45
                                                 radius: 1
-                                                color: "#ff6b61"
+                                                color: Theme.dangerLight
                                             }
 
                                             MouseArea {

@@ -493,6 +493,7 @@ QString qstr(const std::string &s) { return QString::fromStdString(s); }
 void EngineBridge::enumerateDevices()
 {
     lastEnumerationMs_ = QDateTime::currentMSecsSinceEpoch();
+    lastAudioEnumerationMs_ = lastEnumerationMs_;
     audioDevices_.clear();
     screenDevices_.clear();
     videoDevices_.clear();
@@ -977,6 +978,35 @@ void EngineBridge::refreshDevices()
         return;
     ndiRetries_ = 0;
     enumerateDevices();
+}
+
+void EngineBridge::refreshAudioDevices()
+{
+    constexpr qint64 kMinRefreshGapMs = 10000;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (lastAudioEnumerationMs_ > 0 && now - lastAudioEnumerationMs_ < kMinRefreshGapMs)
+        return;
+    lastAudioEnumerationMs_ = now;
+    if (!bps::platform::PlatformAccessor::Installed())
+        return;
+
+    QVariantList next;
+    for (const auto &d : bps::platform::PlatformAccessor::Get().Audio().Enumerate()) {
+        const QString name = qstr(d.name);
+        next.append(QVariantMap{
+            {QStringLiteral("id"), qstr(d.id)},
+            {QStringLiteral("label"), name},
+            {QStringLiteral("value"), name},
+            {QStringLiteral("isInput"), d.isInput},
+            {QStringLiteral("isDefault"), d.isDefault},
+            {QStringLiteral("channels"), int(d.channels)},
+            {QStringLiteral("sampleRateHz"), int(d.sampleRateHz)},
+        });
+    }
+    if (next != audioDevices_) {
+        audioDevices_ = std::move(next);
+        emit devicesChanged();
+    }
 }
 
 // ============================================================================
@@ -2056,6 +2086,48 @@ void EngineBridge::startRelay()
         [deviceChange](const bps::events::MonitorDisconnected &e) {
             deviceChange("platform.monitor_disconnected", QStringLiteral("Display"),
                          QStringLiteral("%1 disconnected").arg(qstr(e.monitorId)));
+        }));
+
+    // ---- Power (AC ↔ battery) — battery percent / AC state
+    // The kernel's platform watcher publishes PowerChanged the moment the
+    // charger is plugged or pulled, and BatteryLow separately (only on the
+    // 20% crossing). BOTH must re-read the hardware report: the profiled
+    // battery reading feeds the Smart Config "Battery" row and the
+    // recommended profile, so without this the page stayed on its boot-time
+    // "Plugged in · 100%" forever after the charger came out. The toast tells
+    // the operator what changed, which is the whole point of the reading.
+    auto powerChange = [self](const char *topic, const QString &message, const QString &level) {
+        QMetaObject::invokeMethod(self, [self, topic = QString::fromLatin1(topic),
+                                         message, level]() mutable {
+            // Re-read the report FIRST, so anything the toast leads to (the
+            // Smart Config card is open) already shows the new state.
+            SettingsService::instance().refreshHardware();
+            self->ingestEngineEvent(topic, QVariantMap{
+                {QStringLiteral("level"), level},
+                {QStringLiteral("title"), QStringLiteral("Power")},
+                {QStringLiteral("message"), message},
+            });
+        }, Qt::QueuedConnection);
+    };
+    relaySubs_.push_back(bus.Subscribe<bps::events::PowerChanged>(
+        [powerChange](const bps::events::PowerChanged &e) {
+            // The engine's detail string is authoritative about which way the
+            // AC state moved — the PAL reading may lag the event by a beat.
+            const bool onBattery = e.detail.find("on battery") != std::string::npos;
+            const QString message = onBattery
+                ? QStringLiteral("Running on battery — background work is paused so the show lasts. %1")
+                      .arg(qstr(e.detail))
+                : QStringLiteral("Plugged in — the full profile is available again. %1")
+                      .arg(qstr(e.detail));
+            powerChange("platform.power_changed", message,
+                        onBattery ? QStringLiteral("warning") : QStringLiteral("info"));
+        }));
+    relaySubs_.push_back(bus.Subscribe<bps::events::BatteryLow>(
+        [powerChange](const bps::events::BatteryLow &e) {
+            powerChange("platform.battery_low",
+                        QStringLiteral("Battery is low (%1) - plug in soon so the show isn't cut short.")
+                            .arg(qstr(e.detail)),
+                        QStringLiteral("warning"));
         }));
 
     // ---- Display / outputs -------------------------------------------------

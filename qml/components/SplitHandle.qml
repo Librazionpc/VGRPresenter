@@ -25,7 +25,7 @@ Item {
     property real value: 0
     property real minValue: 0
     property real maxValue: 100000
-    property color lineColor: "#6c5ce7"
+    property color lineColor: Theme.accent
 
     readonly property real thickness: 8
     readonly property bool active: hover.hovered || drag.pressed

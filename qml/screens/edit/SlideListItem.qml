@@ -15,8 +15,8 @@ import VGRPresenterUI
 // the slide to keep in step with the real one. The model's own title/line1/line2/ref roles turned out to be dead data,
 // so this component never took them.
 //
-// Literal colors, not Theme.* — same AOT-compiler limitation as
-// AppMenuBar.qml at this nesting depth.
+// Literal colors. The "AOT nesting" reason once given for these is disproven
+// (see DropdownPanel.qml's header) — this file can migrate to Theme.* tokens.
 Rectangle {
     id: root
 
@@ -56,7 +56,7 @@ Rectangle {
     // The thumbnail keeps the stage's proportions (754 x 428), so the row is as tall as the picture needs.
     height: canvasThumb.height + 8
     width: 256
-    border.color: root.active ? "#6c5ce7" : "#232530"
+    border.color: root.active ? Theme.accent : "#232530"
     border.width: root.active ? 1.2 : 1
     color: "#161823"
     radius: 9
@@ -66,7 +66,7 @@ Rectangle {
         height: parent.height
         width: 3
         radius: 2
-        color: "#6c5ce7"
+        color: Theme.accent
     }
 
     Rectangle {

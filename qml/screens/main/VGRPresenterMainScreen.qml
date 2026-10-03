@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Shapes
+import VGRPresenterUI
 import "../../components"
 
 Rectangle {
@@ -8,10 +9,10 @@ Rectangle {
     height: 900
     width: 1440
 
-    border.color: "#232530"
+    border.color: Theme.border
     border.width: 1
     clip: true
-    color: "#0f1015"
+    color: Theme.windowBg
 
     // Emitted by BOTH "New show" buttons (the clock panel's primary CTA
     // and the dock footer's red one) — Main.qml funnels it into
@@ -110,9 +111,9 @@ Rectangle {
             height: parent.height
             width: 280
 
-            border.color: "#232530"
+            border.color: Theme.border
             border.width: 1
-            color: "#12131a"
+            color: Theme.panelBg
 
             Rectangle {
                 id: projects_section
@@ -168,9 +169,9 @@ Rectangle {
                 height: workspace_body.topHeight
                 width: parent.width
 
-                border.color: "#232530"
+                border.color: Theme.border
                 border.width: 1
-                color: "#0f1015"
+                color: Theme.windowBg
 
                 Rectangle {
                     id: logo_group
@@ -197,7 +198,7 @@ Rectangle {
                         // the whole wordmark was single purple before.
                         Text {
                             height: 60
-                            color: "#f2f3f7"
+                            color: Theme.textPrimary
                             font.family: "Outfit"
                             font.letterSpacing: 0.48
                             font.pixelSize: 55
@@ -208,7 +209,7 @@ Rectangle {
                         }
                         Text {
                             height: 60
-                            color: "#8a8fa0"
+                            color: Theme.textSecondary
                             font.family: "Outfit"
                             font.letterSpacing: 0.48
                             font.pixelSize: 55
@@ -227,7 +228,7 @@ Rectangle {
                         height: 16
                         width: 83
 
-                        color: "#5c6475"
+                        color: Theme.textMuted
                         font.family: "Segoe UI"
                         font.pixelSize: 15
                         font.weight: Font.Medium
@@ -254,7 +255,7 @@ Rectangle {
                         height: 40
                         width: 521
 
-                        color: "#8a94a6"
+                        color: Theme.textSecondary
                         font.family: "Segoe UI"
                         font.pixelSize: 15
                         font.weight: Font.Normal
@@ -284,17 +285,22 @@ Rectangle {
                         height: 36
                         width: 240
 
-                        border.color: actionQuickSearchMouse.containsMouse ? "#3a3d4d" : "#232530"
+                        border.color: actionQuickSearchHover.hovered ? Theme.borderSubtle : Theme.border
                         border.width: 1
-                        color: actionQuickSearchMouse.pressed ? "#1e1f28"
-                             : (actionQuickSearchMouse.containsMouse ? "#1c1d26" : "#16171e")
+                        color: actionQuickSearchMouse.pressed ? Theme.activeBg
+                             : (actionQuickSearchHover.hovered ? Theme.hoverBg : Theme.rowBg)
                         radius: 8
+                        Behavior on border.color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                        Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+
+                        PositionHoverArea {
+                            id: actionQuickSearchHover
+                            anchors.fill: parent
+                        }
 
                         MouseArea {
                             id: actionQuickSearchMouse
                             anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
                             onClicked: vGRPresenter_Main_Screen.searchRequested()
                         }
 
@@ -310,28 +316,15 @@ Rectangle {
                             clip: true
                             color: "transparent"
 
-                            Shape {
-                                id: _vector_16
-
-                                x: 1.75
-                                y: 1.75
-
-                                height: 10.50
-                                width: 10.50
-
-                                ShapePath {
-                                    id: _vector_16_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#ff4d3d"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_16_ShapePath0_PathSvg0
-
-                                        path: "M 10.500091552734375 10.500091552734375 L 7.96842472041161 7.96842472041161 M 9.333333615901045 4.666666807950523 C 9.333333615901045 7.2439955679252375 7.2439955679252375 9.333333615901045 4.666666807950523 9.333333615901045 C 2.0893377698207902 9.333333615901045 0 7.2439955679252375 0 4.666666807950523 C 0 2.0893377698207902 2.0893377698207902 0 4.666666807950523 0 C 7.2439955679252375 0 9.333333615901045 2.0893377698207902 9.333333615901045 4.666666807950523 Z"
-                                    }
-                                }
+                            // The quick-search magnifier now comes from the shared
+                            // IconGlyph bank (name "search") rather than an inline
+                            // Shape, so the one source owns every icon.
+                            IconGlyph {
+                                anchors.centerIn: parent
+                                name: "search"
+                                color: Theme.accent
+                                strokeWidth: 2
+                                width: 14; height: 14
                             }
                         }
                         Text {
@@ -343,7 +336,7 @@ Rectangle {
                             height: 16
                             width: 159
 
-                            color: "#e2e8f0"
+                            color: Theme.textPrimary
                             font.family: "Segoe UI"
                             font.pixelSize: 15
                             font.weight: Font.Medium
@@ -369,28 +362,12 @@ Rectangle {
                             clip: true
                             color: "transparent"
 
-                            Shape {
-                                id: _vector_17
-
-                                x: 4.50
-                                y: 3
-
-                                height: 6
-                                width: 3
-
-                                ShapePath {
-                                    id: _vector_17_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#5c6475"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_17_ShapePath0_PathSvg0
-
-                                        path: "M 0 6 L 3 3 L 0 0"
-                                    }
-                                }
+                            IconGlyph {
+                                anchors.centerIn: parent
+                                name: "chevronRight"
+                                color: Theme.textMuted
+                                strokeWidth: 2
+                                width: 12; height: 12
                             }
                         }
                     }
@@ -402,17 +379,22 @@ Rectangle {
                         height: 36
                         width: 240
 
-                        border.color: actionNewProjectMouse.containsMouse ? "#3a3d4d" : "#232530"
+                        border.color: actionNewProjectHover.hovered ? Theme.borderSubtle : Theme.border
                         border.width: 1
-                        color: actionNewProjectMouse.pressed ? "#1e1f28"
-                             : (actionNewProjectMouse.containsMouse ? "#1c1d26" : "#16171e")
+                        color: actionNewProjectMouse.pressed ? Theme.activeBg
+                             : (actionNewProjectHover.hovered ? Theme.hoverBg : Theme.rowBg)
                         radius: 8
+                        Behavior on border.color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                        Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+
+                        PositionHoverArea {
+                            id: actionNewProjectHover
+                            anchors.fill: parent
+                        }
 
                         MouseArea {
                             id: actionNewProjectMouse
                             anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
                             onClicked: EventBus.notify(
                                 qsTr("Project creation isn't wired yet."),
                                 "info", "New project", "ui.main.newProject")
@@ -430,28 +412,12 @@ Rectangle {
                             clip: true
                             color: "transparent"
 
-                            Shape {
-                                id: _vector_18
-
-                                x: 2.92
-                                y: 2.92
-
-                                height: 8.17
-                                width: 8.17
-
-                                ShapePath {
-                                    id: _vector_18_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#ff4d3d"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_18_ShapePath0_PathSvg0
-
-                                        path: "M 0 4.083800315856934 L 8.167600631713867 4.083800315856934 M 4.083800315856934 0 L 4.083800315856934 8.167600631713867"
-                                    }
-                                }
+                            IconGlyph {
+                                anchors.centerIn: parent
+                                name: "plus"
+                                color: Theme.accent
+                                strokeWidth: 2
+                                width: 14; height: 14
                             }
                         }
                         Text {
@@ -463,7 +429,7 @@ Rectangle {
                             height: 16
                             width: 159
 
-                            color: "#e2e8f0"
+                            color: Theme.textPrimary
                             font.family: "Segoe UI"
                             font.pixelSize: 15
                             font.weight: Font.Medium
@@ -485,28 +451,12 @@ Rectangle {
                             clip: true
                             color: "transparent"
 
-                            Shape {
-                                id: _vector_19
-
-                                x: 4.50
-                                y: 3
-
-                                height: 6
-                                width: 3
-
-                                ShapePath {
-                                    id: _vector_19_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#5c6475"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_19_ShapePath0_PathSvg0
-
-                                        path: "M 0 6 L 3 3 L 0 0"
-                                    }
-                                }
+                            IconGlyph {
+                                anchors.centerIn: parent
+                                name: "chevronRight"
+                                color: Theme.textMuted
+                                strokeWidth: 2
+                                width: 12; height: 12
                             }
                         }
                     }
@@ -518,17 +468,22 @@ Rectangle {
                         height: 36
                         width: 240
 
-                        border.color: actionNewShowMouse.containsMouse ? "#3a3d4d" : "#232530"
+                        border.color: actionNewShowHover.hovered ? Theme.borderSubtle : Theme.border
                         border.width: 1
-                        color: actionNewShowMouse.pressed ? "#1e1f28"
-                             : (actionNewShowMouse.containsMouse ? "#1c1d26" : "#16171e")
+                        color: actionNewShowMouse.pressed ? Theme.activeBg
+                             : (actionNewShowHover.hovered ? Theme.hoverBg : Theme.rowBg)
                         radius: 8
+                        Behavior on border.color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                        Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+
+                        PositionHoverArea {
+                            id: actionNewShowHover
+                            anchors.fill: parent
+                        }
 
                         MouseArea {
                             id: actionNewShowMouse
                             anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
                             onClicked: vGRPresenter_Main_Screen.newShowRequested()
                         }
 
@@ -540,7 +495,7 @@ Rectangle {
                         // siblings (the button is wider than that group),
                         // reading as visibly misaligned against them.
                         Rectangle {
-                            id: presentation_1
+                            id: new_show_glyph
 
                             x: 20
                             y: 11
@@ -551,27 +506,19 @@ Rectangle {
                             clip: true
                             color: "transparent"
 
-                            Shape {
-                                id: _vector_20
-
+                            // The app's own New-show mark (IconGlyph "newShow", from
+                            // qml/assets/new show add.svg — the shows cards with a plus), not a
+                            // bare "+": creating a show reads as a show action, where a plain
+                            // plus could have meant anything. This one asset covers every
+                            // button of the title "New show" — the "New project" row above keeps
+                            // its own plus, since a project is not a show. The glyph centres
+                            // itself in this 14px box.
+                            IconGlyph {
                                 anchors.centerIn: parent
-
-                                height: 10.50
-                                width: 11.67
-
-                                ShapePath {
-                                    id: _vector_20_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#6c5ce7"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_20_ShapePath0_PathSvg0
-
-                                        path: "M 0 0 L 11.667600631713867 0 M 11.084220600128175 0 L 11.084220600128175 6.416666666666667 C 11.084220600128175 6.726085916161537 10.961294218155647 7.02283191929261 10.74248426689028 7.241624355316163 C 10.523674315624913 7.460416791339716 10.226904556745712 7.583333333333334 9.917460536956789 7.583333333333334 L 1.7501400947570802 7.583333333333334 C 1.440696074968156 7.583333333333334 1.1439260379116805 7.460416791339716 0.9251160866463125 7.241624355316163 C 0.7063061353809446 7.02283191929261 0.5833800315856936 6.726085916161537 0.5833800315856934 6.416666666666667 L 0.5833800315856934 0 M 2.916900157928467 10.5 L 5.833800315856934 7.583333333333334 L 8.7507004737854 10.5"
-                                    }
-                                }
+                                name: "newShow"
+                                color: Theme.accent
+                                strokeWidth: 2
+                                width: 14; height: 14
                             }
                         }
                         Text {
@@ -583,7 +530,7 @@ Rectangle {
                             height: 16
                             width: 159
 
-                            color: "#e2e8f0"
+                            color: Theme.textPrimary
                             font.family: "Segoe UI"
                             font.pixelSize: 15
                             font.weight: Font.Medium
@@ -605,28 +552,12 @@ Rectangle {
                             clip: true
                             color: "transparent"
 
-                            Shape {
-                                id: _vector_21
-
-                                x: 4.50
-                                y: 3
-
-                                height: 6
-                                width: 3
-
-                                ShapePath {
-                                    id: _vector_21_ShapePath0
-
-                                    fillColor: "#00000000"
-                                    strokeColor: "#5c6475"
-                                    strokeWidth: 2
-
-                                    PathSvg {
-                                        id: _vector_21_ShapePath0_PathSvg0
-
-                                        path: "M 0 6 L 3 3 L 0 0"
-                                    }
-                                }
+                            IconGlyph {
+                                anchors.centerIn: parent
+                                name: "chevronRight"
+                                color: Theme.textMuted
+                                strokeWidth: 2
+                                width: 12; height: 12
                             }
                         }
                     }
@@ -656,7 +587,7 @@ Rectangle {
                 height: parent.height - workspace_body.topHeight
                 width: parent.width
 
-                color: "#12131a"
+                color: Theme.panelBg
 
                 Rectangle {
                     id: dock_tab_bar
@@ -668,7 +599,7 @@ Rectangle {
                     // bar's extent.
                     width: parent.width
 
-                    border.color: "#232530"
+                    border.color: Theme.border
                     border.width: 1
                     color: "transparent"
 
@@ -865,7 +796,7 @@ Rectangle {
                     // show library — persisted across restarts); every CRUD
                     // call goes straight to the engine, which validates and
                     // republishes. Counts are the engine's shows-per-category.
-                    property int currentCategory: 0   // 0 = All, 1..n = category
+                    property int currentCategory: 0   // 0 = All, -1 = Unlabeled, 1..n = category
                     // The row being renamed inline (-1 = none). Opened from
                     // the right-click context menu; Enter/focus-loss commits,
                     // Escape cancels.
@@ -880,22 +811,99 @@ Rectangle {
                         // second row used to leave both menus up at once).
                         closeShowMenu()
                         menuIndex = i
-                        // Clamp inside the pane so the menu never pokes out.
-                        catContextMenu.x = Math.min(x, width - catContextMenu.width - 4)
-                        catContextMenu.y = Math.min(y, height - catContextMenu.height - 4)
+                        // DropdownPanel.openAt lifts the panel to the window
+                        // root and clamps it to `bounds`, so it can neither be
+                        // clipped by this pane nor land off-screen near an
+                        // edge — the hand-rolled menu clamped against the
+                        // pane's own rect by hand, and being parented inside
+                        // the pane is also what kept its dismiss layer from
+                        // covering the rest of the window.
+                        catContextMenu.openAt(media_table, x, y, boundsItem())
                     }
                     function closeCatMenu() { menuIndex = -1 }
+                    // Picked from the panel's model (by label), so the row it
+                    // acts on is read FIRST — hiding the panel runs
+                    // closeCatMenu() through the panel's own visibleChanged.
+                    function activateCatMenu(label) {
+                        const i = menuIndex
+                        catContextMenu.visible = false
+                        if (i < 0)
+                            return
+                        if (label === qsTr("Rename"))
+                            renamingIndex = i
+                        else if (label === qsTr("Delete"))
+                            removeCategory(i)
+                    }
 
-                    // Show row context menu (right-click) — Rename/Duplicate/
-                    // Delete, the same pattern as the category menu above.
+                    // Show row context menu (right-click) — Rename/Duplicate,
+                    // move to a library category, or Delete.
                     property int showMenuIndex: -1
+                    // The show the open menu acts on, CAPTURED WHEN IT OPENS.
+                    // The menu used to re-read it at click time through the
+                    // table's filtered list; capturing it means the action
+                    // always lands on the row you actually right-clicked, and
+                    // cannot be disturbed by the list rebuilding underneath.
+                    property var showMenuTarget: null
+                    readonly property string showMoveLabel: qsTr("Move to")
+                    property var showMoveRow: null
                     function openShowMenu(i, x, y) {
                         closeCatMenu()
+                        showMoveMenu.closeFlyout()
+                        const shows = table_body.shownShows
                         showMenuIndex = i
-                        showContextMenu.x = Math.min(x, width - showContextMenu.width - 4)
-                        showContextMenu.y = Math.min(y, height - showContextMenu.height - 4)
+                        showMenuTarget = (shows && i >= 0 && i < shows.length) ? shows[i] : null
+                        showContextMenu.model = [
+                            { label: qsTr("Rename") },
+                            { label: qsTr("Duplicate") },
+                            { divider: true },
+                            { label: showMoveLabel, trailing: "\u203a" },
+                            { divider: true },
+                            { label: qsTr("Delete"), danger: true }
+                        ]
+                        showContextMenu.openAt(media_table, x, y, boundsItem())
                     }
-                    function closeShowMenu() { showMenuIndex = -1 }
+                    function closeShowMenu() {
+                        showMenuIndex = -1
+                        showMenuTarget = null
+                    }
+                    function activateShowMenu(label) {
+                        const show = showMenuTarget
+                        if (label === showMoveLabel) {
+                            if (!showMoveMenu.visible)
+                                openShowMoveMenu(showMoveRow)
+                            return
+                        }
+                        showContextMenu.visible = false
+                        if (!show)
+                            return
+                        if (label === qsTr("Rename")) {
+                            showRenameDialog.targetPath = show.path
+                            showRenameDialog.open(show.name)
+                        } else if (label === qsTr("Duplicate")) {
+                            if (ShowService.duplicateShow(show.path))
+                                ShowService.refreshLibrary()
+                        } else if (label === qsTr("Delete")) {
+                            showDeleteConfirm.targetPath = show.path
+                            showDeleteConfirm.title = qsTr("Delete show")
+                            showDeleteConfirm.message = qsTr("Delete “%1”? This can be recovered from the library's .deleted bin.").arg(show.name)
+                            showDeleteConfirm.open()
+                        }
+                    }
+                    function openShowMoveMenu(rowItem) {
+                        const show = showMenuTarget
+                        if (!rowItem || !show) return
+                        showMoveRow = rowItem
+                        const entry = (name, label) => ({
+                            label: label, payload: name,
+                            trailing: show.category === name ? "\u2713" : ""
+                        })
+                        showMoveMenu.model = [entry("", qsTr("Unlabeled"))]
+                            .concat(showCategories.map((c) => entry(c.name, c.name)))
+                        showMoveMenu.openBeside(rowItem, boundsItem())
+                    }
+                    // Clamp bounds for openAt: the window root when there is
+                    // one (always, in the app), else this pane.
+                    function boundsItem() { return Window.window ? Window.window.contentItem : media_table }
 
                     // Engine is the source of truth — no UI-side roster.
                     readonly property var showCategories: {
@@ -921,10 +929,12 @@ Rectangle {
                     // ---- Category CRUD — straight through to the engine.
                     // The engine validates (no duplicates, no junk names) and
                     // republishes; failures toast from ShowService itself.
-                    function addCategory() {
-                        if (ShowService.createLibraryCategory(qsTr("New category"))) {
-                            currentCategory = showCategories.length
-                            renamingIndex = showCategories.length - 1
+                    function addCategory(name) {
+                        const trimmed = name.trim()
+                        if (trimmed === "") return
+                        if (ShowService.createLibraryCategory(trimmed)) {
+                            const idx = showCategories.findIndex(c => c.name === trimmed)
+                            if (idx >= 0) currentCategory = idx + 1
                         }
                     }
                     function renameCategory(i, name) {
@@ -977,96 +987,35 @@ Rectangle {
                             width: parent.width - 16
                             spacing: 2
 
-                            // ---- All row (the library-wide filter) ------
-                            Rectangle {
+                            SidebarRow {
+                                objectName: "selfTestShowsAll"
                                 width: parent.width
-                                height: 40
-                                radius: 6
-                                // Tint is cursor-driven only — selection is
-                                // marked by the red edge + ring, never by a
-                                // persistent background (user call).
-                                color: allRowMouse.containsMouse ? "#16171e" : "transparent"
-                                Rectangle {
-                                    visible: media_table.currentCategory === 0
-                                    x: 0; y: 9; width: 3; height: 22
-                                    color: "#ff4d3d"; radius: 1.5
-                                }
-                                Rectangle {
-                                    x: 14
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    width: 14; height: 14; radius: 7
-                                    color: "transparent"
-                                    border.color: media_table.currentCategory === 0 ? "#ff4d3d" : "#5c6475"
-                                    border.width: 2
-                                }
-                                Text {
-                                    x: 44
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    text: qsTr("All")
-                                    color: media_table.currentCategory === 0 ? "#e2e8f0" : "#c7cdd8"
-                                    font.family: "Segoe UI"; font.pixelSize: 16
-                                }
-                                Text {
-                                    anchors.right: parent.right
-                                    anchors.rightMargin: 12
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    text: ShowService.libraryShows.length
-                                    color: "#5c6475"
-                                    font.family: "Segoe UI"; font.pixelSize: 14
-                                }
-                                MouseArea {
-                                    id: allRowMouse
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: media_table.currentCategory = 0
-                                }
+                                height: 38
+                                icon: "layoutDashboard"
+                                label: qsTr("All")
+                                count: String(ShowService.libraryShows.length)
+                                selected: media_table.currentCategory === 0
+                                onClicked: media_table.currentCategory = 0
+                            }
+                            SidebarRow {
+                                objectName: "selfTestShowsUnlabeled"
+                                width: parent.width
+                                height: 38
+                                icon: "layers"
+                                label: qsTr("Unlabeled")
+                                count: String(ShowService.libraryShowsIn("").length)
+                                selected: media_table.currentCategory === -1
+                                onClicked: media_table.currentCategory = -1
                             }
 
                             // ---- Categories section header + add ------
                             Item {
-                                width: parent.width; height: 30
+                                width: parent.width; height: 26
                                 Text {
-                                    x: 8; y: 9
-                                    text: qsTr("Categories")
-                                    color: "#8a94a6"
-                                    font.family: "Segoe UI"; font.pixelSize: 14; font.weight: Font.DemiBold
-                                }
-                                // The + lives at the header's RIGHT (user call) —
-                                // hover/press states, honest toast while creation
-                                // is engine-owned.
-                                Rectangle {
-                                    id: addCatBtn
-
-                                    anchors.right: parent.right
-                                    anchors.rightMargin: 4
-                                    anchors.verticalCenter: parent.verticalCenter
-
-                                    width: 22
-                                    height: 22
-                                    radius: 11
-
-                                    color: addCatMouse.pressed ? "#5b4bd1"
-                                         : (addCatMouse.containsMouse ? "#8d7cf3" : "#6c5ce7")
-                                    Behavior on color { ColorAnimation { duration: 100 } }
-
-                                    MouseArea {
-                                        id: addCatMouse
-                                        anchors.fill: parent
-                                        hoverEnabled: true
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: media_table.addCategory()
-                                    }
-                                    // A drawn cross (PlusGlyph), not a "+" TEXT
-                                    // glyph: fonts sit the + off the optical
-                                    // center of its box, which read as misaligned
-                                    // inside the round chip (the user report).
-                                    PlusGlyph {
-                                        anchors.centerIn: parent
-                                        size: 11; thickness: 1.8; color: "#ffffff"
-                                        rotation: addCatMouse.containsMouse ? 90 : 0
-                                        Behavior on rotation { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
-                                    }
+                                    x: 12; anchors.verticalCenter: parent.verticalCenter
+                                    text: qsTr("CATEGORIES")
+                                    color: Theme.textMuted
+                                    font.family: Theme.fontFamily; font.pixelSize: 12; font.bold: true
                                 }
                             }
 
@@ -1081,36 +1030,19 @@ Rectangle {
                             id: catScroll
 
                             x: 8
-                            y: 82
+                            y: 120
                             width: parent.width - 16
-                            height: parent.height - y - 8
+                            height: Math.max(0, parent.height - y - 48)
 
                             clip: true
                             contentWidth: width
                             contentHeight: catRows.height
                             boundsBehavior: Flickable.StopAtBounds
 
-                            // Scroll-proof hover: containsMouse on the rows
-                            // goes stale when the list scrolls under a
-                            // stationary cursor (no mouse movement = no exit
-                            // event, so a tint can ride away with a row and
-                            // stick). The hovered row is computed from the
-                            // cursor position instead, so every scroll
-                            // re-evaluates it. Row pitch = 38 + 2 spacing.
-                            readonly property int hoveredRow: {
-                                if (!hoverTracker.containsMouse) return -1
-                                const y = hoverTracker.mouseY + contentY
-                                return Math.min(Math.max(Math.floor(y / 40), 0),
-                                                media_table.showCategories.length - 1)
-                            }
-                            // NoButton so clicks and flick drags pass
-                            // straight through to the rows/Flickable.
-                            MouseArea {
-                                id: hoverTracker
-                                anchors.fill: parent
-                                acceptedButtons: Qt.NoButton
-                                hoverEnabled: true
-                            }
+                            // (Hover moved onto the rows themselves via
+                            // PositionHoverArea — the tracker-Math MouseArea
+                            // this replaces latched its containsMouse like
+                            // every hoverEnabled MouseArea in this build.)
                             // Scrolling with the right-click menu open closes it.
                             onMovementStarted: media_table.closeCatMenu()
 
@@ -1129,32 +1061,33 @@ Rectangle {
                                         width: parent.width
                                         height: 38
                                         radius: 6
-                                        // Cursor-driven only — the selected
-                                        // row keeps its red edge + ring, never
-                                        // a persistent background (user call).
-                                        color: catScroll.hoveredRow === index ? "#16171e" : "transparent"
+                                        // Same pill ramp as the All row:
+                                        // subtle lift at rest, hover a step
+                                        // up, selected one more + edge.
+                                        color: selected ? Theme.activeBg
+                                             : (catHover.hovered ? Theme.hoverBg : Theme.rowBg)
+                                        Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
 
                                         Rectangle {
                                             visible: parent.selected
-                                            x: 0; y: 8; width: 3; height: 22
-                                            color: "#ff4d3d"; radius: 1.5
+                                            x: 0; y: 5; width: 3; height: 20
+                                            color: Theme.accent; radius: 1.5
                                         }
-                                        Rectangle {
-                                            x: 14
+                                        IconGlyph {
+                                            x: 12
                                             anchors.verticalCenter: parent.verticalCenter
-                                            width: 14; height: 14; radius: 7
-                                            color: "transparent"
-                                            border.color: parent.selected ? "#ff4d3d" : "#5c6475"
-                                            border.width: 2
+                                            width: 14; height: 14
+                                            name: "folder"
+                                            color: selected ? Theme.accent : Theme.textSecondary
                                         }
                                         Text {
                                             id: catNameText
-                                            x: 44
-                                            width: parent.width - 130
+                                            x: 34
+                                            width: parent.width - 78
                                             anchors.verticalCenter: parent.verticalCenter
                                             visible: media_table.renamingIndex !== index
                                             text: modelData.name
-                                            color: selected ? "#e2e8f0" : "#c7cdd8"
+                                            color: selected ? Theme.textPrimary : Theme.navLabelMuted
                                             elide: Text.ElideRight
                                             font.family: "Segoe UI"; font.pixelSize: 15
                                         }
@@ -1162,13 +1095,13 @@ Rectangle {
                                         // right-click menu's Rename entry.
                                         TextInput {
                                             id: catNameEdit
-                                            x: 44
-                                            width: parent.width - 130
+                                            x: 34
+                                            width: parent.width - 78
                                             anchors.verticalCenter: parent.verticalCenter
                                             visible: media_table.renamingIndex === index
                                             enabled: visible
                                             text: visible ? modelData.name : ""
-                                            color: "#e2e8f0"
+                                            color: Theme.textPrimary
                                             font.family: "Segoe UI"; font.pixelSize: 15
                                             clip: true
                                             onAccepted: media_table.renameCategory(index, text)
@@ -1190,15 +1123,17 @@ Rectangle {
                                             anchors.rightMargin: 12
                                             anchors.verticalCenter: parent.verticalCenter
                                             visible: media_table.renamingIndex !== index
-                                            text: modelData.count > 0 ? modelData.count : ""
-                                            color: "#5c6475"
+                                            text: String(modelData.count)
+                                            color: Theme.textMuted
                                             font.family: "Segoe UI"; font.pixelSize: 14
+                                        }
+                                        PositionHoverArea {
+                                            id: catHover
+                                            anchors.fill: parent
                                         }
                                         MouseArea {
                                             id: catRowMouse
                                             anchors.fill: parent
-                                            hoverEnabled: true
-                                            cursorShape: Qt.PointingHandCursor
                                             acceptedButtons: Qt.LeftButton | Qt.RightButton
                                             onClicked: (mouse) => {
                                                 if (mouse.button === Qt.RightButton) {
@@ -1224,241 +1159,135 @@ Rectangle {
                         AppScrollBar {
                             flickable: catScroll
 
-                            x: parent.width - 8
-                            y: 82
-                            height: parent.height - y - 8
+                            x: parent.width - 12
+                            y: 120
+                            height: Math.max(0, parent.height - y - 48)
+                        }
+
+                        SidebarAddButton {
+                            objectName: "selfTestShowsNewCategory"
+                            x: 8
+                            y: parent.height - 40
+                            width: parent.width - 16
+                            text: qsTr("New category")
+                            onClicked: showCategoryDialog.open("")
                         }
                     }
 
                     // ---- Category context menu (right-click) ---- one
                     // shared Rename/Delete menu for any row; a click anywhere
-                    // else closes it. Declared LAST in the pane so it paints
-                    // above the sidebar and table.
-                    Rectangle {
+                    // else in the WINDOW closes it (see MenuCatcher below).
+                    // The shared DropdownPanel every other menu in the app
+                    // uses (ProjectsPanel, DesignLibraryPane, the settings
+                    // screens): its rows derive hover from pointer POSITION
+                    // (PositionHoverArea) instead of containsMouse, which
+                    // latches in this build — that is the hover highlight the
+                    // hand-rolled rows never had reliably.
+                    DropdownPanel {
                         id: catContextMenu
 
-                        visible: media_table.menuIndex !== -1
-                        x: 0; y: 0
-                        width: 148
-                        height: 76
+                        // DropdownPanel drives `visible` imperatively (openAt
+                        // shows it, the consumer hides it). It must stay a
+                        // plain value, never a binding: MenuCatcher dismisses
+                        // by assigning it.
+                        visible: false
                         z: 60
-
-                        radius: 8
-                        color: "#1e1f28"
-                        border.color: "#3a3d4d"
-                        border.width: 1
-
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: (mouse) => {
-                                // Consume clicks on the menu itself so they
-                                // don't fall through to the catcher.
-                                mouse.accepted = true
-                            }
-                        }
-
-                        Column {
-                            anchors.fill: parent
-                            anchors.margins: 4
-
-                            Item {
-                                width: parent.width; height: 32
-                                Rectangle {
-                                    anchors.fill: parent
-                                    anchors.margins: 2
-                                    radius: 5
-                                    color: menuRenameMouse.containsMouse ? "#2c2f3c" : "transparent"
-                                }
-                                Text {
-                                    x: 12
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    text: qsTr("Rename")
-                                    color: "#e2e8f0"
-                                    font.family: "Segoe UI"; font.pixelSize: 15
-                                }
-                                MouseArea {
-                                    id: menuRenameMouse
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: {
-                                        media_table.renamingIndex = media_table.menuIndex
-                                        media_table.closeCatMenu()
-                                    }
-                                }
-                            }
-                            Item {
-                                width: parent.width; height: 32
-                                Rectangle {
-                                    anchors.fill: parent
-                                    anchors.margins: 2
-                                    radius: 5
-                                    color: menuDeleteMouse.containsMouse ? "#2c2f3c" : "transparent"
-                                }
-                                Text {
-                                    x: 12
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    text: qsTr("Delete")
-                                    color: "#ff6b61"
-                                    font.family: "Segoe UI"; font.pixelSize: 15
-                                }
-                                MouseArea {
-                                    id: menuDeleteMouse
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: {
-                                        media_table.removeCategory(media_table.menuIndex)
-                                        media_table.closeCatMenu()
-                                    }
-                                }
-                            }
-                        }
+                        width: 148
+                        model: [
+                            { label: qsTr("Rename") },
+                            { label: qsTr("Delete"), danger: true }
+                        ]
+                        onItemActivated: (label) => media_table.activateCatMenu(label)
                     }
-                    // Click-outside catcher while the menu is open.
-                    MouseArea {
-                        anchors.fill: parent
-                        enabled: media_table.menuIndex !== -1
-                        z: 50
-                        onClicked: media_table.closeCatMenu()
+                    // The shared dismiss layer. The MouseArea it replaces was
+                    // parented INSIDE this pane, so it only caught clicks that
+                    // landed in the library — a click on the header, the
+                    // projects column or the output column left the menu
+                    // sitting there, which is the "it doesn't always close"
+                    // report. MenuCatcher lifts itself beside the menu at the
+                    // window root, covers the whole window, closes on PRESS
+                    // (release is the flaky half of click delivery in this
+                    // build) and takes EVERY button, not just the left one.
+                    MenuCatcher { menu: catContextMenu }
+                    // MenuCatcher dismisses by assigning `visible` rather than
+                    // calling back in, so the table re-derives its own state
+                    // from the panel: however the menu closed — an activation,
+                    // a press anywhere else, a wheel — nothing is left "open".
+                    Connections {
+                        target: catContextMenu
+                        function onVisibleChanged() {
+                            if (!catContextMenu.visible)
+                                media_table.closeCatMenu()
+                        }
                     }
 
                     // ---- Show row context menu (right-click) ---- Rename/
-                    // Duplicate/Delete for one show, same shape as the
-                    // category menu above. Declared LAST so it paints above
-                    // the table.
-                    Rectangle {
+                    // Duplicate/Delete for one show: the same shared panel +
+                    // dismiss pair as the category menu above, which is where
+                    // the note on why the hand-rolled Rectangle + in-pane
+                    // catcher is gone lives. Nothing here needs to be declared
+                    // last any more: openAt lifts the panel out of this pane
+                    // to the window root, so no sibling can paint over it.
+                    DropdownPanel {
                         id: showContextMenu
 
-                        readonly property var targetShow: media_table.showMenuIndex >= 0
-                            && media_table.showMenuIndex < table_body.shownShows.length
-                            ? table_body.shownShows[media_table.showMenuIndex] : null
-
-                        visible: media_table.showMenuIndex !== -1
-                        x: 0; y: 0
-                        width: 148
-                        height: 108
+                        visible: false
                         z: 60
-
-                        radius: 8
-                        color: "#1e1f28"
-                        border.color: "#3a3d4d"
-                        border.width: 1
-
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: (mouse) => { mouse.accepted = true }
+                        width: 160
+                        fitContentWidth: true
+                        maxHeight: 320
+                        onItemHovered: (label, hovering, rowItem) => {
+                            if (label === media_table.showMoveLabel) {
+                                if (hovering) {
+                                    showMoveMenuGrace.stop()
+                                    media_table.openShowMoveMenu(rowItem)
+                                } else {
+                                    showMoveMenuGrace.restart()
+                                }
+                            } else if (hovering) {
+                                showMoveMenu.closeFlyout()
+                            }
                         }
-
-                        Column {
-                            anchors.fill: parent
-                            anchors.margins: 4
-
-                            Item {
-                                width: parent.width; height: 32
-                                Rectangle {
-                                    anchors.fill: parent
-                                    anchors.margins: 2
-                                    radius: 5
-                                    color: showMenuRenameMouse.containsMouse ? "#2c2f3c" : "transparent"
-                                }
-                                Text {
-                                    x: 12
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    text: qsTr("Rename")
-                                    color: "#e2e8f0"
-                                    font.family: "Segoe UI"; font.pixelSize: 15
-                                }
-                                MouseArea {
-                                    id: showMenuRenameMouse
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: {
-                                        const show = showContextMenu.targetShow
-                                        media_table.closeShowMenu()
-                                        if (show) {
-                                            showRenameDialog.targetPath = show.path
-                                            showRenameDialog.open(show.name)
-                                        }
-                                    }
-                                }
-                            }
-                            Item {
-                                width: parent.width; height: 32
-                                Rectangle {
-                                    anchors.fill: parent
-                                    anchors.margins: 2
-                                    radius: 5
-                                    color: showMenuDuplicateMouse.containsMouse ? "#2c2f3c" : "transparent"
-                                }
-                                Text {
-                                    x: 12
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    text: qsTr("Duplicate")
-                                    color: "#e2e8f0"
-                                    font.family: "Segoe UI"; font.pixelSize: 15
-                                }
-                                MouseArea {
-                                    id: showMenuDuplicateMouse
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: {
-                                        const show = showContextMenu.targetShow
-                                        media_table.closeShowMenu()
-                                        if (show) {
-                                            const newPath = ShowService.duplicateShow(show.path)
-                                            if (newPath) ShowService.refreshLibrary()
-                                        }
-                                    }
-                                }
-                            }
-                            Item {
-                                width: parent.width; height: 32
-                                Rectangle {
-                                    anchors.fill: parent
-                                    anchors.margins: 2
-                                    radius: 5
-                                    color: showMenuDeleteMouse.containsMouse ? "#2c2f3c" : "transparent"
-                                }
-                                Text {
-                                    x: 12
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    text: qsTr("Delete")
-                                    color: "#ff6b61"
-                                    font.family: "Segoe UI"; font.pixelSize: 15
-                                }
-                                MouseArea {
-                                    id: showMenuDeleteMouse
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: {
-                                        const show = showContextMenu.targetShow
-                                        media_table.closeShowMenu()
-                                        if (show) {
-                                            showDeleteConfirm.targetPath = show.path
-                                            showDeleteConfirm.title = qsTr("Delete show")
-                                            showDeleteConfirm.message = qsTr("Delete “%1”? This can be recovered from the library's .deleted bin.").arg(show.name)
-                                            showDeleteConfirm.open()
-                                        }
-                                    }
-                                }
-                            }
+                        onItemActivated: (label) => media_table.activateShowMenu(label)
+                    }
+                    MenuCatcher { menu: showContextMenu }
+                    Timer {
+                        id: showMoveMenuGrace
+                        interval: 260
+                        onTriggered: if (!AppCursor.hovered(showMoveMenu)
+                                       && !AppCursor.hovered(media_table.showMoveRow))
+                                         showMoveMenu.closeFlyout()
+                    }
+                    DropdownPanel {
+                        id: showMoveMenu
+                        objectName: "selfTestShowMoveMenu"
+                        visible: showContextMenu.visible
+                        z: 60
+                        fitContentWidth: true
+                        maxHeight: 320
+                        onItemPicked: (index, payload) => {
+                            const show = media_table.showMenuTarget
+                            showMoveMenu.closeFlyout()
+                            showContextMenu.visible = false
+                            if (show)
+                                ShowService.moveShowToCategory(show.path, payload === undefined ? "" : payload)
                         }
                     }
-                    // Click-outside catcher for the show menu.
-                    MouseArea {
-                        anchors.fill: parent
-                        enabled: media_table.showMenuIndex !== -1
-                        z: 50
-                        onClicked: media_table.closeShowMenu()
+                    MenuCatcher { menu: showMoveMenu }
+                    Connections {
+                        target: showContextMenu
+                        function onVisibleChanged() {
+                            if (!showContextMenu.visible) {
+                                showMoveMenu.closeFlyout()
+                                media_table.closeShowMenu()
+                            }
+                        }
                     }
 
                     NameDialog {
                         id: showRenameDialog
                         anchors.fill: parent
+                        z: 30000
                         property string targetPath: ""
                         title: qsTr("Rename show")
                         confirmLabel: qsTr("Rename")
@@ -1470,9 +1299,20 @@ Rectangle {
                         }
                     }
 
+                    NameDialog {
+                        id: showCategoryDialog
+                        anchors.fill: parent
+                        z: 30000
+                        title: qsTr("New category")
+                        placeholder: qsTr("Category name")
+                        confirmLabel: qsTr("Create")
+                        onAccepted: (text) => media_table.addCategory(text)
+                    }
+
                     ConfirmDialog {
                         id: showDeleteConfirm
                         anchors.fill: parent
+                        z: 30000
                         property string targetPath: ""
                         confirmLabel: qsTr("Delete")
                         confirmVariant: "danger"
@@ -1508,7 +1348,7 @@ Rectangle {
                             height: 13
                             width: 34
 
-                            color: "#5c6475"
+                            color: Theme.textMuted
                             font.family: "Segoe UI"
                             font.pixelSize: 13
                             font.weight: Font.DemiBold
@@ -1527,7 +1367,7 @@ Rectangle {
                             height: 13
                             width: 201
 
-                            color: "#5c6475"
+                            color: Theme.textMuted
                             font.family: "Segoe UI"
                             font.pixelSize: 13
                             font.weight: Font.DemiBold
@@ -1561,7 +1401,8 @@ Rectangle {
                             media_table.libRev   // re-read on engine republish
                             const cat = media_table.currentCategory
                             const inCategory = cat === 0 ? ShowService.libraryShows
-                                : ShowService.libraryShowsIn(media_table.showCategories[cat - 1].name)
+                                : (cat === -1 ? ShowService.libraryShowsIn("")
+                                   : ShowService.libraryShowsIn(media_table.showCategories[cat - 1].name))
                             // The tab bar's Shows search: the ENGINE's library search (name or category), best first.
                             const query = media_tab_bar.searches.shows !== undefined ? media_tab_bar.searches.shows.trim() : ""
                             if (query === "")
@@ -1590,9 +1431,10 @@ Rectangle {
                         // a selected category filters to its sub-folder. Rows
                         // are click-to-open: the path goes up through
                         // openShowRequested → Main.qml → the engine, with the
-                        // unsaved-changes guard. Hover = cursor-driven lift;
-                        // the stale-containsMouse lesson applied from day one
-                        // via a pointer-position tracker like the sidebar's.
+                        // unsaved-changes guard. Hover = cursor-driven lift
+                        // via a per-row PositionHoverArea (the tabs'
+                        // pattern — tracker-Math MouseAreas latch their
+                        // containsMouse in this build).
                         Repeater {
                             model: table_body.shownShows
                             delegate: Rectangle {
@@ -1604,35 +1446,59 @@ Rectangle {
                                 width: parent.width - 24
 
                                 radius: 4
-                                color: showRowsHover.hoveredIdx === index ? "#16171e" : "transparent"
+                                // The floating "New show" pill sits OVER the last rows.
+                                // PositionHoverArea reads pure geometry (AppCursor.hovered),
+                                // so it cannot see the pill on top of it — without the gate
+                                // the row beneath lit up while the pointer was on the pill.
+                                color: (rowHover.hovered && !newShowDockHover.hovered) ? Theme.activeBg : "transparent"
+                                Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                                PositionHoverArea {
+                                    id: rowHover
+                                    anchors.fill: parent
+                                    showCursor: false
+                                }
+
+                                // The show mark (IconGlyph "shows", from qml/assets/
+                                // shows icon.svg) in front of every show, same as the
+                                // Projects panel's rows — the list reads as shows at a
+                                // glance instead of as bare filenames.
+                                IconGlyph {
+                                    x: 8
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    name: "shows"
+                                    color: rowHover.hovered ? Theme.textSecondary : Theme.textMuted
+                                    width: 15; height: 15
+                                    Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                                }
 
                                 Text {
-                                    x: 8
-                                    y: 8
-                                    height: 15
-                                    width: parent.width - 240
-                                    color: "#e2e8f0"
+                                    // Indented past the mark; the width gives back the same 8px it used to start at.
+                                    x: 31
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: parent.width - 263
+                                    color: Theme.textPrimary
                                     elide: Text.ElideRight
                                     font.family: "Segoe UI"; font.pixelSize: 14
                                     text: modelData.name
                                     textFormat: Text.PlainText
-                                    verticalAlignment: Text.AlignTop
                                 }
                                 Text {
                                     anchors.right: parent.right
                                     anchors.rightMargin: 16
-                                    y: 9
-                                    height: 13
+                                    anchors.verticalCenter: parent.verticalCenter
                                     width: 201
-                                    color: "#5c6475"
+                                    color: Theme.textMuted
                                     font.family: "Segoe UI"; font.pixelSize: 13
                                     horizontalAlignment: Text.AlignRight
                                     text: {
+                                        // Subscribe to the LOCALE so the day/month names
+                                        // follow Settings > General > Language (QLocale has
+                                        // no signal of its own to re-evaluate this binding).
+                                        SettingsService.localeRevision
                                         const d = new Date(modelData.modifiedMs)
                                         Qt.formatDate(d, "dddd d, MMMM yyyy")
                                     }
                                     textFormat: Text.PlainText
-                                    verticalAlignment: Text.AlignTop
                                 }
                                 // Click: the show on the centre page. Double-click: into the open project.
                                 // Right-click: Rename/Duplicate/Delete. Drag: into a project.
@@ -1651,24 +1517,6 @@ Rectangle {
                             }
                         }
                         }   // Flickable table_scroll
-
-                        // Cursor-position hover tracker for the rows (same
-                        // scroll-proof pattern as the category list). It sits
-                        // on the VIEWPORT (not the scrolling content), so the
-                        // hovered row index must add the scroll offset back in.
-                        MouseArea {
-                            id: showRowsHover
-                            anchors.fill: parent
-                            acceptedButtons: Qt.NoButton
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            z: 1
-                            readonly property int hoveredIdx: {
-                                if (!containsMouse || table_body.shownShows.length === 0) return -1
-                                const i = Math.floor((mouseY + table_scroll.contentY) / 32)
-                                return (i >= 0 && i < table_body.shownShows.length) ? i : -1
-                            }
-                        }
 
                         // A real draggable bar for the now-scrolling table
                         // (auto-hides when every row already fits).
@@ -1698,41 +1546,51 @@ Rectangle {
                         height: 36
                         width: new_show_1.width + 32
                         radius: 18
-                        color: newShowDockMouse.pressed ? "#e5484d" : "#ff4d3d"
+                        color: newShowDockHover.hovered ? Qt.darker(Theme.accent, 1.1) : Theme.accent
                         Behavior on color { ColorAnimation { duration: 100 } }
 
                         // the soft shadow (drawn first, so it sits under the pill)
                         Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 3; width: parent.width + 6; height: parent.height + 4; radius: 20; color: "#26000000" }
                         Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 2; width: parent.width + 2; height: parent.height + 2; radius: 19; color: "#33000000" }
 
-                        // The second dead "New show" chrome button, now
-                        // live with the same reset action.
-                        MouseArea {
-                            id: newShowDockMouse
+                        // PositionHoverArea, the codebase's standard hover/click surface:
+                        // a hoverEnabled MouseArea latches containsMouse in this build
+                        // (hover-EXIT never delivers) and its cursorShape is unreliable.
+                        // Its id is what the table rows consult so the row under the
+                        // floating pill no longer highlights when the pill is hovered —
+                        // the pill now acts as its own independent button/popup.
+                        PositionHoverArea {
+                            id: newShowDockHover
                             anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
                             onClicked: vGRPresenter_Main_Screen.newShowRequested()
                         }
 
-                        // CENTERED + OPTICALLY MATCHED: the drawn cross is
-                        // sized to the text's cap height (a font "+" sits low
-                        // and small next to bold text — the misalignment
-                        // report) and the pair is one centered Row.
+                        // CENTERED: the app's New-show mark (IconGlyph "newShow",
+                        // from qml/assets/new show add.svg) beside the label, ONE
+                        // Row — the pill's width is this Row's width + 32, so the
+                        // label has to live INSIDE the Row: as a sibling it was not
+                        // measured, the pill sized itself to the icon alone (48px),
+                        // and the label overflowed the pill with the centered icon
+                        // on top of it. Sized to the text's cap band like the plus
+                        // on the "New project" row (this glyph's ink is inset from
+                        // its 24 grid, so 16 here draws at roughly the old cross's
+                        // optical size), and nudged 1px the way every box-centered
+                        // glyph beside Segoe UI text is.
                         Row {
                             id: new_show_1
 
                             anchors.centerIn: parent
                             spacing: 8
 
-                            PlusGlyph {
+                            IconGlyph {
                                 anchors.verticalCenter: parent.verticalCenter
-                                // Optical cap-band alignment (same measurement as the
-                                // clock CTA): Segoe UI caps sit ~1px above the line-box
-                                // center, so box-centered glyphs read a touch high.
                                 anchors.verticalCenterOffset: 1
-                                size: 11; thickness: 2; color: "#ffffff"
+                                name: "newShow"
+                                color: "#ffffff"
+                                strokeWidth: 2
+                                width: 16; height: 16
                             }
+
                             Text {
                                 id: new_show_1_label
 
@@ -1747,211 +1605,378 @@ Rectangle {
                             }
                         }
                     }   // new_show_dock_btn
-                }   // dock band (host container of the dock + clock panel)
+                }   // media_table
+                // ---- Shows template sidebar (Shows tab) ---- the right column
+                // Scripture/The Table have, per CATEGORY: each category keeps its
+                // own template pick (settings key shows.categoryTemplate.<name>),
+                // shown and changed here with the same chooser popup Scripture
+                // uses (TemplatePickerModal, self-reparented to the window
+                // overlay). "All" selects no category, so the panel says so
+                // instead of showing some other category's pick.
                 Rectangle {
-                    id: clock_panel
+                    id: shows_template_sidebar
 
-                    // The band's right region: clock + New show CTA. Starts
-                    // BELOW the tab row (the FreeShow sample: the row runs the
-                    // full width above it; the clock lives in the bottom-right
-                    // of the band).
+                    visible: media_tab_bar.currentPane === "shows"
                     x: parent.width - 400
                     y: 39
-                    visible: media_tab_bar.currentPane !== "scripture" && media_tab_bar.currentPane !== "table"   // the Scripture-architecture preview takes this spot
-
+                    width: 400
                     height: parent.height - 39
 
-                    width: 400
+                    color: Theme.windowBg
 
-                    color: "#0f1015"
-
-                    Rectangle {
-                        id: digital_clock_group
-
-                        // Dynamic centering — was fixed x/y in the old 439px
-                        // panel, which drifted off-balance as soon as the
-                        // panel's height became content-driven.
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.verticalCenterOffset: -48
-
-                        height: 88
-                        width: 352
-
-                        color: "transparent"
-
-                        Text {
-                            id: element_5
-
-                            x: 56.50
-
-                            height: 68
-                            width: 242
-
-                            color: "#ff523b"
-                            font.family: "Segoe UI"
-                            font.letterSpacing: 1.12
-                            font.pixelSize: 64
-                            font.weight: Font.ExtraBold
-                            horizontalAlignment: Text.AlignHCenter
-                            text: showClockTicker.formatClock(showClockTicker.now, false, true)
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                        }
-                        Text {
-                            id: saturday_8_August_2026
-
-                            x: 97.50
-                            y: 72
-
-                            height: 16
-                            width: 158
-
-                            color: "#8a94a6"
-                            font.family: "Segoe UI"
-                            font.pixelSize: 15
-                            font.weight: Font.DemiBold
-                            horizontalAlignment: Text.AlignHCenter
-                            text: Qt.formatDate(showClockTicker.now, "dddd d, MMMM yyyy")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                        }
+                    // The selected category's name ("" for All — the DEFAULT row).
+                    readonly property string categoryName: media_table.currentCategory <= 0
+                                                           ? "" : media_table.showCategories[media_table.currentCategory - 1].name
+                    // Per-category storage — the same values-map pattern scripture's
+                    // "scripture.template" setting uses.
+                    readonly property string settingsKey: "shows.categoryTemplate." + categoryName
+                    // THE FALLBACK RULE — the same one every template sidebar follows
+                    // (Scripture/The Table's engine default already works this way):
+                    // when no template is selected FOR a category, what is chosen for
+                    // All is used for it. All's own pick (shows.defaultTemplate) is
+                    // that fallback; a category overrides it with its own pick.
+                    readonly property string defaultKey: "shows.defaultTemplate"
+                    readonly property string defaultTemplateId: String(SettingsService.values[defaultKey] ?? "")
+                    readonly property string ownTemplateId: categoryName === ""
+                                                            ? "" : String(SettingsService.values[settingsKey] ?? "")
+                    readonly property bool inherited: categoryName !== "" && ownTemplateId === "" && defaultTemplateId !== ""
+                    readonly property string templateId: categoryName === "" ? defaultTemplateId
+                                                         : (ownTemplateId !== "" ? ownTemplateId : defaultTemplateId)
+                    // Resolved from the designs() CATALOG (its rows provably carry
+                    // id/name/color — design(key) only guarantees the preview
+                    // blocks). null = no template stored, or a stored key the
+                    // catalog no longer has (shows as "Missing template", Reset
+                    // still offered).
+                    readonly property var templateDesign: {
+                        if (templateId === "") return null
+                        const list = TemplateLibraryService.designs()
+                        for (let i = 0; i < list.length; ++i)
+                            if (String(list[i].id) === templateId) return list[i]
+                        return null
                     }
-                    Rectangle {
-                        id: clock_actions
+                    readonly property string templateName: templateDesign ? String(templateDesign.name ?? "") : ""
+                    // The round tune button swaps the panel between the template
+                    // view and the slide-options view — the same two-state panel
+                    // ReferencePane's footer button drives.
+                    property bool optionsOpen: false
 
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.verticalCenterOffset: 55
+                    // The whole catalog, mapped to the picker's {key,name,color,
+                    // category,categoryName} shape — copied from ReferencePane's
+                    // openTemplateMenu so both pickers list identical rows.
+                    function openTemplatePicker() {
+                        const categoryNames = {}
+                        for (const c of TemplateLibraryService.categories) categoryNames[c.id] = c.name
+                        templatePicker.templates = TemplateLibraryService.designs().map((t) => ({
+                            key: t.id, name: t.name, color: t.color,
+                            category: t.category,
+                            categoryName: t.category ? (categoryNames[t.category] ?? t.category) : qsTr("Unlabeled")
+                        }))
+                        templatePicker.selectedKey = shows_template_sidebar.templateId
+                        templatePicker.open = true
+                    }
 
-                        height: 61
-                        width: 352
+                    // THE SHARED TEMPLATE COMPONENT — Scripture/The Table's
+                    // right column (ReferencePane's previewCol), rebuilt for
+                    // shows: the SAME 16:9 preview tile over the SAME Template
+                    // row (label in the red accent, name in DemiBold, and the
+                    // three icon actions: clear ✕, pick ⧉, edit ✎). The
+                    // preview renders the category's template the way
+                    // ReferencePane's renders the picked verses' slide.
+                    readonly property var previewDesign: {
+                        if (templateId === "") return null
+                        try { return TemplateLibraryService.design(templateId) } catch (e) { return null }
+                    }
+                    readonly property bool hasPreviewBlocks: previewDesign !== null
+                                                             && previewDesign.blocks !== undefined
+                                                             && previewDesign.blocks.length > 0
 
-                        color: "transparent"
+                    Flickable {
+                        id: previewFlick
+                        anchors.top: parent.top; anchors.bottom: parent.bottom
+                        anchors.left: parent.left; anchors.right: parent.right
+                        // Reserve the scrollbar's strip so the toggles never sit
+                        // under it (ReferencePane's exact pattern).
+                        anchors.rightMargin: optionsScrollBar.visible ? 9 : 0
+                        contentWidth: width
+                        contentHeight: previewContent.height
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
 
-                        Rectangle {
-                            id: new_show_btn
+                        Column {
+                            id: previewContent
+                            width: previewFlick.width
 
-                            objectName: "selfTestNewShowBtn"   // UI self-test hover target
+                            // ---- the template's slide preview: fixed size, driven by width alone
+                            // (ReferencePane's previewTile: never squeezed, the column scrolls instead) ----
+                            Item {
+                                width: parent.width
+                                height: previewTile.height + 28
 
-                            x: 86
+                                Rectangle {
+                                    id: previewTile
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    y: 20
+                                    width: parent.width - 32
+                                    height: Math.round(width * 428 / 754)   // the 16:9-ish design ratio, purely from width
+                                    color: "#000000"
+                                    clip: true
 
-                            height: 36
-                            width: 180
-
-                            // Hover/press must READ as a reaction — the old
-                            // #7d6df0 tint was a ~7% lighten, imperceptible.
-                            color: newShowMouse.pressed ? "#5b4bd1"
-                                 : (newShowMouse.containsMouse ? "#8d7cf3" : "#6c5ce7")
-                            radius: 100
-                            Behavior on color { ColorAnimation { duration: 100 } }
-
-                            // LIVE: resets the deck to a fresh slide (see
-                            // newShowRequested at the top of this file).
-                            MouseArea {
-                                id: newShowMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: vGRPresenter_Main_Screen.newShowRequested()
-                            }                            // CENTERED CONTENT ROW, OPTICALLY MATCHED: the
-                            // drawn + is sized to the text's cap height (a font
-                            // "+" glyph or an undersized cross reads as a speck
-                            // beside bold text — the misalignment report) and
-                            // the pair sits as one centered Row.
-                            Row {
-                                anchors.centerIn: parent
-                                spacing: 7
-
-                                PlusGlyph {
-                                    id: plus_1
-
-                                    anchors.verticalCenter: parent.verticalCenter
-
-                                    // Cap-band alignment, natural line box: the label has
-                                    // no clipped height, so its ~20px Segoe UI box centers on
-                                    // the Row and the CAP glyphs' center lands ~1px BELOW that
-                                    // (ascent-heavy font). +1 puts the cross on the cap band —
-                                    // the same calibration as the dock pill's cross.
-                                    anchors.verticalCenterOffset: 1
-
-                                    size: 12; thickness: 2; color: "#ffffff"
+                                    DesignPreview {
+                                        anchors.fill: parent
+                                        visible: shows_template_sidebar.hasPreviewBlocks
+                                        blocks: shows_template_sidebar.hasPreviewBlocks ? shows_template_sidebar.previewDesign.blocks : []
+                                        background: shows_template_sidebar.hasPreviewBlocks
+                                                    && shows_template_sidebar.previewDesign.background !== undefined
+                                                    ? shows_template_sidebar.previewDesign.background : "#000000"
+                                    }
+                                    Text {
+                                        visible: !shows_template_sidebar.hasPreviewBlocks
+                                        anchors.centerIn: parent
+                                        text: shows_template_sidebar.categoryName === ""
+                                              ? qsTr("No default template")
+                                              : qsTr("No template for %1").arg(shows_template_sidebar.categoryName)
+                                        color: Theme.textMuted
+                                        font.family: "Segoe UI"; font.pixelSize: 14
+                                    }
                                 }
+                            }
+
+                            // ---- the template controls — ReferencePane's exact row ----
+                            Column {
+                                visible: !shows_template_sidebar.optionsOpen
+                                x: 16; width: parent.width - 32
+                                spacing: 10
+
+                                Rectangle {
+                                    width: parent.width; height: 56; radius: 6
+                                    color: Theme.windowBg; border.color: Theme.border   // Theme.border
+                                    clip: true
+
+                                    Column {
+                                        x: 12; anchors.verticalCenter: parent.verticalCenter
+                                        spacing: 2
+                                        Text { text: qsTr("Template"); color: Theme.accent; font.family: "Segoe UI"; font.pixelSize: 13 }
+                                        Text {
+                                            width: 150
+                                            text: shows_template_sidebar.templateId === ""
+                                                  ? qsTr("Default — no template")
+                                                  : (shows_template_sidebar.templateName !== "" ? shows_template_sidebar.templateName : qsTr("Missing template"))
+                                            color: shows_template_sidebar.templateId === "" ? Theme.textMuted : Theme.textPrimary
+                                            elide: Text.ElideRight
+                                            font.family: "Segoe UI"; font.pixelSize: 16; font.weight: Font.DemiBold
+                                        }
+                                    }
+
+                                    Row {
+                                        anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                        spacing: 0
+
+                                        // back to no template (only when one is chosen) —
+                                        // for a category this clears ITS pick (it then
+                                        // inherits All's, per the fallback rule); for All
+                                        // it clears the default itself.
+                                        Item {
+                                            visible: shows_template_sidebar.categoryName === ""
+                                                     ? shows_template_sidebar.templateId !== ""
+                                                     : shows_template_sidebar.ownTemplateId !== ""
+                                            width: 36; height: 56
+                                            IconGlyph { anchors.centerIn: parent; name: "close"; color: clearHover.hovered ? Theme.textPrimary : Theme.textSecondary; width: 10; height: 10 }
+                                            HoverHandler { id: clearHover; cursorShape: Qt.PointingHandCursor }
+                                            TapHandler { onTapped: SettingsService.setValue(
+                                                shows_template_sidebar.categoryName === ""
+                                                ? shows_template_sidebar.defaultKey
+                                                : shows_template_sidebar.settingsKey, "") }
+                                        }
+                                        // choose another template (the shared picker popup)
+                                        Item {
+                                            width: 36; height: 56
+                                            IconGlyph { anchors.centerIn: parent; name: "layoutTemplate"; color: pickHover.hovered ? Theme.textPrimary : Theme.textSecondary; width: 14; height: 14 }
+                                            HoverHandler { id: pickHover; cursorShape: Qt.PointingHandCursor }
+                                            TapHandler { onTapped: shows_template_sidebar.openTemplatePicker() }
+                                        }
+                                        // edit it on the Edit screen
+                                        Rectangle {
+                                            width: 46; height: 56; color: editHover.hovered ? Theme.hoverBg : Theme.windowBg
+                                            IconGlyph { anchors.centerIn: parent; name: "penTool"; color: Theme.textPrimary; width: 14; height: 14 }
+                                            HoverHandler { id: editHover; cursorShape: Qt.PointingHandCursor }
+                                            TapHandler {
+                                                onTapped: if (shows_template_sidebar.templateId !== "")
+                                                              vGRPresenter_Main_Screen.designEditRequested("template", shows_template_sidebar.templateId)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // The fallback-rule note — ReferencePane's pattern of
+                                // a caption under the row (there: the old-templates note).
+                                Text {
+                                    width: parent.width
+                                    text: shows_template_sidebar.categoryName === ""
+                                          ? qsTr("The default — every category without its own pick uses this one.")
+                                          : (shows_template_sidebar.inherited
+                                             ? qsTr("Inherited from All — choose one to give \"%1\" its own.").arg(shows_template_sidebar.categoryName)
+                                             : qsTr("\"%1\"'s own template.").arg(shows_template_sidebar.categoryName))
+                                    color: Theme.textMuted
+                                    font.family: "Segoe UI"; font.pixelSize: 12
+                                    wrapMode: Text.Wrap
+                                }
+                            }
+
+                            // ---- the slide options (the round tune button turns this on) —
+                            // ReferencePane's OptionToggle/OptionNumber rows verbatim, over the
+                            // shows.* keys ("Line numbers", "Divide long lines", "Max lines").
+                            // The engine consumes the scripture/table keys today; the shows
+                            // builder reads the same shape when it lands.
+                            component ShowsOptionToggle: Item {
+                                id: opt
+                                property string settingKey: ""
+                                width: parent.width; height: 40
+                                readonly property var def: SettingsService.definitions[opt.settingKey]
+                                Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.borderSubtle }
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: opt.def ? opt.def.label : ""
+                                    color: Theme.textPrimary   // Theme.textPrimary
+                                    font.family: "Segoe UI"; font.pixelSize: 14
+                                }
+                                SettingsToggle {
+                                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                    checked: SettingsService.values[opt.settingKey] === true
+                                    onToggled: SettingsService.setValue(opt.settingKey, !(SettingsService.values[opt.settingKey] === true))
+                                }
+                            }
+                            component ShowsOptionNumber: Item {
+                                id: num
+                                property string settingKey: ""
+                                property int step: 1
+                                width: parent.width; height: 40
+                                readonly property var def: SettingsService.definitions[num.settingKey]
+                                Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.borderSubtle }
+                                function nudge(delta) {
+                                    const next = Math.max(num.def.min, Math.min(num.def.max, Number(SettingsService.values[num.settingKey]) + delta))
+                                    if (next !== SettingsService.values[num.settingKey])
+                                        SettingsService.setValue(num.settingKey, next)
+                                }
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: num.def ? num.def.label : ""
+                                    color: Theme.textPrimary
+                                    font.family: "Segoe UI"; font.pixelSize: 14
+                                }
+                                Row {
+                                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                    spacing: 6
+                                    Rectangle {
+                                        width: 24; height: 24; radius: 6; color: minusHover.hovered ? Theme.hoverBg : Theme.rowBg; border.color: Theme.border
+                                        Text { anchors.centerIn: parent; text: "\u2212"; color: Theme.textPrimary; font.pixelSize: 15 }
+                                        HoverHandler { id: minusHover; cursorShape: Qt.PointingHandCursor }
+                                        TapHandler { onTapped: num.nudge(-num.step) }
+                                    }
+                                    Text {
+                                        width: 40; horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter
+                                        text: SettingsService.values[num.settingKey] ?? ""
+                                        color: Theme.textPrimary
+                                        font.family: "Segoe UI"; font.pixelSize: 14
+                                    }
+                                    Rectangle {
+                                        width: 24; height: 24; radius: 6; color: plusHover.hovered ? Theme.hoverBg : Theme.rowBg; border.color: Theme.border
+                                        Text { anchors.centerIn: parent; text: "+"; color: Theme.textPrimary; font.pixelSize: 15 }
+                                        HoverHandler { id: plusHover; cursorShape: Qt.PointingHandCursor }
+                                        TapHandler { onTapped: num.nudge(num.step) }
+                                    }
+                                }
+                            }
+
+                            // The boxed options — ReferencePane's exact chrome:
+                            // the SLIDE OPTIONS caption, then ONE rounded box
+                            // (Theme.windowBg, Theme.border, r=8) holding every row.
+                            Column {
+                                visible: shows_template_sidebar.optionsOpen
+                                x: 16; width: parent.width - 32
+                                spacing: 0
 
                                 Text {
-                                    id: new_show_2
-
-                                    anchors.verticalCenter: parent.verticalCenter
-
-                                    // No hard height: a 15px Segoe UI line box is
-                                    // ~20px tall, and clipping it to 16 with the
-                                    // default top alignment shoved the glyph mass
-                                    // ~3px below the Row's center line — the real
-                                    // source of the remaining misalignment.
-
-                                    color: "#ffffff"
-                                    font.family: "Segoe UI"
-                                    font.pixelSize: 15
-                                    font.weight: Font.Bold
-                                    text: qsTr("New show")
-                                    textFormat: Text.PlainText
+                                    x: 6; height: 26; verticalAlignment: Text.AlignVCenter
+                                    text: qsTr("SLIDE OPTIONS")
+                                    color: Theme.textMuted
+                                    font.family: "Segoe UI"; font.pixelSize: 12; font.weight: Font.DemiBold; font.letterSpacing: 1.2
                                 }
-                            }
-                        }
-                        Text {
-                            id: autosaved_2_mins_ago
+                                Rectangle {
+                                    width: parent.width; height: showsOptionsColumn.height + 8
+                                    radius: 8; color: Theme.windowBg; border.color: Theme.border   // Theme.border
 
-                            x: 118.50
-                            y: 48
+                                    Column {
+                                        id: showsOptionsColumn
+                                        x: 14; y: 4; width: parent.width - 28
+                                        spacing: 0
 
-                            height: 13
-                            width: 116
-
-                            color: "#5c6475"
-                            font.family: "Segoe UI"
-                            font.pixelSize: 13
-                            font.weight: Font.Normal
-                            horizontalAlignment: Text.AlignHCenter
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                            // KERNEL-DRIVEN: real project.saved relay events with a
-                            // live "n ago" ticker, not the export's frozen string.
-                            property real lastSaveTs: 0
-                            function relabel() {
-                                if (lastSaveTs <= 0) {
-                                    text = qsTr("Not saved yet")
-                                    return
-                                }
-                                const mins = Math.max(0, Math.floor((Date.now() - lastSaveTs) / 60000))
-                                text = mins === 0 ? qsTr("Autosaved just now")
-                                     : qsTr("Autosaved %1 min%2 ago").arg(mins).arg(mins === 1 ? "" : "s")
-                            }
-                            Timer {
-                                interval: 30000
-                                running: parent.lastSaveTs > 0
-                                repeat: true
-                                triggeredOnStart: true
-                                onTriggered: parent.relabel()
-                            }
-                            Component.onCompleted: {
-                                const recent = EngineBridge.recentEngineEvents(200)
-                                for (let i = recent.length - 1; i >= 0; --i)
-                                    if (recent[i].topic === "project.saved") {
-                                        lastSaveTs = recent[i].ts
-                                        break
+                                        ShowsOptionToggle { settingKey: "shows.verseNumbers" }
+                                        ShowsOptionToggle { settingKey: "shows.versesOnIndividualLines" }
+                                        ShowsOptionToggle { settingKey: "shows.splitLongVerses" }
+                                        Column {
+                                            visible: SettingsService.values["shows.splitLongVerses"] === true
+                                            width: parent.width
+                                            ShowsOptionToggle { settingKey: "shows.splitLongVersesSuffix" }
+                                            ShowsOptionNumber { settingKey: "shows.longVersesChars"; step: 10 }
+                                            ShowsOptionNumber { settingKey: "shows.longVersesTolerance"; step: 5 }
+                                        }
+                                        ShowsOptionToggle { settingKey: "shows.smartSplit" }
+                                        ShowsOptionNumber { settingKey: "shows.versesPerSlide" }
                                     }
-                                relabel()
+                                }
                             }
-                        }
-                        Connections {
-                            target: EngineBridge
-                            function onEngineEvent(topic, payload) {
-                                if (topic === "project.saved" && payload) {
-                                    autosaved_2_mins_ago.lastSaveTs = Date.now()
-                                    autosaved_2_mins_ago.relabel()
+
+                            // ---- the footer: the round tune button (ReferencePane's, minus
+                            // Convert-to-show — the shows sidebar has no picked content to
+                            // convert; its template applies to shows created in the category) ----
+                            Item {
+                                x: 16; width: parent.width - 32; height: 48 + 12
+
+                                Item {
+                                    id: optionsButton
+                                    anchors.right: parent.right; y: 0
+                                    width: 48; height: 48
+                                    Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 3; width: parent.width + 6; height: width; radius: width / 2; color: "#26000000" }
+                                    Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 2; width: parent.width + 2; height: width; radius: width / 2; color: "#33000000" }
+                                    Rectangle {
+                                        anchors.fill: parent; radius: width / 2
+                                        gradient: Gradient {
+                                            GradientStop { position: 0.0; color: shows_template_sidebar.optionsOpen ? (optionsHover.hovered ? Theme.accentLight : Theme.accent) : (optionsHover.hovered ? Theme.hoverBg : Theme.rowBg) }
+                                            GradientStop { position: 1.0; color: shows_template_sidebar.optionsOpen ? Qt.darker(Theme.accent, 1.2) : Theme.rowBg }
+                                        }
+                                        border.width: 1
+                                        border.color: shows_template_sidebar.optionsOpen ? Theme.dangerLight : Theme.borderSubtle
+                                        IconGlyph { anchors.centerIn: parent; name: "sliders"; color: shows_template_sidebar.optionsOpen ? "#ffffff" : Theme.textPrimary; fit: true; width: 22; height: 22 }
+                                    }
+                                    HoverHandler { id: optionsHover; cursorShape: Qt.PointingHandCursor }
+                                    TapHandler { onTapped: shows_template_sidebar.optionsOpen = !shows_template_sidebar.optionsOpen }
                                 }
                             }
                         }
+                    }
+
+                    // The shared scrollbar — ReferencePane's previewScrollBar over
+                    // the same-shaped Flickable.
+                    AppScrollBar {
+                        id: optionsScrollBar
+                        flickable: previewFlick
+                        anchors.top: parent.top; anchors.bottom: parent.bottom; anchors.right: parent.right
+                        anchors.topMargin: 4; anchors.bottomMargin: 4; anchors.rightMargin: 3
+                    }
+
+                    // The chooser — same popup Scripture's template row opens, fed
+                    // the whole catalog. Applied picks persist to THIS category's
+                    // settings key; Reset clears back to "no template".
+                    TemplatePickerModal {
+                        id: templatePicker
+                        z: 30000
+                        contentType: "shows"
+                        contentTypeLabel: qsTr("All")
+                        onApplied: (tpl) => {
+                            templatePicker.open = false
+                            SettingsService.setValue(shows_template_sidebar.settingsKey, tpl.key)
+                        }
+                        onCancelled: templatePicker.open = false
                     }
                 }
             }
@@ -1963,9 +1988,9 @@ Rectangle {
             height: workspace_body.topHeight
             width: 400
 
-            border.color: "#232530"
+            border.color: Theme.border
             border.width: 1
-            color: "#12131a"            // ---- Monitor wall — the shared MonitorWall component
+            color: Theme.panelBg            // ---- Monitor wall — the shared MonitorWall component
             // (qml/components/MonitorWall.qml), driven by OutputListModel.
             // The old preview_Main_Output / preview_Stage_Screen /
             // preview_Nursery_Display / preview_Stream_Overlay blocks were
@@ -2000,18 +2025,11 @@ Rectangle {
                 y: monitorWall.y + monitorWall.height + (monitorWall.pageCount > 1 ? 22 : 11)
                 width: parent.width
                 height: 1
-                color: "#232530"   // Theme.border
+                color: Theme.border   // Theme.border
             }
 
-            // Restored: the live clock panel my earlier static-tile cleanup
-            // removed along with the preview blocks (it sat directly below
-            // them in the original column). The time/date are now driven by
-            // the shared LiveClock ticker instead of the Figma-export's
-            // frozen "11:50:47" strings.
-            LiveClock {
-                id: showClockTicker
-            }
         }
+
 
         // ---- Divider between the top region and the library dock: drag to resize, double-click
         // for the default (the same SplitHandle every sidebar uses).

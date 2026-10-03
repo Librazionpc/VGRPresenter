@@ -99,9 +99,17 @@ public:
     explicit StyleListModel(QObject *parent = nullptr);
     ~StyleListModel() override;
 
-    // OutputListModel resolves style names through this; QML_SINGLETON gives
-    // us exactly one engine-owned instance, so remember it here.
-    static StyleListModel *instance() { return s_instance; }
+    // OutputListModel resolves style names through this.
+    //
+    // EAGER, not lazy (fixed 2026-10-01). These model singletons used to be
+    // instantiated by QML itself, on first property access — so a C++ reader
+    // that ran before any QML binding touched the type got a null and
+    // silently did nothing (the monitor tile showed the transparency
+    // checkerboard because the output's style resolved as "no style").
+    // create() below hands QML the same static instance C++ uses, so the
+    // two can never disagree about whether it exists.
+    static StyleListModel *instance();
+    static StyleListModel *create(QQmlEngine *engine, QJSEngine *jsEngine);
 
     int rowCount(const QModelIndex &parent = QModelIndex()) const override;
     QVariant data(const QModelIndex &index, int role) const override;

@@ -8,10 +8,27 @@
 #include "modules/production/ProductionTypes.hpp"
 
 #include <QJsonArray>
+#include <QJSEngine>
 #include <QJsonDocument>
 #include <QJsonObject>
 
 #include <algorithm>
+
+// The one instance, for C++ AND QML — see the header for why this is eager.
+AudioInputListModel *AudioInputListModel::Instance()
+{
+    static AudioInputListModel s;
+    return &s;
+}
+
+AudioInputListModel *AudioInputListModel::create(QQmlEngine *engine, QJSEngine *jsEngine)
+{
+    Q_UNUSED(engine)
+    Q_UNUSED(jsEngine)
+    AudioInputListModel *s = Instance();
+    QJSEngine::setObjectOwnership(s, QJSEngine::CppOwnership);
+    return s;
+}
 
 static QVariantList routingVariant(const QList<QList<int>> &routes)
 {
@@ -57,6 +74,10 @@ static QVariantMap effectToVariant(const AudioEffect &effect)
 AudioInputListModel::AudioInputListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
+    Q_ASSERT_X(!s_instance || s_instance == this, "AudioInputListModel",
+               "a second AudioInputListModel was constructed — Instance() "
+               "would silently rebind and every C++ reader would hold the "
+               "wrong one");
     s_instance = this;
     // Starts EMPTY: the board shows the machine's real audio devices (via
     // EngineBridge.audioDevices), not a hardcoded demo roster — every source

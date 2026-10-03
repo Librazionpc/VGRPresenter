@@ -15,6 +15,9 @@ import VGRPresenterUI
 // Literal colours, not Theme.* (a modal opened from the window root, like the other modal cards).
 Item {
     id: root
+    // Shared top-level modal layer: keep the scrim and card above the page
+    // so clicks and hover never reach the controls behind the dialog.
+    z: 30000
 
     property bool open: false
     signal closed()

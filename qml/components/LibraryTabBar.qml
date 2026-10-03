@@ -16,14 +16,21 @@ Rectangle {
     // Scripture selected; the app opens on the shows library).
     property int currentTab: 0
     readonly property var tabs: [
-        { label: "Shows",     icon: "play",            pane: "shows" },
-        { label: "Media",     icon: "layoutDashboard", pane: "media" },
-        { label: "Overlays",  icon: "layers",          pane: "overlays" },
-        { label: "Templates", icon: "layoutTemplate",  pane: "templates" },
-        { label: "Scripture", icon: "bookOpen",        pane: "scripture" },
-        { label: "The Table", icon: "bookOpen",        pane: "table" },
-        { label: "Calendar",  icon: "calendar",        pane: "soon" },
-        { label: "Functions", icon: "wrench",          pane: "functions" }
+        // Shows / Media / Templates / Scripture / The Table / Calendar carry the
+        // app's own icon assets (IconGlyph "shows" / "media" / "overlay" /
+        // "template" / "bible" / "book" / "calendar", from qml/assets/shows
+        // icon.svg, media icon.svg, overlay.svg, template.svg, bible .svg,
+        // book.svg and calendar-event.svg) instead of the generic play / layout
+        // / open-book glyphs they used to borrow. Overlays was the last tab
+        // still wearing the shared hand-sized "layers" glyph.
+        { label: "Shows",     icon: "shows",    pane: "shows" },
+        { label: "Media",     icon: "media",    pane: "media" },
+        { label: "Overlays",  icon: "overlay",  pane: "overlays" },
+        { label: "Templates", icon: "template", pane: "templates" },
+        { label: "Scripture", icon: "bible",    pane: "scripture" },
+        { label: "The Table", icon: "book",     pane: "table" },
+        { label: "Calendar",  icon: "calendar", pane: "soon" },
+        { label: "Functions", icon: "wrench",   pane: "functions" }
     ]
     // Pane key of the current tab (\"shows\" | \"media\" | \"overlays\" |
     // \"scripture\" | \"table\" | \"functions\" | \"soon\") — the host's
@@ -151,32 +158,48 @@ Rectangle {
                 objectName: "selfTestTab_" + modelData.pane
 
                 height: 31
-                // 12 left | icon 13 | 6 gap | label | 13 right
-                width: tabLabel.implicitWidth + 44
+                // 12 left | icon 15 | 7 gap | label | 13 right
+                width: tabLabel.implicitWidth + 47
                 topLeftRadius: 6
                 topRightRadius: 6
                 // Hover from pointer position (PositionHoverArea): a MouseArea's containsMouse never clears in this
                 // build, which left tabs you had merely passed over lit.
-                color: tabHover.hovered && !selected ? "#1a1b23" : "transparent"
+                // Selected tabs wear the app's active-pill wash (Theme.activeBg
+                // — the user call: selection must read at a glance, same
+                // treatment as the sidebar's selected row); the underline +
+                // accent icon stay. Hover keeps a fainter lift.
+                color: selected ? Theme.activeBg : (tabHover.hovered ? Theme.hoverBg : "transparent")
+                Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
 
+                // Every tab icon is the SAME 15px box and the same optical
+                // weight (user call: the row read as mixed sizes). Two things
+                // used to break that: `layers` and `calendar` are hand-sized
+                // glyphs (10 and 9x10 of natural ink) which `fit` cannot scale -
+                // it fits the Lucide 24 grid to the box, and those two are not
+                // drawn on that grid - so they stayed at their natural size
+                // while the rest grew; and they drew with the IconGlyph default
+                // 1.5px stroke, where a 24-grid glyph's 2 units come out as
+                // 2 * 15/24 = 1.25px at this box, so they read heavier as well.
+                // 1.25 here matches their weight, and 15 puts the row a step up.
                 IconGlyph {
                     name: tabDelegate.modelData.icon
-                    color: tabDelegate.selected ? "#ff4d3d" : "#8a94a6"
+                    color: tabDelegate.selected ? Theme.accent : Theme.textSecondary
                     x: 12
                     anchors.verticalCenter: parent.verticalCenter
                     fit: true
-                    width: 13; height: 13
+                    strokeWidth: 1.25
+                    width: 15; height: 15
                 }
                 Text {
                     id: tabLabel
 
-                    x: 31
+                    x: 34
                     anchors.verticalCenter: parent.verticalCenter
 
                     // Heavier and lighter-on-dark than before: the tabs read as faint.
-                    color: tabDelegate.selected ? "#f1f5f9" : "#b4bccb"
+                    color: tabDelegate.selected ? Theme.textPrimary : Theme.iconChrome
                     font.family: "Segoe UI"
-                    font.pixelSize: 14
+                    font.pixelSize: 15
                     font.weight: tabDelegate.selected ? Font.Bold : Font.DemiBold
                     horizontalAlignment: Text.AlignLeft
                     text: tabDelegate.modelData.label
@@ -196,7 +219,7 @@ Rectangle {
                     anchors.bottomMargin: -4
                     height: 2
                     radius: 1
-                    color: "#ff4d3d"
+                    color: Theme.accent
                 }
                 PositionHoverArea {
                     id: tabHover

@@ -135,6 +135,10 @@ MediaLibrary::MediaLibrary(std::string storageFile) : storageFile_(std::move(sto
 }
 
 std::string MediaLibrary::Canonical(std::string_view path) const {
+    // An empty query matches nothing. Without this guard the fallback below
+    // would compare Norm("") against every stored folder — and any folder
+    // whose normalised form is also empty would be returned as a match.
+    if (path.empty()) return {};
     auto absolute = platform::PlatformAccessor::Get().Filesystem().Absolute(path);
     const std::string key = Norm(absolute.ok() ? absolute.value() : std::string(path));
     for (const std::string& f : order_)
@@ -293,6 +297,11 @@ std::vector<LibraryFolder> MediaLibrary::Folders() const {
 }
 
 Result<size_t> MediaLibrary::Scan(std::string_view path) {
+    // Empty path: Canonical() answers {} for it, which the check below
+    // reports as "not in the library". Stated explicitly so the intent is
+    // readable — an empty folder name is not a library folder.
+    if (path.empty())
+        return Error::Make(Err::NotFound, kModule, "that folder is not in the library");
     std::string folder;
     {
         std::lock_guard<std::mutex> lock(mutex_);

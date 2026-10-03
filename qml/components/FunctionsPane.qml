@@ -132,7 +132,7 @@ Item {
                         color: "#16171e"
                         border.width: root.hasExecution
                                       && String(root.execution.flowId ?? "") === flowCard.modelData.id ? 1 : 0
-                        border.color: "#6c5ce7"
+                        border.color: Theme.accent
 
                         Row {
                             id: flowRow

@@ -111,18 +111,46 @@ Item {
     // period on the way to false — and the click-pin is the deterministic
     // path that doesn't depend on hover timing at all.
     property bool settingsRowHovered: false
+    onSettingsRowHoveredChanged: recomputeSettingsFlyout()
     property bool settingsFlyoutHovered: false
+    onSettingsFlyoutHoveredChanged: recomputeSettingsFlyout()
     // The row item from the last "Settings" hover — lets the click-pin
     // path position the flyout without re-deriving the row's geometry.
     property var lastSettingsRow: null
-    readonly property bool settingsFlyoutOpen: root.openMenu === "logo"
-                                                && (root.settingsPinned
-                                                    || root.settingsRowHovered
-                                                    || root.settingsFlyoutHovered)
+    // Open = GEOMETRY truth, not event truth. The old relay (Settings row
+    // exit → 300 ms grace timer → flyout row enter) could miss the enter —
+    // this build's hover events are exactly what PositionHoverArea exists to
+    // avoid — and the timer then hid the flyout while the cursor sat on
+    // "General" (the reported disappearance).
+    //
+    // This is deliberately NOT a binding. The first version WAS one — a
+    // readonly property reading AppCursor.hovered(logoPanel) and
+    // hovered(settingsFlyout) — and Qt flagged a binding loop on it: the
+    // changed-handler writes settingsFlyoutVisible (→ the flyout's visible,
+    // → its layout) while the binding itself reads that geometry, so the
+    // write could re-enter the read. The imperative form has no re-entrancy:
+    // the value is written once per trigger (flag change, menu change,
+    // pointer move), never during its own read. settingsFlyoutVisible gates
+    // the flyout term so a hidden panel's geometry is never even read.
+    property bool settingsFlyoutOpen: false
+    // Keep-open regions are ONLY the Settings row (its relay flag) and the
+    // flyout itself — the logo PANEL is deliberately NOT one: the cursor
+    // sits over that panel the whole time the logo menu is open (right
+    // after clicking the logo, over "New show", …), so counting it kept
+    // the flyout popped open over the menu without Settings ever being
+    // touched (the reported overlay bug).
+    function recomputeSettingsFlyout() {
+        settingsFlyoutOpen = root.openMenu === "logo"
+            && (root.settingsPinned
+                || root.settingsRowHovered
+                || root.settingsFlyoutHovered
+                || (root.settingsFlyoutVisible && AppCursor.hovered(settingsFlyout)))
+    }
     // Clicking "Settings" pins the flyout open (click again to unpin) —
     // so the section list is selectable at leisure, not in a race against
     // the hover grace timer. Hover still previews it.
     property bool settingsPinned: false
+    onSettingsPinnedChanged: recomputeSettingsFlyout()
 
     property bool settingsFlyoutVisible: false
     onSettingsFlyoutOpenChanged: {
@@ -139,17 +167,29 @@ Item {
     // same invisible-item trap the cursor stack had), so a flag left true
     // here would instantly re-show the flyout — unpositioned — the next
     // time the logo menu opened.
-    onOpenMenuChanged: if (root.openMenu !== "logo") {
-        settingsCloseTimer.stop()
-        root.settingsFlyoutVisible = false
-        root.settingsPinned = false
-        root.settingsRowHovered = false
-        root.settingsFlyoutHovered = false
+    onOpenMenuChanged: {
+        if (root.openMenu !== "logo") {
+            settingsCloseTimer.stop()
+            root.settingsFlyoutVisible = false
+            root.settingsPinned = false
+            root.settingsRowHovered = false
+            root.settingsFlyoutHovered = false
+        }
+        // Re-derive on EVERY menu change, including "logo" opening — the
+        // flags above are only reset when leaving, and opening must start
+        // from a freshly computed (closed) flyout state.
+        root.recomputeSettingsFlyout()
     }
     Timer {
         id: settingsCloseTimer
         interval: 300
         onTriggered: root.settingsFlyoutVisible = false
+    }
+    // Pointer moves re-derive the keep-open state from geometry — the
+    // deterministic path that never depends on enter/exit events.
+    Connections {
+        target: AppCursor
+        function onPointerMoved() { root.recomputeSettingsFlyout() }
     }
 
     // Positions the flyout just to the right of the hovered row, in THIS
@@ -265,12 +305,18 @@ Item {
             Rectangle {
                 anchors.fill: parent
                 anchors.margins: -4
-                // Literals, not Theme.radiusSm / Theme.accent — see logoText below.
-                radius: 6
+                // Radius + accent tint read the Theme singleton now (see
+                // logoText below for why this was literal before).
+                radius: 6 // Theme.radiusSm
                 color: logoButton.isOpen || logoButton.isHover
-                       ? "#1a6c5ce7"
+                       ? Qt.alpha(Theme.accent, 0.1)
                        : "transparent"
-                Behavior on color { ColorAnimation { duration: 100 } }
+                // Soft hover fade — 100 ms read as a snap; 180 ms ease-out
+                // reads as a breathe. Same treatment on the File/Edit/View/
+                // Help pills below.
+                Behavior on color {
+                    ColorAnimation { duration: 180; easing.type: Easing.OutQuad }
+                }
             }
 
             Row {
@@ -278,13 +324,13 @@ Item {
                 height: 23
                 spacing: 0
                 // The brand two-tone, matching the boot splash's lockup: VGR
-                // WHITE (bold) + Presenter GREY — not the old single purple
-                // text. Literals, not Theme.*: at this nesting depth (Main ->
-                // VGRPresenterMainScreen -> AppMenuBar) Qt 6.11.1's AOT
-                // compiler cannot resolve the Theme singleton here.
+                // (primary text) + Presenter (secondary grey) — not the old
+                // single purple wordmark. Both read the Theme singleton, so
+                // the wordmark stays legible when Light turns the header pale
+                // (a hardcoded near-white "VGR" would vanish on it).
                 Text {
                     height: 23
-                    color: "#f2f3f7"
+                    color: Theme.textPrimary
                     font.family: "Bahnschrift"
                     font.letterSpacing: 0.09
                     font.pixelSize: 21
@@ -296,7 +342,7 @@ Item {
                 }
                 Text {
                     height: 23
-                    color: "#8a8fa0"
+                    color: Theme.textSecondary
                     font.family: "Bahnschrift"
                     font.letterSpacing: 0.09
                     font.pixelSize: 21
@@ -351,21 +397,25 @@ Item {
                 Rectangle {
                     anchors.fill: parent
                     anchors.margins: -4
-                    // Literals, not Theme.radiusSm / Theme.textPrimary — see logoText above.
-                    radius: 6
+                    // Radius + the textPrimary hover washes read the Theme
+                    // singleton (see logoText above).
+                    radius: 6 // Theme.radiusSm
                     color: labelRoot.isOpen
-                           ? "#1ae2e8f0"
+                           ? Qt.alpha(Theme.textPrimary, 0.1)
                            : labelRoot.isHover
-                           ? "#0de2e8f0"
+                           ? Qt.alpha(Theme.textPrimary, 0.05)
                            : "transparent"
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    // Same soft fade as the logo pill above.
+                    Behavior on color {
+                        ColorAnimation { duration: 180; easing.type: Easing.OutQuad }
+                    }
                 }
 
                 Text {
                     id: label
                     anchors.verticalCenter: parent.verticalCenter
-                    // Literal, not Theme.textPrimary — see logoText above.
-                    color: "#e2e8f0"
+                    // Reads Theme.textPrimary — see logoText above.
+                    color: Theme.textPrimary
                     font.family: "Segoe UI"
                     font.pixelSize: 14
                     font.weight: Font.Normal
@@ -390,7 +440,15 @@ Item {
     }
 
     DropdownPanel {
-        x: 16; y: 48
+        id: logoPanel
+        // Directly under the logo, FLUSH with its hover pill (the pill is
+        // the control's rect expanded 4px each way, so the panel's top edge
+        // = logo bottom + 4). y was 48 — the OLD single-row header height —
+        // which left a 16 px gap with the screen behind peeking through;
+        // then 36, still a 5 px float above the pill.
+        x: 16
+        y: header_left.y + logoButton.y + logoButton.height + 4
+        fitContentWidth: true
         visible: root.openMenu === "logo"
         headerTitle: "VGRPresenter"
         headerSubtitle: qsTr("v%1").arg(SettingsService.appVersion)
@@ -425,6 +483,7 @@ Item {
     DropdownPanel {
         id: settingsFlyout
         visible: root.settingsFlyoutVisible
+        fitContentWidth: true
         model: root.settingsSubmenuItems
         onItemActivated: (label) => {
             const item = root.settingsSubmenuItems.find((i) => i.label === label)
@@ -442,26 +501,39 @@ Item {
         enabled: root.openMenu === "logo" && root.settingsPinned
         onActivated: root.settingsPinned = false
     }
+    // Each dropdown's left edge sits under its own menu label — bound to
+    // the label's real position, because the old literals (154/186/220/260)
+    // predate the current logo width and landed left of File/Edit/View/Help.
+    // Top edge is FLUSH with that label's hover pill (label bottom + the
+    // pill's 4 px overhang) — zero gap, like a native menu on its item.
     DropdownPanel {
-        x: 154; y: 48
+        x: header_left.x + sys_menu.x + file.x
+        y: header_left.y + sys_menu.y + file.y + file.height + 4
+        fitContentWidth: true
         visible: root.openMenu === "file"
         model: root.fileMenuItems
         onItemActivated: (label) => root.activateItem("file", label)
     }
     DropdownPanel {
-        x: 186; y: 48
+        x: header_left.x + sys_menu.x + edit.x
+        y: header_left.y + sys_menu.y + edit.y + edit.height + 4
+        fitContentWidth: true
         visible: root.openMenu === "edit"
         model: root.editMenuItems
         onItemActivated: (label) => root.activateItem("edit", label)
     }
     DropdownPanel {
-        x: 220; y: 48
+        x: header_left.x + sys_menu.x + view.x
+        y: header_left.y + sys_menu.y + view.y + view.height + 4
+        fitContentWidth: true
         visible: root.openMenu === "view"
         model: root.viewMenuItems
         onItemActivated: (label) => root.activateItem("view", label)
     }
     DropdownPanel {
-        x: 260; y: 48
+        x: header_left.x + sys_menu.x + help.x
+        y: header_left.y + sys_menu.y + help.y + help.height + 4
+        fitContentWidth: true
         visible: root.openMenu === "help"
         model: root.helpMenuItems
         onItemActivated: (label) => root.activateItem("help", label)

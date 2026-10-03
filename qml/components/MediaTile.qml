@@ -77,7 +77,7 @@ Item {
         clip: true
         color: "#16171e"
         border.width: root.onAir ? 2 : (hover.hovered ? 1 : 0)
-        border.color: root.onAir ? "#6c5ce7" : "#4a4d5e"
+        border.color: root.onAir ? Theme.accent : "#4a4d5e"
 
         // ---- preview ----
         Rectangle {
@@ -149,7 +149,7 @@ Item {
                 anchors.bottom: parent.bottom
                 height: 3
                 width: parent.width * (root.frameStep + 1) / Math.max(1, root.steps)
-                color: "#6c5ce7"
+                color: Theme.accent
             }
 
             // Marks a video or an audio file (the picture alone looks like a photo).

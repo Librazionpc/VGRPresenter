@@ -48,7 +48,19 @@ MouseArea {
 
     anchors.fill: parent
     acceptedButtons: Qt.AllButtons
-    hoverEnabled: true
+    // Click-and-wheel ONLY — deliberately NOT hoverEnabled. This catcher
+    // covers the whole window UNDER the open menu, and the window-root
+    // AppCursorCatcher (the app's single pointer-position truth source,
+    // which every PositionHoverArea reads) sits below it. A hoverEnabled
+    // MouseArea is a hover TARGET: hover delivery stops at it, so the
+    // catcher below stops receiving point updates and AppCursor's point
+    // FREEZES the moment a menu opens over the pointer — the dropdown's own
+    // rows then never light (position-truth hover reads a stale point).
+    // This is exactly why AppMenuBar's outsideCatcher is click-only; the
+    // menus that use THIS catcher (the design library's card/category menus,
+    // SelectField dropdowns) were the ones whose rows showed no hover tint.
+    // Presses and wheels do not need hover, so nothing here regresses.
+    hoverEnabled: false
     visible: menu ? menu.visible : false
     enabled: visible
 

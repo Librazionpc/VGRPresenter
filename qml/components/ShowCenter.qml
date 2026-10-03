@@ -31,7 +31,8 @@ Item {
     readonly property color cDarker: "#191923"
     readonly property color cDarkest: "#12121c"
     readonly property color cText: "#f0f0ff"
-    readonly property color cSecondary: "#E64934"
+    // Selection and focus accents follow the user's Appearance setting.
+    readonly property color cSecondary: Theme.accent
     readonly property string mono: "Consolas"
     property bool headerMenuOpen: false
     // the colour of a slide's group (verse, chorus...): the bar under its picture
@@ -296,7 +297,9 @@ Item {
                     height: Math.max(80, lyricText.y + lyricText.implicitHeight + 10)
                     radius: 6
                     color: selected ? "#1a1b23" : (listHover.hovered ? "#15161d" : "#12131a")
-                    border.color: selected ? "#ff4d3d" : "#1d1f2a"
+                    // Purple selection — the app-wide selection accent
+                    // (see cSecondary above).
+                    border.color: selected ? Theme.accent : "#1d1f2a"
                     Rectangle {
                         x: 10; y: 10; width: 106; height: Math.round(width * 428 / 754); color: "#000"; radius: 3; clip: true
                         DesignPreview {
@@ -442,8 +445,8 @@ Item {
                     opacity: root.barOpen ? 1 : 0.65
                     rotation: root.barOpen ? 0 : 180
                     Behavior on rotation { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
-                    Rectangle { x: 4.5 - width / 2; y: 3.4 - height / 2; width: 8; height: 2; radius: 1; color: "#ff4d3d"; rotation: 45 }
-                    Rectangle { x: 4.5 - width / 2; y: 8.6 - height / 2; width: 8; height: 2; radius: 1; color: "#ff4d3d"; rotation: -45 }
+                    Rectangle { x: 4.5 - width / 2; y: 3.4 - height / 2; width: 8; height: 2; radius: 1; color: Theme.accent; rotation: 45 }
+                    Rectangle { x: 4.5 - width / 2; y: 8.6 - height / 2; width: 8; height: 2; radius: 1; color: Theme.accent; rotation: -45 }
                 }
                 HoverHandler { id: chevHover; cursorShape: Qt.PointingHandCursor }
                 TapHandler { onTapped: { root.barOpen = !root.barOpen; if (!root.barOpen) root.zoomOpen = false } }
@@ -457,7 +460,7 @@ Item {
                 objectName: "selfTestBarClock"
                 width: 40; height: parent.height
                 Rectangle { anchors.centerIn: parent; width: 32; height: 32; radius: 16; color: timerHover.hovered || root.timerOpen ? "#22242e" : "transparent" }
-                IconGlyph { anchors.centerIn: parent; name: "clock"; color: root.timerTotal > 0 ? "#ff4d3d" : "#ffffff"; fit: true; width: 16; height: 16 }
+                IconGlyph { anchors.centerIn: parent; name: "clock"; color: root.timerTotal > 0 ? Theme.accent : "#ffffff"; fit: true; width: 16; height: 16 }
                 HoverHandler { id: timerHover; cursorShape: Qt.PointingHandCursor }
                 TapHandler {
                     onTapped: {
@@ -533,8 +536,8 @@ Item {
                             width: parent.width; height: 40; radius: 20
                             readonly property bool usable: root.timerApplied || root.timerSeconds > 0
                             opacity: usable ? 1 : 0.4
-                            color: root.timerApplied ? (applyHover.hovered ? "#22242e" : "transparent") : (applyHover.hovered ? "#a03a30" : "#85261f")
-                            border.color: root.timerApplied ? "#3a3d4c" : "#ff4d3d"
+                            color: root.timerApplied ? (applyHover.hovered ? "#22242e" : "transparent") : (applyHover.hovered ? "#4a3fd1" : "#3f35b5")
+                            border.color: root.timerApplied ? "#3a3d4c" : Theme.accent
                             Row {
                                 anchors.centerIn: parent; spacing: 8
                                 Text { text: root.timerApplied ? qsTr("Reset") : qsTr("To all slides"); color: "#ffffff"; font.family: "Segoe UI"; font.pixelSize: 15; font.weight: Font.DemiBold }
@@ -740,7 +743,7 @@ Item {
                 width: 64; height: 64; radius: 32
                 color: "#b0000000"
                 border.width: 2
-                border.color: "#6c5ce7"
+                border.color: Theme.accent
                 IconGlyph {
                     anchors.centerIn: parent
                     name: "play"
@@ -794,7 +797,7 @@ Item {
                     width: parent.width * seekBar.frac
                     height: 4
                     radius: 2
-                    color: "#6c5ce7"
+                    color: Theme.accent
                 }
                 Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
@@ -892,7 +895,7 @@ Item {
         spacing: 10
         IconGlyph {
             anchors.horizontalCenter: parent.horizontalCenter
-            name: root.type === "audio" ? "music" : root.type === "video" || root.type === "media" ? "play" : root.type === "scripture" ? "bookOpen"
+            name: root.type === "audio" ? "music" : root.type === "video" || root.type === "media" ? "play" : root.type === "scripture" ? "bible"
                 : root.type === "camera" ? "camera" : root.type === "pdf" ? "fileText" : "layoutDashboard"
             color: "#5c6475"; fit: true; width: 40; height: 40
         }

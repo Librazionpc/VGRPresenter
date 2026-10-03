@@ -16,7 +16,7 @@ Item {
     id: root
 
     property Flickable flickable
-    property int trackWidth: 4
+    property int trackWidth: 8
     property color trackColor: "#161823"
     property color thumbColor: "#3a3f4d"
     property int minThumbLength: 24
@@ -24,8 +24,8 @@ Item {
     // (RoutingMatrixModal's sideways matrix). Everything else — fat grip,
     // hover, jump-to-click, drag — behaves identically.
     property bool horizontal: false
-    // Fat invisible hover/drag zone around the thumb: a 4px bar with a 5px
-    // margin is a 14px-wide grab target — mouse-reachable without pixel
+    // Fat invisible hover/drag zone around the thumb: an 8px bar with a 5px
+    // margin is an 18px-wide grab target — mouse-reachable without pixel
     // hunting. The VISIBLE thumb stays trackWidth; only the hit area grows.
     property int gripMargin: 5
     // True (default): a track click JUMPS so the thumb centers on the click.

@@ -32,6 +32,9 @@ void HardwareProfiler::Refresh() {
     info_.onBattery = snap.onBattery;
     info_.batteryPercent = snap.batteryPercent;
     info_.hasBattery = snap.batteryPercent >= 0;
+    // Package temperature, where the backend exposes one (Windows PDH thermal
+    // zones). -1 keeps "not exposed", which is what a desktop/server is.
+    info_.thermalCelsius = snap.cpuTempC;
 
     try {
         auto monitors = platform.Monitor().Enumerate();

@@ -16,14 +16,27 @@ import VGRPresenterUI
 // the cap the item list becomes a Flickable with an AppScrollBar, so a long
 // option list (a device picker) scrolls instead of running off-screen.
 //
-// Every color/spacing/font value below is a literal, not a Theme.* reference:
-// this file is instantiated from AppMenuBar.qml, itself nested two documents
-// deep (Main -> VGRPresenterMainScreen -> AppMenuBar -> DropdownPanel). At
-// that depth Qt 6.11.1's AOT compiler cannot resolve the Theme singleton at
-// all — every property bound to it here logged "Unable to assign [undefined]"
-// and rendered wrong permanently (confirmed, not just a transient warning).
-// Each literal below is commented with the Theme token it must stay in sync
-// with if that token's value ever changes.
+// WINDOW-RESPONSIVE: the cap is only an UPPER bound — the panel also fits
+// itself to the room it actually has. `openAt` measures the `bounds` rect
+// (the window, or the dialog a field lives in) around the anchor and
+// subtracts the space above the anchor's TOP edge, and additionally caps at the
+// caller's own `maxHeight`. A menu opened from a row near the window's bottom
+// used to size to content, land mostly off-screen, and clamp its own y so its
+// top hid under the anchor; now it shrinks and SCROLLS instead. Every
+// maxHeight: 0 consumer (menu bar, SelectField, …) gets this for free.
+//
+// FLYOUT (`openBeside`): a second open mode for a row that owns a long list
+// — the panel opens beside the row (right, or left when there is no room)
+// with the same fit-and-scroll behavior, and closes with its parent. Used by
+// the design library's "Move to …" row so a library with many categories
+// scrolls in a submenu instead of growing the parent menu past the window.
+//
+// Colors read the Theme singleton (panel/row ground, borders, text tones), so
+// a Light choice recolours every menu and dropdown with the app. This file
+// carried literal hex for a while because Theme resolved to undefined at the
+// time — the real cause was Theme being registered as an ORDINARY type rather
+// than a singleton, so `Theme.*` was undefined (fixed via
+// QT_QML_SINGLETON_TYPE in CMakeLists.txt), not any nesting/AOT limit.
 Rectangle {
     id: root
 
@@ -31,8 +44,25 @@ Rectangle {
     property string headerTitle: ""
     property string headerSubtitle: ""
     // 0 = size to content; a positive value caps the height and turns the
-    // item list into a scrollable Flickable (see header comment).
+    // item list into a scrollable Flickable (see header comment). The room
+    // the panel was opened into caps it further (effMaxHeight).
     property int maxHeight: 0
+
+    // ---- measured open geometry (see _reposition) ---------------------------
+    // The rect the panel was opened into (the window, or a dialog a field
+    // lives in) and what the measurement found: the tallest/widest the panel
+    // may draw, and whether it flipped above its anchor.
+    property Item openBounds: null
+    property int roomCap: 0        // 0 = not measured
+    property int widthCap: 0       // 0 = not measured
+    property bool flipUp: false
+    // True for a panel opened as a FLYOUT beside a row rather than at a
+    // point (openBeside) — it aligns to the row and flips to the row's left
+    // instead of the anchor's right when the bounds have no room there.
+    property bool isFlyout: false
+    // Panel padding against the bounds' edges — a menu never touches the
+    // window frame.
+    readonly property int edgePad: 8
 
     signal itemActivated(string label)
 
@@ -54,6 +84,22 @@ Rectangle {
             root.visible = false
     }
 
+    // While open, CLAIM the pointer (AppCursor.blocked): a PositionHoverArea
+    // beneath the panel — a design card, a list row — must not light up as
+    // though the pointer were on it. Hover is derived from pure geometry, so
+    // without this an open menu washed the surface behind it (the card's
+    // border lit and its action row appeared while the pointer was merely on
+    // the menu). The panel's OWN rows are descendants and stay exempt, so the
+    // menu keeps its row hover. Emits blockersChanged so the surfaces it
+    // covers settle at once, even under a stationary pointer.
+    onVisibleChanged: {
+        if (root.visible)
+            AppCursor.pushBlocker(root)
+        else
+            AppCursor.popBlocker(root)
+    }
+    Component.onDestruction: AppCursor.popBlocker(root)
+
     // Scroll the item list by `step` px (clamped) — the catcher calls this
     // for wheels over the anchor control, so a wheel on the open combobox's
     // box scrolls the MENU's options, never the dialog/page behind it.
@@ -67,6 +113,15 @@ Rectangle {
             return
         const maxY = itemFlick.contentHeight - itemFlick.height
         itemFlick.contentY = Math.max(0, Math.min(maxY, itemFlick.contentY - step))
+    }
+
+    // Called by a FLYOUT's parent panel when the parent closes: a submenu
+    // must never outlive the menu that spawned it. (A binding on `visible`
+    // does the same thing; this is the imperative twin for hosts that show
+    // the flyout by a method call.)
+    function closeFlyout() {
+        if (root.visible)
+            root.visible = false
     }
     // Hover in/out of a non-divider row — `rowItem` is the row's own
     // Rectangle, in THIS panel's coordinate space, so a consumer that wants
@@ -107,27 +162,116 @@ Rectangle {
         // transparent/overdrawn garbage and fought the dialog's own
         // scroller. At the root, the panel floats above everything (z is
         // relative to window-level siblings) and nothing clips it.
+        root.isFlyout = false
         root.anchorItem = sourceItem
         root.anchorLocalX = x
         root.anchorLocalY = y
+        root.openBounds = bounds ? bounds : sourceItem.Window.contentItem
         const contentItem = sourceItem.Window.contentItem
         if (contentItem && root.parent !== contentItem)
             root.parent = contentItem
-        root.z = 10000
-        _placeAt(sourceItem.mapToItem(root.parent, x, y),
-                 bounds ? bounds : root.Window.contentItem)
+        root.z = 40000
+        _reposition()
         root.visible = true
+        // The measurement above sizes the panel, but the FIRST pass reads the
+        // width/height it had BEFORE that sizing — so the clamp math (and a
+        // flip-up's y) is one layout late. Re-place once the panel has laid
+        // out, exactly as the old call site used to do by hand.
+        Qt.callLater(function () { if (root.visible) root._reposition() })
     }
 
-    function _placeAt(parentPos, bounds) {
-        if (bounds && root.parent) {
-            const bp = root.parent.mapFromItem(bounds, 0, 0)
-            root.x = Math.max(bp.x, Math.min(parentPos.x, bp.x + bounds.width - root.width))
-            root.y = Math.max(bp.y, Math.min(parentPos.y, bp.y + bounds.height - root.height))
-        } else {
-            root.x = parentPos.x
-            root.y = parentPos.y
+    // Opens this panel as a FLYOUT beside `rowItem` — a row of another,
+    // already-open panel that owns this list (the design library's
+    // "Move to …" row). It sits at the row's right edge, or to its LEFT when
+    // the bounds have no room there, and fits/scrols exactly like openAt. It
+    // is a submenu, not an independent menu: the host binds its `visible` to
+    // the parent panel's, so the pair always comes and goes together.
+    function openBeside(rowItem, bounds) {
+        root.isFlyout = true
+        root.anchorItem = rowItem
+        root.anchorLocalX = 0     // the ROW's own top-left, not a click point
+        root.anchorLocalY = 0
+        root.openBounds = bounds ? bounds : rowItem.Window.contentItem
+        const contentItem = rowItem.Window.contentItem
+        if (contentItem && root.parent !== contentItem)
+            root.parent = contentItem
+        root.z = 40000
+        _reposition()
+        root.visible = true
+        Qt.callLater(function () { if (root.visible) root._reposition() })
+    }
+
+    // Sizes the panel to the room it has and places it at its anchor —
+    // called when it opens and again whenever the anchor moves or the window
+    // resizes (see the resize Connections below). A panel that doesn't fit
+    // below its anchor SCROLLS (the cap turns the list into a Flickable) and
+    // flips ABOVE the anchor when that side has more room, instead of being
+    // clamped into a position where part of it hangs off the window — the
+    // "dropdown isn't window responsive" bug.
+    function _reposition() {
+        const item = root.anchorItem
+        if (!item || !root.parent)
+            return
+        const pad = root.edgePad
+        const pt = item.mapToItem(root.parent, root.anchorLocalX, root.anchorLocalY)
+        let x = pt.x
+        let y = pt.y
+        const b = root.openBounds
+
+        if (!b) {
+            root.roomCap = 0
+            root.widthCap = 0
+            root.flipUp = false
+            root.x = x
+            root.y = y
+            return
         }
+
+        const bp = root.parent.mapFromItem(b, 0, 0)
+        const innerTop = bp.y + pad
+        const innerBottom = bp.y + b.height - pad
+        const innerLeft = bp.x + pad
+        const innerRight = bp.x + b.width - pad
+        const roomBelow = innerBottom - pt.y
+        const roomAbove = pt.y - innerTop
+        // The room the panel may draw in: the roomier side of the anchor. A
+        // menu (a click point for an anchor) flips ABOVE when there is no
+        // usable room below; a flyout (a ROW for an anchor) keeps its top at
+        // the row and shifts up instead, so it still reads as that row's
+        // submenu rather than detaching from it.
+        if (root.isFlyout) {
+            root.flipUp = false
+            root.roomCap = Math.floor(Math.max(roomBelow, roomAbove))
+        } else if (roomBelow < 240 && roomAbove > roomBelow) {
+            root.flipUp = true
+            root.roomCap = Math.floor(roomAbove)
+        } else {
+            root.flipUp = false
+            root.roomCap = Math.floor(roomBelow)
+        }
+        // Never taller/wider than the bounds itself: a window shorter than
+        // the menu's content is exactly the case this exists for.
+        root.roomCap = Math.max(0, Math.min(root.roomCap, Math.floor(b.height - pad * 2)))
+        root.widthCap = Math.max(0, Math.floor(b.width - pad * 2))
+
+        // Horizontal: a flyout prefers the row's right edge and flips to its
+        // left when the bounds have no room there.
+        if (root.isFlyout) {
+            const rowRight = item.mapToItem(root.parent, item.width + 4, 0).x
+            const rowLeft = item.mapToItem(root.parent, 0, 0).x
+            x = (rowRight + root.width <= innerRight) ? rowRight : rowLeft - root.width - 4
+        }
+        x = Math.max(innerLeft, Math.min(x, innerRight - root.width))
+
+        // Vertical.
+        if (root.isFlyout)
+            y = Math.min(pt.y, innerBottom - root.height)
+        else if (root.flipUp)
+            y = pt.y - root.height
+        y = Math.max(innerTop, Math.min(y, innerBottom - root.height))
+
+        root.x = x
+        root.y = y
     }
 
     // Coalesced follow: when the anchor (or an ancestor scroller) moves,
@@ -140,8 +284,7 @@ Rectangle {
         repeat: false
         onTriggered: {
             if (!root.visible || !root.anchorItem) return
-            const p = root.anchorItem.mapToItem(root.parent, root.anchorLocalX, root.anchorLocalY)
-            root._placeAt(p, root.Window.contentItem)
+            root._reposition()
         }
     }
 
@@ -152,19 +295,128 @@ Rectangle {
         function onYChanged() { anchorFollow.restart() }
     }
 
+    // The window resized under an open menu: re-measure and re-place, so a
+    // menu that was inside the old window can't be left hanging over (or
+    // past) the new edge — no menu open, no cost.
+    Connections {
+        enabled: root.visible
+        target: root.Window.contentItem
+        function onWidthChanged() { anchorFollow.restart() }
+        function onHeightChanged() { anchorFollow.restart() }
+    }
+
     // Matches Theme.space4 — see x/y note below.
     readonly property int insetPad: 16
 
-    width: 480
-    height: root.maxHeight > 0
-            ? Math.min(headerCol.height + itemList.height + 16, root.maxHeight)
-            : headerCol.height + itemList.height + 16
+    // Content-fit width (opt-in): the panel hugs its widest row — how a
+    // native menu sizes itself — instead of the fixed 480 slab the menu
+    // bar's dropdowns used to render as (a "Save  Ctrl+S" row floating in
+    // 480 px of mostly empty panel). Off by default, so every existing
+    // consumer keeps 480; the AppMenuBar menus turn it on.
+    property bool fitContentWidth: false
+    // Floor for a fitted panel — narrower than this a menu reads as a chip.
+    property real minFitWidth: 140
+
+    // Invisible measurement twins. The real rows ELIDE to the panel's width,
+    // so the needed width cannot be read off them; these render the same
+    // strings in the same fonts unelided, and fittedWidth reads their
+    // implicitWidths. A model rebuild recreates the Repeater's delegates
+    // (its children list is a binding dependency), so a menu whose contents
+    // change re-fits without anyone remembering to ask.
+    Column {
+        id: sizerCol
+        visible: false
+        width: 0; height: 0
+        Repeater {
+            model: root.model
+            Item {
+                required property var modelData
+                readonly property bool isDivider: modelData === undefined || modelData === null
+                                                  || modelData.divider === true
+                readonly property bool hasTrailing: !isDivider && modelData.trailing !== undefined
+                                                    && modelData.trailing !== ""
+                // What the row needs to show unelided: 16 left pad + label,
+                // then either 16 right pad (no trailing) or the trailing
+                // text + its own right pad + the row's fixed label↔trailing
+                // gap (8 + 26 = 34 from itemC's width formula, +4 slack).
+                readonly property real sizerWidth: isDivider ? 0 : Math.ceil(
+                    labelSizer.implicitWidth
+                    + (hasTrailing ? trailingSizer.implicitWidth + 54 : 32))
+                Text {
+                    id: labelSizer
+                    visible: false
+                    font.family: "Segoe UI" // Theme.fontFamily
+                    font.pixelSize: 15 // Theme.textMd
+                    font.weight: Font.Medium
+                    text: parent.isDivider || parent.modelData.label === undefined
+                          ? "" : parent.modelData.label
+                }
+                Text {
+                    id: trailingSizer
+                    visible: false
+                    font.family: "Segoe UI" // Theme.fontFamily
+                    font.pixelSize: 10 // Theme.textXs
+                    text: parent.hasTrailing ? parent.modelData.trailing : ""
+                }
+            }
+        }
+    }
+    // Header twins — a fitted panel must fit the title/version lines too.
+    Text {
+        id: headerTitleSizer
+        visible: false
+        font.family: "Segoe UI" // Theme.fontFamily
+        font.pixelSize: 15 // Theme.textMd
+        font.weight: Font.Bold
+        text: root.headerTitle
+    }
+    Text {
+        id: headerSubSizer
+        visible: false
+        font.family: "Segoe UI" // Theme.fontFamily
+        font.pixelSize: 10 // Theme.textXs
+        text: root.headerSubtitle
+    }
+    readonly property real fittedWidth: {
+        let w = root.minFitWidth
+        const kids = sizerCol.children
+        for (let i = 0; i < kids.length; ++i)
+            if (kids[i].sizerWidth !== undefined)
+                w = Math.max(w, kids[i].sizerWidth)
+        if (root.headerTitle !== "")
+            w = Math.max(w, 16 + headerTitleSizer.implicitWidth + 16,
+                            16 + headerSubSizer.implicitWidth + 16)
+        return Math.ceil(w)
+    }
+    // The width the contents want, before the window's own limit is applied.
+    readonly property real naturalWidth: fitContentWidth ? fittedWidth : 480
+    width: root.widthCap > 0 ? Math.min(root.naturalWidth, root.widthCap) : root.naturalWidth
+    // What the panel wants to be, and the cap actually in force: the room
+    // `openAt`/`openBeside` measured and the caller's own `maxHeight`,
+    // whichever is smaller. A panel that was never measured (the menu bar's
+    // declaratively-positioned menus) falls back to the window itself, so no
+    // menu can ever be taller than the window it opens in.
+    readonly property real contentHeight: headerCol.height + itemList.height + 16
+    readonly property int effMaxHeight: {
+        let cap = root.roomCap
+        if (root.maxHeight > 0)
+            cap = cap > 0 ? Math.min(cap, root.maxHeight) : root.maxHeight
+        if (cap <= 0) {
+            const w = root.Window.contentItem
+            cap = w ? Math.floor(w.height - root.edgePad * 2) : 0
+        }
+        return cap
+    }
+    height: root.effMaxHeight > 0 ? Math.min(root.contentHeight, root.effMaxHeight)
+                                  : root.contentHeight
     // The viewport the item list scrolls within — everything inside the
-    // panel that isn't the 8px top/bottom padding or the header.
-    readonly property real listViewport: height - 16 - headerCol.height
+    // panel that isn't the 8px top/bottom padding or the header. Floored at
+    // 0: a window so short that the header alone fills the cap must not
+    // produce a negative Flickable height.
+    readonly property real listViewport: Math.max(0, height - 16 - headerCol.height)
     radius: 10 // Theme.radiusLg
-    color: "#16171e" // Theme.rowBg
-    border.color: "#232530" // Theme.border
+    color: Theme.rowBg
+    border.color: Theme.border
     border.width: 1
     clip: true
 
@@ -183,7 +435,7 @@ Rectangle {
                 x: root.insetPad
                 topPadding: 4 // Theme.space1
                 text: root.headerTitle
-                color: "#6C5CE7" // Theme.accent
+                color: Theme.accent
                 font.family: "Segoe UI" // Theme.fontFamily
                 font.pixelSize: 15 // Theme.textMd
                 font.weight: Font.Bold
@@ -192,11 +444,11 @@ Rectangle {
                 x: root.insetPad
                 bottomPadding: 8 // Theme.space2
                 text: root.headerSubtitle
-                color: "#5c6475" // Theme.textMuted
+                color: Theme.textMuted
                 font.family: "Segoe UI" // Theme.fontFamily
                 font.pixelSize: 10 // Theme.textXs
             }
-            Rectangle { width: parent.width; height: 1; color: "#232530" /* Theme.border */ }
+            Rectangle { width: parent.width; height: 1; color: Theme.border }
         }
 
         // The item list — a Flickable whenever maxHeight caps it, so the cap
@@ -205,12 +457,12 @@ Rectangle {
         Flickable {
             id: itemFlick
             width: content.width
-            height: root.maxHeight > 0 ? root.listViewport : itemList.height
+            height: root.effMaxHeight > 0 ? root.listViewport : itemList.height
             contentWidth: width
             contentHeight: itemList.height
             clip: true
             boundsBehavior: Flickable.StopAtBounds
-            interactive: root.maxHeight > 0 && contentHeight > height
+            interactive: root.effMaxHeight > 0 && contentHeight > height
 
             // Contained wheels: wheels over the list scroll THE LIST —
             // anything the list can't take (fits without scrolling, or at
@@ -256,7 +508,7 @@ Rectangle {
                                     anchors.centerIn: parent
                                     width: parent.width - 32 // Theme.space4 * 2
                                     height: 1
-                                    color: "#232530" // Theme.border
+                                    color: Theme.border
                                 }
                             }
                         }
@@ -286,10 +538,15 @@ Rectangle {
                                 // Autocomplete mode draws the keyboard highlight (the row
                                 // Up/Down will accept) under the mouse hover, same wash.
                                 color: alive && !modelData.disabled && (itemArea.hovered || root.highlightedIndex === index)
-                                       ? (modelData.danger ? "#24ff4d3d" /* Theme.danger @ 14% */
-                                                           : "#232530" /* Theme.border */)
+                                       ? (modelData.danger ? Qt.alpha(Theme.danger, 0.14)
+                                                           : Theme.border)
                                        : "transparent"
-                                Behavior on color { ColorAnimation { duration: 100 } }
+                                // Slightly quicker fade than the header pills
+                                // (180 ms there): the cursor sweeps rows fast,
+                                // and a longer wash here smears the trail.
+                                Behavior on color {
+                                    ColorAnimation { duration: 150; easing.type: Easing.OutQuad }
+                                }
 
                                 Text {
                                     id: rowTrailing
@@ -297,7 +554,7 @@ Rectangle {
                                     anchors.rightMargin: 16 // Theme.space4
                                     anchors.verticalCenter: parent.verticalCenter
                                     text: alive ? modelData.trailing || "" : ""
-                                    color: "#5c6475" // Theme.textMuted
+                                    color: Theme.textMuted
                                     font.family: "Segoe UI" // Theme.fontFamily
                                     font.pixelSize: 10 // Theme.textXs
                                 }
@@ -315,9 +572,9 @@ Rectangle {
                                                  : parent.width
                                     elide: Text.ElideRight
                                     text: alive ? modelData.label : ""
-                                    color: alive ? (modelData.disabled ? "#5c6475" /* Theme.textMuted */
-                                        : modelData.danger ? "#ff6b61" /* Theme.dangerLight */ : "#e2e8f0" /* Theme.textPrimary */)
-                                        : "#5c6475" /* Theme.textMuted */
+                                    color: alive ? (modelData.disabled ? Theme.textMuted
+                                        : modelData.danger ? Theme.dangerLight : Theme.textPrimary)
+                                        : Theme.textMuted
                                     font.family: "Segoe UI" // Theme.fontFamily
                                     font.pixelSize: 15 // Theme.textMd
                                     font.weight: Font.Medium

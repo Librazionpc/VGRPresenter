@@ -224,10 +224,21 @@ std::vector<ScriptureSlide> BuildScriptureSlides(const std::vector<ContentBlock>
         for (size_t i = 0; i < parts.size(); ++i) groups.back().push_back(i);
     } else if (settings.smartSplit) {
         const size_t capacity = Capacity(tmpl);
+        // "Max verses/paragraphs" is a HARD CAP in BOTH modes (user rule):
+        // smart split still packs by the template box's character capacity,
+        // but a slide never takes more than `per` pieces — content that
+        // out-grows the max SPLITS into another slide. The max used to be
+        // ignored whenever smart split was on, so setting it looked dead
+        // (the reported gap); the count-only mode below already respected it.
+        const size_t per = static_cast<size_t>(std::max(1, settings.versesPerSlide));
         size_t used = 0;
         for (size_t i = 0; i < parts.size(); ++i) {
             const size_t size = parts[i].text.size() + parts[i].label.size() + 1;
-            if (groups.empty() || (used + size > capacity && !groups.back().empty())) { groups.emplace_back(); used = 0; }
+            if (groups.empty() || (used + size > capacity && !groups.back().empty())
+                || groups.back().size() >= per) {
+                groups.emplace_back();
+                used = 0;
+            }
             groups.back().push_back(i);
             used += size;
         }

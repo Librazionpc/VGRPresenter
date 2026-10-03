@@ -80,6 +80,20 @@ public:
     bool IsLive() const noexcept { return running_.load(); }
     uint64_t FramesSent() const noexcept { return frames_.load(); }
 
+    // --- Idle preview (a show is open but nothing is on air) ---------------
+    // Renders the open show's first slide at a light cadence with
+    // distribute=false, so the engine keeps producing frames while nothing is
+    // on air: the render-path telemetry the Settings meters read stays live
+    // instead of sitting at zero, and nothing is ever sent to an output. The
+    // LIVE loop's state is untouched — this is its own worker, its own flag,
+    // and it never binds the runtime — so a preview can neither put anything
+    // on air nor disturb a go-live. Started/stopped by the frontend; the
+    // worker also stops itself a few seconds after the open show disappears.
+    // Idempotent, and safe to call from the GUI thread.
+    Result<void> StartIdlePreview();
+    void StopIdlePreview();
+    bool IsPreviewing() const noexcept { return previewRunning_.load(); }
+
     // Test seam: render one frame now (the loop body's single iteration).
     Result<void> RenderOnce();
 
@@ -107,6 +121,11 @@ private:
     // The shared off-air cleanup both stop paths run (unbind the runtime,
     // clear per-session state). Caller holds lifecycle_.
     Result<void> StopLiveTail();
+    // The idle preview's own loop — see StartIdlePreview. Exits on its own
+    // when the open show has been gone for kPreviewIdleTicks ticks.
+    void PreviewLoop();
+    // Stop the preview worker; callers already hold lifecycle_.
+    void StopIdlePreviewLocked();
     // Re-sync the runtime with the open show's document (1Hz): rebind if the
     // presentation id changed, rebuild scenes if the compiled set changed.
     // Skipped entirely while temp content is on air (StartFromSlides).
@@ -143,6 +162,26 @@ private:
     // 60Hz burned a whole core and dragged the whole app down with it.
     std::string lastRenderedScene_;
     uint64_t lastStyleRevision_ = 0;
+    // LIGHT HEARTBEAT: the wall-clock moment of the last real raster. An
+    // otherwise-static on-air scene would stop producing frames entirely — and
+    // with them the render-path telemetry the Settings meters read (and the
+    // frame-budget accounting). At most one extra frame per kHeartbeatMs keeps
+    // those numbers honest without the 60Hz core burn change-driven rendering
+    // removed.
+    std::chrono::steady_clock::time_point lastRaster_{};
+    static constexpr int kHeartbeatMs = 1000;
+
+    // IDLE PREVIEW: its own worker + flag, kept out of the live path's state
+    // on purpose (see StartIdlePreview). One frame a second — the same light
+    // cadence as the live heartbeat; a 60Hz idle re-raster is exactly the core
+    // burn the live loop's change-skip exists to prevent.
+    std::atomic<bool> previewRunning_{false};
+    std::thread previewWorker_;
+    presentation::PresentationEngine* presPreview_ = nullptr;
+    static constexpr int kPreviewIntervalMs = 1000;
+    // How many empty preview ticks in a row (no open show) before the worker
+    // gives its thread back.
+    static constexpr int kPreviewIdleTicks = 3;
 
     // The engine (fetched at Start, held by pointer — it is a Kernel
     // singleton that outlives this controller's worker thread).

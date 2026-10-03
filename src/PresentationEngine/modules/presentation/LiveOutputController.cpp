@@ -8,6 +8,7 @@
 #include "modules/rendering/RenderEngine.hpp"
 #include "modules/rendering/RenderTypes.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <utility>
 
@@ -77,17 +78,20 @@ Result<void> LiveOutputController::Start() {
 
 Result<void> LiveOutputController::Stop() {
     (void)StopLive();
+    StopIdlePreview();
     return Ok();
 }
 
 Result<void> LiveOutputController::Shutdown() {
     (void)StopLive();
+    StopIdlePreview();
     initialized_.store(false);
     return Ok();
 }
 
 Result<void> LiveOutputController::Reset() {
     (void)StopLive();
+    StopIdlePreview();
     frames_.store(0);
     return Ok();
 }
@@ -119,6 +123,10 @@ Result<void> LiveOutputController::StartFromOpenShow() {
     std::lock_guard<std::mutex> lifecycleLock(lifecycle_);
     std::lock_guard<std::mutex> lock(control_);
     if (running_.load()) return Ok();   // already live
+
+    // The live loop owns the pipeline from here on; the idle preview would
+    // only compete with it for the render engine.
+    StopIdlePreviewLocked();
 
     presentation::PresentationEngine& pres = presentation::PresentationEngine::Instance();
     auto doc = pres.Document();
@@ -188,6 +196,8 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
     // Same lifecycle gate as StartFromOpenShow (the fast GO LIVE -> STOP
     // crash) — held for the whole body.
     std::lock_guard<std::mutex> lifecycleLock(lifecycle_);
+    // Live takes priority over the idle preview (see StartFromOpenShow).
+    StopIdlePreviewLocked();
 
     // THE CONTROLLER OWNS THE ON-AIR CONTENT: the runtime binds a raw pointer,
     // so the copy must outlive the run. A stable member keyed by content name;
@@ -496,8 +506,17 @@ Result<void> LiveOutputController::RenderOnce() {
     // for zero visual gain. Playback animations would tick via the style
     // revision/clock below; cues that mutate the scene bump the revision.
     const uint64_t styleRev = pres_->Runtime().StyleRevision();
-    if (sceneId == lastRenderedScene_ && styleRev == lastStyleRevision_)
-        return Ok();
+    if (sceneId == lastRenderedScene_ && styleRev == lastStyleRevision_) {
+        // ...but a LIGHT HEARTBEAT: a fully static scene would otherwise stop
+        // producing frames, so the render-path telemetry the Settings meters
+        // read never advances (they sit at their last value, or at 0 if the
+        // engine has not rasterized once since boot). At most one extra frame
+        // per kHeartbeatMs keeps the numbers honest without the 60Hz re-raster
+        // that starved the GUI thread.
+        if (std::chrono::steady_clock::now() - lastRaster_
+            < std::chrono::milliseconds(kHeartbeatMs))
+            return Ok();
+    }
 
     rendering::RenderOptions opts;
     opts.distribute = true;   // -> every enabled output -> Telemetry output meter
@@ -506,6 +525,9 @@ Result<void> LiveOutputController::RenderOnce() {
         lastRenderedScene_ = sceneId;
         lastStyleRevision_ = styleRev;
     }
+    // Measured from the attempt (not only a success) so a scene that keeps
+    // failing to rasterize is retried on the heartbeat, not every frame.
+    lastRaster_ = std::chrono::steady_clock::now();
 
     // THE OTHER LIVE OUTPUTS: one gated pass per entry of the engine's
     // live-output style set (best-effort — a failure in one pass never
@@ -580,6 +602,74 @@ void LiveOutputController::RenderPerOutputPasses() {
                                 std::chrono::system_clock::now().time_since_epoch()).count();
             (void)fb->Present(f);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Idle preview (a show is open but nothing is on air)
+// ---------------------------------------------------------------------------
+Result<void> LiveOutputController::StartIdlePreview() {
+    if (running_.load()) return Ok();             // on air: the live loop owns it
+    if (previewRunning_.load()) return Ok();      // already previewing
+    std::lock_guard<std::mutex> gate(lifecycle_);
+    if (running_.load() || previewRunning_.load()) return Ok();
+    // Reap a worker that stopped itself (its own "no open show" exit).
+    if (previewWorker_.joinable()) previewWorker_.join();
+    presPreview_ = &presentation::PresentationEngine::Instance();
+    previewRunning_.store(true);
+    previewWorker_ = std::thread([this]() { PreviewLoop(); });
+    return Ok();
+}
+
+void LiveOutputController::StopIdlePreview() {
+    std::lock_guard<std::mutex> gate(lifecycle_);
+    StopIdlePreviewLocked();
+}
+
+void LiveOutputController::StopIdlePreviewLocked() {
+    previewRunning_.store(false);
+    if (previewWorker_.joinable()) previewWorker_.join();
+}
+
+// One frame a second of the open show's first slide, off the live path
+// entirely: nothing is distributed, nothing is read back, and nothing is put
+// on air. The point is the FRAME — RenderEngine publishes RenderFrameRendered
+// for every render, which is the feed the Settings meters read, so the engine
+// no longer reads as idle just because a show is not on air.
+void LiveOutputController::PreviewLoop() {
+    int emptyTicks = 0;
+    while (previewRunning_.load()) {
+        bool rendered = false;
+        if (presPreview_) {
+            auto doc = presPreview_->Document();
+            if (doc && doc->HasDocument()) {
+                const presentation::Presentation show = doc->Snapshot();
+                if (!show.slides.empty()) {
+                    rendering::RenderEngine &engine = rendering::RenderEngine::Instance();
+                    // The builder caches by scene id, so this rebuilds only
+                    // when the slide itself changed.
+                    auto sceneId = presPreview_->Builder().BuildSlideScene(
+                        show, show.slides.front(), engine,
+                        rendering::Size(kFrameBufferWidth, kFrameBufferHeight));
+                    if (sceneId.ok()) {
+                        rendering::RenderOptions opts;
+                        opts.distribute = false;   // nothing goes on air
+                        opts.capture = false;      // no readback: the frame is the point
+                        (void)engine.Render(sceneId.value(), opts);
+                        rendered = true;
+                    }
+                }
+            }
+        }
+        if (rendered) {
+            emptyTicks = 0;
+        } else if (++emptyTicks >= kPreviewIdleTicks) {
+            previewRunning_.store(false);   // no open show: give the thread back
+            break;
+        }
+        // Sleep in short steps so a stop is felt promptly.
+        for (int slept = 0; slept < kPreviewIntervalMs && previewRunning_.load(); slept += 50)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 }
 

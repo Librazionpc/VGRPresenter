@@ -37,7 +37,7 @@ ModalCard {
 
     readonly property var kindInfo: ({
         "bible":    { group: qsTr("Bible"),      badge: qsTr("BIBLE"),    color: "#e0b04a" },
-        "show":     { group: qsTr("Shows"),      badge: qsTr("SHOW"),     color: "#6c5ce7" },
+        "show":     { group: qsTr("Shows"),      badge: qsTr("SHOW"),     color: Theme.accent },
         "slide":    { group: qsTr("Slides"),     badge: qsTr("SLIDE"),    color: "#4aa3e0" },
         "template": { group: qsTr("Templates"),  badge: qsTr("TEMPLATE"), color: "#4ac9a4" },
         "overlay":  { group: qsTr("Overlays"),   badge: qsTr("OVERLAY"),  color: "#c46ce7" },

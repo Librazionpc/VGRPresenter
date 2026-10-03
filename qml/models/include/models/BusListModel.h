@@ -55,10 +55,15 @@ class BusListModel : public QAbstractListModel
     QML_SINGLETON
 
 public:
-    // C++ access to the QML-created singleton (null until QML constructs
-    // it) — the cross-model translation entry points below are only ever
-    // called from routing flows, which run after the screen exists.
-    static BusListModel *Instance() { return s_instance; }
+    // C++ access to the singleton.
+    //
+    // EAGER, not lazy (fixed 2026-10-01) — see AudioInputListModel::Instance()'s
+    // comment. This one matters most in practice: its constructor rebuilds the
+    // bus rows from the production graph while the Audio & Video screen may
+    // never have been opened, and the static bus-number translation below is
+    // reached from other models' construction.
+    static BusListModel *Instance();
+    static BusListModel *create(QQmlEngine *engine, QJSEngine *jsEngine);
 
     // Bus row <-> stable bus number (BusItem::id). rowForBusNumber returns
     // -1 when the bus was removed — callers treat that as "no such route".

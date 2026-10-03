@@ -37,17 +37,25 @@ Rectangle {
 
     height: 30
     radius: 6
-    color: selected ? "#1e1f28" : (rowHover.hovered ? "#16171e" : "transparent")
+    // Same subtle pill ramp as the shows categories sidebar (the first
+    // brighter ramp read too hot against the ground — user call).
+    color: selected ? "#1e2130" : (rowHover.hovered ? "#181a23" : "#14161e")
+    Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
 
     Rectangle {
         visible: root.selected
         x: 0; y: 5; width: 3; height: 20
-        color: Theme.danger; radius: 1.5
+        color: Theme.accent; radius: 1.5
     }
     IconGlyph {
         name: root.icon
-        color: root.selected ? Theme.danger : Theme.textSecondary
+        color: root.selected ? Theme.accent : Theme.textSecondary
         x: 12 + root.inset; y: 8; width: 14; height: 14
+        // `fit` normalises the icon to the 14px box whichever sort it is: the
+        // row's icons mix 24-grid glyphs (camera) with ones migrated onto the
+        // grid (layoutDashboard, layers, folder), which draw at different
+        // natural sizes without it — the "All" row read smaller than "Inputs".
+        fit: true
     }
     Text {
         x: 34 + root.inset

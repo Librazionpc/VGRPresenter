@@ -133,6 +133,16 @@ class LiveOutputService : public QObject {
     Q_PROPERTY(QString ndiSendingOutputName READ ndiSendingOutputName NOTIFY ndiChanged)
     // Frames the sender has pushed (poll-refreshed with the preview feed).
     Q_PROPERTY(qulonglong ndiFramesSent READ ndiFramesSent NOTIFY ndiChanged)
+    // TRUE while an enabled NDI output WANTS feeding but no frame has reached
+    // the wire yet (the first second or two after GO LIVE, once the live loop
+    // is warming up). Lets Settings · Outputs show "warming up" on the row
+    // inline, instead of the misleading "ready (go live to send)" that a
+    // not-yet-sending feed reads as. False the moment frames flow (or when no
+    // NDI row / not live).
+    Q_PROPERTY(bool ndiWarming READ ndiWarming NOTIFY ndiChanged)
+    // The roster name of the row being warmed ("" when not warming) — only
+    // the FIRST enabled NDI output feeds, so the row can gate on its own name.
+    Q_PROPERTY(QString ndiWarmingOutputName READ ndiWarmingOutputName NOTIFY ndiChanged)
 
 public:
     static LiveOutputService *create(QQmlEngine *engine, QJSEngine *jsEngine);
@@ -170,6 +180,8 @@ public:
     bool ndiSending() const;
     QString ndiSendingOutputName() const;
     qulonglong ndiFramesSent() const;
+    bool ndiWarming() const;
+    QString ndiWarmingOutputName() const;
     // The worker's job: sender-create + force-alpha + SDK send. Static; all
     // argument state BY VALUE (the pixels' owned buffer crosses threads).
     // Provider is a raw pointer (the caller resolved it on the GUI thread);
@@ -380,6 +392,10 @@ private:
     QVariantMap stagedSlide_;
 
     QTimer *poll_ = nullptr;   // while live: onAir/frames refresh at 10Hz
+    // Off air: asks the engine to keep previewing the open show (see
+    // LiveOutputController::StartIdlePreview), so the Settings resource meters
+    // stay live with a show open. A no-op while live or before boot.
+    QTimer *previewTimer_ = nullptr;
     std::unique_ptr<LivePreviewProvider> provider_;
 
     // ---- overlays-on-air state ----
@@ -446,6 +462,14 @@ private:
     // (a plain mutex, never held across the send itself).
     bool ndiSending_ = false;
     QString ndiSendingOutput_;   // roster name of the row being fed while sending
+    // See ndiWarming: true between "an NDI row wants feeding" and "first
+    // frame is on the wire". GUI-thread only, but kept under the same lock as
+    // the sending state so the QML readers are uniform.
+    bool ndiWarming_ = false;
+    QString ndiWarmingOutput_;
+    // Update the warming state and notify ONLY on a real change (the send
+    // tick would otherwise emit ndiChanged 30-60x/s for a static value).
+    void setNdiWarming(bool on, const QString &name);
     qulonglong ndiFramesSent_ = 0;   // provider's own counter, worker-refreshed
     // mutable: the const property readers lock it (QML reads from bindings).
     mutable std::mutex ndiStateMutex_;
@@ -494,6 +518,35 @@ private:
     // is wanted but absent (a row enabled mid-live, the blank-roster edge)
     // — the timer's own tick handles cadence sync and shutdown.
     void pollTickRecheckNdi();
+    // ---- Output frame-rate drift watch ---------------------------------------
+    // The NDI feed is the ONE output whose wire rate is meant to track its
+    // configured Refresh rate continuously (the sender re-sends the last frame
+    // every clock tick), so an actual send rate well under the setting is real
+    // drift worth telling the operator about. Measured as frames-sent per
+    // second over a rolling window; a single warning fires only after
+    // back-to-back slow windows ("more than a few seconds") and re-arms once
+    // the rate recovers, so it can never flap. (Screen/HDMI outputs are NOT
+    // watched this way: the live loop is change-driven — a static scene only
+    // re-rasterizes on its 1Hz heartbeat — so its frame count is not the
+    // output's presented rate. NDI is where the configured rate drives a real
+    // stream.) Runs from pollTick while live.
+    void checkNdiFeedRate();
+    QElapsedTimer ndiDriftClock_;    // window timer; invalid = not sampling
+    qulonglong ndiDriftFrames_ = 0;  // last sample of the provider's counter
+    int ndiDriftSlowWindows_ = 0;    // consecutive windows below the setting
+    bool ndiDriftWarned_ = false;    // one warning per slow episode
+    // Coarse tier of the last window's measured rate: -1 unknown, 0 at the
+    // configured rate, 1 at (about) its half — the backpressure halving — and
+    // 2 for anything lower. A transition between them is what the runtime
+    // "rate changed" toast announces.
+    int ndiRateTier_ = -1;
+    // The configured rate the previous window saw. A window whose setting
+    // just moved is rebaselined SILENTLY — the Settings-side refresh toast
+    // already covers a changed rate, so the runtime watcher must not add a
+    // second one for a settings-only change.
+    float ndiLastConfiguredFps_ = 0.0f;
+    static constexpr int kDriftWindowMs = 4000;
+    static constexpr int kDriftWindowsToWarn = 2;
     // The first enabled NDI output's configured Refresh rate ("60 Hz" → 60).
     // A row with an unusable/blank value feeds at the engine's 30 fps
     // default; 0 means NO enabled NDI row (the send clock stops).

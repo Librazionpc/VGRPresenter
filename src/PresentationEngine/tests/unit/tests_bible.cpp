@@ -628,11 +628,16 @@ void TestScriptureSlides() {
     fixed.versesPerSlide = 3;
     auto even = pf::BuildScriptureSlides(tmpl, five, fixed);
     CHECK(even.size() == 2 && even[0].reference == "Genesis 1:1-2" && even[1].reference == "Genesis 1:3-4");
-    // smart split: a small text box holds few verses, a big one all of them
+    // smart split: a small text box holds few verses, a big one all of them —
+    // but the Max setting is a HARD CAP in both modes (a slide that out-grows
+    // it splits), so the default max of 3 splits five verses even in a big box.
     std::vector<pf::ContentBlock> smallBox = { text("{scripture_text}", {}, 60) };
     smallBox[0].width = 400; smallBox[0].height = 200;       // ~13 characters a line, 2 lines
     CHECK(pf::BuildScriptureSlides(smallBox, five, {}).size() > 1);
-    CHECK(pf::BuildScriptureSlides(tmpl, five, {}).size() == 1);
+    auto capped = pf::BuildScriptureSlides(tmpl, five, {});   // big box, default max 3
+    CHECK(capped.size() == 2 && capped[0].reference == "Genesis 1:1-3" && capped[1].reference == "Genesis 1:4-5");
+    pf::ScriptureSettings loose; loose.versesPerSlide = 100;  // max raised out of the way: capacity alone decides
+    CHECK(pf::BuildScriptureSlides(tmpl, five, loose).size() == 1);
 
     // ---- long verses divided ----
     pf::ScriptureSource longOne = src;
