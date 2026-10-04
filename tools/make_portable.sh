@@ -138,6 +138,12 @@ rm -rf "$DIST"
 mkdir -p "$DIST"
 cp "$EXE_SRC" "$DIST/"
 
+# The default style background is referenced by filename so an existing
+# style roster can attach it on a different machine. Ship the image beside
+# the app for the renderer's ExecutableDir()/assets fallback.
+mkdir -p "$DIST/assets"
+cp "$ROOT/assets/VGRPresenter background.png" "$DIST/assets/"
+
 WINDEPLOYQT="$QT_BIN/windeployqt.exe"
 if [ ! -f "$WINDEPLOYQT" ]; then
     echo "windeployqt not found at $WINDEPLOYQT"

@@ -111,7 +111,33 @@ rendering::RgbaImage LoadImageCached(const std::string& path) {
     g_imageCache[path] = rendering::RgbaImage{};   // reserve the key
     rendering::RgbaImage& slot = g_imageCache[path];
 
-    std::ifstream file(path, std::ios::binary);
+    std::string imagePath = path;
+    auto& platform = bps::platform::PlatformAccessor::Get();
+    if (!platform.Filesystem().Exists(imagePath)) {
+        // A stored style can carry the authoring machine's absolute path. The
+        // installer seeds the matching image by filename into this user's
+        // data directory, so attach that local copy before trying to decode.
+        const size_t slash = imagePath.find_last_of("/\\");
+        const std::string name = slash == std::string::npos
+            ? imagePath : imagePath.substr(slash + 1);
+        if (!name.empty()) {
+            const std::string roots[] = {
+                platform.Paths().UserDataDir(),
+                platform.Paths().AssetDir(),
+                platform.Paths().ExecutableDir() + "/assets",
+            };
+            for (const std::string& root : roots) {
+                if (root.empty()) continue;
+                const std::string candidate = platform.Filesystem().Join(root, name);
+                if (platform.Filesystem().Exists(candidate)) {
+                    imagePath = candidate;
+                    break;
+                }
+            }
+        }
+    }
+
+    std::ifstream file(imagePath, std::ios::binary);
     if (!file) return slot;
     std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(file)),
                                      std::istreambuf_iterator<char>());
@@ -121,13 +147,13 @@ rendering::RgbaImage LoadImageCached(const std::string& path) {
             slot.width = decoded.value().width;
             slot.height = decoded.value().height;
             slot.pixels = std::move(decoded.value().pixels);
+            return slot;
         }
-        return slot;
     }
-    // Non-PNG (jpg/webp/...): the media module's platform frame source decodes
-    // them (Media Foundation + shell on Windows).
+    // PNGs unsupported by the lightweight engine codec and non-PNG formats
+    // (jpg/webp/...) fall back to the platform image decoder (WIC on Windows).
     auto pic = bps::media::MakePlatformFrameSource()->Grab(
-        path, bps::media::MediaKind::Image, 0.0, 1920);
+        imagePath, bps::media::MediaKind::Image, 0.0, 1920);
     if (pic.ok() && !pic.value().empty()) {
         slot.width = pic.value().width;
         slot.height = pic.value().height;

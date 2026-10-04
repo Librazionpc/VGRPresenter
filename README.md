@@ -105,4 +105,4 @@ this); only the packaged `dist/` zip is self-contained.
 Every release is a version tag with curated notes (new features, tweaks, bug
 fixes) and the portable zip attached. See the
 [releases page](https://github.com/Librazionpc/VGRPresenter/releases) —
-current release: **v0.0.3**.
+current release: **v0.0.5**.
