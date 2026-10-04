@@ -213,11 +213,12 @@ fi
 QML_ERRORS=0
 if [ -f "$LOG" ]; then
     QML_ERRORS="$(tail -n +$((LOG_BEFORE + 1)) "$LOG" \
-        | grep -icE "QML|RangeError|Cannot read|TypeError|cannot find|cannot load")"
+        | grep -icE "\\[(WARN|ERROR|FATAL)\\].*\\[QML\\]|RangeError|Cannot read|TypeError|cannot find|cannot load")"
 fi
 if [ "$QML_ERRORS" -gt 0 ]; then
     echo "smoke FAILED — $QML_ERRORS error line(s) on a clean PATH:"
-    tail -n +$((LOG_BEFORE + 1)) "$LOG" | grep -aiE "QML|cannot find|cannot load" | head -10
+    tail -n +$((LOG_BEFORE + 1)) "$LOG" \
+        | grep -aiE "\\[(WARN|ERROR|FATAL)\\].*\\[QML\\]|RangeError|Cannot read|TypeError|cannot find|cannot load" | head -10
     taskkill //IM "$APP" //F >/dev/null 2>&1
     echo "PORTABLE: FAIL smoke"
     exit 1

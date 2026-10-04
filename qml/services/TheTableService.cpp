@@ -306,6 +306,10 @@ QVariantList TheTableService::search(const QString &text, int limit) const
 void TheTableService::searchAsync(const QString &text, int limit, int token)
 {
     auto *runner = QThread::create([this, text, limit, token] {
+        // Typing creates newer requests faster than the full corpus scan can
+        // finish. Skip queued stale work before it enters the serialized scan.
+        if (token != latestSearchToken_.load(std::memory_order_acquire))
+            return;
         const QVariantList rows = search(text, limit);
         QMetaObject::invokeMethod(this, [this, token, rows] {
             if (token == latestSearchToken_)

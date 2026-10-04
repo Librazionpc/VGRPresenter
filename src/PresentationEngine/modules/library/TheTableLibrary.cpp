@@ -138,8 +138,16 @@ std::string CodeOf(const std::string& fileName) {
 std::string CodeFromTitle(const std::string& title) {
     size_t sp = title.find(' ');
     std::string head = sp == std::string::npos ? title : title.substr(0, sp);
-    if (!head.empty() && head.find_first_not_of("0123456789") == std::string::npos)
-        return head;
+    if (!head.empty()) {
+        size_t digits = 0;
+        while (digits < head.size() && std::isdigit(static_cast<unsigned char>(head[digits])))
+            ++digits;
+        const bool numeric = digits == head.size();
+        const bool suffixed = digits + 1 == head.size()
+            && std::isalpha(static_cast<unsigned char>(head.back()));
+        if (digits > 0 && (numeric || suffixed))
+            return head;
+    }
     return {};
 }
 
@@ -1876,6 +1884,31 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
                     }
                     if (score != 0) codeHits.push_back({&book, &ch, score});
                 }
+
+            // A citation query names sermons, not their paragraph text. Return
+            // these hits directly: scanning every paragraph while holding the
+            // library lock made opening a result wait for the entire corpus.
+            std::stable_sort(codeHits.begin(), codeHits.end(),
+                             [](const CodeCand& a, const CodeCand& b) {
+                                 return a.score > b.score;
+                             });
+            std::vector<TheTableSearchHit> out;
+            out.reserve(std::min(limit, codeHits.size()));
+            for (const CodeCand& c : codeHits) {
+                if (c.ch->verses.empty()) continue;
+                TheTableSearchHit hit;
+                hit.reference = SermonCitation(c.b->name,
+                    c.ch->code.empty() ? CodeFromTitle(c.ch->title) : c.ch->code,
+                    c.ch->title, 0);
+                hit.bookId = c.b->id;
+                hit.chapter = c.ch->number;
+                hit.verse = 0;
+                hit.snippet = c.ch->verses.front().text.substr(0, 220);
+                hit.score = c.score;
+                out.push_back(std::move(hit));
+                if (out.size() >= limit) break;
+            }
+            return out;
         }
     }
 

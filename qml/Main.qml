@@ -460,12 +460,11 @@ ApplicationWindow {
     // Declared LAST (after the Settings overlay) so a crash/error toast
     // always z-orders above an open modal, not just the screens underneath.
     NotificationOverlay {
-        anchors.top: parent.top
+        anchors.bottom: parent.bottom
         anchors.right: parent.right
         anchors.margins: Theme.space5
-        // Below the header strip, so a toast never covers the window buttons in the
-        // title bar (the header is window.headerHeight tall).
-        anchors.topMargin: window.headerHeight + 8
+        // Keep transient notices in the lower-right corner, away from the
+        // monitor wall that occupies the upper-right workspace.
         z: 10000
     }
 

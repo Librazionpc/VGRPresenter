@@ -29,6 +29,13 @@ struct ScriptureVerse {
     std::string text;
 };
 
+struct ScriptureSlidePart {
+    int number = 0;
+    int partIndex = 0;          // zero-based; continuations display as 2-1, 2-2, etc.
+    std::string text;
+    bool continuation = false;
+};
+
 // What the user picked.
 struct ScriptureSource {
     std::string versionName;     // "King James Version (KJV)"
@@ -54,6 +61,8 @@ struct ScriptureSlide {
     std::vector<ContentBlock> blocks;    // the template's blocks, filled in
     std::string reference;               // "Genesis 1:1-3" - this slide's verses
     std::string title;                   // the same, for a slide list
+    std::vector<int> verses;             // source verse/paragraph numbers in this group
+    std::vector<ScriptureSlidePart> parts; // source pieces, used for selectable continuation rows
 };
 
 // Does the template use the scripture placeholders? (If not it is an old-style template.)
@@ -64,7 +73,9 @@ std::string ScriptureReference(const std::string& book, int chapter, const std::
 // "1-3, 5" - the verse part alone.
 std::string ScriptureVerseRange(const std::vector<int>& verses);
 
-// Every slide the selection needs, or just the first when `onlyFirst` (a preview). An empty selection gives no slides.
+// Every slide the selection needs, or just the first real output slide when
+// `onlyFirst` (a preview). Splitting and slide limits apply in either mode.
+// An empty selection gives no slides.
 std::vector<ScriptureSlide> BuildScriptureSlides(const std::vector<ContentBlock>& templateBlocks, const ScriptureSource& source,
                                                  const ScriptureSettings& settings, bool onlyFirst = false);
 

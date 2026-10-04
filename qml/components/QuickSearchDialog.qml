@@ -162,7 +162,10 @@ ModalCard {
         console.log("[QS] choose:", result.kind, result.title)
         root.rememberPick(result)
         root.close()
-        root.resultChosen(result)
+        // Let the row's click finish and the modal close settle before the host
+        // switches tabs and opens a pane. Doing both synchronously from the
+        // dialog's own MouseArea could tear down the active delegate mid-event.
+        Qt.callLater(function() { root.resultChosen(result) })
     }
 
     // Enter: the highlighted result (the query is run first if the debounce hasn't fired).
@@ -350,6 +353,12 @@ ModalCard {
                 readonly property var info: root.kindInfo[modelData.kind] || root.kindInfo["show"]
                 readonly property bool firstOfKind: index === 0 || root.results[index - 1].kind !== modelData.kind
                 readonly property bool selected: root.current === index
+                // A sermon-code hit names the whole sermon (verse 0). Its
+                // citation already contains both the code and title; paragraph
+                // snippets and hover fetches add noise and can stall the UI on
+                // unusually large opening paragraphs.
+                readonly property bool sermonCodeResult: modelData.kind === "table"
+                    && Number(modelData.verse) === 0
                 // A Bible verse or sermon paragraph with a known location: hovering
                 // fetches the FULL text (the row normally carries only a capped
                 // snippet; a spread-across-two-paragraphs sermon match needs BOTH
@@ -357,6 +366,7 @@ ModalCard {
                 // The Table pane's match rows give.
                 readonly property bool isLocatedVerse: (modelData.kind === "bible" || modelData.kind === "table")
                                                         && modelData.bookId !== undefined && modelData.bookId !== ""
+                                                        && !sermonCodeResult
                 property string fullText: ""
                 width: parent.width
 
@@ -414,7 +424,9 @@ ModalCard {
                         spacing: 2
                         Text {
                             width: parent.width
-                            text: root.canHighlight ? root.highlight(entry.modelData.title) : entry.modelData.title
+                            text: entry.sermonCodeResult
+                                  ? entry.modelData.subtitle
+                                  : (root.canHighlight ? root.highlight(entry.modelData.title) : entry.modelData.title)
                             color: Theme.textPrimary
                             font.family: Theme.fontFamily
                             font.pixelSize: Theme.textSm + 1
@@ -427,7 +439,7 @@ ModalCard {
                         // words are highlighted yellow in both (highlight() escapes the
                         // text, so StyledText can't be abused by verse content).
                         Text {
-                            visible: entry.modelData.text !== "" || entry.fullText !== ""
+                            visible: !entry.sermonCodeResult && (entry.modelData.text !== "" || entry.fullText !== "")
                             width: parent.width
                             text: {
                                 const source = rowHover.hovered && entry.fullText !== "" ? entry.fullText : entry.modelData.text
@@ -442,6 +454,7 @@ ModalCard {
                             textFormat: root.canHighlight ? Text.StyledText : Text.PlainText
                         }
                         Text {
+                            visible: !entry.sermonCodeResult
                             width: parent.width
                             text: entry.modelData.subtitle
                             color: Theme.textMuted

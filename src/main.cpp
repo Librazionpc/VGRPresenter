@@ -5,6 +5,9 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QEventLoop>
+#include <QFile>
+#include <QFont>
+#include <QFontDatabase>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QVariant>
@@ -393,6 +396,38 @@ int main(int argc, char *argv[])
     QGuiApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("VGRPresenter"));
     app.setOrganizationName(QStringLiteral("VGR"));
+    const QString sourceSerifResource = QStringLiteral(":/fonts/SourceSerif4-VariableFont_opsz,wght.ttf");
+    const QString sourceSerifItalicResource = QStringLiteral(":/fonts/SourceSerif4-Italic-VariableFont_opsz,wght.ttf");
+    const int sourceSerifFontId = QFontDatabase::addApplicationFont(
+        sourceSerifResource);
+    const int sourceSerifItalicFontId = QFontDatabase::addApplicationFont(sourceSerifItalicResource);
+    Q_UNUSED(sourceSerifItalicFontId)
+    if (sourceSerifFontId < 0)
+        qWarning() << "Bundled Source Serif 4 font could not be loaded";
+    app.setFont(QFont(QStringLiteral("Segoe UI")));
+#ifdef Q_OS_WIN
+    // Qt's font database serves QML. Add the same bundled faces to this
+    // process's GDI font collection too, which the presentation renderer uses.
+    QByteArray sourceSerifGdiData;
+    QByteArray sourceSerifItalicGdiData;
+    HANDLE sourceSerifGdiHandle = nullptr;
+    HANDLE sourceSerifItalicGdiHandle = nullptr;
+    DWORD sourceSerifFontsAdded = 0;
+    QFile sourceSerifFile(sourceSerifResource);
+    if (sourceSerifFile.open(QIODevice::ReadOnly)) {
+        sourceSerifGdiData = sourceSerifFile.readAll();
+        sourceSerifGdiHandle = AddFontMemResourceEx(sourceSerifGdiData.data(),
+                                                    static_cast<DWORD>(sourceSerifGdiData.size()),
+                                                    nullptr, &sourceSerifFontsAdded);
+    }
+    QFile sourceSerifItalicFile(sourceSerifItalicResource);
+    if (sourceSerifItalicFile.open(QIODevice::ReadOnly)) {
+        sourceSerifItalicGdiData = sourceSerifItalicFile.readAll();
+        sourceSerifItalicGdiHandle = AddFontMemResourceEx(sourceSerifItalicGdiData.data(),
+                                                          static_cast<DWORD>(sourceSerifItalicGdiData.size()),
+                                                          nullptr, &sourceSerifFontsAdded);
+    }
+#endif
     // The running app's title-bar/taskbar icon: the same multi-size .ico the
     // build embeds as the executable's own resource (RC_ICONS in
     // CMakeLists.txt — Explorer/taskbar-pinned icon). QML's ApplicationWindow
@@ -426,6 +461,15 @@ int main(int argc, char *argv[])
         LiveOutputService::instance().shutdownNdiWorker();
         EngineBridge::instance().shutdown();
     });
+#ifdef Q_OS_WIN
+    QObject::connect(&app, &QGuiApplication::aboutToQuit,
+                     [sourceSerifGdiHandle, sourceSerifItalicGdiHandle] {
+        if (sourceSerifGdiHandle)
+            RemoveFontMemResourceEx(sourceSerifGdiHandle);
+        if (sourceSerifItalicGdiHandle)
+            RemoveFontMemResourceEx(sourceSerifItalicGdiHandle);
+    });
+#endif
 
     BootSplashWindow bootSplash;
     // SettingsService must exist before bootedChanged is emitted: it loads

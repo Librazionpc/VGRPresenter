@@ -63,19 +63,22 @@ Item {
     // the page dots from these.
     readonly property alias pageCount: wall.pageCount
     readonly property alias currentPage: wall.currentPage
-    function goTo(page) { wall.goTo(page) }
+    function goTo(page) {
+        wall.goTo(page)
+    }
 
     height: tabs.height + wall.height + (toolbar.visible ? toolbar.height : 0)
 
     // ---- Output tabs (FreeShow's PreviewOutputs tab strip) -----------------
     // GO LIVE lives in the app header now (user call) — the wall keeps only
     // the per-output tabs.
-    Row {
+    Item {
         id: tabs
-        x: 0; y: 0
-        width: parent.width
-        height: 26
-        spacing: 4
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: 0
+        width: wall.pageW
+        height: wall.rowsPerPage * 26
+        clip: true
 
         Repeater {
             model: root._wallRev >= 0 ? OutputListModel.rowCount() : 0
@@ -83,11 +86,22 @@ Item {
             delegate: Rectangle {
                 id: tab
                 required property int index
-                readonly property var out: OutputListModel.getOutput(index)
-                readonly property bool isCurrent: OutputListModel.activeIndex() === index
+                // getOutput() is an invokable snapshot, so explicitly depend
+                // on the model's data revision to refresh enabled/active state.
+                readonly property var out: {
+                    root._wallRev
+                    return OutputListModel.getOutput(index)
+                }
+                readonly property bool isCurrent: tab.out.active === true
+                readonly property int slot: index % wall.perPage
+                readonly property int page: Math.floor(index / wall.perPage)
+                readonly property int columns: wall.columnsForPage(page)
+                readonly property real tileWidth: wall.slotWidthForPage(page)
 
-                width: Math.max(64, (tabs.width - (OutputListModel.rowCount() - 1) * 4) / OutputListModel.rowCount())
-                height: parent.height
+                x: page * wall.pageW + (slot % columns) * (tileWidth + wall.columnGap) - wall.contentX
+                y: Math.floor(slot / columns) * 26
+                width: tileWidth
+                height: 26
                 radius: 0
                 color: isCurrent ? Theme.activeBg : (tabArea.containsMouse ? Theme.hoverBg : Theme.panelBg)
                 border.color: isCurrent ? Theme.borderSubtle : Theme.border
@@ -97,12 +111,13 @@ Item {
                     anchors.centerIn: parent
                     spacing: 6
 
-                    // State dot: green = enabled, grey = disabled (FreeShow's
-                    // indicator; red is reserved for the LIVE border on tiles).
+                    // State dot: green = the selected active output, grey =
+                    // inactive. Enabled/disabled controls whether the tab can
+                    // be selected; it is not the on-air status.
                     Rectangle {
                         anchors.verticalCenter: parent.verticalCenter
                         width: 7; height: 7; radius: 3.5
-                        color: tab.out.isEnabled ? Theme.success : Theme.textMuted
+                        color: tab.isCurrent ? Theme.success : Theme.textMuted
                     }
                     Text {
                         anchors.verticalCenter: parent.verticalCenter
@@ -122,7 +137,10 @@ Item {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: tab.out.isEnabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor
-                    onClicked: if (tab.out.isEnabled) OutputListModel.setActive(tab.index)
+                    onClicked: if (tab.out.isEnabled) {
+                        OutputListModel.setActive(tab.index)
+                        root.goTo(Math.floor(tab.index / wall.perPage))
+                    }
                 }
             }
         }
@@ -140,15 +158,43 @@ Item {
         readonly property int perPage: count === 1 ? 1 : 4
         readonly property int pageCount: Math.max(1, Math.ceil(count / perPage))
         readonly property real pageW: 376
-        readonly property real slotW: count === 1 ? 376 : 182
-        // The tile's REAL height: 1px border + pane + 1px border — the name
-        // footer is gone and the meters/markers OVERLAY the pane, so nothing
-        // extra sits below it.
-        readonly property real slotH: 2 + (slotW - 2) * 9 / 16
+        readonly property real columnGap: 0
+        // Each page sizes itself to its own roster. A lone output fills the
+        // page; two use two columns; three use three columns; four use 2×2.
+        // This also lets a partial final page grow (for example output 5).
+        function itemsOnPage(page) {
+            return Math.max(0, Math.min(perPage, count - page * perPage))
+        }
+        function columnsForPage(page) {
+            const items = itemsOnPage(page)
+            if (items <= 1) return 1
+            if (items === 3) return 3
+            return 2
+        }
+        function slotWidthForPage(page) {
+            const columns = columnsForPage(page)
+            return (pageW - (columns - 1) * columnGap) / columns
+        }
+        function rowsForPage(page) {
+            return Math.max(1, Math.ceil(itemsOnPage(page) / columnsForPage(page)))
+        }
+        function slotHeightForPage(page) {
+            return 2 + (slotWidthForPage(page) - 2) * 9 / 16
+        }
+        function pageHeightForPage(page) {
+            const rows = rowsForPage(page)
+            return rows * slotHeightForPage(page)
+        }
+        readonly property int columns: columnsForPage(currentPage)
+        readonly property int rowsPerPage: rowsForPage(currentPage)
 
         width: 376
-        height: pageCount === 1 ? slotH
-                                : 2 * slotH + 11
+        height: {
+            let tallestPage = 0
+            for (let page = 0; page < pageCount; ++page)
+                tallestPage = Math.max(tallestPage, pageHeightForPage(page))
+            return tallestPage
+        }
         contentWidth: pageCount * pageW
         contentHeight: height
         clip: true
@@ -162,10 +208,7 @@ Item {
         // writes from these handlers are programmatic, not user drags, so
         // no fighting occurs.
         function snapToPage() {
-            const target = Math.max(0, Math.min(pageCount - 1, Math.round(contentX / pageW)))
-            currentPage = target
-            snapAnim.to = target * pageW
-            snapAnim.restart()
+            root.goTo(Math.round(contentX / pageW))
         }
         onDragEnded: snapToPage()
         onFlickEnded: snapToPage()
@@ -183,25 +226,21 @@ Item {
             snapAnim.to = currentPage * pageW
             snapAnim.restart()
         }
+        onPageCountChanged: root.goTo(Math.min(currentPage, pageCount - 1))
 
         Repeater {
             model: OutputListModel
 
             delegate: OutputMonitorTile {
                 required property int index
+                readonly property int page: wall.count === 1 ? 0 : Math.floor(index / wall.perPage)
+                readonly property int slot: wall.count === 1 ? 0 : index % wall.perPage
+                readonly property int columns: wall.columnsForPage(page)
+                readonly property real tileWidth: wall.slotWidthForPage(page)
 
-                x: {
-                    const perPage = wall.perPage
-                    const page = wall.count === 1 ? 0 : Math.floor(index / perPage)
-                    const slot = wall.count === 1 ? 0 : index % perPage
-                    return page * wall.pageW + (slot % 2) * (wall.slotW + 12)
-                }
-                y: {
-                    const perPage = wall.perPage
-                    const slot = wall.count === 1 ? 0 : index % perPage
-                    return Math.floor(slot / 2) * (wall.slotH + 11)
-                }
-                width: wall.slotW
+                x: page * wall.pageW + (slot % columns) * (tileWidth + wall.columnGap)
+                y: Math.floor(slot / columns) * wall.slotHeightForPage(page)
+                width: tileWidth
             }
         }
     }
@@ -228,7 +267,7 @@ Item {
                     anchors.fill: parent
                     anchors.margins: -4
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: wall.goTo(parent.index)
+                    onClicked: root.goTo(parent.index)
                 }
             }
         }

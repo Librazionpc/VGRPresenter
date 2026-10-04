@@ -27,6 +27,21 @@ QVariantList blocksToVariants(const std::vector<pf::ContentBlock> &blocks)
     return out;
 }
 
+QVariantList partsToVariants(const std::vector<pf::ScriptureSlidePart> &parts)
+{
+    QVariantList out;
+    out.reserve(static_cast<qsizetype>(parts.size()));
+    for (const pf::ScriptureSlidePart &part : parts) {
+        out.append(QVariantMap{
+            { QStringLiteral("number"), part.number },
+            { QStringLiteral("partIndex"), part.partIndex },
+            { QStringLiteral("text"), QString::fromStdString(part.text) },
+            { QStringLiteral("continuation"), part.continuation },
+        });
+    }
+    return out;
+}
+
 QString templateId(const Profile &profile)
 {
     const QString chosen = SettingsService::instance().value(QString::fromLatin1(profile.templateSetting)).toString();
@@ -60,19 +75,36 @@ bool templateHasValues(const QString &id)
 QVariantMap preview(const QString &templateId, const pf::ScriptureSource &source, const pf::ScriptureSettings &options)
 {
     QVariantMap out{ { QStringLiteral("blocks"), QVariantList() }, { QStringLiteral("background"), QString() },
-                     { QStringLiteral("reference"), QString() }, { QStringLiteral("hasValues"), true }, { QStringLiteral("slideCount"), 0 } };
+                     { QStringLiteral("reference"), QString() }, { QStringLiteral("hasValues"), true },
+                     { QStringLiteral("slideCount"), 0 }, { QStringLiteral("slides"), QVariantList() } };
     if (source.verses.empty())
         return out;
     QString background;
     const std::vector<pf::ContentBlock> tmpl = templateBlocks(templateId, &background);
-    const auto first = pf::BuildScriptureSlides(tmpl, source, options, /*onlyFirst=*/true);
-    if (first.empty())
+    const auto generated = pf::BuildScriptureSlides(tmpl, source, options);
+    if (generated.empty())
         return out;
-    out[QStringLiteral("blocks")] = blocksToVariants(first.front().blocks);
+    out[QStringLiteral("blocks")] = blocksToVariants(generated.front().blocks);
     out[QStringLiteral("background")] = background;
-    out[QStringLiteral("reference")] = QString::fromStdString(first.front().reference);
+    out[QStringLiteral("reference")] = QString::fromStdString(generated.front().reference);
     out[QStringLiteral("hasValues")] = pf::HasScriptureValues(tmpl);
-    out[QStringLiteral("slideCount")] = static_cast<int>(pf::BuildScriptureSlides(tmpl, source, options).size());
+    QVariantList slideGroups;
+    slideGroups.reserve(static_cast<qsizetype>(generated.size()));
+    for (const pf::ScriptureSlide &slide : generated) {
+        QVariantList verses;
+        verses.reserve(static_cast<qsizetype>(slide.verses.size()));
+        for (int verse : slide.verses)
+            verses.append(verse);
+        slideGroups.append(QVariantMap{
+            { QStringLiteral("title"), QString::fromStdString(slide.title) },
+            { QStringLiteral("reference"), QString::fromStdString(slide.reference) },
+            { QStringLiteral("verses"), verses },
+            { QStringLiteral("parts"), partsToVariants(slide.parts) },
+            { QStringLiteral("blocks"), blocksToVariants(slide.blocks) },
+        });
+    }
+    out[QStringLiteral("slides")] = slideGroups;
+    out[QStringLiteral("slideCount")] = static_cast<int>(generated.size());
     return out;
 }
 
@@ -90,6 +122,7 @@ QVariantList slides(const QString &templateId, const pf::ScriptureSource &source
         // the style's template only applies to its own content family.
         out.append(QVariantMap{ { QStringLiteral("title"), QString::fromStdString(s.title) }, { QStringLiteral("background"), background },
                                 { QStringLiteral("blocks"), blocksToVariants(s.blocks) },
+                                { QStringLiteral("parts"), partsToVariants(s.parts) },
                                 { QStringLiteral("contentType"), contentType } });
     return out;
 }

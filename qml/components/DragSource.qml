@@ -22,6 +22,10 @@ MouseArea {
     property var payload: null
     property string label: ""
     property bool dragEnabled: true
+    // Optional owner for callbacks from an embedded DragSource. Its internal
+    // MouseArea is also named `root`, so callers must not rely on a captured
+    // outer id with that name inside signal handlers.
+    property var owner: null
 
     signal activated()
     signal opened()

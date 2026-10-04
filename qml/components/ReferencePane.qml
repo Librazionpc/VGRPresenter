@@ -196,7 +196,64 @@ Item {
     readonly property string referenceText: root.book ? root.adapter.reference(root.book.name, root.chapterNumber, root.selected) : ""
     readonly property var preview: {
         root.engineRevision
-        return root.book ? root.adapter.preview(root.sourceId, root.book.id, root.chapterNumber, root.selected) : { blocks: [], background: "", reference: "", hasValues: true, slideCount: 0 }
+        return root.book ? root.adapter.preview(root.sourceId, root.book.id, root.chapterNumber, root.selected) : { blocks: [], background: "", reference: "", hasValues: true, slideCount: 0, slides: [] }
+    }
+    property int previewSlideIndex: 0
+    readonly property var previewSlides: root.preview.slides || []
+    readonly property var currentPreviewSlide: root.previewSlides.length > 0
+        ? root.previewSlides[Math.max(0, Math.min(root.previewSlideIndex, root.previewSlides.length - 1))]
+        : null
+    onPreviewChanged: {
+        if (root.previewSlideIndex >= root.previewSlides.length)
+            root.previewSlideIndex = 0
+    }
+    // Show one row for each output slide. Several split pieces can share a
+    // slide; combine them into one row labeled by its first piece. Search
+    // results stay unchanged.
+    readonly property var mainRows: {
+        const piecesByVerse = ({})
+        for (let slideIndex = 0; slideIndex < root.previewSlides.length; ++slideIndex) {
+            const parts = root.previewSlides[slideIndex].parts || []
+            for (const part of parts) {
+                const key = String(part.number)
+                if (!piecesByVerse[key]) piecesByVerse[key] = []
+                piecesByVerse[key].push({ number: part.number, text: part.text, partIndex: part.partIndex,
+                                          slideIndex: slideIndex, continuation: part.continuation })
+            }
+        }
+        const rows = []
+        for (const verse of root.chapterVerses) {
+            const pieces = piecesByVerse[String(verse.number)] || []
+            pieces.sort((a, b) => a.partIndex - b.partIndex)
+            const isSplit = pieces.length > 1
+            if (!isSplit) {
+                rows.push({ number: verse.number, text: verse.text, continuation: false, isSplit: false,
+                            partIndex: 0, slideIndex: 0 })
+                continue
+                }
+            const groups = ({})
+            const slideOrder = []
+            for (const piece of pieces) {
+                const key = String(piece.slideIndex)
+                if (!groups[key]) {
+                    groups[key] = []
+                    slideOrder.push(piece.slideIndex)
+                }
+                groups[key].push(piece)
+            }
+            slideOrder.sort((a, b) => a - b)
+            for (const slideIndex of slideOrder) {
+                const group = groups[String(slideIndex)]
+                const first = group[0]
+                rows.push({ number: verse.number,
+                            text: group.map((piece) => piece.text).join(" "),
+                            partIndex: first.partIndex,
+                            slideIndex: slideIndex,
+                            continuation: first.partIndex > 0,
+                            isSplit: true })
+            }
+        }
+        return rows
     }
     readonly property string templateId: { root.engineRevision; return root.adapter.templateId() }
     // The template's display name. Deliberately a property gated on
@@ -315,6 +372,7 @@ Item {
     function openChapter(number, selectFirst) {
         root.peekIndex = -1                   // (a real open ends any hover peek)
         root.peekVerses = []
+        root.previewSlideIndex = 0
         root.chapterNumber = number
         root.chapterVerses = root.book ? root.adapter.chapter(root.sourceId, root.book.id, number) : []
         root.searching = false
@@ -330,6 +388,7 @@ Item {
 
     // A verse was clicked: alone, with Ctrl added or removed, with Shift as a range from the last one.
     function selectVerse(number, ctrl, shift) {
+        root.previewSlideIndex = 0
         let next
         if (shift && root.anchorVerse > 0) {
             const lo = Math.min(root.anchorVerse, number), hi = Math.max(root.anchorVerse, number)
@@ -342,6 +401,28 @@ Item {
             root.anchorVerse = number
         }
         root.selected = next.sort((a, b) => a - b)
+    }
+
+    function selectSubpart(number, partIndex) {
+        root.selected = [number]
+        root.anchorVerse = number
+        root.previewSlideIndex = 0
+        const slides = root.adapter.preview(root.sourceId, root.book.id, root.chapterNumber, [number]).slides || []
+        for (let i = 0; i < slides.length; ++i) {
+            const parts = slides[i].parts || []
+            if (parts.some((part) => part.number === number && part.partIndex === partIndex)) {
+                root.previewSlideIndex = i
+                // Keep the Main Output tile on the same continuation as the
+                // reference preview. goLiveRequested stages while idle and
+                // follows the existing live-pick behavior while on air.
+                const outputSlides = root.buildSlides()
+                const outputSlide = outputSlides.find((slide) =>
+                    (slide.parts || []).some((part) => part.number === number && part.partIndex === partIndex))
+                if (outputSlide)
+                    root.goLiveRequested(root.referenceText, [outputSlide])
+                return
+            }
+        }
     }
 
     // The previous / next verse (crossing into the next chapter or book).
@@ -395,6 +476,7 @@ Item {
             if (picked.length > 0) {
                 root.selected = picked
                 root.anchorVerse = picked[0]
+                root.previewSlideIndex = 0
                 // Bring the first picked verse into view (rows are a fixed 38, as in the list).
                 versesFlick.contentY = Math.max(0, (picked[0] - 1) * 38 - 40)
             }
@@ -500,6 +582,25 @@ Item {
         // So a unique match below 5 chars still shows as a one-row list to click;
         // from 5 chars up, uniqueness completes the rest of the line inline.
         if (root.books.length > 0 && root.books[0].chapterTitles !== undefined) {
+            // A two-digit year is the Table's shorthand for a year prefix.
+            // When that year exists, commit the citation separator so `61`
+            // immediately becomes `61-` and the in-pane list is narrowed to
+            // sermons from 1961 instead of matching those digits anywhere in
+            // other years' titles.
+            if (/^\d{2}$/.test(needle)) {
+                const yearName = "19" + needle
+                const yearBook = root.books.find((b) => String(b.name).toLowerCase() === yearName)
+                if (yearBook) {
+                    const yearMatches = []
+                    const titles = yearBook.chapterTitles || []
+                    for (let i = 0; i < yearBook.chapters.length; i++) {
+                        const cite = String(titles[i] || "")
+                        if (cite.toLowerCase().indexOf(needle + "-") === 0)
+                            yearMatches.push(root.citeRow(yearBook, i, cite))
+                    }
+                    return { rows: yearMatches.slice(0, 150), complete: "-" }
+                }
+            }
             if (needle.length >= 2) {
                 const matches = []
                 for (const b of root.books) {
@@ -607,7 +708,11 @@ Item {
             root.searchToken++
             return
         }
-        if (SearchService.resolveWordsAsync) {
+        const tableSearch = root.adapter && root.adapter.contentType === "table"
+        if (tableSearch) {
+            root.resolveToken++
+            root.resolvedWords = []
+        } else if (SearchService.resolveWordsAsync) {
             root.resolveToken++
             SearchService.resolveWordsAsync(text, root.resolveToken)
         } else {
@@ -629,6 +734,15 @@ Item {
     function applySearchResults(token, rows) {
         if (token !== root.searchToken) return   // a stale keystroke's answer
         root.searchResults = rows
+        // The Table search already resolves terms while searching. Only run
+        // the separate spelling hint when that search found no results.
+        if (root.adapter && root.adapter.contentType === "table") {
+            root.resolveToken++
+            if (rows.length === 0 && searchInput.text.trim() !== "")
+                SearchService.resolveWordsAsync(searchInput.text, root.resolveToken)
+            else
+                root.resolvedWords = []
+        }
     }
     // Word-resolution worker answers (applyResolvedWords above).
     Connections {
@@ -978,8 +1092,13 @@ Item {
                             elide: Text.ElideRight
                             font.family: Theme.fontFamily; font.pixelSize: 16
                         }
-                        PositionHoverArea { id: bookHoverPA; anchors.fill: parent; checkAncestors: false; showCursor: false }
-                        TapHandler { onTapped: root.openBook(root.books.findIndex((b) => b.id === bookRow.modelData.id), 0) }
+                        PositionHoverArea {
+                            id: bookHoverPA
+                            anchors.fill: parent
+                            checkAncestors: false
+                            showCursor: false
+                            onClicked: root.openBook(root.books.findIndex((b) => b.id === bookRow.modelData.id), 0)
+                        }
                     }
                 }
             }
@@ -1051,8 +1170,13 @@ Item {
                             color: chapterRow.active ? Theme.textPrimary : root.textDim
                             font.family: Theme.fontFamily; font.pixelSize: 16
                         }
-                        PositionHoverArea { id: chapterHoverPA; anchors.fill: parent; checkAncestors: false; showCursor: false }
-                        TapHandler { onTapped: root.openChapter(chapterRow.modelData, true) }
+                        PositionHoverArea {
+                            id: chapterHoverPA
+                            anchors.fill: parent
+                            checkAncestors: false
+                            showCursor: false
+                            onClicked: root.openChapter(chapterRow.modelData, true)
+                        }
                     }
                 }
             }
@@ -1090,12 +1214,19 @@ Item {
                 id: versesList
                 visible: !root.searching && root.citationMatches.length === 0
                 x: 0; y: 4; width: parent.width - 8
+
                 Repeater {
-                    model: root.chapterVerses
+                    model: root.mainRows
                     delegate: Item {
                         id: verseRow
                         required property var modelData
-                        readonly property bool active: root.selected.indexOf(modelData.number) >= 0
+                        readonly property bool continuation: modelData.continuation === true
+                        readonly property int verseNumber: Number(modelData.number)
+                        readonly property int partIndex: Number(modelData.partIndex ?? 0)
+                        readonly property int slideIndex: Number(modelData.slideIndex ?? 0)
+                        readonly property bool isSplit: modelData.isSplit === true || continuation
+                        readonly property bool active: root.selected.indexOf(verseNumber) >= 0
+                            && (!isSplit || root.previewSlideIndex === slideIndex)
                         // One line per row, like FreeShow's own verse list (the full paragraph is what the preview pane on the right is
                         // for). A verse spanning several of the sermon's own blank-line paragraphs still carries their break as a literal
                         // "\n" in its text - elide alone does not collapse a real line break, so it is flattened to a space here too.
@@ -1104,10 +1235,11 @@ Item {
                         // the verse number wears gold while the verse carries either.
                         // The user's marks, from the ONE batched chapter read
                         // (root.chapterMarks) — no per-row engine calls.
-                        readonly property bool marked: root.hasUserData && root.markFor(verseRow.modelData.number).highlight === true
-                        readonly property bool hasNote: (root.markFor(verseRow.modelData.number).note || "") !== ""
+                        readonly property bool marked: !continuation && root.hasUserData && root.markFor(verseNumber).highlight === true
+                        readonly property bool hasNote: !continuation && (root.markFor(verseNumber).note || "") !== ""
                         // The open note editor stretches this one row to make room for itself.
-                        width: versesList.width; height: root.noteVerse === verseRow.modelData.number ? 122 : 38
+                        width: versesList.width
+                        height: continuation ? 34 : (root.noteVerse === verseNumber ? 122 : 38)
                         Rectangle {
                             anchors.fill: parent; anchors.margins: 1; radius: 4
                             // Position-truth hover (PositionHoverArea), not DragSource's
@@ -1122,18 +1254,23 @@ Item {
                             id: verseHover
                             anchors.fill: parent
                             checkAncestors: false   // (rows inside a Flickable; no hover-gated visibility in the chain)
+                            clickEnabled: false     // the DragSource below owns verse clicks and drags
                         }
                         // The verse number: the usual red, gold while the user has
                         // marked this verse with a highlight or a note.
                         Text {
-                            x: 10; anchors.verticalCenter: parent.verticalCenter
+                            x: verseRow.continuation ? 18 : 10; anchors.verticalCenter: parent.verticalCenter
                             width: 40; horizontalAlignment: Text.AlignRight
-                            text: verseRow.modelData.number
+                            text: verseRow.continuation
+                                ? qsTr("%1-%2").arg(verseRow.verseNumber).arg(verseRow.partIndex)
+                                : verseRow.verseNumber
                             color: verseRow.marked ? "#f5c542" : Theme.accent
                             font.family: Theme.fontFamily; font.pixelSize: 16; font.bold: true
                         }
                         Text {
-                            x: 60; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 106
+                            x: verseRow.continuation ? 68 : 60
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width - (verseRow.continuation ? 114 : 106)
                             // While a search (or citation filter) is showing, the typed
                             // words light up yellow in the visible text — the same obvious
                             // chip Quick search uses.
@@ -1150,15 +1287,23 @@ Item {
                         DragSource {
                             id: verseSource
                             anchors.fill: parent
-                            payload: root.dragPayload(verseRow.active ? root.selected : [verseRow.modelData.number])
+                            owner: root
+                            payload: root.dragPayload(verseRow.active ? root.selected : [verseRow.verseNumber])
                             label: payload ? payload.items[0].name : ""
                             onActivated: {
-                                const mods = Qt.application.keyboardModifiers
-                                root.selectVerse(verseRow.modelData.number, (mods & Qt.ControlModifier) !== 0, (mods & Qt.ShiftModifier) !== 0)
+                                if (verseRow.isSplit) {
+                                    verseSource.owner.selectSubpart(verseRow.verseNumber, verseRow.partIndex)
+                                } else {
+                                    const mods = Qt.application.keyboardModifiers
+                                    verseSource.owner.selectVerse(verseRow.verseNumber, (mods & Qt.ControlModifier) !== 0, (mods & Qt.ShiftModifier) !== 0)
+                                }
                             }
                             onOpened: {
-                                root.selectVerse(verseRow.modelData.number, false, false)
-                                root.playPicked()
+                                if (verseRow.isSplit)
+                                    verseSource.owner.selectSubpart(verseRow.verseNumber, verseRow.partIndex)
+                                else
+                                    verseSource.owner.selectVerse(verseRow.verseNumber, false, false)
+                                verseSource.owner.playPicked()
                             }
                         }
                         // The note affordance: a pencil on hover, persistent while a note
@@ -1166,7 +1311,7 @@ Item {
                         // editor; Enter saves, Esc discards.
                         Item {
                             id: noteBtn
-                            readonly property bool editing: root.noteVerse === verseRow.modelData.number
+                            readonly property bool editing: !verseRow.continuation && root.noteVerse === verseRow.verseNumber
                             visible: root.hasUserData && (verseHover.hovered || verseRow.hasNote || editing)
                             x: parent.width - 34; y: 7
                             width: 24; height: 24
@@ -1178,11 +1323,11 @@ Item {
                                 width: 11; height: 11
                             }
                             HoverHandler { id: noteHover; cursorShape: Qt.PointingHandCursor }
-                            TapHandler { onTapped: root.openNoteEditor(verseRow.modelData.number) }
+                            TapHandler { onTapped: root.openNoteEditor(verseRow.verseNumber) }
                         }
                         // The note editor, open under its verse (one at a time).
                         Rectangle {
-                            visible: root.noteVerse === verseRow.modelData.number
+                            visible: !verseRow.continuation && root.noteVerse === verseRow.verseNumber
                             x: 4; y: 40
                             width: parent.width - 8; height: 76
                             radius: 6
@@ -1502,7 +1647,7 @@ Item {
                     }
                     Timer {
                         id: pillDebounce
-                        interval: 160
+                        interval: 80
                         onTriggered: root.runSearch(searchInput.text)
                     }
                     Text {
@@ -1536,14 +1681,19 @@ Item {
                             width: 13; height: 13
                             fit: true
                         }
-                        PositionHoverArea { id: stepHover; anchors.fill: parent; checkAncestors: false }
-                        TapHandler { onTapped: root.stepAndPlay(stepBtn.modelData.dir) }
+                        PositionHoverArea {
+                            id: stepHover
+                            anchors.fill: parent
+                            checkAncestors: false
+                            onClicked: root.stepAndPlay(stepBtn.modelData.dir)
+                        }
                     }
                 }
 
                 Rectangle { visible: !root.searching; width: 1; height: 16; color: Theme.border; anchors.verticalCenter: parent.verticalCenter }
 
                 Item {
+                    id: playPickedButton
                     visible: !root.searching
                     width: 28; height: 26
                     readonly property bool isOurs: root.adapter && root.adapter.liveIsOurs
@@ -1562,8 +1712,12 @@ Item {
                         width: 13; height: 13
                         fit: true
                     }
-                    PositionHoverArea { id: playPickedHover; anchors.fill: parent; checkAncestors: false }
-                    TapHandler { onTapped: parent.isOurs ? LiveOutputService.stop() : root.playPicked() }
+                    PositionHoverArea {
+                        id: playPickedHover
+                        anchors.fill: parent
+                        checkAncestors: false
+                        onClicked: playPickedButton.isOurs ? LiveOutputService.stop() : root.playPicked()
+                    }
                 }
 
                 // The highlight toggle for the picked passage (the drawer's other half):
@@ -1582,9 +1736,11 @@ Item {
                         width: 13; height: 13
                         fit: true
                     }
-                    PositionHoverArea { id: starHover; anchors.fill: parent; checkAncestors: false }
-                    TapHandler {
-                        onTapped: {
+                    PositionHoverArea {
+                        id: starHover
+                        anchors.fill: parent
+                        checkAncestors: false
+                        onClicked: {
                             if (!root.book || root.selected.length === 0)
                                 return
                             root.toggleHighlight(root.selected[0])
@@ -1604,9 +1760,11 @@ Item {
                         width: 13; height: 13
                         fit: true
                     }
-                    PositionHoverArea { id: searchHover; anchors.fill: parent; checkAncestors: false }
-                    TapHandler {
-                        onTapped: {
+                    PositionHoverArea {
+                        id: searchHover
+                        anchors.fill: parent
+                        checkAncestors: false
+                        onClicked: {
                             root.searching = !root.searching
                             if (root.searching) {
                                 root.searchResults = []
@@ -1772,7 +1930,7 @@ Item {
                         clip: true
                         DesignPreview {
                             anchors.fill: parent
-                            blocks: root.preview.blocks
+                            blocks: root.currentPreviewSlide ? root.currentPreviewSlide.blocks : root.preview.blocks
                             background: (root.preview.background ?? "") === "" || root.preview.background === "transparent" ? "#000000" : root.preview.background
                         }
                         Text {

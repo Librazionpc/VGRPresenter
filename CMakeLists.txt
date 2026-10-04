@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(VGRPresenterUI VERSION 0.1.0 LANGUAGES CXX)
+project(VGRPresenterUI VERSION 0.0.6 LANGUAGES CXX)
 
 # C++23 project-wide — the Qt app and the engine (src/PresentationEngine/)
 # build as one project now, one CMakeLists.txt, so they share one dialect
@@ -496,6 +496,10 @@ set_source_files_properties("${APP_ICON}" PROPERTIES QT_RESOURCE_ALIAS "app-icon
 set_target_properties(appVGRPresenterUI PROPERTIES
     WIN32_EXECUTABLE TRUE
     MACOSX_BUNDLE TRUE
+    # This is a standalone application, not a DLL host.  In particular,
+    # MinGW's --out-implib export pass fails on this large static Qt/QML link
+    # with "0-bit reloc in dll" and the generated import library is unused.
+    ENABLE_EXPORTS FALSE
 )
 
 if(WIN32)
@@ -510,6 +514,18 @@ endif()
 qt_add_resources(appVGRPresenterUI "appicon"
     PREFIX "/app"
     FILES "${APP_ICON}")
+
+# Bundle Source Serif 4 for template text and the Edit tab font picker.
+set(APP_FONT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts")
+set(APP_FONT_REGULAR "${APP_FONT_DIR}/SourceSerif4-VariableFont_opsz,wght.ttf")
+set(APP_FONT_ITALIC "${APP_FONT_DIR}/SourceSerif4-Italic-VariableFont_opsz,wght.ttf")
+set(APP_FONT_LICENSE "${APP_FONT_DIR}/OFL.txt")
+set_source_files_properties("${APP_FONT_REGULAR}" PROPERTIES QT_RESOURCE_ALIAS "SourceSerif4-VariableFont_opsz,wght.ttf")
+set_source_files_properties("${APP_FONT_ITALIC}" PROPERTIES QT_RESOURCE_ALIAS "SourceSerif4-Italic-VariableFont_opsz,wght.ttf")
+set_source_files_properties("${APP_FONT_LICENSE}" PROPERTIES QT_RESOURCE_ALIAS "OFL.txt")
+qt_add_resources(appVGRPresenterUI "appfonts"
+    PREFIX "/fonts"
+    FILES "${APP_FONT_REGULAR}" "${APP_FONT_ITALIC}" "${APP_FONT_LICENSE}")
 
 target_link_libraries(appVGRPresenterUI
     PRIVATE Qt6::Quick Qt6::QuickControls2 Qt6::QuickShapes Qt6::Multimedia engine_core

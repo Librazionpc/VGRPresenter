@@ -311,7 +311,7 @@ Item {
                     anchors.left: parent.left
                     anchors.right: windowedTile.left
                     anchors.rightMargin: Theme.space3
-                    height: Math.max(96, mapItem.height)
+                    height: maxH
 
                     readonly property real maxH: 120
 
@@ -331,30 +331,57 @@ Item {
                         return { minX: minX, minY: minY, w: maxX - minX, h: maxY - minY }
                     }
 
-                    readonly property real scale:
-                        (root.displayList.length === 0 || bounds.w <= 0 || bounds.h <= 0)
+                    readonly property var smallestDisplay: {
+                        let w = 0, h = 0
+                        for (let i = 0; i < root.displayList.length; ++i) {
+                            const d = root.displayList[i]
+                            if (w === 0 || d.width < w) w = d.width
+                            if (h === 0 || d.height < h) h = d.height
+                        }
+                        return { w: w, h: h }
+                    }
+                    readonly property real fitScale:
+                        (bounds.w <= 0 || bounds.h <= 0)
                             ? 0
                             : Math.min((width - 12) / bounds.w, maxH / bounds.h)
+                    // Keep the smallest display tile large enough to recognize
+                    // and click. If the desktop's full layout no longer fits,
+                    // the Flickable below scrolls it instead of overlapping tiles.
+                    readonly property real minScale:
+                        (smallestDisplay.w <= 0 || smallestDisplay.h <= 0)
+                            ? 0
+                            : Math.max(64 / smallestDisplay.w, 44 / smallestDisplay.h)
+                    readonly property real scale: root.displayList.length === 0
+                        ? 0 : Math.max(fitScale, minScale)
 
-                    Text {
-                        anchors.centerIn: parent
-                        visible: root.displayList.length === 0
-                        width: parent.width
-                        text: "No external displays detected — outputs stay windowed."
-                        horizontalAlignment: Text.AlignHCenter
-                        color: Theme.textMuted
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textXs
-                        wrapMode: Text.WordWrap
-                    }
+                    Flickable {
+                        anchors.fill: parent
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        flickableDirection: Flickable.AutoFlickDirection
+                        interactive: contentWidth > width || contentHeight > height
+                        contentWidth: Math.max(width, mapItem.width + 12)
+                        contentHeight: Math.max(height, mapItem.height + 12)
 
-                    Item {
-                        id: mapItem
-                        visible: root.displayList.length > 0
-                        x: (mapArea.width - width) / 2
-                        y: (mapArea.height - height) / 2
-                        width: mapArea.bounds.w * mapArea.scale
-                        height: mapArea.bounds.h * mapArea.scale
+                        Text {
+                            anchors.centerIn: parent
+                            visible: root.displayList.length === 0
+                            width: parent.width
+                            text: "No external displays detected — outputs stay windowed."
+                            horizontalAlignment: Text.AlignHCenter
+                            color: Theme.textMuted
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.textXs
+                            wrapMode: Text.WordWrap
+                        }
+
+                        Item {
+                            id: mapItem
+                            visible: root.displayList.length > 0
+                            x: width + 12 > mapArea.width ? 6 : (mapArea.width - width) / 2
+                            y: height + 12 > mapArea.height ? 6 : (mapArea.height - height) / 2
+                            width: mapArea.bounds.w * mapArea.scale
+                            height: mapArea.bounds.h * mapArea.scale
 
                         Repeater {
                             model: root.displayList
@@ -372,8 +399,8 @@ Item {
 
                                 x: (modelData.x - mapArea.bounds.minX) * mapArea.scale
                                 y: (modelData.y - mapArea.bounds.minY) * mapArea.scale
-                                width: Math.max(64, modelData.width * mapArea.scale)
-                                height: Math.max(44, modelData.height * mapArea.scale)
+                                width: modelData.width * mapArea.scale
+                                height: modelData.height * mapArea.scale
                                 radius: Theme.radiusSm
                                 color: displayTile.selected
                                        ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.15)
@@ -445,6 +472,7 @@ Item {
                             }
                         }
                     }
+                }
                 }
 
                 // ---- Windowed: the output renders from no display at all

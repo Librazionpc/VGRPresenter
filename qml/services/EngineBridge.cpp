@@ -36,10 +36,18 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 
 #include <atomic>
 
 namespace {
+
+struct PowerToastState {
+    std::mutex mutex;
+    int lastPercent = -1;
+    bool lastOnBattery = false;
+    bool initialized = false;
+};
 
 // Wraps two QML callables as one bps::project::ICommand — the engine's
 // stack only ever sees a Label()/Execute()/Undo(), never that the actual
@@ -2100,18 +2108,9 @@ void EngineBridge::startRelay()
         }));
 
     // ---- Power (AC ↔ battery) — battery percent / AC state
-    // The kernel's platform watcher publishes PowerChanged the moment the
-    // charger is plugged or pulled, and BatteryLow separately (only on the
-    // 20% crossing). BOTH must re-read the hardware report: the profiled
-    // battery reading feeds the Smart Config "Battery" row and the
-    // recommended profile, so without this the page stayed on its boot-time
-    // "Plugged in · 100%" forever after the charger came out. The toast tells
-    // the operator what changed, which is the whole point of the reading.
     auto powerChange = [self](const char *topic, const QString &message, const QString &level) {
         QMetaObject::invokeMethod(self, [self, topic = QString::fromLatin1(topic),
                                          message, level]() mutable {
-            // Re-read the report FIRST, so anything the toast leads to (the
-            // Smart Config card is open) already shows the new state.
             SettingsService::instance().refreshHardware();
             self->ingestEngineEvent(topic, QVariantMap{
                 {QStringLiteral("level"), level},
@@ -2120,18 +2119,68 @@ void EngineBridge::startRelay()
             });
         }, Qt::QueuedConnection);
     };
+    const auto powerToastState = std::make_shared<PowerToastState>();
     relaySubs_.push_back(bus.Subscribe<bps::events::PowerChanged>(
-        [powerChange](const bps::events::PowerChanged &e) {
-            // The engine's detail string is authoritative about which way the
-            // AC state moved — the PAL reading may lag the event by a beat.
+        [self, powerChange, powerToastState](const bps::events::PowerChanged &e) {
             const bool onBattery = e.detail.find("on battery") != std::string::npos;
-            const QString message = onBattery
-                ? QStringLiteral("Running on battery — background work is paused so the show lasts. %1")
-                      .arg(qstr(e.detail))
-                : QStringLiteral("Plugged in — the full profile is available again. %1")
-                      .arg(qstr(e.detail));
-            powerChange("platform.power_changed", message,
-                        onBattery ? QStringLiteral("warning") : QStringLiteral("info"));
+            int percent = -1;
+            const auto open = e.detail.find('(');
+            const auto mark = e.detail.find('%', open == std::string::npos ? 0 : open + 1);
+            if (open != std::string::npos && mark != std::string::npos) {
+                try {
+                    percent = std::stoi(e.detail.substr(open + 1, mark - open - 1));
+                } catch (...) {
+                    percent = -1;
+                }
+            }
+
+            bool initialized = false;
+            bool powerStateChanged = false;
+            int previousPercent = -1;
+            {
+                std::lock_guard<std::mutex> lock(powerToastState->mutex);
+                initialized = powerToastState->initialized;
+                previousPercent = powerToastState->lastPercent;
+                powerStateChanged = initialized && powerToastState->lastOnBattery != onBattery;
+                if (percent >= 0) powerToastState->lastPercent = percent;
+                powerToastState->lastOnBattery = onBattery;
+                powerToastState->initialized = true;
+            }
+
+            if (powerStateChanged) {
+                const QString message = onBattery
+                    ? QStringLiteral("Running on battery — background work is paused so the show lasts. %1")
+                          .arg(qstr(e.detail))
+                    : QStringLiteral("Plugged in — the full profile is available again. %1")
+                          .arg(qstr(e.detail));
+                powerChange("platform.power_changed", message,
+                            onBattery ? QStringLiteral("warning") : QStringLiteral("info"));
+            } else {
+                // Keep the live Smart Config battery row current without
+                // showing a toast for every one-percent hardware update.
+                QMetaObject::invokeMethod(self, [self] {
+                    SettingsService::instance().refreshHardware();
+                }, Qt::QueuedConnection);
+            }
+
+            if (!initialized || previousPercent < 0 || percent < 0 || percent == previousPercent)
+                return;
+
+            static constexpr int levels[] = {30, 50, 80, 100};
+            const bool charging = percent > previousPercent;
+            for (const int levelPercent : levels) {
+                const bool crossed = charging
+                    ? previousPercent < levelPercent && percent >= levelPercent
+                    : previousPercent >= levelPercent && percent < levelPercent;
+                if (!crossed) continue;
+
+                const QString direction = charging
+                    ? QStringLiteral("charging") : QStringLiteral("discharging");
+                powerChange("platform.battery_level",
+                            QStringLiteral("Battery %1: %2%")
+                                .arg(direction).arg(levelPercent),
+                            charging ? QStringLiteral("info") : QStringLiteral("warning"));
+            }
         }));
     relaySubs_.push_back(bus.Subscribe<bps::events::BatteryLow>(
         [powerChange](const bps::events::BatteryLow &e) {

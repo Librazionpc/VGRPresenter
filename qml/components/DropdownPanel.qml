@@ -591,32 +591,22 @@ Rectangle {
                                     id: itemArea
                                     anchors.fill: parent
                                     onClicked: {
-                                        // THE fix for the reported TypeError:
-                                        // itemActivated's consumer may rebuild
-                                        // root.model SYNCHRONOUSLY (retagging,
-                                        // switching content) — the Repeater then
-                                        // rebinds this delegate's modelData to
-                                        // undefined while this handler is still
-                                        // on the stack, and the old code read
-                                        // modelData.payload AFTER that ("Cannot
-                                        // read property 'payload' of undefined";
-                                        // a consumer that closed the panel
-                                        // entirely tore the context down instead
-                                        // — "root is not defined"). Capture the
-                                        // row's data FIRST (the user picked THIS
-                                        // row — itemPicked must carry it even if
-                                        // the model just changed under us), and
-                                        // typeof-guard both lookups (the one
-                                        // reference that cannot itself throw) so
-                                        // a fully dead row does nothing.
+                                        // Capture the row before emitting: a handler can
+                                        // synchronously replace the model or close/destroy
+                                        // this panel. Payload rows use itemPicked; ordinary
+                                        // menu rows use itemActivated. Emitting both made
+                                        // the second signal access a destroyed `root` after
+                                        // the first handler closed its owner.
                                         if (typeof modelData === "undefined" || !modelData || modelData.disabled
                                             || typeof root === "undefined")
                                             return
                                         const pickedLabel = modelData.label
                                         const pickedPayload = modelData.payload
                                         const pickedIndex = index
-                                        root.itemActivated(pickedLabel)
-                                        root.itemPicked(pickedIndex, pickedPayload)
+                                        if (typeof pickedPayload !== "undefined")
+                                            root.itemPicked(pickedIndex, pickedPayload)
+                                        else
+                                            root.itemActivated(pickedLabel)
                                     }
                                     // Same stale-row guards as the click: a
                                     // hover recompute can also fire on a row

@@ -19,6 +19,7 @@ std::string Letter(int index) { return std::string(1, static_cast<char>('a' + st
 // A piece of a verse: a whole verse, or one part of a long one.
 struct Part {
     int number = 0;
+    int partIndex = 0;
     std::string label;       // "1", "1a", or "" (a continuation without a number, or numbers off)
     std::string text;
     bool continuation = false;   // not the first part of its verse
@@ -201,12 +202,13 @@ std::vector<ScriptureSlide> BuildScriptureSlides(const std::vector<ContentBlock>
     std::vector<Part> parts;
     for (const ScriptureVerse& v : source.verses) {
         const std::string text = Trim(v.text);
-        const bool divide = settings.splitLongVerses && !onlyFirst && static_cast<int>(text.size()) > settings.longVersesChars;
+        const bool divide = settings.splitLongVerses && static_cast<int>(text.size()) > settings.longVersesChars;
         const std::vector<std::string> pieces = divide ? SplitText(text, settings.longVersesChars, settings.longVersesTolerance)
                                                        : std::vector<std::string>{ text };
         for (size_t i = 0; i < pieces.size(); ++i) {
             Part p;
             p.number = v.number;
+            p.partIndex = static_cast<int>(i);
             p.text = pieces[i];
             p.continuation = i > 0;
             if (numbers) {
@@ -219,10 +221,7 @@ std::vector<ScriptureSlide> BuildScriptureSlides(const std::vector<ContentBlock>
 
     // ---- which pieces go on which slide ----
     std::vector<std::vector<size_t>> groups;
-    if (onlyFirst) {
-        groups.emplace_back();
-        for (size_t i = 0; i < parts.size(); ++i) groups.back().push_back(i);
-    } else if (settings.smartSplit) {
+    if (settings.smartSplit) {
         const size_t capacity = Capacity(tmpl);
         // "Max verses/paragraphs" is a HARD CAP in BOTH modes (user rule):
         // smart split still packs by the template box's character capacity,
@@ -250,6 +249,11 @@ std::vector<ScriptureSlide> BuildScriptureSlides(const std::vector<ContentBlock>
             groups.back().push_back(i);
         }
     }
+    // Preview is the first real output slide. Apply all splitting and limits
+    // above, then keep that first group; otherwise long paragraphs looked
+    // unsplit in the preview and its contents differed from the slide on air.
+    if (onlyFirst && groups.size() > 1)
+        groups.resize(1);
 
     // ---- fill the template once per slide ----
     std::vector<int> allNumbers;
@@ -259,8 +263,10 @@ std::vector<ScriptureSlide> BuildScriptureSlides(const std::vector<ContentBlock>
     for (size_t g = 0; g < groups.size(); ++g) {
         std::string text;
         std::vector<int> numbersHere;
+        std::vector<ScriptureSlidePart> slideParts;
         for (size_t k = 0; k < groups[g].size(); ++k) {
             const Part& p = parts[groups[g][k]];
+            slideParts.push_back({ p.number, p.partIndex, p.text, p.continuation });
             if (k > 0) text += (p.continuation || !settings.versesOnIndividualLines) ? " " : "\n";
             text += p.label.empty() ? p.text : p.label + " " + p.text;
             if (numbersHere.empty() || numbersHere.back() != p.number) numbersHere.push_back(p.number);
@@ -283,6 +289,8 @@ std::vector<ScriptureSlide> BuildScriptureSlides(const std::vector<ContentBlock>
         ScriptureSlide slide;
         slide.reference = values.reference;
         slide.title = values.reference;
+        slide.verses = numbersHere;
+        slide.parts = std::move(slideParts);
         slide.blocks = tmpl;
         for (ContentBlock& b : slide.blocks) {
             if (b.kind != "text") continue;

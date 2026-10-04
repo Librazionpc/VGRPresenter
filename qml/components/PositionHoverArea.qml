@@ -55,6 +55,8 @@ Item {
     // hover-only surface that must not claim the cursor.
     property bool showCursor: true
     property int cursorShape: Qt.PointingHandCursor
+    // Hover-only overlays should let the actual control below them receive clicks.
+    property bool clickEnabled: true
 
     signal entered()
     signal exited()
@@ -123,6 +125,7 @@ Item {
 
     MouseArea {
         anchors.fill: parent
+        enabled: root.clickEnabled
         hoverEnabled: false
         onClicked: (mouse) => root.clicked(mouse)
         onDoubleClicked: (mouse) => root.doubleClicked(mouse)

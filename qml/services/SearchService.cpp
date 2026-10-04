@@ -308,6 +308,8 @@ QVariantList SearchService::resolveWords(const QString &text) const
 void SearchService::resolveWordsAsync(const QString &text, int token)
 {
     auto *runner = QThread::create([this, text, token] {
+        if (token != latestResolveToken_.load(std::memory_order_acquire))
+            return;
         const QVariantList rows = resolveWords(text);
         QMetaObject::invokeMethod(this, [this, token, rows] {
             if (token == latestResolveToken_)
@@ -578,9 +580,9 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
             tableRows.append(r);
         }
     }
-    if (codeShaped && !tableRows.isEmpty())
-        return tableRows;   // a sermon-code query names a SERMON: The Table only —
-                            // Bible verses that merely contain "47" are noise here
+    if (codeShaped)
+        return tableRows;   // citation-shaped queries match sermon codes only;
+                            // never fall through to fuzzy paragraph / Bible hits
     return out;
 }
 
@@ -590,6 +592,8 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
 void SearchService::searchAsync(const QString &text, int perKind, int token)
 {
     auto *runner = QThread::create([this, text, perKind, token] {
+        if (token != latestToken_.load(std::memory_order_acquire))
+            return;
         const QVariantList rows = search(text, perKind);
         QMetaObject::invokeMethod(this, [this, token, rows] {
             if (token == latestToken_)

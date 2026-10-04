@@ -310,7 +310,7 @@ Item {
                             checkerSize: 24
                         }
                     }
-                    Text { x: 130; y: 10; text: (listRow.index + 1) + "  " + (listRow.modelData.title ?? "") + ((listRow.modelData.nextTimer ?? 0) > 0 ? "  ·  " + root.formatTime(listRow.modelData.nextTimer) : ""); color: "#e2e8f0"; font.family: "Segoe UI"; font.pixelSize: 14; font.weight: Font.DemiBold }
+                    Text { x: 130; y: 10; text: (listRow.index + 1) + "  " + (listRow.modelData.title ?? "") + ((listRow.modelData.nextTimer ?? 0) > 0 ? "  ·  " + root.formatTime(listRow.modelData.nextTimer) : ""); color: "#e2e8f0"; font.family: Theme.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold }
                     // EDITABLE — same live-autosave mechanism as the "lyrics"
                     // view (ShowService.rewriteShowFromText), just presented
                     // per row instead of one big text block: a row's own
@@ -540,8 +540,8 @@ Item {
                             border.color: root.timerApplied ? "#3a3d4c" : Theme.accent
                             Row {
                                 anchors.centerIn: parent; spacing: 8
-                                Text { text: root.timerApplied ? qsTr("Reset") : qsTr("To all slides"); color: "#ffffff"; font.family: "Segoe UI"; font.pixelSize: 15; font.weight: Font.DemiBold }
-                                Text { visible: !root.timerApplied && root.timerSeconds > 0; text: root.formatTime(root.timerSeconds * root.slides.length); color: "#ffb4ab"; font.family: "Segoe UI"; font.pixelSize: 14 }
+                                Text { text: root.timerApplied ? qsTr("Reset") : qsTr("To all slides"); color: "#ffffff"; font.family: Theme.fontFamily; font.pixelSize: 15; font.weight: Font.DemiBold }
+                                Text { visible: !root.timerApplied && root.timerSeconds > 0; text: root.formatTime(root.timerSeconds * root.slides.length); color: "#ffb4ab"; font.family: Theme.fontFamily; font.pixelSize: 14 }
                             }
                             HoverHandler { id: applyHover; cursorShape: parent.usable ? Qt.PointingHandCursor : Qt.ArrowCursor }
                             TapHandler { enabled: parent.usable; onTapped: root.applyTimer() }

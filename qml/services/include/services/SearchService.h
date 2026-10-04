@@ -121,7 +121,7 @@ signals:
 private:
     explicit SearchService(QObject *parent = nullptr);
     static QStringList candidateBibleFiles();
-    int latestResolveToken_ = 0;   // resolveWordsAsync: newest request wins
+    std::atomic<int> latestResolveToken_{0};   // resolveWordsAsync: newest request wins
 
     QPointer<QThread> loader_;
     std::atomic<int> latestToken_{0};   // searchAsync: only the newest request emits
