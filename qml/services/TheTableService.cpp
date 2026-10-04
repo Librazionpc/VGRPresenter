@@ -677,6 +677,8 @@ void TheTableService::startIndexing()
     }
     indexCancel_.store(false, std::memory_order_relaxed);
     indexReindex_.store(false, std::memory_order_relaxed);
+    EngineBridge::write(QStringLiteral("info"), QStringLiteral("StartupTrace"),
+                        QStringLiteral("The Table search indexing worker starting"));
     indexWorker_ = std::thread([this] {
         do {
             indexReindex_.store(false, std::memory_order_relaxed);

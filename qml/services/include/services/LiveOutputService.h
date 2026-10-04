@@ -494,8 +494,6 @@ private:
     bool ndiBackoff_ = false;      // skip the tick after a reported-slow send
     bool ndiSlowLogged_ = false;   // "send is slow" once per incident
     int ndiFastStreak_ = 0;        // consecutive fast sends; ≥30 re-arms the slow-send log (toast-spam guard)
-    int ndiReceiversSeen_ = -1;    // last reported connected-monitor count
-    int ndiTick_ = 0;              // send-tick counter (telemetry, ~1 Hz nominal)
     // ---- The NDI feed's own clock ------------------------------------------
     // pushNdiFrame used to ride the 10 Hz GUI poll — the feed ran at the
     // poll's rate no matter what the output's Refresh rate select said. It

@@ -834,28 +834,39 @@ void EngineBridge::openNdiDownloadPage()
     QDesktopServices::openUrl(QUrl(ndiDownloadUrl()));
 }
 
-// Connected-receiver telemetry: the live poll's 100 ms cadence is overkill
-// for an mDNS-level counter — 1 s is plenty and this piggybacks on the
-// existing poll thread instead of owning another timer.
+// Connected-receiver telemetry: the NDI SDK query can block while a send is
+// in progress, so never call it from the GUI's live poll. Coalesce refreshes
+// onto the worker pool; only the small property update returns to the GUI.
 void EngineBridge::refreshNdiConnections()
 {
-    int connected = -1;
-    if (booted()) {
+    if (!booted()) return;
+    bool expected = false;
+    if (!ndiConnectionProbeBusy_.compare_exchange_strong(expected, true))
+        return; // the SDK query is still in flight; the next poll will retry
+
+    QPointer<EngineBridge> guard(this);
+    QThreadPool::globalInstance()->start([guard]() {
         auto *provider = []() -> bps::display::NdiDisplayProvider * {
             auto p = bps::display::DisplayEngine::Instance().Provider("Ndi");
             return p ? dynamic_cast<bps::display::NdiDisplayProvider *>(p.get()) : nullptr;
         }();
+        int connected = -1;
         if (provider) {
             const std::string senderId = provider->SenderId();
             if (!senderId.empty())
                 connected = bps::broadcast::BroadcastEngine::Instance()
                                 .SenderConnectedReceivers(senderId);
         }
-    }
-    if (connected != ndiConnectedReceivers_) {
-        ndiConnectedReceivers_ = connected;
-        emit ndiConnectedReceiversChanged();
-    }
+        QMetaObject::invokeMethod(guard, [guard, connected]() {
+            if (!guard) return;
+            EngineBridge *self = guard.data();
+            self->ndiConnectionProbeBusy_ = false;
+            if (connected != self->ndiConnectedReceivers_) {
+                self->ndiConnectedReceivers_ = connected;
+                emit self->ndiConnectedReceiversChanged();
+            }
+        }, Qt::QueuedConnection);
+    });
 }
 
 // ============================================================================

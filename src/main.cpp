@@ -480,7 +480,15 @@ int main(int argc, char *argv[])
     // tile under the on-air content), same up-front registration convention.
     engine.addImageProvider(QStringLiteral("mediaplay"), new LiveMediaFrameProvider);
 
+    QElapsedTimer qmlLoadClock;
+    qmlLoadClock.start();
+    EngineBridge::write(QStringLiteral("info"), QStringLiteral("StartupTrace"),
+                        QStringLiteral("QML load begin: VGRPresenterUI.Main"));
     engine.loadFromModule("VGRPresenterUI", "Main");
+    EngineBridge::write(QStringLiteral("info"), QStringLiteral("StartupTrace"),
+                        QStringLiteral("QML load returned after %1 ms; root objects=%2")
+                            .arg(qmlLoadClock.elapsed())
+                            .arg(engine.rootObjects().size()));
 
     // The window's own taskbar/alt-tab icon: a QQuickWindow does NOT reliably
     // adopt QGuiApplication::setWindowIcon() on Windows — the exe carried the
@@ -506,6 +514,25 @@ int main(int argc, char *argv[])
         rootWindow->raise();
         rootWindow->requestActivate();
     }
+    EngineBridge::write(QStringLiteral("info"), QStringLiteral("StartupTrace"),
+                        QStringLiteral("main window shown; visible=%1")
+                            .arg(rootWindow && rootWindow->isVisible()));
+
+    // Temporary hang diagnostic: if the GUI thread stops processing events,
+    // this timestamped line is the last confirmed event-loop progress in
+    // engine.log. Kept at a low rate so a normal development run stays legible.
+    QElapsedTimer uiTraceClock;
+    uiTraceClock.start();
+    QTimer uiHeartbeat;
+    uiHeartbeat.setInterval(5000);
+    QObject::connect(&uiHeartbeat, &QTimer::timeout, &app, [&] {
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("StartupTrace"),
+                            QStringLiteral("UI event-loop heartbeat at %1 ms; visible=%2; active=%3")
+                                .arg(uiTraceClock.elapsed())
+                                .arg(rootWindow && rootWindow->isVisible())
+                                .arg(rootWindow && rootWindow->isActive()));
+    });
+    uiHeartbeat.start();
 
     // Env-gated taken-input self-test: takes a real window through the
     // whole output-preview chain ~2.5s after launch and logs PASS/FAIL.
@@ -540,7 +567,11 @@ int main(int argc, char *argv[])
     // crash still goes through CrashHandler.cpp's SEH/signal path, which
     // this can't catch.
     try {
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("StartupTrace"),
+                            QStringLiteral("entering app event loop"));
         const int code = app.exec();
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("StartupTrace"),
+                            QStringLiteral("app event loop returned with code %1").arg(code));
         // Finalize any still-running recording BEFORE the kernel tears the
         // engine down — the file on disk must be complete (a planned exit
         // has no excuse for a half-written recording; a CRASHED one recovers

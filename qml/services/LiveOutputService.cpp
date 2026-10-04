@@ -1704,21 +1704,6 @@ void LiveOutputService::pushNdiFrame()
         setNdiWarming(false, QString());   // on the wire: no longer warming
         emit ndiChanged();
 
-        // Connected-monitor telemetry, every 10th tick (the SDK's own count;
-        // cheap query, GUI thread fine). "2 monitor(s)" stays the honest
-        // witness it was during the green-screen hunt.
-        if (++ndiTick_ % 10 == 0) {
-            const int connected = bps::broadcast::BroadcastEngine::Instance()
-                                      .SenderConnectedReceivers(provider->SenderId());
-            if (connected != ndiReceiversSeen_) {   // -1 = provider can't tell — stays silent
-                const bool first = ndiReceiversSeen_ < 0;
-                ndiReceiversSeen_ = connected;
-                qCWarning(lcNdiProgress, "LiveOutputService: NDI sender '%s' %s %d monitor(s) connected",
-                         qUtf8Printable(senderName.isEmpty() ? QStringLiteral("VGR Program") : senderName),
-                         first ? "currently has" : (connected > 0 ? "now has" : "has NO monitors left —"),
-                         connected);
-            }
-        }
     }
 }
 
@@ -1743,7 +1728,6 @@ void LiveOutputService::stopNdiFeed()
     ndiBackoff_ = false;
     ndiSlowLogged_ = false;
     ndiFastStreak_ = 0;
-    ndiReceiversSeen_ = -1;
     // The in-flight sequence: queued jobs may still report back after this
     // point — stamp the sequence so their results are dropped as stale (a
     // session restart must not resurrect the pill from an old send).

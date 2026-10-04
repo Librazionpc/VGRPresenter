@@ -509,6 +509,9 @@ private:
     // while one is in flight coalesces into the running probe instead of
     // stacking a second runtime load/discovery pass.
     std::atomic<bool> ndiProbeBusy_{false};
+    // The SDK's connected-receiver query can block while NDI is sending, so
+    // the 1 Hz live telemetry refresh is coalesced onto the worker pool too.
+    std::atomic<bool> ndiConnectionProbeBusy_{false};
     int ndiConnectedReceivers_ = -1;   // SDK connection count, poll-refreshed
     bool ndiFirewallPrompted_ = false;   // once per install (settings-backed)
     qint64 lastEnumerationMs_ = 0;   // throttles refreshDevices()

@@ -6,6 +6,9 @@ import "../../components"
 Rectangle {
     id: vGRPresenter_Main_Screen
 
+    Component.onCompleted: EngineBridge.log("info", "StartupTrace", "main screen component completed")
+    onVisibleChanged: if (visible) EngineBridge.log("info", "StartupTrace", "main screen became visible")
+
     height: 900
     width: 1440
 
@@ -670,13 +673,17 @@ Rectangle {
                         id: scripturePane
                         objectName: "selfTestScripturePane"
                         visible: media_tab_bar.currentPane === "scripture"
+                        onVisibleChanged: if (visible) EngineBridge.log("info", "StartupTrace", "Scripture pane became visible")
+                        Component.onCompleted: {
+                            EngineBridge.log("info", "StartupTrace", "Scripture pane component completed")
+                            media_tab_bar.registerSuggester("scripture", scripturePane)
+                        }
                         width: parent.width; height: parent.height
                         filter: media_tab_bar.searches.scripture !== undefined ? media_tab_bar.searches.scripture : ""
                         onTemplateEditRequested: (id) => vGRPresenter_Main_Screen.designEditRequested("template", id)
                         onConvertToShowRequested: (name, slides) => vGRPresenter_Main_Screen.scriptureShowRequested(name, slides)
                         // Live reference autocomplete: the pane builds the rows (its suggest()),
                         // the tab bar feeds them to the search box and routes picks back here.
-                        Component.onCompleted: media_tab_bar.registerSuggester("scripture", scripturePane)
                         onSuggestionChosen: (ref) => scripturePane.applySuggestion(ref)
                         // The preview toolbar's ‹ › at the edge of the on-air
                         // set: this tab re-picks the neighbouring passage and
@@ -694,10 +701,14 @@ Rectangle {
                         id: tablePane
                         objectName: "selfTestTablePane"
                         visible: media_tab_bar.currentPane === "table"
+                        onVisibleChanged: if (visible) EngineBridge.log("info", "StartupTrace", "The Table pane became visible")
+                        Component.onCompleted: {
+                            EngineBridge.log("info", "StartupTrace", "The Table pane component completed")
+                            media_tab_bar.registerSuggester("table", tablePane)
+                        }
                         width: parent.width; height: parent.height
                         filter: media_tab_bar.searches.table !== undefined ? media_tab_bar.searches.table : ""
                         // The Table autocompletes the same way (its suggest() offers sermons).
-                        Component.onCompleted: media_tab_bar.registerSuggester("table", tablePane)
                         onSuggestionChosen: (ref) => tablePane.applySuggestion(ref)
                         // Same passage-step relay as Scripture (see there).
                         Connections {
@@ -716,6 +727,8 @@ Rectangle {
                     MediaLibraryPane {
                         id: mediaPane
                         objectName: "selfTestMediaPane"
+                        onVisibleChanged: if (visible) EngineBridge.log("info", "StartupTrace", "Media pane became visible")
+                        Component.onCompleted: EngineBridge.log("info", "StartupTrace", "Media pane component completed")
                         onItemActivated: (item) => vGRPresenter_Main_Screen.centerItem = item
                         // Double-click: drop it on the project (unchanged)
                         // AND take it to the Main Output — the SAME toggle

@@ -1615,6 +1615,12 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine(const std::atomic<bool>* c
         snapshot = books_;
     }
 
+    size_t total = 0;
+    for (const TheTableBook& book : snapshot)
+        total += book.chapters.size();
+    Logger::Instance().Info(std::format("The Table search indexing started ({} sermon documents)", total),
+                            kModule);
+
     size_t indexed = 0;
     // One cache invalidation for the whole batch, not one per sermon.
     engine.SuspendCacheInvalidation();
@@ -1650,6 +1656,9 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine(const std::atomic<bool>* c
                 return r.error();
             }
             ++indexed;
+            if (indexed % 25 == 0 || indexed == total)
+                Logger::Instance().Info(std::format("The Table search indexing progress: {}/{}",
+                                                    indexed, total), kModule);
         }
     }
     engine.ResumeCacheInvalidation();
