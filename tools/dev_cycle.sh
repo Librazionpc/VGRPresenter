@@ -124,13 +124,13 @@ PID="$(echo "$PID_LINE" | cut -d'"' -f4)"
 QML_ERRORS=0
 if [ -f "$LOG" ]; then
     QML_ERRORS="$(tail -n +$((LOG_BEFORE + 1)) "$LOG" \
-        | grep -icE "QML|RangeError|Cannot read|TypeError")"
+        | grep -icE "\\[(WARN|ERROR|FATAL)\\].*\\[QML\\]|RangeError|Cannot read|TypeError")"
 fi
 
 if [ "$QML_ERRORS" -gt 0 ]; then
     echo "health FAILED — $QML_ERRORS QML error line(s) since launch:"
     tail -n +$((LOG_BEFORE + 1)) "$LOG" \
-        | grep -aiE "QML|RangeError|Cannot read|TypeError" | head -10
+        | grep -aiE "\\[(WARN|ERROR|FATAL)\\].*\\[QML\\]|RangeError|Cannot read|TypeError" | head -10
     echo "DEV_CYCLE: FAIL qml-errors"
     exit 3
 fi
