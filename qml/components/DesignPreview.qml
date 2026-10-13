@@ -5,7 +5,7 @@ import VGRPresenterUI
 // Draws a DESIGN - an overlay or a template - from the BLOCKS the ENGINE keeps for it
 // (DesignLibraryService.designs(): { key, kind, text, x, y, width, height, bind, meta, style }).
 //
-// The blocks are in the Edit screen's stage units (754 x 428); this item lays the stage out at its own
+// The blocks are in the Edit screen's stage units (StageGrid.w x StageGrid.h, 754 x 428); this item lays the stage out at its own
 // width (set the width and the height follows). They may be plain objects (a library card) or the Edit screen's live
 // CanvasItem objects (a slide thumbnail) - either way every property is read through bindings, so a live item re-draws here
 // the moment it changes, without the list being rebuilt. It draws the same kinds the Edit screen draws, with the
@@ -29,6 +29,19 @@ Item {
 
     property var blocks: []
     property string background: "transparent"
+    // LAYER SPLIT FOR A LIVE FEED (the monitor tile's use). WHICH blocks paint
+    // under a taken camera/screen feed is the ENGINE's rule, not this item's
+    // (SceneBuilder::PlanBlockLayers, asked through
+    // EngineBridge.backdropBlockIndexes) — a block it puts there arrives here
+    // MARKED (block.underVideo === true), so the marker travels with the block
+    // and no surface has to index into a list it also filters. This item then
+    // only knows how to DRAW the two passes that marker implies:
+    //   * paintOnly: draw this pass's item PAINTS only, no item content — the
+    //     pass below the feed, which is under the text as well as the video.
+    //   * blocks marked underVideo are drawn WITHOUT their own paint (a text
+    //     block's box, a shape's fill) in every normal pass, because their paint
+    //     is below the feed while their text stays above it.
+    property bool paintOnly: false
     // A background IMAGE painted over the colour, under the blocks — the
     // engine's own order (SceneBuilder: background colour object, then the
     // style image cover-fit, then content). Hosts pass the STYLE's image
@@ -54,11 +67,14 @@ Item {
     // content turn this off; every editor/library surface keeps it on.
     property bool showBindPlaceholders: true
 
-    readonly property real stageW: 754
-    readonly property real stageH: 428
-    readonly property real unit: width / stageW
+    // The stage's grid, from its ONE definition (qml/settings/StageGrid.qml) —
+    // this item draws a picture OF THE STAGE, so it follows the stage's own
+    // proportion (StageGrid's rule 2), never the frame's axis-by-axis mapping.
+    readonly property real stageW: StageGrid.w
+    readonly property real stageH: StageGrid.h
+    readonly property real unit: width / StageGrid.w
 
-    implicitHeight: Math.round(width * stageH / stageW)
+    implicitHeight: StageGrid.heightForWidth(width)
     clip: true
 
     // The canvas's clock/timer formatting, shared (this one never ticks; the host feeds `now`).
@@ -115,14 +131,22 @@ Item {
                 // The box behind a block the canvas draws one for: a text or a clock (a fill of nothing is just its border).
                 // (Shapes, timers and camera / media tiles draw their own; a vignette / corners block is never a box.)
                 readonly property bool hasBox: kind === "text" || kind === "clock"
+                // Set by the layer that renders a live feed (the monitor tile),
+                // from the ENGINE's own answer: this block's paint belongs under
+                // the feed, so it is not painted again above it.
+                readonly property bool paintUnderFeed: modelData.underVideo === true
 
                 x: modelData.x; y: modelData.y
                 width: modelData.width !== undefined ? modelData.width : 160
                 height: modelData.height !== undefined ? modelData.height : 40
+                // A block never paints outside its own box — the Edit canvas clips a
+                // bound placeholder for the same reason it is pinned to the item's own
+                // type size below: it can be wider than a small box.
+                clip: true
 
                 // fill + border (the box the Edit screen draws behind a text or a clock)
                 Rectangle {
-                    visible: el.hasBox
+                    visible: el.hasBox && !el.paintUnderFeed
                     anchors.fill: parent
                     color: el.style.backgroundColor !== undefined ? el.style.backgroundColor : "transparent"
                     radius: el.style.cornerRadius ?? 0
@@ -158,7 +182,15 @@ Item {
                     const pad = el.style.padding ?? 0
                     const bw = el.width - pad * 2, bh = el.height - pad * 2
                     let lo = 3, hi = 400
-                    if (bw <= 0 || bh <= 0) {
+                    // A BOUND PLACEHOLDER IS NOT CONTENT, so the DECLARED size is the
+                    // answer in every mode (the Edit canvas's recomputeFit carries the same
+                    // rule, with the measurements) — the mode names describe what may happen
+                    // to content, and a token is not content. Asking "is this text a
+                    // stand-in?" rather than "is the mode grow?" also keeps the rule from
+                    // needing two spellings for one idea ("grow" here, "growToFit" there).
+                    // The delegate is clipped to its box, so the token is cut at the edge
+                    // instead of shrinking the type.
+                    if (bw <= 0 || bh <= 0 || MetadataFields.isToken(fitText.text)) {
                         lo = el.meta.fontSize ?? 16
                     } else {
                         for (let i = 0; i < 11; ++i) {
@@ -192,7 +224,7 @@ Item {
                 }
                 Text {
                     id: fitText
-                    visible: el.kind === "text"
+                    visible: el.kind === "text" && !root.paintOnly
                     anchors.fill: parent
                     leftPadding: el.style.padding ?? 0; rightPadding: el.style.padding ?? 0
                     // (a block from the canvas may carry no text at all)
@@ -239,6 +271,7 @@ Item {
                 //     outline-only frame stays an outline), the stroke its border ---
                 Rectangle {   // rectangle / rounded / anything unrecognised
                     visible: el.kind === "shape" && !el.isCircle && !el.isLine && !el.isGlyph
+                             && !el.paintUnderFeed
                     anchors.fill: parent
                     radius: el.style.cornerRadius ?? 0
                     color: el.fillColor
@@ -246,7 +279,7 @@ Item {
                     border.width: el.strokeWidth
                 }
                 Rectangle {   // circle - the square that fits, centred
-                    visible: el.kind === "shape" && el.isCircle
+                    visible: el.kind === "shape" && el.isCircle && !el.paintUnderFeed
                     anchors.centerIn: parent
                     width: Math.min(parent.width, parent.height); height: width
                     radius: width / 2
@@ -255,13 +288,13 @@ Item {
                     border.width: el.strokeWidth
                 }
                 Rectangle {   // line - a thin bar across the middle
-                    visible: el.kind === "shape" && el.isLine
+                    visible: el.kind === "shape" && el.isLine && !el.paintUnderFeed
                     anchors.verticalCenter: parent.verticalCenter
                     width: parent.width; height: Math.max(2, el.strokeWidth || 3)
                     color: el.fillColor
                 }
                 Text {        // triangle / arrow / star / hexagon
-                    visible: el.kind === "shape" && el.isGlyph
+                    visible: el.kind === "shape" && el.isGlyph && !el.paintUnderFeed
                     anchors.centerIn: parent
                     text: el.shapeType === "triangle" ? "▲" : el.shapeType === "arrow" ? "→" : el.shapeType === "star" ? "★" : "⬡"
                     color: el.fillColor
@@ -270,7 +303,7 @@ Item {
 
                 // --- clock (digits, or an analog face) - formatted and sized like the canvas's own ---
                 Column {
-                    visible: el.kind === "clock" && el.meta.style !== "analog"
+                    visible: el.kind === "clock" && el.meta.style !== "analog" && !root.paintOnly
                     anchors.centerIn: parent
                     spacing: 2
 
@@ -292,7 +325,7 @@ Item {
                     }
                 }
                 Item {
-                    visible: el.kind === "clock" && el.meta.style === "analog"
+                    visible: el.kind === "clock" && el.meta.style === "analog" && !root.paintOnly
                     anchors.centerIn: parent
                     width: Math.min(el.width, el.height) * 0.8; height: width
 
@@ -337,7 +370,7 @@ Item {
 
                 // --- timer: a dark box unless the item has a fill, then the count (the canvas's own rule) ---
                 Rectangle {
-                    visible: el.kind === "timer"
+                    visible: el.kind === "timer" && !root.paintOnly
                     anchors.fill: parent
                     radius: el.style.cornerRadius ?? 8
                     color: !root.isClear(el.style.backgroundColor) ? el.style.backgroundColor : "#12131a"
@@ -357,14 +390,16 @@ Item {
 
                 // --- camera: the live-preview tile the canvas shows (its source's name at the bottom) ---
                 Rectangle {
-                    visible: el.kind === "camera"
+                    visible: el.kind === "camera" && !root.paintOnly
                     anchors.fill: parent
                     radius: 8
                     gradient: Gradient {
                         GradientStop { position: 0; color: "#123326" }
                         GradientStop { position: 1; color: "#07130e" }
                     }
-                    Rectangle { x: 8; y: 9; width: 5; height: 5; radius: 3; color: "#ff5d5d" }
+                    // the canvas's own LIVE dot is Theme.danger red (EditScreen) — the
+                    // preview paints the same dot, so it reads the same token.
+                    Rectangle { x: 8; y: 9; width: 5; height: 5; radius: 3; color: Theme.danger }
                     Text { x: 18; y: 7; text: qsTr("LIVE"); color: "#e2e8f0"; font.family: "Segoe UI"; font.pixelSize: 8; font.weight: Font.Medium }
                     Rectangle { x: 10; y: 24; width: 36; height: 34; radius: 4; color: "#14503a" }
                     Rectangle { x: 30; y: 24; width: 24; height: 34; radius: 4; color: "#0f3a2c" }
@@ -377,7 +412,7 @@ Item {
 
                 // --- media / audio / any other kind: the canvas's generic tile - the kind's icon and name, and the picked file ---
                 Rectangle {
-                    visible: el.isPlaceholder
+                    visible: el.isPlaceholder && !root.paintOnly
                     anchors.fill: parent
                     radius: 6
                     color: "#1a1c26"

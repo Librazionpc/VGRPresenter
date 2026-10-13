@@ -1,4 +1,6 @@
 import QtQuick
+import QtQuick.Controls
+import VGRPresenterUI
 
 // "Select Camera Source" picker — pops up when "Camera" is picked from the
 // Edit screen's "+" Add Content menu, matching
@@ -50,6 +52,15 @@ Item {
     // Dim scrim behind the card; clicking it cancels, same as every other
     // overlay in this app (see BackgroundColorModal.qml). Shared ModalScrim
     // — also consumes wheel so the page behind can't scroll through it.
+    // The dialog belongs to the WINDOW, not to the pane that declares it. A modal
+    // declared inside a settings page (every Add / Edit dialog in Settings) must dim
+    // the whole app, not just that page's content column: parented in place its scrim
+    // covered one side of the settings card, so the dialog read as half-modal (user
+    // report: "the black box doesn't cover the whole settings modal, only one side").
+    // Reparented to the window overlay, this component has no scaled ancestor to
+    // inherit a scale from, so its CARD applies the app scale itself (see AppScale.qml).
+    parent: Overlay.overlay
+
     ModalScrim {
         anchors.fill: parent
         onDismissed: root.cancelled()
@@ -57,12 +68,16 @@ Item {
 
     Rectangle {
         id: card
+        // The app's one scale, on the card (see AppScale.qml) — never on the root,
+        // whose scrim IS the dialog's black box and has to stay window-sized.
+        scale: AppScale.cardScale(card)
+        transformOrigin: Item.Center
         anchors.centerIn: parent
         width: 640
         height: content.height + 40
         radius: 14
-        color: "#13151c"
-        border.color: "#232530"
+        color: Theme.surface
+        border.color: Theme.border
         border.width: 1
 
         // Swallows clicks so they don't fall through to the scrim behind it.
@@ -87,8 +102,8 @@ Item {
                         anchors.left: parent.left
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Select Camera Source")
-                        color: "#f1f3f8"
-                        font.family: "Segoe UI"
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
                         font.pixelSize: 18
                         font.weight: Font.DemiBold
                     }
@@ -100,13 +115,13 @@ Item {
                         width: 28
                         height: 28
                         radius: 7
-                        color: closeArea.containsMouse ? "#20222c" : "transparent"
+                        color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
                         Behavior on color { ColorAnimation { duration: 100 } }
 
                         Text {
                             anchors.centerIn: parent
                             text: "✕"
-                            color: "#8a94a6"
+                            color: Theme.textSecondary
                             font.pixelSize: 14
                         }
 
@@ -123,21 +138,21 @@ Item {
                 Text {
                     width: parent.width
                     text: qsTr("Choose a live camera feed to add to this slide")
-                    color: "#8a94a6"
-                    font.family: "Segoe UI"
+                    color: Theme.textSecondary
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                 }
             }
 
-            Rectangle { width: parent.width; height: 1; color: "#232530" }
+            Rectangle { width: parent.width; height: 1; color: Theme.border }
 
             // Search field — filters `sources` by name as you type.
             Rectangle {
                 width: parent.width
                 height: 32
                 radius: 8
-                color: "#1a1c26"
-                border.color: "#2a2f3a"
+                color: Theme.inset
+                border.color: Theme.borderSubtle
                 border.width: 1
 
                 Row {
@@ -151,15 +166,15 @@ Item {
                     IconGlyph {
                         anchors.verticalCenter: parent.verticalCenter
                         name: "search"
-                        color: "#5c6475"
+                        color: Theme.textMuted
                         width: 12; height: 12
                         }
 
                     TextInput {
                         anchors.verticalCenter: parent.verticalCenter
                         width: parent.width - 24
-                        color: "#c9cedd"
-                        font.family: "Segoe UI"
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                         selectByMouse: true
                         onTextChanged: root.searchQuery = text
@@ -167,8 +182,8 @@ Item {
                         Text {
                             visible: parent.text.length === 0
                             text: qsTr("Search cameras...")
-                            color: "#5c6475"
-                            font.family: "Segoe UI"
+                            color: Theme.textMuted
+                            font.family: Theme.fontFamily
                             font.pixelSize: 14
                         }
                     }
@@ -196,7 +211,7 @@ Item {
                         radius: 10
                         color: "#0d0f16"
                         border.width: sourceCard.selected ? 1.5 : 1
-                        border.color: sourceCard.selected ? Theme.accent : "#262a38"
+                        border.color: sourceCard.selected ? Theme.accent : Theme.borderSubtle
                         opacity: sourceCard.isOffline ? 0.6 : 1
                         Behavior on border.color { ColorAnimation { duration: 100 } }
 
@@ -210,13 +225,13 @@ Item {
                                 width: 6
                                 height: 6
                                 radius: 3
-                                color: sourceCard.isOffline ? "#5c6475" : "#2ed573"
+                                color: sourceCard.isOffline ? Theme.textMuted : "#2ed573"
                             }
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: sourceCard.isOffline ? qsTr("OFFLINE") : qsTr("LIVE")
-                                color: sourceCard.isOffline ? "#5c6475" : "#2ed573"
-                                font.family: "Segoe UI"
+                                color: sourceCard.isOffline ? Theme.textMuted : "#2ed573"
+                                font.family: Theme.fontFamily
                                 font.pixelSize: 10
                                 font.weight: Font.DemiBold
                             }
@@ -245,8 +260,8 @@ Item {
                                 width: parent.width
                                 horizontalAlignment: Text.AlignHCenter
                                 text: sourceCard.modelData.name
-                                color: sourceCard.isOffline ? "#7a8094" : "#eef1f8"
-                                font.family: "Segoe UI"
+                                color: sourceCard.isOffline ? Theme.textSecondary : Theme.textPrimary
+                                font.family: Theme.fontFamily
                                 font.pixelSize: 15
                                 font.weight: Font.Medium
                             }
@@ -254,8 +269,10 @@ Item {
                                 width: parent.width
                                 horizontalAlignment: Text.AlignHCenter
                                 text: sourceCard.modelData.description
-                                color: sourceCard.isOffline ? "#4a5162" : "#5c6475"
-                                font.family: "Segoe UI"
+                                // The offline card's blurb is a shade dimmer than a live one's
+                                // (Theme has no token below textMuted, so it is derived).
+                                color: sourceCard.isOffline ? Qt.darker(Theme.textMuted, 1.2) : Theme.textMuted
+                                font.family: Theme.fontFamily
                                 font.pixelSize: 12
                             }
                         }
@@ -270,7 +287,7 @@ Item {
                 }
             }
 
-            Rectangle { width: parent.width; height: 1; color: "#232530" }
+            Rectangle { width: parent.width; height: 1; color: Theme.border }
 
             Row {
                 anchors.right: parent.right
@@ -280,16 +297,16 @@ Item {
                     width: 100
                     height: 36
                     radius: 10
-                    color: cancelArea.containsMouse ? "#20222c" : "#1a1c26"
-                    border.color: "#2a2f3a"
+                    color: cancelArea.containsMouse ? Theme.hoverBg : Theme.inset
+                    border.color: Theme.borderSubtle
                     border.width: 1
                     Behavior on color { ColorAnimation { duration: 100 } }
 
                     Text {
                         anchors.centerIn: parent
                         text: qsTr("Cancel")
-                        color: "#c8cdd9"
-                        font.family: "Segoe UI"
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
                         font.pixelSize: 15
                         font.weight: Font.Medium
                     }
@@ -316,7 +333,7 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Add Camera")
                         color: "#ffffff"
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 15
                         font.weight: Font.DemiBold
                     }

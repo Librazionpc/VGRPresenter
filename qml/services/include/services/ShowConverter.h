@@ -38,12 +38,29 @@ QVariantMap toVariant(const bps::presentation::Presentation &presentation);
 QVariantMap metaOf(const bps::presentation::Slide &slide);
 std::string metaToJsonString(const QVariantMap &meta);
 
+// THE PLACEHOLDER VOCABULARY A SLIDE CARRIES, filtered out of its meta map, in
+// the key names the engine reads it back by (SceneBuilder::SlideValues).
+//
+// Why this exists as one function: a slide's fill — the body, and The Table's
+// code / paragraph numbers / year / title / citation — has to survive every trip
+// between the engine and the QML surfaces that preview it, because the ENGINE
+// resolves an output style's own slots from these values and, without them,
+// falls back to guessing the body from the design's block ORDER (which is how a
+// table design's date code came to be drawn where the sermon text belonged).
+// Three surfaces need to agree on the spelling — the fill's writer (SlideBuilder),
+// a saved show (ShowConverter::toVariant) and a previewed slide
+// (LiveOutputService::slideToVariantMap) — and this is the one list that says it.
+// Keys are copied ONLY when the meta really names them: an empty `refLast` is the
+// fill saying "not the last slide", which is not the same as never told.
+QVariantMap fillFromMeta(const QVariantMap &meta);
+
 // Single items (used by the CRUD calls, which edit one thing at a time).
 bps::presentation::Category categoryFromVariant(const QVariantMap &category);
 bps::presentation::Overlay overlayFromVariant(const QVariantMap &overlay);
 bps::presentation::Slide slideFromVariant(const QVariantMap &slide);
 bps::presentation::ContentBlock blockFromVariant(const QVariantMap &block);
 QVariantMap blockToVariant(const bps::presentation::ContentBlock &block);
+QVariantList blocksToVariant(const std::vector<bps::presentation::ContentBlock> &blocks);
 
 bps::presentation::SlideTemplate templateFromVariant(const QVariantMap &tmpl);
 QVariantMap templateToVariant(const bps::presentation::SlideTemplate &tmpl);

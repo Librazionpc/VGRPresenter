@@ -6,6 +6,7 @@
 
 #include "modules/library/DesignCatalogs.hpp"
 #include "modules/library/DesignLibrary.hpp"
+#include "modules/presentation/BookFill.hpp"   // the placeholder vocabulary the metadata registry is checked against
 #include "platform/PlatformAccessor.hpp"
 
 #include <QJSEngine>
@@ -360,6 +361,16 @@ OverlayLibraryService *OverlayLibraryService::create(QQmlEngine *engine, QJSEngi
     Q_UNUSED(jsEngine)
     QJSEngine::setObjectOwnership(&instance(), QJSEngine::CppOwnership);
     return &instance();
+}
+
+bool TemplateLibraryService::metadataTokenResolves(const QString &contentType, const QString &token) const
+{
+    // The registry stores the LITERAL token (braces included, because that is what
+    // lands in an item's text); the vocabulary answers for the part inside them.
+    std::string t = token.toStdString();
+    if (t.size() >= 2 && t.front() == '{' && t.back() == '}')
+        t = t.substr(1, t.size() - 2);
+    return bps::presentation::FamilyAnswersToken(bps::presentation::FromTag(contentType.toStdString()), t);
 }
 
 TemplateLibraryService::TemplateLibraryService()

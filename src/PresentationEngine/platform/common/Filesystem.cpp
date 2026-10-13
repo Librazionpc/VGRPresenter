@@ -14,7 +14,16 @@
 #undef CreateDirectory
 #endif
 
+#if defined(_WIN32)
+// windows.h is already in scope above; nothing further.
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
+#include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -41,6 +50,125 @@ Error IoError(std::string_view module, std::string_view message) {
     if (errno != 0) e.nativeError = errno;
     e.stack = CaptureStack();
     return e;
+}
+
+// ---------------------------------------------------------------------------
+// Durability primitives behind WriteAtomic/CopyAtomic (see ReplaceAtomic for
+// the ordering argument). All three are OS-specific, so they live here with the
+// rest of the PAL's platform knowledge.
+// ---------------------------------------------------------------------------
+
+// Whether the volume could be asked to push bytes out of its cache.
+enum class FlushOutcome {
+    Flushed,       // the platform confirmed the data is on the medium
+    Unsupported,   // the volume/filesystem has no flush primitive (a network
+                   // share, a filter driver): nothing to promise, nothing broken
+    Failed,        // flush exists and the volume reported a real I/O error
+};
+
+#if defined(_WIN32)
+
+bool FlushUnsupported(DWORD e) {
+    return e == ERROR_INVALID_FUNCTION || e == ERROR_NOT_SUPPORTED ||
+           e == ERROR_CALL_NOT_IMPLEMENTED;
+}
+
+// Open + FlushFileBuffers, the Windows way to say "this data is on the disk".
+// `directory` opens with FILE_FLAG_BACKUP_SEMANTICS, which is the only way the
+// OS lets a caller hold a directory handle at all. NOTE the access rights: a
+// FILE handle needs GENERIC_WRITE for FlushFileBuffers (opens for reading fail
+// with ERROR_ACCESS_DENIED, which read as a real I/O failure and failed every
+// save), while a DIRECTORY handle is opened for reading and flushed as-is.
+FlushOutcome FlushPathData(const std::string& path, bool directory) {
+    HANDLE h = CreateFileA(path.c_str(), directory ? GENERIC_READ : GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING,
+                           directory ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL,
+                           nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        const DWORD e = GetLastError();
+        return FlushUnsupported(e) ? FlushOutcome::Unsupported : FlushOutcome::Failed;
+    }
+    const BOOL ok = FlushFileBuffers(h);
+    const DWORD err = ok ? 0 : GetLastError();
+    (void)CloseHandle(h);
+    if (ok) return FlushOutcome::Flushed;
+    return FlushUnsupported(err) ? FlushOutcome::Unsupported : FlushOutcome::Failed;
+}
+
+#else
+
+// O_RDONLY is enough for both fsync(fd) and F_FULLFSYNC(fd) — neither needs a
+// writable descriptor.
+FlushOutcome FlushPathData(const std::string& path, bool directory) {
+    const int flags = directory ? (O_RDONLY
+#if defined(O_DIRECTORY)
+                                   | O_DIRECTORY
+#endif
+                                   )
+                                : O_RDONLY;
+    const int fd = ::open(path.c_str(), flags);
+    if (fd < 0) {
+        const int e = errno;
+        return (e == EINVAL || e == ENOTSUP
+#if defined(EOPNOTSUPP)
+                || e == EOPNOTSUPP
+#endif
+                )
+                   ? FlushOutcome::Unsupported
+                   : FlushOutcome::Failed;
+    }
+    int rc;
+#if defined(__APPLE__)
+    // macOS: fsync() only reaches the drive's own cache; F_FULLFSYNC is the one
+    // that asks for the platter. Falls back to fsync where a filesystem has no
+    // F_FULLFSYNC (it then answers ENOTSUP, which we read as Unsupported).
+    rc = ::fcntl(fd, F_FULLFSYNC);
+    if (rc != 0) {
+        const int e = errno;
+        if (e == ENOTSUP || e == EINVAL)
+            rc = ::fsync(fd);   // no F_FULLFSYNC here: the weaker flush is all there is
+        else {
+            (void)::close(fd);
+            return FlushOutcome::Failed;
+        }
+    }
+#else
+    rc = ::fsync(fd);
+#endif
+    const int e = errno;
+    (void)::close(fd);
+    if (rc == 0) return FlushOutcome::Flushed;
+    return (e == EINVAL || e == ENOTSUP
+#if defined(EOPNOTSUPP)
+            || e == EOPNOTSUPP
+#endif
+            )
+               ? FlushOutcome::Unsupported
+               : FlushOutcome::Failed;
+}
+
+#endif
+
+// The bytes we hold and the bytes the file now holds, compared in chunks (no
+// second copy of the whole document in memory). A short read, a longer file or
+// one differing byte is a mismatch.
+bool ContentMatches(const std::string& path, const void* bytes, size_t size) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    const char* expected = static_cast<const char*>(bytes);
+    constexpr size_t kChunk = 64 * 1024;
+    size_t done = 0;
+    std::vector<char> buf(std::min(kChunk, size == 0 ? size_t{1} : size));
+    while (done < size) {
+        const size_t want = std::min(buf.size(), size - done);
+        in.read(buf.data(), static_cast<std::streamsize>(want));
+        if (static_cast<size_t>(in.gcount()) != want) return false;
+        if (std::memcmp(buf.data(), expected + done, want) != 0) return false;
+        done += want;
+    }
+    // Nothing may follow: a longer file is a different file.
+    return in.peek() == std::char_traits<char>::eof();
 }
 
 // mtime tick used as a change fingerprint (ns resolution).
@@ -131,6 +259,166 @@ Result<void> FilesystemImpl::Append(std::string_view path, std::string_view data
     out.write(data.data(), static_cast<std::streamsize>(data.size()));
     out.close();
     if (!out) return IoError("Filesystem", "append failed: " + std::string(path));
+    return Ok();
+}
+
+Result<void> FilesystemImpl::RenameRetry(std::string_view from, std::string_view to) {
+    constexpr int kAttempts = 5;
+    constexpr auto kDelay = std::chrono::milliseconds(150);
+    Result<void> last = IoError("Filesystem", "rename not attempted");
+    for (int attempt = 0; attempt < kAttempts; ++attempt) {
+        last = Move(from, to);
+        if (last.ok()) return Ok();
+        // Only a transient holder (a sync filter, an indexer) is worth waiting
+        // out; a genuinely missing parent or a read-only volume just pays the
+        // delay and reports the same error it would have reported once.
+        std::this_thread::sleep_for(kDelay);
+    }
+    return last;
+}
+
+Result<void> FilesystemImpl::WriteAtomic(std::string_view path, std::string_view data) {
+    return ReplaceAtomic(path, data.data(), data.size());
+}
+
+Result<void> FilesystemImpl::WriteBinaryAtomic(std::string_view path,
+                                               const std::vector<uint8_t>& data) {
+    return ReplaceAtomic(path, data.data(), data.size());
+}
+
+// Write to a sibling temp, prove the bytes landed, then swap it in. The
+// invariant is the whole point: `path` holds a COMPLETE file at every instant,
+// including while a save is in flight or if the process dies mid-save. Nothing
+// between the truncate and the rename can be observed through `path`.
+Result<void> FilesystemImpl::ReplaceAtomic(std::string_view path, const void* bytes, size_t size) {
+    if (!bytes && size > 0)
+        return IoError("Filesystem", "no bytes to write for " + std::string(path));
+    // The temp must be a SIBLING (one volume, so the rename is a real rename),
+    // so the parent has to exist first — created here rather than pushed onto
+    // every caller, which is how half of them ended up writing into a missing
+    // directory and reporting it as a save failure.
+    const std::string target(path);
+    const size_t cut = target.find_last_of("/\\");
+    if (cut != std::string::npos && cut > 0) {
+        if (auto made = CreateDirectories(std::string_view(target).substr(0, cut)); !made.ok())
+            return made;
+    }
+    const std::string temp = target + ".tmp";
+    {
+        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+        if (!out) return IoError("Filesystem", "cannot open for writing: " + temp);
+        if (size > 0)
+            out.write(static_cast<const char*>(bytes), static_cast<std::streamsize>(size));
+        out.close();
+        if (!out) {
+            (void)Remove(temp);
+            return IoError("Filesystem", "write failed: " + temp);
+        }
+    }
+    // A short (or zero-length) temp is exactly what an interrupted save leaves
+    // behind, and it must never reach the target.
+    auto landed = FileSize(temp);
+    if (!landed.ok() || landed.value() != size) {
+        const uint64_t wrote = landed.ok() ? landed.value() : 0;
+        (void)Remove(temp);
+        return IoError("Filesystem",
+                       "wrote " + std::to_string(wrote) + " of " + std::to_string(size) +
+                           " bytes to " + temp + "; " + target + " was left untouched");
+    }
+
+    // ORDERING, before anything is published: the temp's bytes go to the medium
+    // FIRST, and only then does the rename put a name on them. Without this a
+    // power cut can persist the rename while the data is still in the driver's
+    // cache, which is how a document ends up NAMED and hollow. A volume that
+    // has no flush primitive (a network share, a filter driver answering
+    // ERROR_INVALID_FUNCTION) is not an error: there is simply nothing more to
+    // ask of it and no promise to make. A real I/O failure here IS fatal — the
+    // bytes are not durable, so the save is reported as failed and the target
+    // keeps the last good document.
+    switch (FlushPathData(temp, /*directory=*/false)) {
+    case FlushOutcome::Flushed:
+    case FlushOutcome::Unsupported:
+        break;
+    case FlushOutcome::Failed:
+        (void)Remove(temp);
+        return IoError("Filesystem",
+                       "could not flush " + temp + " to disk; " + target +
+                           " was left untouched");
+    }
+
+    // The byte count says the write was not SHORT; it does not say the bytes are
+    // the ones we sent. Read the temp back and compare it against the buffer —
+    // the read-back vgr::VgrFile::Write does for shows (which additionally
+    // parses), done here for EVERY document, so a torn or reordered write is
+    // caught before it can take the target's name.
+    if (!ContentMatches(temp, bytes, size)) {
+        (void)Remove(temp);
+        return IoError("Filesystem",
+                       "read-back of " + temp + " does not match the " + std::to_string(size) +
+                           " bytes written; " + target + " was left untouched");
+    }
+
+    if (auto swapped = RenameRetry(temp, target); !swapped.ok()) {
+        (void)Remove(temp);   // leave no debris beside the real file
+        return swapped;
+    }
+
+    // The rename ITSELF is a change to the parent directory, so flush the
+    // directory entry too or a power cut can undo a save that already reported
+    // success. Best-effort by nature, and deliberately non-fatal: what is at
+    // stake is only how RECENT the surviving document is — either the old file
+    // or the new one, both complete — which is the same recency every save
+    // without a journal gives away. Atomicity is never at risk here.
+    if (cut != std::string::npos)
+        (void)FlushPathData(target.substr(0, cut), /*directory=*/true);
+    return Ok();
+}
+
+Result<void> FilesystemImpl::CopyAtomic(std::string_view from, std::string_view to) {
+    const std::string source(from);
+    if (!IsRegularFile(from))
+        return IoError("Filesystem", "no file to copy from: " + source);
+    const std::string target(to);
+    const size_t cut = target.find_last_of("/\\");
+    if (cut != std::string::npos && cut > 0) {
+        if (auto made = CreateDirectories(std::string_view(target).substr(0, cut)); !made.ok())
+            return made;
+    }
+    const std::string temp = target + ".tmp";
+    std::error_code ec;
+    fs::copy_file(fs::path(source), fs::path(temp),
+                  fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+        (void)Remove(temp);
+        return FsError("copy_file", source, ec);
+    }
+    // Whole-file check: a copy that stopped early must not be swapped in, or a
+    // backup/destination ends up looking complete and unreadable.
+    auto expected = FileSize(source);
+    auto landed = FileSize(temp);
+    if (!expected.ok() || !landed.ok() || landed.value() != expected.value()) {
+        const uint64_t want = expected.ok() ? expected.value() : 0;
+        const uint64_t wrote = landed.ok() ? landed.value() : 0;
+        (void)Remove(temp);
+        return IoError("Filesystem",
+                       "copied " + std::to_string(wrote) + " of " + std::to_string(want) +
+                           " bytes to " + temp + "; " + target + " was left untouched");
+    }
+    // Same ordering rule as ReplaceAtomic, and for the same reason: a copy that
+    // backs up or restores user work must be on the medium before it takes the
+    // target's name. Unsupported (no flush primitive) is not a failure.
+    if (FlushPathData(temp, /*directory=*/false) == FlushOutcome::Failed) {
+        (void)Remove(temp);
+        return IoError("Filesystem",
+                       "could not flush " + temp + " to disk; " + target +
+                           " was left untouched");
+    }
+    if (auto swapped = RenameRetry(temp, target); !swapped.ok()) {
+        (void)Remove(temp);
+        return swapped;
+    }
+    if (cut != std::string::npos)
+        (void)FlushPathData(target.substr(0, cut), /*directory=*/true);
     return Ok();
 }
 

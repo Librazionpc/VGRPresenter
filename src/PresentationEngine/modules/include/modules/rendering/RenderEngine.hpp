@@ -117,6 +117,17 @@ public:
                            ResourceUploader::Decoder decoder,
                            ResourceUploader::DoneFn done);
 
+    // --- Transparency inspection (diagnostic) ---
+    // When ON, every CAPTURED/DISTRIBUTED frame composites its transparent
+    // pixels over a checkerboard, so a keyed feed's alpha is VISIBLE on the
+    // real bound output window, the NDI feed and HDMI — not only in the in-app
+    // monitor tile (which draws its own QML checkerboard). Opaque pixels are
+    // left untouched (alpha 255 composites to itself), so a fully opaque scene
+    // is bit-identical either way. DIAGNOSTIC ONLY: it repaints the frame's
+    // alpha, so it must stay OFF for a live keyed feed. See VGR_ALPHA_INSPECT.
+    void SetAlphaInspect(bool on) noexcept { alphaInspect_.store(on, std::memory_order_relaxed); }
+    bool AlphaInspect() const noexcept { return alphaInspect_.load(std::memory_order_relaxed); }
+
     // --- Diagnostics ---
     RenderStats Stats() const;
     void ResetStats();
@@ -161,6 +172,8 @@ private:
     std::atomic<bool> initialized_{false};
     std::atomic<bool> running_{false};
     std::atomic<PressureLevel> pressure_{PressureLevel::None};
+    // Transparency inspection (see SetAlphaInspect). Off unless asked for.
+    std::atomic<bool> alphaInspect_{false};
     mutable std::chrono::steady_clock::time_point lastFrameAt_;
     double lastFrameMs_ = 0.0;
     // Serializes the whole frame sequence (collect → draw → submit → readback)

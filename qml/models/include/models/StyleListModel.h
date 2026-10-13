@@ -1,5 +1,7 @@
 #pragma once
 
+#include "modules/presentation/PresentationTypes.hpp"   // the family slot indices (kFamilySlot*)
+
 #include <QAbstractListModel>
 #include <QList>
 #include <QPointer>
@@ -47,18 +49,56 @@ struct StyleItem
     // all-false default made BuildGatedSlideScene render BACKGROUND-ONLY
     // scenes — styled bg, no text — while the QML tile kept showing text
     // through its gate-free DesignPreview path). A style that genuinely
-    // wants no content is meaningless; the engine treats all-false as
-    // "unconfigured" anyway (SceneBuilder.cpp's StyleAdmitsSlide).
+    // wants no content is meaningless; the engine reads all-false as
+    // "unconfigured" and admits everything anyway
+    // (SlideRules::StyleAdmits — the one gate implementation, which the
+    // engine's builds and the live preview both call).
     bool showShows = true;
     bool showMedia = true;
     bool showScripture = true;
     bool showTable = true;
-    // PER-FAMILY TEMPLATE KEYS ("" = no template for that family — NO
-    // inherit; the family renders plain, and SHOWS alone falls back to the
-    // Bible template, baked engine-side). The style renders each content
-    // family through its OWN template: shows/media/scripture/table, index
-    // order matching the show* flags.
-    QString familyTemplateKeys[4];
+    // A fifth gate, same on/off shape, but for the Overlays pane's
+    // compositor layer rather than a slide content family — no template
+    // slot of its own (see familyTemplateKeys below, still sized 4).
+    bool showOverlay = true;
+    // PER-FAMILY TEMPLATE KEYS ("" = no pick for that family, which then
+    // INHERITS the style's whole-style template — StyleStore.hpp's documented
+    // contract, baked engine-side by StyleSpecBuilder: an explicit pick always
+    // wins, and the SHOWS slot additionally falls back to the Bible template
+    // when even the whole-style template is unset or a legacy preset). The
+    // style renders each content family through its OWN template:
+    // shows/media/scripture/table, indexed by the engine's family slots
+    // (presentation::kFamilySlot*, whose order this array follows).
+    QString familyTemplateKeys[bps::presentation::kFamilySlotCount];
+
+    // The overlay gate is NOT one of the four families (it gates the Overlays
+    // pane's compositor layer, not a slide's content), so the engine stores it at
+    // index kFamilySlotCount of its showTemplates array. Named here so no caller
+    // spells that index out (the old code wrote `[4]` in load and save).
+    static constexpr int kOverlaySlot = static_cast<int>(bps::presentation::kFamilySlotCount);
+
+    // The gate for one family SLOT rather than by member name, so the roster's
+    // load / save / setters can walk the families with one loop instead of
+    // spelling the same four-way choice out three times (the named members stay:
+    // they are the roles and the variant keys QML reads).
+    bool showForSlot(int slot) const
+    {
+        switch (slot) {
+        case static_cast<int>(bps::presentation::kFamilySlotMedia):     return showMedia;
+        case static_cast<int>(bps::presentation::kFamilySlotScripture): return showScripture;
+        case static_cast<int>(bps::presentation::kFamilySlotTable):     return showTable;
+        default:                                                        return showShows;
+        }
+    }
+    void setShowForSlot(int slot, bool on)
+    {
+        switch (slot) {
+        case static_cast<int>(bps::presentation::kFamilySlotMedia):     showMedia = on; break;
+        case static_cast<int>(bps::presentation::kFamilySlotScripture): showScripture = on; break;
+        case static_cast<int>(bps::presentation::kFamilySlotTable):     showTable = on; break;
+        default:                                                        showShows = on; break;
+        }
+    }
     // Shows-only category label (free text).
     QString category;
 };
@@ -92,6 +132,7 @@ public:
         ShowMediaRole,
         ShowScriptureRole,
         ShowTableRole,
+        ShowOverlayRole,
         CategoryRole,
     };
     Q_ENUM(Role)
@@ -106,9 +147,16 @@ public:
     // that ran before any QML binding touched the type got a null and
     // silently did nothing (the monitor tile showed the transparency
     // checkerboard because the output's style resolved as "no style").
-    // create() below hands QML the same static instance C++ uses, so the
-    // two can never disagree about whether it exists.
+    // main.cpp registers THIS object with QML, so the two sides can no longer
+    // disagree about which roster exists.
     static StyleListModel *instance();
+    // The QML-side factory contract. The engine does NOT call it (measured
+    // 2026-10-11: the generated registration is qmlRegisterTypesAndRevisions
+    // and the engine default-constructs its own instance), which is why QML and
+    // C++ can end up on two different rosters. That is why Main.qml hands the
+    // QML-side instance to OutputListModel at startup
+    // (OutputListModel::adoptStyleRoster) — the roster C++ readers use is the
+    // one the UI actually edits, whatever object the engine built first.
     static StyleListModel *create(QQmlEngine *engine, QJSEngine *jsEngine);
 
     int rowCount(const QModelIndex &parent = QModelIndex()) const override;
@@ -128,6 +176,7 @@ public:
     Q_INVOKABLE void setBackgroundColor(int index, const QString &color);
     Q_INVOKABLE void setBackgroundImage(int index, const QString &path);
     Q_INVOKABLE void setClearBackgroundOnText(int index, bool on);
+    // contentType: "shows"|"media"|"scripture"|"table"|"overlay".
     Q_INVOKABLE void setShowTemplate(int index, const QString &contentType, bool on);
     // The per-family template pick ("" clears the family to no template —
     // Shows then falls back to the Bible template). contentType:

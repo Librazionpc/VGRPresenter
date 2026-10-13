@@ -35,12 +35,20 @@ ReferencePane {
         readonly property var loading: () => ScriptureService.loading
         readonly property var books: (id) => ScriptureService.books(id)
         readonly property var chapter: (src, bookId, n) => ScriptureService.chapter(src, bookId, n)
+        readonly property var chapterAsync: (src, bookId, n, token) => ScriptureService.chapterAsync(src, bookId, n, token)
         readonly property var reference: (book, ch, nums) => ScriptureService.reference(book, ch, nums)
         readonly property var resolve: (text, srcId) => ScriptureService.resolve(text, srcId)
-        readonly property var search: (text, srcId) => ScriptureService.search(text, srcId)
+        // `exact` = the pane's padlock: every typed word must appear as a whole
+        // word in the verse (the engine's index matches fuzzily, so the service
+        // filters its rows when locked).
+        // CHAPTER LOCK: Scripture has books, so the pane's search field offers the
+        // chapter lock — the search is limited to the passage on screen (the book
+        // and chapter the pane passes as `bookId`/`chapter`).
+        readonly property bool supportsChapterLock: true
+        readonly property var search: (text, srcId, exact, bookId, chapter) => ScriptureService.search(text, srcId, 60, exact, bookId, chapter)
         // ASYNC pill search: the pane prefers this when present (token-guarded,
         // answers via ScriptureService.searchResultsReady -> the pane's Connections).
-        readonly property var searchAsync: (text, srcId, token) => ScriptureService.searchAsync(text, srcId, 60, token)
+        readonly property var searchAsync: (text, srcId, token, exact, bookId, chapter) => ScriptureService.searchAsync(text, srcId, 60, token, exact, bookId, chapter)
         readonly property var preview: (src, bookId, ch, nums) => ScriptureService.preview(src, bookId, ch, nums)
         readonly property var slides: (src, bookId, ch, nums) => ScriptureService.slides(src, bookId, ch, nums)
         // A picked passage STAGES (Main Output tile preview only) — the
@@ -77,9 +85,16 @@ ReferencePane {
         // writes take the pane's display reference, which the ENGINE resolves
         // (the reference grammar lives engine-side, once).
         readonly property var chapterUserData: (src, bookId, ch) => ScriptureService.chapterUserData(src, bookId, ch)
-        readonly property var setNote: (reference, text) => ScriptureService.setNote(src(), reference, text)
-        readonly property var setHighlighted: (reference, on) => ScriptureService.setHighlighted(src(), reference, on)
-        readonly property var notes: () => ScriptureService.notes(src())
+        // Same "src is the caller's job to pass, not ours to invent" contract
+        // as chapterUserData right above — these three called an undefined
+        // src() function (dead leftover from an earlier shape of this
+        // adapter), throwing a ReferenceError on every note save/highlight/
+        // notes-drawer open on the Scripture tab. ReferencePane.qml now
+        // passes its own root.sourceId through, matching chapterUserData's
+        // call site exactly.
+        readonly property var setNote: (src, reference, text) => ScriptureService.setNote(src, reference, text)
+        readonly property var setHighlighted: (src, reference, on) => ScriptureService.setHighlighted(src, reference, on)
+        readonly property var notes: (src) => ScriptureService.notes(src)
         readonly property var userData: ({
             chapterUserData: ad.chapterUserData,
             setNote: ad.setNote,

@@ -159,7 +159,7 @@ Item {
         horizontalAlignment: Text.AlignHCenter
         text: root.caption
         font.family: Theme.fontFamily
-        font.pixelSize: Theme.textXs
+        font.pixelSize: Theme.textSub
         color: Theme.textMuted
         elide: Text.ElideRight
     }

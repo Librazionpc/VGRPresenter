@@ -3,7 +3,7 @@
 //   ./bps_unit_tests bible
 #include "TestHarness.hpp"
 
-#include "modules/presentation/ScriptureSlides.hpp"
+#include "modules/presentation/BookFill.hpp"
 #include "platform/PlatformAccessor.hpp"
 
 void TestBibleResolver() {
@@ -275,6 +275,50 @@ void TestBibleEngine() {
     CHECK(refHits.ok() && refHits.value().front().reference == "JHN 3:16");
     auto none = eng.Search("xyzzy-no-such-word", "TEST");
     CHECK(none.ok());
+
+    // ---- the chapter lock: the search can be scoped to the open passage --------
+    // The reference panes' book pill locks the search to what is on screen.
+    // "shall" lives in BOTH books of this fixture (John 3:16 "shall not perish",
+    // Psalm 23:1 "I shall not want"), so the same query shows the scope really
+    // narrows — it is a narrowing of the SEARCH, not a label on the box.
+    {
+        auto both = eng.Search("shall", "TEST");
+        bool anyPsalm = false, anyJohn = false;
+        for (const auto& h : both.ok() ? both.value() : std::vector<bb::BibleSearchHit>{}) {
+            if (h.bookId == "PSA") anyPsalm = true;
+            if (h.bookId == "JHN") anyJohn = true;
+        }
+        CHECK(anyPsalm && anyJohn);   // the unscoped query spans two books
+
+        auto lockedPsalm = eng.Search("shall", "TEST", "PSA", 23);
+        CHECK(lockedPsalm.ok() && !lockedPsalm.value().empty());
+        for (const auto& h : lockedPsalm.value())
+            CHECK(h.bookId == "PSA" && h.chapter == 23);
+
+        auto lockedJohn = eng.Search("shall", "TEST", "JHN", 3);
+        CHECK(lockedJohn.ok() && !lockedJohn.value().empty());
+        for (const auto& h : lockedJohn.value())
+            CHECK(h.bookId == "JHN" && h.chapter == 3);
+
+        // Locking to the BOOK is the wider step of the same lock: every chapter
+        // of John, never a Psalm.
+        auto lockedBook = eng.Search("shall", "TEST", "JHN", 0);
+        CHECK(lockedBook.ok() && !lockedBook.value().empty());
+        for (const auto& h : lockedBook.value())
+            CHECK(h.bookId == "JHN");
+
+        // A scope the query does not reach answers NOTHING. Falling back to the
+        // whole Bible here is exactly the bug the pill promises not to have.
+        auto unreached = eng.Search("eternal life", "TEST", "PSA", 23);
+        CHECK(unreached.ok() && unreached.value().empty());
+
+        // A typed REFERENCE respects the lock too (both tiers of Search).
+        auto refLockedOut = eng.Search("John 3:16", "TEST", "PSA", 23);
+        CHECK(refLockedOut.ok() && refLockedOut.value().empty());
+        auto refLockedIn = eng.Search("John 3:16", "TEST", "JHN", 3);
+        CHECK(refLockedIn.ok() && !refLockedIn.value().empty());
+        CHECK(refLockedIn.ok() && refLockedIn.value().front().reference == "JHN 3:16");
+    }
 
     // Parallel Bible comparison.
     const char* esv =
@@ -555,7 +599,7 @@ void TestBibleOutline() {
 // ---------------------------------------------------------------------------
 // Scripture on slides (FreeShow's rules): a template with placeholders, filled with the picked verses.
 // ---------------------------------------------------------------------------
-void TestScriptureSlides() {
+void TestBookFill() {
     namespace pf = bps::presentation;
     auto text = [](std::string body, std::string bind = {}, double fontSize = 60) {
         pf::ContentBlock b;
@@ -569,18 +613,21 @@ void TestScriptureSlides() {
     const std::vector<pf::ContentBlock> tmpl = {
         text("{scripture_number} {scripture_text}"), text("{scripture_reference}"), text("{scripture_name}"), text("{scripture_reference_last}"),
     };
-    auto verse = [](int n, std::string t) { return pf::ScriptureVerse{ n, std::move(t) }; };
-    pf::ScriptureSource src;
+    auto verse = [](int n, std::string t) { return pf::BookItem{ n, std::move(t) }; };
+    pf::BookSource src;
+    src.family = pf::ContentFamily::Scripture;      // named, never inferred (BookFill::ContentFamily)
     src.versionName = "King James Version (KJV)"; src.book = "Genesis"; src.bookAbbr = "GEN"; src.chapter = 1;
-    src.verses = { verse(1, "In the beginning God created the heaven and the earth."), verse(2, "And the earth was without form, and void."), verse(3, "And God said, Let there be light.") };
+    src.copyright = "Public domain.";
+    src.items = { verse(1, "In the beginning God created the heaven and the earth."), verse(2, "And the earth was without form, and void."), verse(3, "And God said, Let there be light.") };
 
     // ---- references ----
-    CHECK(pf::ScriptureVerseRange({ 1, 2, 3, 5 }) == "1-3, 5" && pf::ScriptureVerseRange({ 7 }) == "7" && pf::ScriptureVerseRange({ 5, 1, 2 }) == "1-2, 5");
-    CHECK(pf::ScriptureReference("Genesis", 1, { 1, 2, 3 }) == "Genesis 1:1-3" && pf::ScriptureReference("Genesis", 1, {}) == "Genesis 1");
-    CHECK(pf::HasScriptureValues(tmpl) && !pf::HasScriptureValues({ text("just words", "text") }));
+    CHECK(pf::NumberRange({ 1, 2, 3, 5 }) == "1-3, 5" && pf::NumberRange({ 7 }) == "7" && pf::NumberRange({ 5, 1, 2 }) == "1-2, 5");
+    CHECK(pf::BookReference("Genesis", 1, { 1, 2, 3 }, pf::ContentFamily::Scripture) == "Genesis 1:1-3"
+          && pf::BookReference("Genesis", 1, {}, pf::ContentFamily::Scripture) == "Genesis 1");
+    CHECK(pf::HasPlaceholders(tmpl) && !pf::HasPlaceholders({ text("just words", "text") }));
 
     // ---- a preview: everything picked, on one slide ----
-    auto one = pf::BuildScriptureSlides(tmpl, src, {}, /*onlyFirst=*/true);
+    auto one = pf::FillBookSlides(tmpl, src, {}, /*onlyFirst=*/true);
     CHECK(one.size() == 1);
     if (!one.empty()) {
         const auto& b = one[0].blocks;
@@ -588,70 +635,259 @@ void TestScriptureSlides() {
         CHECK(b[1].text == "Genesis 1:1-3" && b[2].text == "King James Version" && b[3].text == "Genesis 1:1-3");
         CHECK(one[0].reference == "Genesis 1:1-3" && one[0].blocks.size() == tmpl.size());
     }
-    CHECK(pf::BuildScriptureSlides(tmpl, {}, {}).empty());   // nothing picked
+    CHECK(pf::FillBookSlides(tmpl, {}, {}).empty());   // nothing picked
 
     // ---- the options ----
-    pf::ScriptureSettings noNumbers; noNumbers.verseNumbers = false;
-    CHECK(pf::BuildScriptureSlides(tmpl, src, noNumbers, true)[0].blocks[0].text.rfind("In the beginning", 0) == 0);
-    pf::ScriptureSettings lines; lines.versesOnIndividualLines = true;
-    CHECK(pf::BuildScriptureSlides(tmpl, src, lines, true)[0].blocks[0].text.find("\n2 And") != std::string::npos);
-    pf::ScriptureSource single = src; single.verses = { src.verses[1] };
+    pf::BookFillOptions noNumbers; noNumbers.numbers = false;
+    CHECK(pf::FillBookSlides(tmpl, src, noNumbers, true)[0].blocks[0].text.rfind("In the beginning", 0) == 0);
+    pf::BookSource single = src; single.items = { src.items[1] };
     // tmpl reserves a number slot ({scripture_number}), so the number stays even though
     // the reference also names the verse (the slot is the author's explicit request).
-    CHECK(pf::BuildScriptureSlides(tmpl, single, {}, true)[0].blocks[0].text == "2 And the earth was without form, and void.");
-    CHECK(pf::BuildScriptureSlides(tmpl, single, {}, true)[0].blocks[1].text == "Genesis 1:2");
+    CHECK(pf::FillBookSlides(tmpl, single, {}, true)[0].blocks[0].text == "2 And the earth was without form, and void.");
+    CHECK(pf::FillBookSlides(tmpl, single, {}, true)[0].blocks[1].text == "Genesis 1:2");
     // without a reserved number slot the de-dup still fires (the reference says it)
-    CHECK(pf::BuildScriptureSlides({ text("{scripture_text}"), text("{scripture_reference}") }, single, {}, true)[0].blocks[0].text == "And the earth was without form, and void.");
+    CHECK(pf::FillBookSlides({ text("{scripture_text}"), text("{scripture_reference}") }, single, {}, true)[0].blocks[0].text == "And the earth was without form, and void.");
     // and in a template that does not name the verse at all the number always stays
-    CHECK(pf::BuildScriptureSlides({ text("{scripture_text}") }, single, {}, true)[0].blocks[0].text == "2 And the earth was without form, and void.");
+    CHECK(pf::FillBookSlides({ text("{scripture_text}") }, single, {}, true)[0].blocks[0].text == "2 And the earth was without form, and void.");
     // a template that RESERVES a number slot ({scripture_number}) keeps the number even
     // for a single verse with the verse in the reference — the marker is the author's
     // explicit "render the number here" request (the old heuristic suppressed it and the
     // number vanished everywhere)
-    CHECK(pf::BuildScriptureSlides({ text("{scripture_number} {scripture_text}"), text("{scripture_reference}") }, single, {}, true)[0].blocks[0].text == "2 And the earth was without form, and void.");
+    CHECK(pf::FillBookSlides({ text("{scripture_number} {scripture_text}"), text("{scripture_reference}") }, single, {}, true)[0].blocks[0].text == "2 And the earth was without form, and void.");
     // the other Bibles of a parallel set are blank, {scripture_number} is only a style marker
-    CHECK(pf::BuildScriptureSlides({ text("{scripture2_text}|{scripture1_name}|{scripture_number}x") }, src, {}, true)[0].blocks[0].text == "|King James Version|x");
+    CHECK(pf::FillBookSlides({ text("{scripture2_text}|{scripture1_name}|{scripture_number}x") }, src, {}, true)[0].blocks[0].text == "|King James Version|x");
+
+    // ---- {table_code}: the citation's code alone, and The Table's only ----
+    // A sermon is cited by its date code; a template with room for a date code
+    // has nowhere to put the whole citation line {scripture_book} writes. Blank
+    // for Scripture (a verse has no date code), and a template whose ONLY
+    // placeholder is the code still counts as one the engine fills.
+    pf::BookSource sermon = src;
+    sermon.book = "47-0412 - Faith Is The Substance";
+    sermon.code = "47-0412";
+    sermon.family = pf::ContentFamily::Table;
+    sermon.chapter = 0;   // a fact about the data: a sermon has no chapter
+    CHECK(pf::FillBookSlides({ text("{table_code}") }, sermon, {}, true)[0].blocks[0].text == "47-0412");
+    CHECK(pf::FillBookSlides({ text("Code {table_code}") }, sermon, {}, true)[0].blocks[0].text == "Code 47-0412");
+    // The code and the paragraphs on THIS slide, the way a printed reference
+    // writes them (the title has its own token, {table_title}).
+    CHECK(pf::FillBookSlides({ text("{table_code_paragraphs}") }, sermon, {}, true)[0].blocks[0].text == "47-0412 1-3");
+    CHECK(pf::FillBookSlides({ text("{table_code_paragraphs}") }, src, {}, true)[0].blocks[0].text == "1-3");
+    CHECK(pf::FillBookSlides({ text("{table_code}") }, src, {}, true)[0].blocks[0].text.empty());
+    CHECK(pf::HasPlaceholders({ text("{table_code}") }));
+    CHECK(pf::HasPlaceholders({ text("{meta_copyright}") }));
+    CHECK(!pf::HasPlaceholders({ text("just words", "text") }));
 
     // ---- sharing verses out over slides ----
-    pf::ScriptureSource five = src;
-    five.verses.clear();
-    for (int i = 1; i <= 5; ++i) five.verses.push_back(verse(i, "Verse number " + std::to_string(i) + " text."));
-    pf::ScriptureSettings fixed; fixed.smartSplit = false; fixed.versesPerSlide = 2;
-    auto slides = pf::BuildScriptureSlides(tmpl, five, fixed);
+    pf::BookSource five = src;
+    five.items.clear();
+    for (int i = 1; i <= 5; ++i) five.items.push_back(verse(i, "Verse number " + std::to_string(i) + " text."));
+    pf::BookFillOptions fixed; fixed.maxPerSlide = 2;
+    auto slides = pf::FillBookSlides(tmpl, five, fixed);
     CHECK(slides.size() == 3);
     if (slides.size() == 3) {
         CHECK(slides[0].reference == "Genesis 1:1-2" && slides[1].reference == "Genesis 1:3-4" && slides[2].reference == "Genesis 1:5");
         CHECK(slides[0].blocks[3].text.empty() && slides[1].blocks[3].text.empty() && slides[2].blocks[3].text == "Genesis 1:1-5");   // {scripture_reference_last}: the last slide only
         CHECK(slides[0].blocks[1].text == "Genesis 1:1-2" && slides[2].title == "Genesis 1:5");
     }
-    five.verses.pop_back();   // four verses, three to a slide would be 2 slides: shared evenly, 2 + 2
-    fixed.versesPerSlide = 3;
-    auto even = pf::BuildScriptureSlides(tmpl, five, fixed);
+    five.items.pop_back();   // four verses, three to a slide would be 2 slides: shared evenly, 2 + 2
+    fixed.maxPerSlide = 3;
+    auto even = pf::FillBookSlides(tmpl, five, fixed);
     CHECK(even.size() == 2 && even[0].reference == "Genesis 1:1-2" && even[1].reference == "Genesis 1:3-4");
-    // smart split: a small text box holds few verses, a big one all of them —
-    // but the Max setting is a HARD CAP in both modes (a slide that out-grows
-    // it splits), so the default max of 3 splits five verses even in a big box.
+    // THE TEMPLATE'S TEXT BOX NO LONGER DECIDES ANYTHING. It used to be a second,
+    // tighter budget (its estimated character capacity over six), which is how
+    // "Max words per slide: 40" silently produced four-word parts. The box's
+    // geometry is deliberately the same as the old smart-split check's small one:
+    // the slides a fill produces must not change with it any more. (`five` is the
+    // four-verse set left after the EVEN-share check above.)
     std::vector<pf::ContentBlock> smallBox = { text("{scripture_text}", {}, 60) };
-    smallBox[0].width = 400; smallBox[0].height = 200;       // ~13 characters a line, 2 lines
-    CHECK(pf::BuildScriptureSlides(smallBox, five, {}).size() > 1);
-    auto capped = pf::BuildScriptureSlides(tmpl, five, {});   // big box, default max 3
+    smallBox[0].width = 400; smallBox[0].height = 200;       // a box the old rule measured as ~2 lines
+    std::vector<pf::ContentBlock> bigBox = { text("{scripture_text}", {}, 60) };
+    bigBox[0].width = 1600; bigBox[0].height = 900;
+    CHECK(pf::FillBookSlides(smallBox, five, {}).size() == pf::FillBookSlides(bigBox, five, {}).size());
+    CHECK(pf::FillBookSlides(smallBox, five, {}).size() == 2);   // Scripture's own cap of 3, box or no box
+    pf::BookSource fiveVerses = five;
+    fiveVerses.items.push_back(verse(5, "Verse number 5 text."));
+    // The packing cap is a HARD CAP, and it is no longer a control: Scripture's
+    // number comes from the caller (AppSettings gives it three), so five verses
+    // still split 3 + 2 rather than taking all five.
+    auto capped = pf::FillBookSlides(tmpl, fiveVerses, {});   // big box, Scripture's cap of 3
     CHECK(capped.size() == 2 && capped[0].reference == "Genesis 1:1-3" && capped[1].reference == "Genesis 1:4-5");
-    pf::ScriptureSettings loose; loose.versesPerSlide = 100;  // max raised out of the way: capacity alone decides
-    CHECK(pf::BuildScriptureSlides(tmpl, five, loose).size() == 1);
+    // ...and THE TABLE takes one paragraph to a slide: the same five items take a
+    // slide each, whatever the box holds (a sermon's paragraph is a whole thought).
+    pf::BookFillOptions oneEach; oneEach.maxPerSlide = 1;
+    auto paragraphs = pf::FillBookSlides(tmpl, fiveVerses, oneEach);
+    CHECK(paragraphs.size() == 5 && paragraphs[0].reference == "Genesis 1:1" && paragraphs[4].reference == "Genesis 1:5");
+    pf::BookFillOptions loose; loose.maxPerSlide = 100;  // max raised out of the way: nothing else caps the slide
+    CHECK(pf::FillBookSlides(tmpl, five, loose).size() == 1);
 
     // ---- long verses divided ----
-    pf::ScriptureSource longOne = src;
-    longOne.verses = { verse(1, "one two three four five six seven eight nine ten eleven twelve") };
-    pf::ScriptureSettings split; split.splitLongVerses = true; split.longVersesChars = 20; split.smartSplit = false; split.versesPerSlide = 1;
-    auto parts = pf::BuildScriptureSlides({ text("{scripture_text}") }, longOne, split);
-    CHECK(parts.size() >= 3);
+    pf::BookSource longOne = src;
+    longOne.items = { verse(1, "one two three four five six seven eight nine ten eleven twelve") };
+    // The budget is in WORDS ("max words per slide"), not characters, and it is
+    // THE rule. Twelve words with a four-word budget is three parts of four — the
+    // even share and "fill each part" are the same answer when the text divides
+    // exactly.
+    pf::BookFillOptions split; split.splitLongItems = true; split.wordsPerSlide = 4; split.maxPerSlide = 1;
+    auto parts = pf::FillBookSlides({ text("{scripture_text}") }, longOne, split);
+    CHECK(parts.size() == 3);
     if (!parts.empty()) CHECK(parts[0].blocks[0].text == "1 one two three four" && parts[1].blocks[0].text.rfind("five", 0) == 0);   // the number only on the first part
-    split.splitLongVersesSuffix = true;
-    auto lettered = pf::BuildScriptureSlides({ text("{scripture_text}") }, longOne, split);
+    if (parts.size() == 3) {
+        // Exactly the budget per part — the old rule's "tolerance" could not be
+        // predicted from the number on screen, and is gone.
+        CHECK(parts[0].blocks[0].text == "1 one two three four");
+        CHECK(parts[1].blocks[0].text == "five six seven eight");
+        CHECK(parts[2].blocks[0].text == "nine ten eleven twelve");
+    }
+    // NO LEFTOVER PARTS. The rule is "the fewest parts the budget allows, holding
+    // as close to the same number of words as they can" — a report put it as "find
+    // a way to treat this so we don't always have all this three words remainder",
+    // with a paragraph that came out as one full slide and one holding "can be
+    // done.". Thirteen words at a four-word budget is four parts (four three-word
+    // parts, not three of four with a stray word pushed onto the last): 4 + 3 + 3 + 3,
+    // and 4 + 4 + 4 + 1 is exactly the shape that does not exist any more.
+    pf::BookSource thirteen = src;
+    thirteen.items = { verse(1, "one two three four five six seven eight nine ten eleven twelve thirteen") };
+    auto tail = pf::FillBookSlides({ text("{scripture_text}") }, thirteen, split);
+    CHECK(tail.size() == 4);
+    if (tail.size() == 4) {
+        CHECK(tail[0].blocks[0].text == "1 one two three four");
+        CHECK(tail[1].blocks[0].text == "five six seven");
+        CHECK(tail[2].blocks[0].text == "eight nine ten");
+        CHECK(tail[3].blocks[0].text == "eleven twelve thirteen");
+    }
+    // The reported shape itself: a 43-word paragraph at a 40-word budget is two
+    // parts of 22 and 21 — NOT 40 + 3. Every part is base or base+1 of
+    // total/parts, so the budget is respected AND no part is the remainder.
+    {
+        std::string words43;
+        for (int n = 1; n <= 43; ++n) {
+            if (!words43.empty()) words43 += ' ';
+            words43 += "w" + std::to_string(n);
+        }
+        pf::BookSource paragraph = src;
+        paragraph.items = { verse(4, words43) };
+        pf::BookFillOptions wide = split;
+        wide.wordsPerSlide = 40;
+        auto even = pf::FillBookSlides({ text("{scripture_text}") }, paragraph, wide);
+        CHECK(even.size() == 2);
+        if (even.size() == 2) {
+            const std::string first = even[0].blocks[0].text;
+            const std::string second = even[1].blocks[0].text;
+            CHECK(first.rfind("4 w1 ", 0) == 0);                   // the number, then the words
+            CHECK(first.find(" w22") != std::string::npos);        // 22 words on the first part
+            CHECK(first.find(" w23") == std::string::npos);
+            CHECK(second.rfind("w23 ", 0) == 0);                   // and 21 on the second
+            CHECK(second.find(" w43") != std::string::npos);       // right to the end — not a three-word tail
+        }
+    }
+    split.splitSuffix = true;
+    auto lettered = pf::FillBookSlides({ text("{scripture_text}") }, longOne, split);
     CHECK(lettered.size() >= 3 && lettered[0].blocks[0].text.rfind("1a ", 0) == 0 && lettered[1].blocks[0].text.rfind("1b ", 0) == 0);
     CHECK(lettered[0].reference == "Genesis 1:1" && lettered[1].reference == "Genesis 1:1");
 
     // ---- an old-style template (no placeholders): its bound blocks get the verses ----
-    auto old = pf::BuildScriptureSlides({ text("Title", "text"), text("Ref", "ref"), text("Static") }, src, {}, true);
+    auto old = pf::FillBookSlides({ text("Title", "text"), text("Ref", "ref"), text("Static") }, src, {}, true);
     CHECK(old.size() == 1 && old[0].blocks[0].text.rfind("1 In the beginning", 0) == 0 && old[0].blocks[1].text == "Genesis 1:1-3" && old[0].blocks[2].text == "Static");
+
+    // ---- THE FAMILY IS NAMED, NOT INFERRED FROM A MISSING CHAPTER ----
+    //
+    // A Bible writes its chapter and joins its items with a colon; a citation
+    // writes no chapter (its `book` IS the citation line) and joins with a space.
+    // The JOINER follows the FAMILY, not the chapter — the old `chapter > 0` test
+    // made "chapter zero" a hidden synonym for "a sermon", so a Bible-shaped
+    // selection that happened to have no chapter (or a sermon whose citation came
+    // with a number) produced the other family's reference.
+    CHECK(pf::BookReference("47-0412 - Faith Is The Substance", 0, { 1, 2, 3 }, pf::ContentFamily::Table)
+          == "47-0412 - Faith Is The Substance 1-3");
+    CHECK(pf::BookReference("Genesis", 0, { 1, 2, 3 }, pf::ContentFamily::Scripture) == "Genesis:1-3");
+    // a sermon's citation never grows a chapter, even when a caller sets one
+    CHECK(pf::BookReference("47-0412 - Faith", 5, { 2 }, pf::ContentFamily::Table) == "47-0412 - Faith 2");
+
+    // The three BIBLE-ONLY facts answer empty on a sermon whatever the caller put
+    // in them (this is what kept the tab's own brand string, which used to be
+    // assigned to `versionName`, out of {scripture_name} — a slot that means
+    // "King James Version") ...
+    const std::vector<pf::ContentBlock> facts = { text("N={scripture_name}|A={scripture_book_abbr}|C={scripture_chapter}") };
+    CHECK(pf::FillBookSlides(facts, sermon, {}, true)[0].blocks[0].text == "N=|A=|C=");
+    // ...and they DO answer for a Bible carrying the very same fields.
+    CHECK(pf::FillBookSlides(facts, src, {}, true)[0].blocks[0].text == "N=King James Version|A=GEN|C=1");
+
+    // The single-item de-duplication (the reference already names the one picked
+    // item, so its leading number would say it twice) used to list only the
+    // scripture spellings, so the same single-paragraph pick kept a redundant
+    // leading number under The Table and dropped it under Scripture. One rule, one
+    // answer, both families.
+    pf::BookSource oneParagraph = sermon;
+    oneParagraph.items = { verse(3, "I trust that sometime when I come back again to Oakland") };
+    const auto tableSingle = pf::FillBookSlides({ text("{table_text}"), text("{table_reference}") }, oneParagraph, {}, true);
+    CHECK(tableSingle[0].blocks[0].text == "I trust that sometime when I come back again to Oakland");
+    CHECK(tableSingle[0].blocks[1].text == "47-0412 - Faith Is The Substance 3");
+
+    // NOTHING IS MEASURED FROM THE TEMPLATE'S TEXT BOX ANY MORE. The box was a
+    // SECOND budget (its estimated capacity over six), which is how "Max words per
+    // slide: 40" silently became four words a slide; and because the estimate read
+    // the body slot's geometry, the same design split differently depending only on
+    // which spelling its author typed ({scripture_text} vs {scripture2_text}). Both
+    // are the same non-question now: the words-per-slide number alone decides, so a
+    // selection inside the budget fills the same however the box is spelled.
+    pf::BookFillOptions noBoxCap; noBoxCap.maxPerSlide = 100;   // the cap out of the way: the word budget is all that is left
+    std::vector<pf::ContentBlock> secondBible = smallBox;
+    secondBible[0].text = "{scripture2_text}";
+    CHECK(pf::FillBookSlides(smallBox, five, noBoxCap).size() == 1);        // ~16 words, inside the default 40
+    CHECK(pf::FillBookSlides(secondBible, five, noBoxCap).size() == 1);     // ...in its second-Bible spelling too
+
+    // ---- EVERY FIELD THE PALETTE OFFERS SHOWS A VALUE ON ITS OWN FAMILY ----
+    //
+    // The menu (MetadataFields.qml) offers exactly these tokens, and this is the
+    // check that each one a slide can carry renders something: a field the engine
+    // resolves to EMPTY on the family that owns it is a field that looks
+    // implemented in the menu and shows nothing on the slide — which is how
+    // {meta_copyright} and {scripture_book_abbr} behaved on a sermon while there
+    // was no way to say "not applicable" rather than "nobody filled this in".
+    // The two fixtures are filled the way the two services fill them.
+    src.copyright = "Public domain.";
+    sermon.year = "1947";
+    sermon.title = "Faith Is The Substance";
+    const auto field = [&](const char* token, const pf::BookSource& from) {
+        return pf::FillBookSlides({ text(std::string("{") + token + "}") }, from, {}, true)[0].blocks[0].text;
+    };
+    for (const char* token : { "scripture_text", "scripture_verses", "scripture_reference", "scripture_reference_full",
+                               "scripture_reference_last", "scripture_book", "scripture_book_abbr", "scripture_chapter",
+                               "scripture_name", "meta_copyright" }) {
+        const std::string got = field(token, src);
+        CHECK(!got.empty() && got.find('{') == std::string::npos);   // a real value, never the raw token
+    }
+    for (const char* token : { "table_text", "table_paragraphs", "table_reference", "table_reference_full",
+                               "table_reference_last", "table_citation", "table_code", "table_code_paragraphs",
+                               "table_year", "table_title" })
+        CHECK(!field(token, sermon).empty());
+    // {scripture_number} / {table_number} are STYLE MARKERS, not values: they
+    // resolve to nothing on purpose (the engine draws the number separately), which
+    // is why they are not in the lists above.
+    CHECK(field("scripture_number", src).empty() && field("table_number", sermon).empty());
+
+    // ---- the registry's boot check asks the ENGINE this -------------------------
+    //
+    // MetadataFields.qml's palette offers these tokens per family and validates
+    // itself against the engine at load, so a chip the fill cannot answer for is
+    // reported instead of rendering nothing. The engine's half of that question is
+    // pinned here — the YESes a chip needs, and the NOs that keep a wrong chip out
+    // of the menu (a Bible-only fact asked of the sermon family), plus the NO that
+    // catches a MISSPELT token, which the fill blanks rather than leaking braces.
+    for (const char* token : { "scripture_text", "scripture_verses", "scripture_reference", "scripture_reference_full",
+                               "scripture_reference_last", "scripture_book", "scripture_book_abbr", "scripture_chapter",
+                               "scripture_name", "meta_copyright", "scripture_number" })
+        CHECK(pf::FamilyAnswersToken(pf::ContentFamily::Scripture, token));
+    for (const char* token : { "table_text", "table_paragraphs", "table_reference", "table_reference_full",
+                               "table_reference_last", "table_citation", "table_code", "table_code_paragraphs",
+                               "table_year", "table_title", "table_number" })
+        CHECK(pf::FamilyAnswersToken(pf::ContentFamily::Table, token));
+    CHECK(!pf::FamilyAnswersToken(pf::ContentFamily::Table, "scripture_name")
+          && !pf::FamilyAnswersToken(pf::ContentFamily::Table, "scripture_book_abbr")
+          && !pf::FamilyAnswersToken(pf::ContentFamily::Table, "scripture_chapter"));
+    CHECK(!pf::FamilyAnswersToken(pf::ContentFamily::Scripture, "nonsense_token")
+          && !pf::FamilyAnswersToken(pf::ContentFamily::Table, "nonsense_token")
+          && !pf::FamilyAnswersToken(pf::ContentFamily::Table, "table_code_paragraph")   // a typo, not a key
+          && !pf::FamilyAnswersToken(pf::ContentFamily::Scripture, "scripture_texts"));
 }

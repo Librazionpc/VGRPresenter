@@ -5,10 +5,11 @@ import VGRPresenterUI
 //
 //   All, and each folder .... a grid of the images and videos MediaLibraryService found in the
 //                             folders the user added (Add folder = import), with previews.
-//   Inputs .................. the live sources: Video sources | Audio inputs | Buses as a
-//                             horizontal tab row, with the selected roster's cards below. They
-//                             are the exact rosters Settings - Audio & Video creates
-//                             (VideoSourceListModel / AudioInputListModel / BusListModel).
+//   Inputs .................. the BUSES: one card per bus, showing its live mix and taking the
+//                             monitor gesture, from BusListModel itself. A bus is where the
+//                             sources are mixed, so this is the roster the Inputs section is
+//                             about; the audio-input and video-source rosters stay on the
+//                             Settings - Audio & Video board that owns them.
 //
 // The sidebar is a LibrarySidebar (drag its divider to resize), its rows are SidebarRows and
 // its foot button a SidebarAddButton - the same pieces the other library tabs use.
@@ -28,18 +29,36 @@ Item {
         function onDataChanged() { root.modelsRev++ }
         function onRowsInserted() { root.modelsRev++ }
         function onRowsRemoved() { root.modelsRev++ }
+        function onModelReset() { root.modelsRev++ }
     }
     Connections {
         target: AudioInputListModel
         function onDataChanged() { root.modelsRev++ }
         function onRowsInserted() { root.modelsRev++ }
         function onRowsRemoved() { root.modelsRev++ }
+        function onModelReset() { root.modelsRev++ }
     }
     Connections {
         target: BusListModel
         function onDataChanged() { root.modelsRev++ }
         function onRowsInserted() { root.modelsRev++ }
         function onRowsRemoved() { root.modelsRev++ }
+        function onModelReset() { root.modelsRev++ }
+    }
+    // THE DEVICE ROSTERS' OWN REVISION — the missing half of the reactivity
+    // above. A binding that asks "is the device this row names still there?"
+    // (the cards' slash state, THE BUS STATUS LIGHT) reads plain Q_INVOKABLE
+    // methods, which QML does not track: without a dependency on the bridge's
+    // own re-enumerations such a binding keeps whatever answer it got when it
+    // was first evaluated. That is why a bus light sat amber for a whole session
+    // with every device present and the engine's rosters full — the sweep that
+    // knew the answer landed and nobody was listening. EngineBridge announces
+    // every roster update with devicesChanged (boot, a picker, a hot-plug, the
+    // status light's own ping), so this counter is the honest dependency.
+    property int devicesRev: 0
+    Connections {
+        target: EngineBridge
+        function onDevicesChanged() { root.devicesRev++ }
     }
 
     // The dock tab bar's Media search: only files whose name matches (the engine's search, so it
@@ -49,34 +68,30 @@ Item {
 
     // ---- what is selected ----------------------------------------------------
     property string selection: "all"   // "all" | "inputs" | a folder's path
-    property int inputTab: 0           // 0 = Video sources, 1 = Audio inputs, 2 = Buses
     readonly property bool inputsMode: selection === "inputs"
 
-    readonly property var inputTabs: [
-        { label: qsTr("Video sources"), icon: "camera",  kind: "video" },
-        { label: qsTr("Audio inputs"),  icon: "mic",     kind: "audio" },
-        { label: qsTr("Buses"),         icon: "volume2", kind: "bus" }
-    ]
-    // The rosters, as lists of the row numbers that match the search (all of them with no search).
+    // ONE roster, not a tab row: the buses. (Video sources / Audio inputs / Buses
+    // used to be sibling tabs here, which made the same rosters live in two places
+    // — this pane and Settings - Audio & Video — and read as if the Media pane
+    // owned the devices. A bus is the thing this section is for: it is where the
+    // sources are mixed, and monitoring it is the gesture that belongs beside the
+    // media grid.)
+    readonly property var inputRoster: ({ label: qsTr("Buses"), icon: "volume2", kind: "bus" })
+    // The bus rows that match the search (all of them with no search).
     readonly property var inputRows: {
         const _ = root.modelsRev   // reactivity dependency
-        const counts = [VideoSourceListModel.rowCount(), AudioInputListModel.rowCount(), BusListModel.rowCount()]
-        const kinds = ["video", "audio", "bus"]
+        const n = BusListModel.rowCount()
         const needle = root.query.toLowerCase()
-        return counts.map((n, roster) => {
-            const rows = []
-            for (let i = 0; i < n; ++i)
-                if (needle === "" || root.cardName(i, kinds[roster]).toLowerCase().indexOf(needle) >= 0)
-                    rows.push(i)
-            return rows
-        })
+        const rows = []
+        for (let i = 0; i < n; ++i)
+            if (needle === "" || root.cardName(i, "bus").toLowerCase().indexOf(needle) >= 0)
+                rows.push(i)
+        return rows
     }
-    readonly property var inputCounts: {
+    readonly property int inputTotal: {
         const _ = root.modelsRev   // reactivity dependency
-        return [VideoSourceListModel.rowCount(), AudioInputListModel.rowCount(), BusListModel.rowCount()]
+        return BusListModel.rowCount()
     }
-    readonly property int inputTotal: inputCounts[0] + inputCounts[1] + inputCounts[2]
-    readonly property int tabRowHeight: 44
 
     // ---- the media grid's items ----------------------------------------------
     property var gridItems: []
@@ -94,6 +109,18 @@ Item {
     // the device's peaks from the bridge's published snapshot list. Re-click
     // releases the tap.
     property var meteredLabels: []
+    // ---- the bus monitor's own bookkeeping: ONE VIDEO, ONE AUDIO --------------
+    // "only video bus can be active … if another bus is selected the prev goes
+    // inactive for the new one, same for the audio route — only one audio can
+    // open". A monitor owns real resources (a WASAPI tap per routed audio input,
+    // a decoder for the routed video), so a new request of a kind RELEASES the
+    // previous bus's of that same kind instead of stacking decoders the user can
+    // no longer see. Recorded, not re-derived: the routes can be edited while a
+    // monitor is open, and a release has to stop exactly what was started.
+    property int busMonitorVideoBus: -1
+    property string busMonitorVideoLabel: ""
+    property int busMonitorAudioBus: -1
+    property var busMonitorAudioLabels: []
     // Refreshed by the bridge's ~20 Hz meter pump while any tap is live.
     property var meterList: []
     Connections {
@@ -129,6 +156,19 @@ Item {
     }
     function toggleAudioMeter(label) {
         const want = label === undefined ? "" : String(label).trim()
+        // NO DEVICE, NO TAP. This used to hand the bridge an empty label, which
+        // it read as "the default input" — so one click on an audio card whose
+        // row names no device (the Add dialog can create one: pick nothing and
+        // press Add Source) opened a REAL capture session on the machine's
+        // default microphone, lit the MonitorWall's audio button and animated
+        // every strip that reads a snapshot (user call: "it is animating
+        // without any device selected … so the WASAPI is being opened"). Say so
+        // instead: an input with no device has nothing to meter.
+        if (want === "") {
+            EventBus.notify(qsTr("This audio input has no device chosen yet — set its Source in Settings - Audio & Video, then click the card to meter it."),
+                            "info", qsTr("Audio input"), "media.audio.meter.no-device")
+            return
+        }
         const i = root.meteredLabels.indexOf(want)
         if (i >= 0) {
             const next = root.meteredLabels.slice()
@@ -140,12 +180,248 @@ Item {
         root.meteredLabels = root.meteredLabels.concat([want])
         EngineBridge.startInputMeter(want)
     }
+    // NOTE (deliberate): this pane does NOT meter anything by itself. An
+    // "every device row meters itself" version was tried and reverted on the
+    // user's call: it opened a WASAPI capture session at startup with nothing
+    // selected, lit the MonitorWall's audio button (which reads
+    // anyInputMetering) and animated the dialogs' channel strips off the
+    // DEFAULT input. A tap belongs to what the user actually turned on — the
+    // card click below, a bus double-click, the Settings board's own rows.
+    // What was broken is the tap REQUEST: a label requested before the (async)
+    // device enumeration landed used to stay dead for the whole session, which
+    // is why a clicked card often never animated. The bridge re-resolves every
+    // requested tap after each enumeration now (EngineBridge::enumerateDevices'
+    // callback), so the click below genuinely starts a working meter.
+    //
+    // ---- VIDEO/NDI card audio: the live STREAM meters ----------------------
+    // A media file or an NDI card carries its own audio, which no capture device
+    // can reach: the bridge's stream tap is its carrier, and it publishes in the
+    // SAME inputLevels list under the row's sublabel. The pane holds a tap while
+    // the card is LIVE here (its internal preview) or ON AIR (taken by an
+    // output) — the identical "a tap belongs to what the user turned on" rule
+    // the audio cards follow, so an idle roster decodes nothing.
+    readonly property var videoMeterTargets: {
+        void root.modelsRev
+        void LiveOutputService.inputRev
+        const live = []
+        for (const l of LiveOutputService.cardPreviews)
+            live.push(String(l).trim())
+        if (LiveOutputService.inputLabel)
+            live.push(String(LiveOutputService.inputLabel).trim())
+        if (LiveOutputService.mediaOnAir && LiveOutputService.mediaPath)
+            live.push(String(LiveOutputService.mediaPath).trim())
+        const out = []
+        for (let r = 0; r < VideoSourceListModel.rowCount(); ++r) {
+            const v = VideoSourceListModel.getSource(r)
+            if (!v || (v.kind !== "media" && v.kind !== "ndi"))
+                continue
+            const label = String(v.sublabel === undefined ? "" : v.sublabel).trim()
+            if (label === "" || live.indexOf(label) < 0)
+                continue
+            out.push({ label: label, kind: v.kind })
+        }
+        return out
+    }
+    property var heldVideoMeters: []
+    // Idempotent diff (see the AV screen's twin): release what left, start what
+    // arrived, leave the rest decoding — a stream tap is a decoder.
+    function syncVideoMeters() {
+        const wanted = root.videoMeterTargets
+        const held = root.heldVideoMeters
+        const has = (list, t) => list.some(x => x.label === t.label && x.kind === t.kind)
+        for (const t of held)
+            if (!has(wanted, t)) EngineBridge.stopStreamMeter(t.label)
+        for (const t of wanted)
+            if (!has(held, t)) EngineBridge.startStreamMeter(t.label, t.kind, t.label)
+        root.heldVideoMeters = wanted
+    }
+    onVideoMeterTargetsChanged: root.syncVideoMeters()
+    Component.onDestruction: {
+        // Only this pane's own holds; Settings' holds are its own business.
+        for (const t of root.heldVideoMeters)
+            EngineBridge.stopStreamMeter(t.label)
+        root.heldVideoMeters = []
+        // ...and the bus monitor the pane itself opened: a tab switch must not
+        // leave a WASAPI tap or a decoder running behind a card nobody sees.
+        root.stopBusMonitorVideo()
+        root.stopBusMonitorAudio()
+    }
+    // The two releases the one-video/one-audio rule is made of. Each stops
+    // exactly what this pane started (the recorded label / labels) and forgets
+    // it, so a release can never touch a tap or a preview someone else owns.
+    function stopBusMonitorVideo() {
+        if (root.busMonitorVideoBus < 0)
+            return
+        if (root.busMonitorVideoLabel !== ""
+                && LiveOutputService.cardPreviews.indexOf(root.busMonitorVideoLabel) >= 0)
+            LiveOutputService.endPreviewInput(root.busMonitorVideoLabel)
+        root.busMonitorVideoBus = -1
+        root.busMonitorVideoLabel = ""
+    }
+    function stopBusMonitorAudio() {
+        for (const label of root.busMonitorAudioLabels)
+            if (root.meteredLabels.indexOf(label) >= 0)
+                root.toggleAudioMeter(label)
+        root.busMonitorAudioBus = -1
+        root.busMonitorAudioLabels = []
+    }
+    function toggleBusMonitorPreview(busIndex) {
+        const bus = BusListModel.getBus(busIndex)
+        if (!bus || Object.keys(bus).length === 0)
+            return
+
+        const type = String(bus.type || "audio").toLowerCase()
+        const needsAudio = type === "audio" || type === "both"
+        const needsVideo = type === "video" || type === "both"
+        const audioRows = bus.routedAudioInputs || []
+        const videoRows = bus.routedVideoSources || []
+        if (needsVideo && videoRows.length === 0) {
+            EventBus.notify(qsTr("This bus is ready for video monitoring. Add a video source and route it here in Settings - Audio & Video."),
+                            "info", qsTr("Bus monitor"), "media.bus.preview.missing-video-route")
+            return
+        }
+        if (needsAudio && audioRows.length === 0) {
+            EventBus.notify(qsTr("This bus needs an audio input routed in Settings - Audio & Video before it can monitor audio."),
+                            "warning", qsTr("Bus monitor"), "media.bus.preview.missing-audio-route")
+            return
+        }
+
+        const audioLabels = []
+        for (const row of audioRows) {
+            const input = AudioInputListModel.getInput(row)
+            if (!input || Object.keys(input).length === 0) continue
+            const label = input.sublabel === undefined ? "" : String(input.sublabel).trim()
+            if (audioLabels.indexOf(label) < 0) audioLabels.push(label)
+        }
+        let video = null
+        let videoLabel = ""
+        if (needsVideo) {
+            for (const row of videoRows) {
+                const candidate = VideoSourceListModel.getSource(row)
+                const label = candidate && candidate.sublabel !== undefined
+                    ? String(candidate.sublabel).trim() : ""
+                const kind = candidate && candidate.kind !== undefined ? String(candidate.kind) : ""
+                if (label === "" || ["camera", "screen", "ndi"].indexOf(kind) < 0)
+                    continue
+                if (!LiveOutputService.inputHealthy(label, kind))
+                    continue
+                video = candidate
+                videoLabel = label
+                break
+            }
+        }
+        if (needsAudio && audioLabels.length === 0) {
+            EventBus.notify(qsTr("This bus has no available routed audio input. Check its routes in Settings - Audio & Video."),
+                            "warning", qsTr("Bus monitor"), "media.bus.preview.audio-unavailable")
+            return
+        }
+
+        // THE ROUTED AUDIO IS METERED WHOEVER THE BUS FEEDS, so this one flag is
+        // read by the release below AND the start further down — declared HERE,
+        // after the labels are known and before either uses it (it used to be
+        // declared at the start site, so the release above it read an undefined
+        // name and every monitor click died with "meterAudio is not defined").
+        // Opening a bus monitor opens the taps for the audio routed into THIS bus,
+        // whatever the bus's type: the card's L/R pair reads that mix, so a video
+        // bus with an input routed in — a real configuration, and the one behind
+        // the "has audio connected and the bottom-right pair is not glowing"
+        // report — showed a pair nothing could light. A tap belongs to what the
+        // user turned on, and they turned this bus on.
+        const meterAudio = needsAudio || audioLabels.length > 0;
+        if (needsVideo && (!video || videoLabel === "")) {
+            EventBus.notify(qsTr("This bus is ready to monitor video once you route an available camera, screen, or NDI source in Settings - Audio & Video."),
+                            "info", qsTr("Bus monitor"), "media.bus.preview.video-unavailable")
+            return
+        }
+
+        // "Is THIS bus's monitor the open one?" — not "is anything previewing".
+        // Another bus monitoring video must not make this bus read as active, and
+        // a click here has to mean "open mine", never "close mine because someone
+        // else's is on".
+        // "Is THIS bus's monitor the open one?" — asked of the BOOKKEEPING, not of
+        // the type: a second click must close exactly what this bus opened, and a
+        // video bus can hold audio taps too now (see the start block), so a pair
+        // that started only partly still closes in one click.
+        const holdsSomething = root.busMonitorAudioBus === busIndex
+                               || root.busMonitorVideoBus === busIndex
+        if (holdsSomething) {
+            if (root.busMonitorVideoBus === busIndex) root.stopBusMonitorVideo()
+            if (root.busMonitorAudioBus === busIndex) root.stopBusMonitorAudio()
+            console.log("[BUSMON] released bus=" + busIndex)
+            return
+        }
+
+        if (needsAudio) {
+            const reasons = []
+            if (bus.muted === true) reasons.push(qsTr("the bus is muted"))
+            if (Number(bus.level) <= 0) reasons.push(qsTr("the bus volume is at 0"))
+            const hasAudibleInput = audioRows.some((row) => {
+                const input = AudioInputListModel.getInput(row)
+                if (!input || input.muted || Number(input.level) <= 0) return false
+                const channels = Number(input.channels) || 2
+                for (let channel = 0; channel < channels; ++channel)
+                    if (!Db.isChannelOff(AudioInputListModel.channelGain(row, channel))) return true
+                return false
+            })
+            if (!hasAudibleInput) reasons.push(qsTr("every routed audio input is muted or has volume at 0"))
+            if (reasons.length > 0) {
+                EventBus.notify(qsTr("Audio will be silent because %1. Unmute the bus and raise the routed input volume in Settings - Audio & Video.")
+                                    .arg(reasons.join(qsTr("; "))),
+                                "warning", qsTr("Bus monitor"), "media.bus.preview.silent-route")
+                return
+            }
+        } else if (needsVideo && bus.muted === true) {
+            EventBus.notify(qsTr("This video bus is muted. Unmute it in Settings - Audio & Video before monitoring it."),
+                            "warning", qsTr("Bus monitor"), "media.bus.preview.muted-video")
+            return
+        }
+
+        // THE NEW MONITOR REPLACES THE OLD ONE, per kind: the previous video bus
+        // stops previewing and the previous audio bus's taps stop BEFORE this
+        // bus's start, so exactly one video and one audio monitor is ever open.
+        // (Ordering matters: releasing first means the new decoder is the only one
+        // left, and a start that then fails leaves nothing of the old one running.)
+        if (needsVideo && root.busMonitorVideoBus !== busIndex)
+            root.stopBusMonitorVideo()
+        if (meterAudio && root.busMonitorAudioBus !== busIndex)
+            root.stopBusMonitorAudio()
+
+        if (meterAudio) {
+            for (const label of audioLabels)
+                if (root.meteredLabels.indexOf(label) < 0) root.toggleAudioMeter(label)
+            root.busMonitorAudioBus = busIndex
+            root.busMonitorAudioLabels = audioLabels
+        }
+        if (needsVideo) {
+            if (LiveOutputService.cardPreviews.indexOf(videoLabel) < 0) {
+                LiveOutputService.previewInput(videoLabel, video.kind,
+                                               video.mode !== undefined ? video.mode : "")
+                if (LiveOutputService.cardPreviews.indexOf(videoLabel) < 0) {
+                    EventBus.notify(qsTr("The bus has a video source routed, but its feed did not start. Check that the source is available, then try monitoring again."),
+                                    "info", qsTr("Bus monitor"), "media.bus.preview.video-start-failed")
+                    return
+                }
+            }
+            root.busMonitorVideoBus = busIndex
+            root.busMonitorVideoLabel = videoLabel
+        }
+        // One line per open: which bus, which taps it took, which feed it shows.
+        // "The pair is not glowing" and "nothing is metered" look identical from
+        // the card, and this is the difference (the pane's taps live in
+        // `meteredLabels`; nothing else in the app can say why a pill is flat).
+        console.log("[BUSMON] opened bus=" + busIndex + " type=" + type
+                    + " audioTaps=" + root.busMonitorAudioLabels.length
+                    + " video=" + (videoLabel === "" ? "-" : videoLabel))
+    }
     function reload() {
         gridItems = inputsMode ? [] : MediaLibraryService.items(selection === "all" ? "" : selection, query)
     }
     onSelectionChanged: reload()
     onQueryChanged: reload()
-    Component.onCompleted: reload()
+    Component.onCompleted: {
+        reload()
+        root.syncVideoMeters()   // the pane's first stream-meter reconcile
+    }
 
     // Which folders of the tree are open (path -> true). A library folder shows everything under it whether
     // or not it is open; opening it only lists the folders inside so one can be chosen on its own.
@@ -216,7 +492,7 @@ Item {
             }
             SidebarRow {
                 width: parent.width
-                icon: "camera"
+                icon: "volume2"
                 label: qsTr("Inputs")
                 count: String(root.inputTotal)
                 selected: root.inputsMode
@@ -368,7 +644,7 @@ Item {
         }
     }
 
-    // ---- Inputs: Video sources | Audio inputs | Buses ------------------------------
+    // ---- Inputs: the buses --------------------------------------------------------
     Item {
         id: inputsArea
         visible: root.inputsMode
@@ -376,77 +652,10 @@ Item {
         width: parent.width - x
         height: parent.height
 
-        // The horizontal tab row, like the reference's Cameras / Screens / NDI / Blackmagic.
-        Item {
-            id: tabRow
-            width: parent.width
-            height: root.tabRowHeight
-
-            Row {
-                anchors.fill: parent
-
-                Repeater {
-                    model: root.inputTabs.length
-                    delegate: Item {
-                        id: tabItem
-                        required property int index
-                        readonly property bool selected: root.inputTab === index
-                        width: tabRow.width / root.inputTabs.length
-                        height: tabRow.height
-
-                        Rectangle {
-                            anchors.fill: parent
-                            color: !tabItem.selected && tabHover.hovered ? Theme.hoverBg : "transparent"
-                        }
-                        Row {
-                            anchors.centerIn: parent
-                            spacing: 9
-                            IconGlyph {
-                                anchors.verticalCenter: parent.verticalCenter
-                                anchors.verticalCenterOffset: -1   // centres the glyph on the text's x-height rather than its line box
-                                name: root.inputTabs[tabItem.index].icon
-                                color: tabItem.selected ? Theme.textPrimary : Theme.textSecondary
-                                fit: true
-                                strokeWidth: 2   // the mic draws 1.5 by default; the camera and speaker draw 2
-                                width: 16; height: 16
-                            }
-                            Text {
-                                anchors.verticalCenter: parent.verticalCenter
-                                text: root.inputTabs[tabItem.index].label
-                                color: tabItem.selected ? Theme.textPrimary : Theme.textSecondary
-                                font.family: Theme.fontFamily; font.pixelSize: 15
-                                font.weight: tabItem.selected ? Font.DemiBold : Font.Medium
-                            }
-                            Text {
-                                anchors.verticalCenter: parent.verticalCenter
-                                text: root.inputCounts[tabItem.index]
-                                color: Theme.textMuted
-                                font.family: Theme.fontFamily; font.pixelSize: 13
-                            }
-                        }
-                        // Selected underline (full tab width, like the reference).
-                        Rectangle {
-                            visible: tabItem.selected
-                            anchors.bottom: parent.bottom
-                            width: parent.width; height: 2
-                            color: Theme.accent
-                        }
-                        PositionHoverArea {
-                            id: tabHover
-                            anchors.fill: parent
-                            onClicked: root.inputTab = tabItem.index
-                        }
-                    }
-                }
-            }
-            // Hairline under the whole row.
-            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.border }
-        }
-
-        // The selected roster's cards, three to a row.
+        // The buses' cards, three to a row.
         Flickable {
             id: cardsFlick
-            y: root.tabRowHeight
+            y: 0
             width: parent.width
             height: parent.height - y
             clip: true
@@ -462,12 +671,23 @@ Item {
                     width: parent.width
                     spacing: 8
                     Repeater {
-                        model: root.inputRows[root.inputTab]
+                        model: root.inputRows
                         delegate: Rectangle {
                             id: card
+                            // Test hook (see tools/selftest/run_bus_light_test.sh):
+                            // the bus status light is drawn from this card's own
+                            // properties, so a scenario has to reach the card to
+                            // read the state the operator sees.
+                            objectName: "selfTestBusCard_" + modelData
+                            // Test hook (see tools/selftest/run_bus_light_test.sh):
+                            // the light's live half can only see frames while this
+                            // Image is actually ASKING the provider for them, so a
+                            // scenario reading the light has to be able to tell
+                            // "nothing is watching" from "watching and empty".
+                            readonly property alias stateWinImage: stateWinImage
                             required property int modelData
                             readonly property int index: modelData
-                            readonly property string kind: root.inputTabs[root.inputTab].kind
+                            readonly property string kind: root.inputRoster.kind
                             // VIDEO cards are a STATE WINDOW + the name below:
                             // the rectangle shows the feed when the source is
                             // receiving frames, "No signal" when it is not
@@ -480,6 +700,24 @@ Item {
                             readonly property bool busCard: kind === "bus"
                             readonly property bool audioCard: kind === "audio"
                             readonly property bool videoCard: kind === "video"
+                            readonly property int busVideoSourceIndex: {
+                                if (!busCard) return -1
+                                void root.modelsRev
+                                const b = BusListModel.getBus(index)
+                                return b.routedVideoSources && b.routedVideoSources.length > 0
+                                    ? b.routedVideoSources[0] : -1
+                            }
+                            readonly property var busVideoSource: {
+                                if (busVideoSourceIndex < 0) return ({})
+                                return VideoSourceListModel.getSource(busVideoSourceIndex)
+                            }
+                            readonly property string busVideoLabel: busVideoSource.sublabel !== undefined
+                                ? String(busVideoSource.sublabel).trim() : ""
+                            readonly property bool busVideoPreviewing: {
+                                void LiveOutputService.inputRev
+                                return busCard && busType !== "audio" && busVideoLabel !== ""
+                                    && LiveOutputService.cardPreviews.indexOf(busVideoLabel) >= 0
+                            }
                             readonly property string sub: {
                                 void root.modelsRev
                                 if (kind !== "video" && kind !== "audio")
@@ -511,6 +749,160 @@ Item {
                                                           && (LiveOutputService.inputLabel === sub
                                                               || (LiveOutputService.mediaOnAir
                                                                   && LiveOutputService.mediaPath === sub))
+                            // The label of the video tap THIS card holds: the first
+                            // routed video source on a bus card, the card's own
+                            // source otherwise. Named once — the state window's
+                            // feed, the connecting ring and the failure line all
+                            // ask about the same tap.
+                            readonly property string heldVideoLabel: busCard ? busVideoLabel : sub
+                            // ---- THE BUS STATUS: one fact, three states ----
+                            //
+                            // The user's own words: "the green dot that indicate the
+                            // bus has a connected source that is active — green
+                            // connect, but the source is not active yellow, not
+                            // connected red", and then the correction that settles
+                            // what "active" means here: "it should be green because
+                            // it's connected and there is audio, but it [is] not
+                            // just playing because of [the] efficiency design".
+                            // So nothing has to be FLOWING for green:
+                            //   "connected" a source is routed into this bus — of a
+                            //               kind its type carries — and that
+                            //               source's device is still there;
+                            //   "offline"   routed, but the device it names is
+                            //               not available right now (a closed
+                            //               window, an unplugged camera, a monitor
+                            //               that is gone);
+                            //   "none"      nothing routed into this bus at all.
+                            //
+                            // NOTHING IS STARTED to answer this: no tap, no
+                            // enumeration, no device open. The routing graph is in
+                            // the model and reachability is the SAME cached-roster
+                            // probe the cards' slash state uses — that is the point
+                            // of a status light ("the l/r won't glow until the pill
+                            // is clicked — that's to relieve the engine from
+                            // unnecessary work").
+                            readonly property string busStatus: {
+                                void root.modelsRev
+                                void root.devicesRev
+                                void LiveOutputService.inputRev
+                                // The AUDIO half's live refresh: inputRev rides the
+                                // video/NDI pump, and a meter tap is published through
+                                // the meter snapshots instead — so this is what makes a
+                                // routed input whose tap stopped read "not delivering"
+                                // rather than keep the answer it last got. (meterList
+                                // changes only while a tap is live, so an idle pane
+                                // pays nothing for it.)
+                                void root.meterList.length
+                                if (!busCard)
+                                    return ""
+                                const b = BusListModel.getBus(index)
+                                const audio = b.routedAudioInputs !== undefined ? b.routedAudioInputs : []
+                                const video = b.routedVideoSources !== undefined ? b.routedVideoSources : []
+                                // Only the kinds this bus's type can carry count as a
+                                // connection: an audio bus with a video source
+                                // routed would be dropped by the engine anyway.
+                                const wantsAudio = busType !== "video"
+                                const wantsVideo = busType !== "audio"
+                                const routedVideo = wantsVideo ? video.length : 0
+                                const routedAudio = wantsAudio ? audio : []
+                                if (routedVideo === 0 && routedAudio.length === 0)
+                                    return "none"
+                                // ANY routed source still being there makes the bus
+                                // connected: a bus carrying two inputs is not
+                                // offline because one of them went away.
+                                //
+                                // ...AND WHILE THE APP IS PULLING IT, "there" IS
+                                // NOT ENOUGH — the light must also mean DELIVERING
+                                // ("green only when the device is delivering
+                                // frames or audio"), so a source the app already
+                                // holds a tap on counts as connected only while
+                                // that tap is handing data over. The live half is
+                                // asked, never started: inputDelivery reads the
+                                // taps the app has (a card's thumbnail, a held
+                                // monitor, the output take, a meter tap) and adds
+                                // no work of its own; "" (nothing held) leaves the
+                                // presence answer standing, which is why an idle
+                                // bus does not read amber just because nothing is
+                                // being pulled from it.
+                                // inputAvailable, not inputHealthy: THE LIGHT MAY PING.
+                                // The slash state (inputHealthy) is a pure cached-roster
+                                // read by design, and the roster is only filled by an
+                                // enumeration a PICKER used to trigger — so a light
+                                // built on it stayed amber until the operator opened
+                                // the Audio & Video screen ("the probe gate should not
+                                // affect this light — give them access to ping so they
+                                // can stay updated without me having to open the
+                                // gate"). This probe asks the machine itself when its
+                                // cache cannot answer, off the GUI thread.
+                                let starved = false
+                                if (routedVideo > 0) {
+                                    const vkind = busVideoSource.kind !== undefined
+                                        ? String(busVideoSource.kind) : ""
+                                    if (LiveOutputService.inputAvailable(busVideoLabel, vkind)) {
+                                        if (LiveOutputService.inputDelivery(busVideoLabel, vkind) === "starved")
+                                            starved = true
+                                        else
+                                            return "connected"
+                                    }
+                                }
+                                for (const r of routedAudio) {
+                                    const data = AudioInputListModel.getInput(r)
+                                    if (!data)
+                                        continue
+                                    const label = data.sublabel !== undefined ? String(data.sublabel) : ""
+                                    if (LiveOutputService.inputAvailable(label, "audio")) {
+                                        if (LiveOutputService.inputDelivery(label, "audio") === "starved")
+                                            starved = true
+                                        else
+                                            return "connected"
+                                    }
+                                }
+                                // Routed, and the device is there — but a source the
+                                // app IS pulling from is handing nothing over.
+                                if (starved)
+                                    return "starved"
+                                // Routed, but every source it names is gone.
+                                return "offline"
+                            }
+                            // THREE COLOURS, FOUR STATES: "starved" is the same amber
+                            // as "offline" — both mean "look at this bus" — and the
+                            // tooltip is what says which of the two it is.
+                            readonly property color busStatusColor: busStatus === "connected" ? Theme.success
+                                : (busStatus === "offline" || busStatus === "starved") ? Theme.warning
+                                : Theme.dangerLight
+                            // The DOT's own sentence (hover only): the state in words,
+                            // because a green/amber/red light is not readable to
+                            // everyone.
+                            readonly property string busStatusText: busStatus === "connected"
+                                ? qsTr("Bus connected")
+                                : busStatus === "offline"
+                                  ? qsTr("Bus connected · source not available")
+                                : busStatus === "starved"
+                                  ? qsTr("Bus connected · source is not delivering")
+                                  : qsTr("Bus not connected")
+
+                            // ---- WHAT THE WINDOW SAYS ----------------
+                            // NOTHING. See the note in the middle of the card's
+                            // state window: the routing counts and the "click to
+                            // monitor" line were removed. The names below the
+                            // window keep the bus's own caption.
+                            // WHY the held tap can never show a frame ("" while it
+                            // is fine, warm-up included) — the state the pulsing
+                            // ring could not express: a capture tap whose open
+                            // failed used to be indistinguishable from one that was
+                            // still connecting, so the ring pulsed for as long as
+                            // the card was on screen with no reason anywhere (see
+                            // IVideo::PreviewFailure).
+                            readonly property string previewFailure: {
+                                void root.modelsRev
+                                void LiveOutputService.inputRev
+                                if (!holding || heldVideoLabel === "")
+                                    return ""
+                                const kind = busCard
+                                    ? (busVideoSource.kind !== undefined ? String(busVideoSource.kind) : "")
+                                    : rowKind
+                                return LiveOutputService.inputFailure(heldVideoLabel, kind)
+                            }
                             // INTERNAL PREVIEW: the ONE-CLICK thumbnail (owner
                             // "card", this card's own state window) — separate
                             // from the output take. Read through inputRev so
@@ -521,13 +913,14 @@ Item {
                                        && LiveOutputService.cardPreviews.indexOf(sub) >= 0
                             }
                             // AUDIO: one-click live metering (the card's own
-                            // window shows the device's peaks; an empty sublabel
-                            // meters the DEFAULT input, same as the AV dialogs).
+                            // window shows the device's peaks). A row that names
+                            // no device has nothing to meter — toggleAudioMeter
+                            // explains that instead of opening the default mic.
                             readonly property bool metering: {
                                 void root.meteredLabels
                                 return audioCard && root.meteredLabels.indexOf(sub) >= 0
                             }
-                            readonly property bool holding: taken || previewing || metering
+                            readonly property bool holding: taken || previewing || metering || busVideoPreviewing
                             // BUS: the window shows open/muted; the click
                             // toggles mute (the bus's only live truth).
                             readonly property bool busMuted: {
@@ -545,40 +938,63 @@ Item {
                                 const b = BusListModel.getBus(index)
                                 return b.type !== undefined ? b.type : "audio"
                             }
-                            // Live mix level (0..1, post-fader) — the SAME
-                            // "loudest routed source wins" computation the
-                            // routing board's own bus strip uses: real WASAPI
-                            // peaks off every routed audio input, not a fake
-                            // wiggle. A bus has no independent stereo capture
-                            // of its own, so both L/R buttons below read this
-                            // one mix value.
-                            readonly property real busAudioLevel: {
+                            // Live stereo bus mix (0..1, post-fader). Each
+                            // output channel reads only its matching source
+                            // channel and gain; a mono source feeds both sides.
+                            readonly property var busChannelLevels: {
                                 void root.meterList
                                 void root.modelsRev
-                                if (!busCard || busType === "video") return 0
+                                // THE PAIR READS THIS BUS'S OWN MIX, whatever kind
+                                // of bus it is. A bus's declared type is its
+                                // ROUTING POLICY — what it may carry — not a
+                                // statement that it carries no audio: the same
+                                // input can be routed into an audio bus and a
+                                // video bus at once, and the video bus's pair is
+                                // where that route's level shows. (The old
+                                // `busType === "video"` early-out made every
+                                // video bus's pair permanently flat — the
+                                // "has audio connected and the bottom-right pair
+                                // is not glowing" report.)
+                                if (!busCard) return [0, 0]
+                                // ...AND ONLY THE BUS THAT IS MONITORING READS A
+                                // LEVEL. The taps live on the INPUT, so one click on
+                                // one bus would otherwise light every bus that
+                                // routes that input at once — the report: "when i
+                                // click one source input ... the other audio source
+                                // starts to glow when i clicked only one". The
+                                // user's rule is one audio monitor at a time; this
+                                // is that rule on screen.
+                                if (root.busMonitorAudioBus !== index
+                                        && root.busMonitorVideoBus !== index)
+                                    return [0, 0]
                                 const b = BusListModel.getBus(index)
-                                let mix = 0
+                                const mix = [0, 0]
                                 for (const r of b.routedAudioInputs) {
                                     const data = AudioInputListModel.getInput(r)
                                     if (!data || data.muted) continue
-                                    // Gain-aware, per-channel-mute-aware — the
-                                    // loudest of the source's channels, each
-                                    // scaled by that channel's own gain (0 when
-                                    // its L/R button muted it), not a bare
-                                    // peaks[0] (which never saw a right-channel
-                                    // mute at all).
                                     const s = root.meterSnapshot(data.sublabel)
-                                    let raw = 0
-                                    if (s && s.peaks !== undefined) {
-                                        for (let c = 0; c < s.peaks.length; c++) {
-                                            const gain = AudioInputListModel.channelGain(r, c)
-                                            const lvl = Math.max(0, Math.min(1, s.peaks[c])) * gain
-                                            if (lvl > raw) raw = lvl
-                                        }
+                                    if (!s || s.peaks === undefined || s.peaks.length === 0) continue
+                                    const sourceLevel = Math.max(0, Math.min(1, Number(data.level || 0) / 100))
+                                    for (let c = 0; c < 2; ++c) {
+                                        const sourceChannel = s.peaks.length === 1 ? 0 : c
+                                        if (sourceChannel >= s.peaks.length) continue
+                                        const gainChannel = s.peaks.length === 1 ? 0 : c
+                                        const gain = AudioInputListModel.channelGain(r, gainChannel)
+                                        const level = Math.max(0, Math.min(1, s.peaks[sourceChannel]))
+                                                     * gain * sourceLevel
+                                        if (level > mix[c]) mix[c] = level
                                     }
-                                    if (raw > mix) mix = raw
                                 }
-                                return card.busMuted ? 0 : mix * (b.level / 100)
+                                if (card.busMuted) return [0, 0]
+                                const busLevel = Math.max(0, Math.min(1, Number(b.level || 0) / 100))
+                                // ...and the bus's OWN per-side trims, the same
+                                // channelGain convention a source card applies: a
+                                // side closed by this card's L/R pill reads 0 here
+                                // too, so the pill can never glow while the audio
+                                // path has that side silenced.
+                                const sideL = BusListModel.channelGain(index, 0)
+                                const sideR = BusListModel.channelGain(index, 1)
+                                return [mix[0] * busLevel * sideL, mix[1] * busLevel * sideR]
                             }
                             // REACHABILITY: a closed window / unplugged device
                             // flips this false (slash over the centre icon).
@@ -589,9 +1005,12 @@ Item {
                             // are graph nodes — always reachable.
                             readonly property bool healthy: {
                                 void root.modelsRev
+                                void root.devicesRev
                                 void LiveOutputService.inputRev
                                 if (busCard)
-                                    return true
+                                    return !card.busVideoPreviewing
+                                        || LiveOutputService.inputHealthy(card.busVideoLabel,
+                                                                         card.busVideoSource.kind || "")
                                 // Audio reachability is a lookup against the ALREADY-
                                 // CACHED device roster (see EngineBridge::
                                 // inputSourceReachable's "audio" branch) — no live
@@ -619,12 +1038,16 @@ Item {
                                 // ONE CLICK = THE CARD'S OWN STATE WINDOW:
                                 //   video → live thumbnail (owner "card")
                                 //   audio → live level meter (the WASAPI tap)
-                                //   bus   → mute toggle (the bus's live truth)
+                                //   bus   → monitor the routed inputs required by its type
                                 // Re-click releases/re-toggles. DOUBLE-CLICK on a
                                 // VIDEO card = OUTPUT PREVIEW (the deliberate
                                 // take, purple border) — Qt delivers the first
                                 // click on the way, so a double-click previews
                                 // AND takes, reading as one motion.
+                                //
+                                // BUS MUTE lives only on its L/R pill. The card
+                                // body monitors the routes required by the bus
+                                // type and explains missing routes with a toast.
                                 onClicked: {
                                     if (videoCard) {
                                         const v = VideoSourceListModel.getSource(index)
@@ -639,13 +1062,16 @@ Item {
                                     } else if (audioCard) {
                                         root.toggleAudioMeter(sub)
                                     } else if (busCard) {
-                                        BusListModel.setMuted(index, !card.busMuted)
+                                        root.toggleBusMonitorPreview(index)
                                     }
                                 }
                                 onDoubleClicked: {
                                     if (videoCard) {
                                         root.toggleVideoSourcePreview(index)
-                                    } else if (audioCard) {
+                                    } else if (busCard && card.busVideoSourceIndex >= 0) {
+                                        root.toggleVideoSourcePreview(card.busVideoSourceIndex)
+                                    }
+                                    if (audioCard) {
                                         // NOT a real "take to output" — there is no
                                         // playback engine behind the production
                                         // graph yet (ProductionEngine.hpp says so
@@ -661,14 +1087,19 @@ Item {
                                         if (root.meteredLabels.indexOf(sub) < 0)
                                             root.toggleAudioMeter(sub)
                                     } else if (busCard) {
-                                        // Same honesty note as audioCard above.
-                                        // busAudioLevel (this delegate's own mix
-                                        // computation) already reads real meter
-                                        // taps on the bus's routed inputs — this
-                                        // just starts those taps so the bus card's
-                                        // live mix actually animates instead of
-                                        // sitting flat until someone separately
-                                        // metered each routed input by hand.
+                                        // Same honesty note as audioCard above,
+                                        // for the bus's OUTGOING audio specifically
+                                        // (user call: "if there is out going audio
+                                        // it should turn it on to as well, if
+                                        // not[,] [leave it]"): busAudioLevel (this
+                                        // delegate's own mix computation) already
+                                        // reads real meter taps on the bus's
+                                        // routed inputs — this just starts those
+                                        // taps (a no-op when the bus routes no
+                                        // audio) so the bus card's live mix
+                                        // actually animates instead of sitting
+                                        // flat until someone separately metered
+                                        // each routed input by hand.
                                         const b = BusListModel.getBus(index)
                                         for (const r of b.routedAudioInputs) {
                                             const data = AudioInputListModel.getInput(r)
@@ -689,7 +1120,7 @@ Item {
                                 color: kind === "audio" ? Qt.alpha(Theme.success, 0.16) : Qt.alpha(Theme.danger, 0.16)
                                 IconGlyph {
                                     anchors.centerIn: parent
-                                    name: root.inputTabs[root.inputTab].icon
+                                    name: root.inputRoster.icon
                                     color: kind === "audio" ? Theme.successLight : Theme.dangerLight
                                     fit: true
                                     strokeWidth: 2
@@ -740,14 +1171,78 @@ Item {
                                 // or the output take; the pump's rev re-fetches
                                 // at ~15 fps).
                                 Image {
+                                    id: stateWinImage
                                     anchors.fill: parent
-                                    visible: videoCard && card.holding && LiveOutputService.inputProducing(card.sub)
+                                    // THE TRACKED DEPENDENCY, and it has to be spelled
+                                    // out: inputProducing() is a plain call, so the
+                                    // binding cannot see the tick that flips it, and
+                                    // the value it CAN see (busVideoPreviewing) goes
+                                    // false→true the moment the take starts — a pump
+                                    // tick BEFORE the first frame lands. Evaluating
+                                    // `visible` right then cached false and nothing
+                                    // ever invalidated it: the monitor stayed empty
+                                    // for the whole take (no frames pulled, and the
+                                    // light's live half saw no pulls at all).
+                                    // inputRev bumps on every pump tick, so the
+                                    // binding re-reads itself once the frames start.
+                                    visible: {
+                                        void LiveOutputService.inputRev
+                                        return (videoCard && card.holding
+                                                || busCard && card.busVideoPreviewing)
+                                            && LiveOutputService.inputProducing(card.heldVideoLabel)
+                                    }
                                     source: visible
-                                        ? "image://videopreview/" + encodeURIComponent(card.sub)
+                                        ? "image://videopreview/" + encodeURIComponent(card.heldVideoLabel)
                                           + "?n=" + LiveOutputService.inputRev : ""
                                     fillMode: Image.PreserveAspectCrop
                                     cache: false
                                     asynchronous: false
+                                }
+                                // THE BUS STATUS DOT — three states, one light (see
+                                // card.busStatus): green = a routed source is
+                                // active, amber = routed but idle, red = nothing
+                                // routed or its device is gone. It sits in the
+                                // window's top-right corner, out of the centred L/R
+                                // pair's way and out of the picture's middle.
+                                Item {
+                                    id: busDot
+                                    visible: busCard
+                                    anchors.top: parent.top
+                                    anchors.right: parent.right
+                                    anchors.topMargin: 6
+                                    anchors.rightMargin: 6
+                                    width: 10; height: 10
+
+                                    // The halo: the dot's own colour, wide and
+                                    // dim, so a green reads at a glance on a dark
+                                    // window without the dot itself having to be
+                                    // large.
+                                    Rectangle {
+                                        anchors.centerIn: parent
+                                        width: 18; height: 18; radius: 9
+                                        color: "transparent"
+                                        border.width: 2
+                                        border.color: card.busStatusColor
+                                        opacity: 0.35
+                                    }
+                                    Rectangle {
+                                        anchors.centerIn: parent
+                                        width: 10; height: 10; radius: 5
+                                        color: card.busStatusColor
+                                    }
+                                    PositionHoverArea {
+                                        anchors.fill: parent
+                                        // The room the dot needs for the pointer to
+                                        // find it at this size — the light is 10px
+                                        // and the pointer should not have to be
+                                        // pixel-perfect.
+                                        anchors.margins: -6
+                                        showCursor: false
+                                        clickEnabled: false
+                                        onEntered: TipService.show(card.busStatusText, busDot)
+                                        onExited: TipService.hide(busDot)
+                                    }
+                                    Component.onDestruction: TipService.forget(busDot)
                                 }
                                 // RECEIVING (audio): the L / R BUTTONS — one
                                 // round button per channel, centered as a pair,
@@ -774,21 +1269,29 @@ Item {
                                             return Math.min(2, n)
                                         }
 
-                                        Rectangle {
-                                            id: pill
+                                        // THE ONE PILL (see ChannelPill) — the very
+                                        // same control the bus and video cards show.
+                                        ChannelPill {
                                             required property int modelData
-                                            readonly property string chLabel: pill.modelData === 0 ? "L" : "R"
+
+                                            channelIndex: modelData
+                                            objectName: "selfTestAudioPill_" + card.index + "_" + modelData
                                             // Reactive through modelsRev — channelGain()
                                             // itself is an untracked Q_INVOKABLE read.
-                                            readonly property bool muted: {
+                                            // The channel's GAIN, not a pre-chewed
+                                            // boolean: the pill reads the state off it
+                                            // through the app's one vocabulary, so a
+                                            // closed OR trimmed side reads here exactly
+                                            // as it does on the dialogs' gain knob.
+                                            gain: {
                                                 void root.modelsRev
-                                                return AudioInputListModel.channelGain(card.index, pill.modelData) <= 0.0005
+                                                return AudioInputListModel.channelGain(card.index, modelData)
                                             }
-                                            width: 38; height: 38
-                                            radius: 19
-                                            readonly property real level: {
+                                            level: {
                                                 void root.meterList
-                                                if (pill.muted) return 0
+                                                void root.modelsRev
+                                                const input = AudioInputListModel.getInput(card.index)
+                                                if (!input || input.muted) return 0
                                                 const s = root.meterSnapshot(card.sub)
                                                 if (!s || s.peaks === undefined
                                                     || s.peaks.length <= modelData)
@@ -800,73 +1303,46 @@ Item {
                                                 // nub that jumps when you speak) while
                                                 // hot signals still reach the top.
                                                 const raw = Math.max(0, Math.min(1, s.peaks[modelData]))
+                                                    * AudioInputListModel.channelGain(card.index, modelData)
+                                                    * Math.max(0, Math.min(1, Number(input.level || 0) / 100))
                                                 return Math.sqrt(raw)
                                             }
-                                            readonly property bool active: pill.level > 0.1
-                                            readonly property color glowColor: root.levelGlowColor(pill.level)
-
-                                            color: pill.muted ? Qt.alpha(Theme.danger, 0.16) : Theme.inset
-                                            border.width: pill.active ? 2 : 1
-                                            border.color: pill.muted ? Qt.alpha(Theme.danger, 0.55)
-                                                        : pill.active ? pill.glowColor : Theme.borderSubtle
-                                            Behavior on border.color { ColorAnimation { duration: 120 } }
-                                            Behavior on color { ColorAnimation { duration: 120 } }
-
-                                            // Soft glow halo — the "premium" touch: a
-                                            // wider, dim corona in the SAME sampled
-                                            // color, brightening with level.
-                                            Rectangle {
-                                                anchors.centerIn: parent
-                                                width: parent.width + 14
-                                                height: parent.height + 14
-                                                radius: width / 2
-                                                color: "transparent"
-                                                border.width: 6
-                                                border.color: pill.glowColor
-                                                opacity: pill.muted ? 0 : pill.level * 0.4
-                                                Behavior on opacity { NumberAnimation { duration: 100 } }
-                                            }
-
-                                            Text {
-                                                anchors.centerIn: parent
-                                                text: pill.chLabel
-                                                color: pill.muted ? Qt.alpha(Theme.dangerLight, 0.7) : (pill.active ? pill.glowColor : Theme.textSecondary)
-                                                font.family: Theme.fontFamily
-                                                font.pixelSize: 12; font.bold: true
-                                                Behavior on color { ColorAnimation { duration: 120 } }
-                                            }
-                                            // Mute slash — only when actually muted,
-                                            // so an idle-but-live channel doesn't
-                                            // read as off.
-                                            Rectangle {
-                                                visible: pill.muted
-                                                anchors.centerIn: parent
-                                                width: 26; height: 2
-                                                rotation: 45
-                                                radius: 1
-                                                color: Theme.dangerLight
-                                            }
-
-                                            Behavior on scale { NumberAnimation { duration: 80 } }
-                                            scale: 1 + pill.level * 0.05
-
-                                            MouseArea {
-                                                anchors.fill: parent
-                                                cursorShape: Qt.PointingHandCursor
-                                                onClicked: AudioInputListModel.setChannelGain(
-                                                    card.index, pill.modelData, pill.muted ? 1.0 : 0.0)
-                                            }
+                                            // Deferred, and the state is re-read
+                                            // inside the call rather than captured:
+                                            // this codebase never writes a model
+                                            // from inside its own delegate's event
+                                            // (the write re-fires the bindings that
+                                            // own the delegate that dispatched it).
+                                            // The model owns the reopen policy: a
+                                            // closed side comes back at the trim it was
+                                            // closed with, not at unity. This used to
+                                            // be `closed ? 1.0 : 0.0` here — three copies
+                                            // of the expression that LOST the trim.
+                                            onToggled: Qt.callLater(() =>
+                                                AudioInputListModel.toggleChannelGain(card.index, modelData))
                                         }
                                     }
                                 }
                                 // CONNECTING (video only; audio's meter shows
                                 // silence as flat bars, which IS its truth):
                                 // held, source reachable, frames not flowing yet
-                                // (tap warm-up) — pulsing ring.
+                                // (tap warm-up) — pulsing ring. A tap that FAILED
+                                // is not warming up: the ring stops for it and the
+                                // reason below takes its place.
                                 Item {
                                     anchors.centerIn: parent
-                                    visible: videoCard && card.holding
-                                             && !LiveOutputService.inputProducing(card.sub) && card.healthy
+                                // The same tracked dependency as the feed above (and
+                                // it matters in the same direction): this ring is
+                                // shown while frames are NOT flowing, so a binding
+                                // that never re-evaluates would park it over the
+                                // picture for the rest of the take.
+                                visible: {
+                                    void LiveOutputService.inputRev
+                                    return (videoCard && card.holding
+                                            || busCard && card.busVideoPreviewing)
+                                        && !LiveOutputService.inputProducing(card.heldVideoLabel)
+                                        && card.healthy && card.previewFailure === ""
+                                }
                                     width: 34; height: 34
                                     SequentialAnimation on scale {
                                         loops: Animation.Infinite
@@ -881,6 +1357,58 @@ Item {
                                         border.color: Theme.accent
                                     }
                                 }
+                                // SAME WINDOW, NO RING: the tap is held and the
+                                // source is still in the roster, but the capture
+                                // itself never opened — the device is busy or its
+                                // driver refused, or the monitor/window's device
+                                // context is gone. The ring above is for a tap that
+                                // is WARMING UP; this one says what happened. The
+                                // reason is the platform's own words, so it is the
+                                // one place a real cause is readable from the UI.
+                                Item {
+                                    anchors.centerIn: parent
+                                    visible: card.previewFailure !== ""
+                                    width: 34; height: 34
+                                    Rectangle {
+                                        anchors.centerIn: parent
+                                        width: 44; height: 44; radius: 22
+                                        color: Qt.rgba(1, 0.42, 0.38, 0.10)
+                                        border.width: 1
+                                        border.color: Qt.rgba(1, 0.42, 0.38, 0.28)
+                                    }
+                                    IconGlyph {
+                                        anchors.centerIn: parent
+                                        name: root.inputRoster.icon
+                                        color: Theme.textMuted
+                                        fit: true; strokeWidth: 2
+                                        width: 22; height: 22
+                                    }
+                                    Rectangle {
+                                        anchors.centerIn: parent
+                                        width: 32; height: 2.5
+                                        rotation: 45
+                                        radius: 1.25
+                                        color: Theme.dangerLight
+                                    }
+                                }
+                                // ...and the reason as a caption at the window's
+                                // foot: the words can be long ("display or window
+                                // device context unavailable"), and a caption is the
+                                // only shape that reads at this size.
+                                Text {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    anchors.bottom: parent.bottom
+                                    anchors.bottomMargin: 5
+                                    width: parent.width - 16
+                                    visible: card.previewFailure !== ""
+                                    horizontalAlignment: Text.AlignHCenter
+                                    wrapMode: Text.WordWrap
+                                    maximumLineCount: 2
+                                    elide: Text.ElideRight
+                                    text: qsTr("preview failed — %1").arg(card.previewFailure)
+                                    color: Theme.textSecondary
+                                    font.family: Theme.fontFamily; font.pixelSize: 8
+                                }
                                 // UNREACHABLE: the source can't be resolved — the
                                 // CENTRE ICON with a SLASH over it (originally "let
                                 // the icon in middle show / over the icon when I
@@ -893,7 +1421,7 @@ Item {
                                 // mic rather than the generic "idle" glyph.
                                 Item {
                                     anchors.centerIn: parent
-                                    visible: !card.healthy && (card.holding || audioCard)
+                                    visible: !card.healthy && (card.holding || audioCard || busCard && card.busVideoPreviewing)
                                     width: 34; height: 34
 
                                     // Soft tinted backdrop — the "premium" pass:
@@ -909,7 +1437,7 @@ Item {
                                     }
                                     IconGlyph {
                                         anchors.centerIn: parent
-                                        name: root.inputTabs[root.inputTab].icon
+                                        name: root.inputRoster.icon
                                         color: Theme.textMuted
                                         fit: true; strokeWidth: 2
                                         width: 22; height: 22
@@ -946,7 +1474,7 @@ Item {
                                     spacing: 6
                                     IconGlyph {
                                         anchors.horizontalCenter: parent.horizontalCenter
-                                        name: root.inputTabs[root.inputTab].icon
+                                        name: root.inputRoster.icon
                                         color: Theme.textMuted
                                         fit: true; strokeWidth: 2
                                         width: 20; height: 20
@@ -962,119 +1490,86 @@ Item {
                                         font.family: Theme.fontFamily; font.pixelSize: 10
                                     }
                                 }
-                                // BUS STATE (audio / both): the SAME L/R glow-
-                                // button design the audio Inputs cards use —
-                                // both buttons read the bus's own live mix
-                                // (busAudioLevel: loudest routed source, post-
-                                // fader), and clicking either mutes the WHOLE
-                                // bus (a bus has no independent per-channel
-                                // capture of its own to isolate).
+                                // THE BUS'S L/R PAIR — one control, TWO PLACEMENTS
+                                // (user call: "for the audio bus all the L and R
+                                // are meant to be at the center, for the video and
+                                // both the L and R are meant to be at the bottom
+                                // right because of the thumbnail preview they
+                                // have"): an audio bus has no picture to protect,
+                                // so its pair sits CENTRED — the same place, and the
+                                // same glow-button design, the audio input cards'
+                                // meters use. A video or "both" bus shows its routed
+                                // feed in this window, so its pair tucks into the
+                                // corner out of the picture's way. Every bus card
+                                // carries the pair: it is the bus's own output trim,
+                                // which exists for a video bus too (its bars simply
+                                // stay flat — a video bus carries no audio).
                                 Row {
-                                    anchors.centerIn: parent
-                                    visible: busCard && card.busType !== "video"
-                                    spacing: 20
+                                    id: busAudioRow
+                                    visible: busCard
+                                    readonly property bool centred: card.busType === "audio"
+                                    width: implicitWidth
+                                    height: implicitHeight
+                                    x: centred ? (parent.width - width) / 2
+                                               : parent.width - width - 6
+                                    y: centred ? (parent.height - height) / 2
+                                               : parent.height - height - 6
+                                    spacing: 6
 
                                     Repeater {
                                         model: 2
 
-                                        Rectangle {
-                                            id: busPill
+                                        // THE SAME PILL A SOURCE CARD USES (see
+                                        // ChannelPill) — the bus is a combination of
+                                        // an audio and a video source, so its L/R is
+                                        // the source cards' L/R, not a bus-flavoured
+                                        // copy of it. Clicking closes THAT SIDE of
+                                        // the bus's own output (BusListModel's
+                                        // per-side trim, applied by the mixer); it
+                                        // used to mute the whole bus, which is the
+                                        // "clicking L or R closes all" report.
+                                        // The bus's overall Mute stays a bus-level
+                                        // control (the Edit Bus dialog), and the
+                                        // card's sublabel already says " - muted".
+                                        ChannelPill {
                                             required property int modelData
-                                            readonly property string chLabel: busPill.modelData === 0 ? "L" : "R"
-                                            readonly property real level: {
-                                                const raw = Math.max(0, Math.min(1, card.busAudioLevel))
+
+                                            channelIndex: modelData
+                                            objectName: "selfTestBusPill_" + card.index + "_" + modelData
+                                            gain: {
+                                                void root.modelsRev
+                                                return BusListModel.channelGain(card.index, modelData)
+                                            }
+                                            level: {
+                                                const raw = Math.max(0, Math.min(1, card.busChannelLevels[modelData] || 0))
                                                 return Math.sqrt(raw)   // same perceptual lift as the input cards
                                             }
-                                            readonly property bool active: busPill.level > 0.1
-                                            readonly property color glowColor: root.levelGlowColor(busPill.level)
-
-                                            width: 38; height: 38
-                                            radius: 19
-                                            color: card.busMuted ? Qt.alpha(Theme.danger, 0.16) : Theme.inset
-                                            border.width: busPill.active ? 2 : 1
-                                            border.color: card.busMuted ? Qt.alpha(Theme.danger, 0.55)
-                                                        : busPill.active ? busPill.glowColor : Theme.borderSubtle
-                                            Behavior on border.color { ColorAnimation { duration: 120 } }
-                                            Behavior on color { ColorAnimation { duration: 120 } }
-
-                                            Rectangle {
-                                                anchors.centerIn: parent
-                                                width: parent.width + 14
-                                                height: parent.height + 14
-                                                radius: width / 2
-                                                color: "transparent"
-                                                border.width: 6
-                                                border.color: busPill.glowColor
-                                                opacity: card.busMuted ? 0 : busPill.level * 0.4
-                                                Behavior on opacity { NumberAnimation { duration: 100 } }
-                                            }
-
-                                            Text {
-                                                anchors.centerIn: parent
-                                                text: busPill.chLabel
-                                                color: card.busMuted ? Qt.alpha(Theme.dangerLight, 0.7) : (busPill.active ? busPill.glowColor : Theme.textSecondary)
-                                                font.family: Theme.fontFamily
-                                                font.pixelSize: 12; font.bold: true
-                                                Behavior on color { ColorAnimation { duration: 120 } }
-                                            }
-                                            Rectangle {
-                                                visible: card.busMuted
-                                                anchors.centerIn: parent
-                                                width: 26; height: 2
-                                                rotation: 45
-                                                radius: 1
-                                                color: Theme.dangerLight
-                                            }
-
-                                            Behavior on scale { NumberAnimation { duration: 80 } }
-                                            scale: 1 + busPill.level * 0.05
-
-                                            MouseArea {
-                                                anchors.fill: parent
-                                                cursorShape: Qt.PointingHandCursor
-                                                onClicked: BusListModel.setMuted(index, !card.busMuted)
-                                            }
+                                            // SIZE FOLLOWS PLACEMENT: the compact
+                                            // corner sizing only while the pair sits
+                                            // in the window's corner (a video or
+                                            // "both" bus, where the feed is behind
+                                            // it). The centred pair on an audio bus
+                                            // is the BIG one — the same live-meter
+                                            // pill the audio input cards use, whose
+                                            // own glow is the meter. Both breathe
+                                            // off the bus's live mix.
+                                            compact: !busAudioRow.centred
+                                            onToggled: Qt.callLater(() =>
+                                                BusListModel.toggleChannelGain(card.index, modelData))
                                         }
                                     }
                                 }
-                                // BUS STATE (video): no compositor tap exists to
-                                // preview a bus's own mixed feed, so this stays a
-                                // simple, video-flavored open/muted readout —
-                                // video's own accent, a routed-source count, not
-                                // a fabricated live thumbnail.
-                                Column {
-                                    anchors.centerIn: parent
-                                    visible: busCard && card.busType === "video"
-                                    spacing: 8
-
-                                    IconGlyph {
-                                        anchors.horizontalCenter: parent.horizontalCenter
-                                        name: "camera"
-                                        color: card.busMuted ? Theme.textMuted : Theme.accentLight
-                                        fit: true; strokeWidth: 2
-                                        width: 22; height: 22
-                                    }
-                                    Text {
-                                        anchors.horizontalCenter: parent.horizontalCenter
-                                        text: {
-                                            void root.modelsRev
-                                            const b = BusListModel.getBus(index)
-                                            const n = b.routedVideoSources !== undefined ? b.routedVideoSources.length : 0
-                                            return n === 1 ? qsTr("1 video source routed")
-                                                           : qsTr("%1 video sources routed").arg(n)
-                                        }
-                                        color: Theme.textSecondary
-                                        font.family: Theme.fontFamily; font.pixelSize: 10
-                                    }
-                                    Text {
-                                        anchors.horizontalCenter: parent.horizontalCenter
-                                        text: card.busMuted
-                                              ? qsTr("MUTED — click to open")
-                                              : qsTr("OPEN — click to mute")
-                                        color: card.busMuted ? Theme.dangerLight : Theme.textSecondary
-                                        font.family: Theme.fontFamily; font.pixelSize: 10; font.bold: card.busMuted
-                                    }
-                                }
+                                // (THE BUS'S MIDDLE IS EMPTY.) It used to carry
+                                // a sentence — "1 video source routed · 1 audio
+                                // input routed" over "Click to monitor video" —
+                                // and then the status sentence as well. All of it
+                                // is gone (the user's call: "remove those
+                                // descriptive text"): the WINDOW is for the bus's
+                                // picture and its live L/R pair, the light in the
+                                // corner is the status, and the sublabel under the
+                                // name already spells the routing out in words
+                                // ("2 sources · both"). What is left here is the
+                                // tap target, nothing drawn.
 
                                 // VIDEO AUDIO — a small L/R pair overlaid on the
                                 // state window, always visible regardless of
@@ -1086,12 +1581,15 @@ Item {
                                 // doesn't carry audio" signal rather than
                                 // hidden entirely. Media/NDI rows DO carry
                                 // audio (NDI embeds it with its video); those
-                                // glow from the row's stored level/muted —
-                                // there is no live audio TAP for video-tab
-                                // rows yet (unlike the real per-device WASAPI
-                                // metering audio inputs get), so this reads
-                                // the stored fader, not a live signal, same
-                                // "no fake signal" rule as everywhere else.
+                                // glow from the row's stored level, dimmed by its
+                                // own Mute — there is no live audio TAP for
+                                // video-tab rows yet (unlike the real per-device
+                                // WASAPI metering audio inputs get), so this
+                                // reads the stored fader, not a live signal,
+                                // same "no fake signal" rule as everywhere else.
+                                // Each pill also CLOSES ITS OWN SIDE (the row's
+                                // per-side trim), which is a different thing
+                                // from the row-wide Mute the Edit dialog owns.
                                 Row {
                                     id: vidAudioRow
                                     visible: videoCard
@@ -1101,6 +1599,20 @@ Item {
                                     spacing: 6
 
                                     readonly property bool audioCapable: rowKind === "media" || rowKind === "ndi"
+                                    // A LIVE stream snapshot exists for this row (the
+                                    // bridge's tap on the media file / NDI stream,
+                                    // held while this card is previewing or on air) —
+                                    // then the pills read REAL audio and may breathe.
+                                    // Without one all we know is the stored fader, so
+                                    // they show it and stay still (never implying live
+                                    // motion a stored value can't back up).
+                                    readonly property bool liveAudio: {
+                                        void root.meterList
+                                        if (!audioCapable || String(card.sub).trim() === "")
+                                            return false
+                                        const s = root.meterSnapshot(card.sub)
+                                        return s !== null && s.peaks !== undefined && s.peaks.length > 0
+                                    }
                                     readonly property real storedLevel: {
                                         void root.modelsRev
                                         if (!vidAudioRow.audioCapable) return 0
@@ -1117,64 +1629,55 @@ Item {
                                     Repeater {
                                         model: 2
 
-                                        Rectangle {
-                                            id: vidPill
+                                        // THE ONE PILL (see ChannelPill) — the SAME
+                                        // control the audio and bus cards use, in its
+                                        // small overlay size. It closes its OWN SIDE
+                                        // only: the hand-rolled copy here wrote the
+                                        // row's single mute flag, so clicking L also
+                                        // closed R (both pills went red at once — the
+                                        // "if i click on the L or R it closes all"
+                                        // report).
+                                        ChannelPill {
                                             required property int modelData
-                                            readonly property string chLabel: vidPill.modelData === 0 ? "L" : "R"
-                                            readonly property bool capable: vidAudioRow.audioCapable
-                                            readonly property real level:
-                                                vidPill.capable && !vidAudioRow.storedMuted
-                                                    ? vidAudioRow.storedLevel : 0
-                                            readonly property bool active: vidPill.capable && vidPill.level > 0.05
-                                            readonly property color glowColor: root.levelGlowColor(vidPill.level)
 
-                                            width: 20; height: 20
-                                            radius: 10
-                                            color: !vidPill.capable ? Theme.windowBg
-                                                 : vidAudioRow.storedMuted ? Qt.alpha(Theme.danger, 0.16) : Theme.inset
-                                            border.width: 1
-                                            border.color: !vidPill.capable ? Theme.borderSubtle
-                                                        : vidAudioRow.storedMuted ? Qt.alpha(Theme.danger, 0.55)
-                                                        : vidPill.active ? vidPill.glowColor : Theme.borderSubtle
-                                            opacity: vidPill.capable ? 1 : 0.55
-                                            Behavior on border.color { ColorAnimation { duration: 120 } }
+                                            channelIndex: modelData
+                                            objectName: "selfTestVideoPill_" + card.index + "_" + modelData
+                                            capable: vidAudioRow.audioCapable
+                                            // The row's own Mute still darkens the
+                                            // level below (nothing to show), but it
+                                            // is not what makes a pill read as
+                                            // closed — that is the side's trim.
+                                            gain: {
+                                                void root.modelsRev
+                                                return VideoSourceListModel.channelGain(card.index, modelData)
+                                            }
+                                            level: {
+                                                void root.meterList
+                                                if (vidAudioRow.storedMuted)
+                                                    return 0
+                                                const s = root.meterSnapshot(card.sub)
+                                                if (!s || s.peaks === undefined || s.peaks.length === 0)
+                                                    return vidAudioRow.storedLevel
+                                                // Same perceptual sqrt lift the audio
+                                                // cards use, and the SAME source-
+                                                // channel rule (a mono file's one
+                                                // channel feeds both pills).
+                                                const src = s.peaks.length === 1 ? 0 : modelData
+                                                if (src >= s.peaks.length)
+                                                    return vidAudioRow.storedLevel
+                                                const raw = Math.max(0, Math.min(1, s.peaks[src]))
+                                                            * vidAudioRow.storedLevel
+                                                return Math.sqrt(raw)
+                                            }
+                                            // The small overlay pair (it sits over
+                                            // the feed — see ChannelPill.compact).
+                                            compact: true
+                                            // Breathe only on a REAL signal; a
+                                            // stored fader never moves on its own.
+                                            scaleWithLevel: vidAudioRow.liveAudio
 
-                                            Rectangle {
-                                                visible: vidPill.capable
-                                                anchors.centerIn: parent
-                                                width: parent.width + 8
-                                                height: parent.height + 8
-                                                radius: width / 2
-                                                color: "transparent"
-                                                border.width: 4
-                                                border.color: vidPill.glowColor
-                                                opacity: vidAudioRow.storedMuted ? 0 : vidPill.level * 0.4
-                                            }
-
-                                            Text {
-                                                anchors.centerIn: parent
-                                                text: vidPill.chLabel
-                                                color: !vidPill.capable ? Theme.textMuted
-                                                     : vidAudioRow.storedMuted ? Qt.alpha(Theme.dangerLight, 0.7)
-                                                     : (vidPill.active ? vidPill.glowColor : Theme.textSecondary)
-                                                font.family: Theme.fontFamily
-                                                font.pixelSize: 8; font.bold: true
-                                            }
-                                            Rectangle {
-                                                visible: vidPill.capable && vidAudioRow.storedMuted
-                                                anchors.centerIn: parent
-                                                width: 14; height: 1.5
-                                                rotation: 45
-                                                radius: 1
-                                                color: Theme.dangerLight
-                                            }
-
-                                            MouseArea {
-                                                anchors.fill: parent
-                                                enabled: vidPill.capable
-                                                cursorShape: Qt.PointingHandCursor
-                                                onClicked: VideoSourceListModel.setMuted(index, !vidAudioRow.storedMuted)
-                                            }
+                                            onToggled: Qt.callLater(() =>
+                                                VideoSourceListModel.toggleChannelGain(card.index, modelData))
                                         }
                                     }
                                 }
@@ -1202,14 +1705,14 @@ Item {
                     }
                 }
                 Text {
-                    visible: root.inputRows[root.inputTab].length === 0
+                    visible: root.inputRows.length === 0
                     width: parent.width
                     topPadding: 24
                     horizontalAlignment: Text.AlignHCenter
                     text: root.query !== ""
                           ? qsTr("Nothing named \u201c%1\u201d.").arg(root.query)
                           : qsTr("Nothing here yet - add %1 in Settings - Audio & Video.")
-                                .arg(root.inputTabs[root.inputTab].label.toLowerCase())
+                                .arg(root.inputRoster.label.toLowerCase())
                     color: Theme.textMuted
                     font.family: Theme.fontFamily; font.pixelSize: 14
                     wrapMode: Text.WordWrap

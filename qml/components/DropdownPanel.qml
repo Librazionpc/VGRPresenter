@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import VGRPresenterUI
 
 // A menu dropdown panel: optional header (title + subtitle), then a list of
@@ -63,6 +64,19 @@ Rectangle {
     // Panel padding against the bounds' edges — a menu never touches the
     // window frame.
     readonly property int edgePad: 8
+
+    // THE APP SCALE (Main.qml's uiScale, via AppScale.qml). openAt/openBeside
+    // reparent this panel to the window's contentItem so nothing clips or scrolls
+    // it — which also means it CANNOT inherit the scale of the screen it was
+    // opened from, and has to apply the app scale itself. AppScale.cardScale
+    // subtracts any scale an ancestor does apply, so the rare panel that is never
+    // reparented is not scaled twice.
+    //
+    // Its top-left IS the anchor point openAt placed it at, so scaling about that
+    // corner makes the menu grow/shrink away from its own anchor exactly like the
+    // UI around it, instead of drifting off it.
+    scale: AppScale.cardScale(root)
+    transformOrigin: Item.TopLeft
 
     signal itemActivated(string label)
 
@@ -154,22 +168,38 @@ Rectangle {
     property real anchorLocalX: 0
     property real anchorLocalY: 0
 
+    // ---- which layer the panel pops into -----------------------------------
+    // The window's Controls OVERLAY, not the raw contentItem. Every modal card in
+    // the app parents itself to Overlay.overlay (see ModalCard.qml — that is what
+    // lets a dialog declared inside a Settings page dim the whole window), and the
+    // overlay is a layer ABOVE the content item. A panel reparented to contentItem
+    // was therefore a SIBLING BELOW the entire overlay: opening the Source field of
+    // a dialog drew its device list behind the open modal, so the list "was nowhere
+    // in sight" (user report). Sharing the modal's own layer puts the two in one
+    // stacking context, where root.z = 40000 sits just above a modal root's 30000.
+    // Falls back to contentItem when the overlay isn't mounted yet.
+    function _layer(item) {
+        const w = item ? item.Window : null
+        if (!w)
+            return null
+        const ov = Overlay.overlay
+        return (ov && ov.parent === w.contentItem) ? ov : w.contentItem
+    }
+
     function openAt(sourceItem, x, y, bounds) {
-        // Window-root reparenting: the panel lifts OUT of its declaration
-        // context (a clipped, scrolling dialog container) to the window's
-        // contentItem. Parented in-place it was clipped by ancestor `clip`
-        // rects and scrolled with the dialog's Flickable — panels read as
-        // transparent/overdrawn garbage and fought the dialog's own
-        // scroller. At the root, the panel floats above everything (z is
-        // relative to window-level siblings) and nothing clips it.
+        // Pop-out reparenting: the panel lifts OUT of its declaration context (a
+        // clipped, scrolling dialog container) to the window's overlay. Parented
+        // in-place it was clipped by ancestor `clip` rects and scrolled with the
+        // dialog's Flickable — panels read as transparent/overdrawn garbage and
+        // fought the dialog's own scroller. Up there nothing clips it.
         root.isFlyout = false
         root.anchorItem = sourceItem
         root.anchorLocalX = x
         root.anchorLocalY = y
         root.openBounds = bounds ? bounds : sourceItem.Window.contentItem
-        const contentItem = sourceItem.Window.contentItem
-        if (contentItem && root.parent !== contentItem)
-            root.parent = contentItem
+        const layer = root._layer(sourceItem)
+        if (layer && root.parent !== layer)
+            root.parent = layer
         root.z = 40000
         _reposition()
         root.visible = true
@@ -192,9 +222,9 @@ Rectangle {
         root.anchorLocalX = 0     // the ROW's own top-left, not a click point
         root.anchorLocalY = 0
         root.openBounds = bounds ? bounds : rowItem.Window.contentItem
-        const contentItem = rowItem.Window.contentItem
-        if (contentItem && root.parent !== contentItem)
-            root.parent = contentItem
+        const layer = root._layer(rowItem)
+        if (layer && root.parent !== layer)
+            root.parent = layer
         root.z = 40000
         _reposition()
         root.visible = true
@@ -217,6 +247,17 @@ Rectangle {
         let x = pt.x
         let y = pt.y
         const b = root.openBounds
+        // The clamps below are in WINDOW coordinates, while the panel's own
+        // width/height are DESIGN units and it is drawn at `scale` (see the scale
+        // property above). What it occupies on screen is width x scale, and the
+        // room caps it is measured against are window pixels — so both the size
+        // used for placement and the caps handed to the layout are converted here,
+        // once. (Clamping a scaled-down menu with its unscaled design size shoved
+        // it away from its anchor.)
+        const s = root.scale > 0 ? root.scale : 1
+        const drawnW = root.width * s
+        const drawnH = root.height * s
+        const capOf = (roomPx) => Math.floor(roomPx / s)
 
         if (!b) {
             root.roomCap = 0
@@ -241,34 +282,34 @@ Rectangle {
         // submenu rather than detaching from it.
         if (root.isFlyout) {
             root.flipUp = false
-            root.roomCap = Math.floor(Math.max(roomBelow, roomAbove))
+            root.roomCap = capOf(Math.max(roomBelow, roomAbove))
         } else if (roomBelow < 240 && roomAbove > roomBelow) {
             root.flipUp = true
-            root.roomCap = Math.floor(roomAbove)
+            root.roomCap = capOf(roomAbove)
         } else {
             root.flipUp = false
-            root.roomCap = Math.floor(roomBelow)
+            root.roomCap = capOf(roomBelow)
         }
         // Never taller/wider than the bounds itself: a window shorter than
         // the menu's content is exactly the case this exists for.
-        root.roomCap = Math.max(0, Math.min(root.roomCap, Math.floor(b.height - pad * 2)))
-        root.widthCap = Math.max(0, Math.floor(b.width - pad * 2))
+        root.roomCap = Math.max(0, Math.min(root.roomCap, capOf(b.height - pad * 2)))
+        root.widthCap = Math.max(0, capOf(b.width - pad * 2))
 
         // Horizontal: a flyout prefers the row's right edge and flips to its
         // left when the bounds have no room there.
         if (root.isFlyout) {
             const rowRight = item.mapToItem(root.parent, item.width + 4, 0).x
             const rowLeft = item.mapToItem(root.parent, 0, 0).x
-            x = (rowRight + root.width <= innerRight) ? rowRight : rowLeft - root.width - 4
+            x = (rowRight + drawnW <= innerRight) ? rowRight : rowLeft - drawnW - 4
         }
-        x = Math.max(innerLeft, Math.min(x, innerRight - root.width))
+        x = Math.max(innerLeft, Math.min(x, innerRight - drawnW))
 
         // Vertical.
         if (root.isFlyout)
-            y = Math.min(pt.y, innerBottom - root.height)
+            y = Math.min(pt.y, innerBottom - drawnH)
         else if (root.flipUp)
-            y = pt.y - root.height
-        y = Math.max(innerTop, Math.min(y, innerBottom - root.height))
+            y = pt.y - drawnH
+        y = Math.max(innerTop, Math.min(y, innerBottom - drawnH))
 
         root.x = x
         root.y = y
@@ -388,8 +429,19 @@ Rectangle {
                             16 + headerSubSizer.implicitWidth + 16)
         return Math.ceil(w)
     }
+    // A COMBOBOX menu matches the field it drops from — the anchor's own width —
+    // the way a native select's list does. Without this the panel was a fixed 480
+    // design px, so a 300px Category field opened a list half again as wide as the
+    // box it belonged to (user report: "the dropdown width is too much"). The
+    // anchor's width is in the same design units as this panel's own: both are
+    // drawn at the app scale, so it needs no conversion (the clamp still converts).
+    property bool matchAnchorWidth: false
     // The width the contents want, before the window's own limit is applied.
-    readonly property real naturalWidth: fitContentWidth ? fittedWidth : 480
+    readonly property real naturalWidth: {
+        if (root.matchAnchorWidth && root.anchorItem && root.anchorItem.width > 0)
+            return root.anchorItem.width
+        return root.fitContentWidth ? root.fittedWidth : 480
+    }
     width: root.widthCap > 0 ? Math.min(root.naturalWidth, root.widthCap) : root.naturalWidth
     // What the panel wants to be, and the cap actually in force: the room
     // `openAt`/`openBeside` measured and the caller's own `maxHeight`,
@@ -517,6 +569,14 @@ Rectangle {
                             id: itemC
                             Rectangle {
                                 id: itemRow
+                                // Self-test handle (VGR_SELFTEST scenarios hover a
+                                // menu row BY NAME — the logo menu's "Settings" row
+                                // is the one that flies out the section flyout).
+                                // Guarded exactly like `alive` below: a detached row
+                                // must not throw while naming itself.
+                                objectName: "selfTestDropdownRow_"
+                                            + (typeof modelData !== "undefined" && modelData
+                                               && modelData.label ? modelData.label : index)
                                 width: itemList.width
                                 height: 34
                                 // STALE-ROW GUARD — the click fix: a model

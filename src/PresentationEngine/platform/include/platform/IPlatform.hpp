@@ -49,6 +49,10 @@ struct Snapshot {
     uint64_t threadCount = 0;       // live threads in this process
     int batteryPercent = -1;        // -1 = no battery
     bool onBattery = false;
+    // Plugged in AND the pack is topping up (Windows BatteryFlag 8, Linux
+    // "Charging"). Distinct from onBattery=false, which also covers "plugged in
+    // and holding at 100%" — the battery dial says which of the two it is.
+    bool batteryCharging = false;
     unsigned coreCount = 0;
     uint64_t gpuVramTotalBytes = 0; // best effort; 0 = no GPU backend reported
     uint64_t gpuVramUsedBytes = 0;

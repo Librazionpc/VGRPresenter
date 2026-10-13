@@ -157,6 +157,15 @@ public:
     static TemplateLibraryService &instance();
     static TemplateLibraryService *create(QQmlEngine *engine, QJSEngine *jsEngine);
 
+    // DOES THE ENGINE'S VOCABULARY HAVE AN ANSWER for `token` (the literal
+    // placeholder, braces included) in this content family? The metadata palette is a
+    // hand-written mirror of that vocabulary (MetadataFields.qml's two lists), and
+    // nothing but a unit test watched the two apart — this is what lets the registry
+    // check ITSELF against the engine at load, so a field the engine cannot fill for
+    // its own family is reported at boot instead of sitting in the menu looking
+    // implemented (BookFill::FamilyAnswersToken is the answer, one call).
+    Q_INVOKABLE bool metadataTokenResolves(const QString &contentType, const QString &token) const;
+
 private:
     TemplateLibraryService();
 };

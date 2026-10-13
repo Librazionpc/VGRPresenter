@@ -20,12 +20,10 @@ Rectangle {
     required property string styleId
     required property bool active
     required property bool isEnabled
-    // The model object itself. Required-property delegates do NOT receive
-    // the implicit `model` context object — reading `model.styleBackground`
-    // without declaring it hits the typeof guard below and silently returns
-    // the unstyled fallback forever (the "style bg never shows" bug).
-    // Declared, it becomes a real dependency: StyleBackgroundRole
-    // dataChanged re-evaluates styleBg and the pane repaints.
+    // The model object itself — this tile's row of the output roster. The pane
+    // does NOT read a style background role from it any more (the composition
+    // answers the style's look), but the row is still what says which output
+    // this tile IS: its name, kind and buffer roles.
     required property var model
 
     // The distributed frame (image://livepreview re-fetched on every frameRev
@@ -64,11 +62,69 @@ Rectangle {
     // tile's own hasFrame/frameSource stay gated on LiveOutputService.live
     // regardless, so a real bound-screen output window never sees a
     // staged-only pick, only this in-app tile does.
-    readonly property var onAirSlide: LiveOutputService.stagedSlide.valid === true
-        ? LiveOutputService.stagedSlide : LiveOutputService.onAirSlide
+    // ---- THE ONE COMPOSITION THIS TILE DRAWS FROM --------------------------
+    // Everything the pane below renders — the layout that owns the slide, the
+    // background the frame paints, whether the style's image is stepped aside,
+    // whether this style paints anything of its own at all, whether the gates
+    // refuse the family — is answered by ONE call (LiveOutputService
+    // .previewWithStyle -> SceneBuilder::ComposeSlide), which is the same
+    // composition the engine builds every real output's scene from.
+    //
+    // ONE CALL, ALWAYS, including when there is nothing staged or on air: an
+    // empty slide still answers the STYLE's own facts, which is why the tile no
+    // longer needs a second source (the model's style role) for its pane colour,
+    // its checkerboard gate or its style image. Two sources was the whole
+    // problem this property exists to end: the tile and the output window each
+    // derived those answers for themselves and drifted from the frame on air.
+    //
+    // WHICH SLIDE: a staged local pick belongs to each output tile (that is the
+    // tile's own preview), otherwise the on-air slide. THIS OUTPUT'S style id is
+    // always the style the composition is asked for — never the active output's,
+    // or a tile would paint another output's look.
+    readonly property var onAirSlide: {
+        void root.stylePulse
+        const stagedRaw = LiveOutputService.stagedSlideRaw
+        const raw = (stagedRaw && Object.keys(stagedRaw).length > 0)
+            ? stagedRaw : LiveOutputService.onAirSlideRaw
+        return LiveOutputService.previewWithStyle((raw && typeof raw === "object") ? raw : ({}),
+                                                 root.styleId)
+    }
     readonly property bool hasSlidePreview: onAirSlide.valid === true
                                             && onAirSlide.blocks
                                             && onAirSlide.blocks.length > 0
+
+    // ---- What the feed does NOT bury: the backdrop pass ------------------
+    // WHICH of the on-air blocks the ENGINE paints under the compositor's video
+    // layer is the engine's own answer (EngineBridge.backdropBlockIndexes →
+    // SceneBuilder::PlanBlockLayers), ASKED rather than re-derived here: this
+    // tile must order its layers exactly as every real output does, or the
+    // operator sees the slab on the tile and the feed on air (the class of
+    // report this whole area keeps producing). Those blocks' own PAINT is drawn
+    // by the backdrop layer below the taken-input image; their text — and every
+    // block the rule left as decoration — stay in the block render above it.
+    readonly property var backdropIndexes: {
+        const bs = root.onAirSlide && root.onAirSlide.blocks ? root.onAirSlide.blocks : []
+        if (bs.length === 0 || typeof EngineBridge === "undefined")
+            return []
+        return EngineBridge.backdropBlockIndexes(bs)
+    }
+    // The same list with those blocks MARKED: the marker travels with the block,
+    // so the block render can skip exactly their paint and the backdrop pass can
+    // draw exactly them, with no parallel index list to keep in step with a list
+    // that gets filtered on the way through.
+    readonly property var markedBlocks: {
+        const bs = root.onAirSlide && root.onAirSlide.blocks ? root.onAirSlide.blocks : []
+        const under = root.backdropIndexes
+        if (under.length === 0)
+            return bs
+        const out = []
+        for (let i = 0; i < bs.length; ++i) {
+            const b = bs[i]
+            out.push(under.indexOf(i) >= 0 ? Object.assign({}, b, { underVideo: true }) : b)
+        }
+        return out
+    }
+    readonly property var backdropBlocks: root.markedBlocks.filter(b => b.underVideo === true)
 
     // ---- Taken input layer (the Media pane's click-to-preview) ----------
     // The service owns the PAL tap; this tile composites the feed as one
@@ -91,70 +147,47 @@ Rectangle {
     // (Image status → confirmInputFrame() → inputRev bump → THIS URL) was a
     // binding loop; QML only reads here now.
 
-    // ---- Media-on-air layer (the Media pane's take-to-program) -----------
-    // A taken video/image FILE plays through the service's real decoder and
-    // lands here as one more image layer — under the on-air content, over
-    // the style background, the same convention as the taken input. The two
-    // holds are mutually exclusive (taking media clears a taken input and
-    // vice versa, service-side) — the guard here keeps the LAYER stack
-    // honest even in the transient window before the service's signal lands.
+    // ---- Media-on-air STATE (the Media pane's take-to-program) -----------
+    // The tile paints no media layer of its own any more — the engine frame
+    // below carries the compositor's media layer, which is what every real
+    // output shows (see the note where that layer used to be). This flag
+    // survives for the things that are ABOUT the state rather than the
+    // picture: the transport readout, the style background's clear-on-text
+    // rule, and the pane's own badges. The two holds are mutually exclusive
+    // (taking media clears a taken input and vice versa, service-side), so a
+    // taken input still outranks it here.
     readonly property bool mediaOnAir: LiveOutputService.mediaOnAir
                                        && !root.inputTaken
-    // Audio-only media has no frame to ask the provider for — requesting
-    // one anyway would just be a wasted round-trip that never resolves.
-    readonly property url mediaSource: mediaOnAir && !LiveOutputService.mediaIsAudio
-        ? "image://mediaplay?v=" + LiveOutputService.mediaRev : ""
 
-    // This output's own style background ({ color, image, hasImage }) —
-    // "for THAT output": the tile the output wears paints ITS style's look,
-    // not the active output's. Delivered as the StyleBackground ROLE (per
-    // OUTPUT, so a re-assignment on another output can't repaint this tile)
-    // — a Q_INVOKABLE is opaque to the QML engine and would capture its
-    // value once at creation and never move again.
-    //
-    // The role's dataChanged pulses are what repaint the tile, but a style
-    // background IMAGE that appears on disk WITHOUT a model mutation (a pick
-    // in the Styles dialog before Save, styles hydrating after boot) needs a
-    // nudge: on activeStyleChanged the model re-emits dataChanged for the
-    // whole roster, so bumping this counter re-reads the role — with a
-    // fresh QFile::exists() inside — and the pane repaints.
+    // A style that gains an image on disk WITHOUT a model mutation (a pick in
+    // the Styles dialog before Save, styles hydrating after boot) still has to
+    // repaint this tile. The composition is a call, so it re-runs only when one
+    // of its inputs moves: bumping this counter on the model's style-change
+    // signal makes the pane re-ask it — with a fresh QFile::exists() inside, in
+    // the composition, where the image's presence is decided.
     property int stylePulse: 0
     Connections {
         target: OutputListModel
         function onActiveStyleChanged() { root.stylePulse++ }
     }
-    readonly property var styleBg: {
-        void root.stylePulse
-        // model is a DECLARED required property (above), so this read is a
-        // real role dependency — no silent-undefined branch. The guard stays
-        // for the transient early-construction window only.
-        const bg = (root.model !== null && root.model !== undefined)
-            ? root.model.styleBackground : null
-        return (bg && typeof bg === "object") ? bg
-            : { color: "transparent", image: "", hasImage: false }
-    }
 
-    // Does the style paint a REAL background — a solid colour or an image?
-    // Everything transparent reads as "no background" (DesignPreview.isClear's
-    // convention: "transparent", "" and a 0-alpha colour alike), so a
-    // layout-only template style (transparent bg, no image) keeps the
-    // checkerboard — the output IS transparent on air. Qt.color can throw on
-    // a malformed string; the try keeps the binding alive rather than
-    // killing the pane's whole background chain.
-    function isClearColor(c) {
-        if (c === undefined || c === null || c === "" || c === "transparent")
-            return true
-        try { return Qt.color(c).a === 0 } catch (e) { return false }
+    // The family's display name, for the style-gate chip below (the same four
+    // families the Styles screen's chips and the engine's gates use —
+    // SlideRules::ContentType / FamilyTemplateSlot, asked rather than copied; an
+    // untagged slide is Shows content, as everywhere else).
+    function familyLabel(type) {
+        if (type === "media") return qsTr("Media")
+        if (type === "scripture") return qsTr("Scripture")
+        if (type === "table") return qsTr("Table")
+        if (type === "shows" || type === "") return qsTr("Shows")
+        return qsTr("content")
     }
-    readonly property bool styled: !isClearColor(root.styleBg.color)
-                                   || root.styleBg.hasImage === true
 
     // FreeShow's clearStyleBackgroundOnText: the style opts its OWN
-    // background image out of the way once this output actually has
-    // something on it — a slide, a taken input, or media — so a style whose
-    // image carries its own baked-in text (a branded church-name PNG) doesn't
-    // permanently collide with live text painted over it. Only the IMAGE
-    // steps aside (FreeShow's own semantics); the flat colour still shows.
+    // background image out of the way once the slide on air CARRIES content —
+    // so a style whose image carries its own baked-in text (a branded
+    // church-name PNG) doesn't permanently collide with live text painted over
+    // it. Only the IMAGE steps aside; the flat colour still shows.
     // The "actually has something on it" half of that sentence was never
     // actually checked — this suppressed the image at ALL times the flag
     // was on, including going live with nothing staged/on air at all
@@ -170,21 +203,30 @@ Rectangle {
     // differently — the live "same style, different result" report: the
     // active tile hid the branded image while the others baked it under the
     // slide. Content on air decides, for all of them alike.
-    readonly property bool suppressStyleBgImage: root.styleBg.clearOnText === true
-        && (root.hasSlidePreview || root.inputTaken || root.mediaOnAir)
+    // THE RULE IS THE ENGINE'S ANSWER, not a second derivation here. The tile
+    // and the output window each used to work this out for themselves —
+    // `clearOnText && (hasSlidePreview || inputTaken || mediaOnAir)` — which is a
+    // DIFFERENT content test from the engine's (a slide that CARRIES blocks),
+    // and it showed: going live with nothing staged (the blank carrier) has a
+    // preview but no content, so the tile hid the branded backdrop while the
+    // engine went on painting it. The composition decides, once, and hands the
+    // answer over with the slide's preview.
+    // THE STYLE'S IMAGE, as the composition answered it: which image to paint and
+    // whether it paints at all for the slide that is up. `styleImagePainted`
+    // carries the engine's clear-on-text step-aside (and the fresh on-disk check)
+    // with it, so there is nothing left here to derive — see the composition
+    // property above.
 
-    // A taken input or on-air media file is a REAL frame sitting directly
-    // under the on-air content in z-order (inputImage/mediaImage draw before
-    // DesignPreview below) — it must always win over ANY background paint
-    // above it, unconditionally (unlike suppressStyleBgImage, which is a
-    // per-style opt-in for the text-vs-baked-image case with no video
-    // involved). Without this, DesignPreview's own opaque fill (the slide's
-    // composed colour, or its own second copy of the style image — see
-    // below) paints straight over the video every time a slide is on air,
-    // even though the text visually sits "on top": the video underneath it
-    // never got through the paint above it.
+    // A REAL frame sitting directly under the on-air content in z-order must
+    // always win over ANY background paint above it, unconditionally (unlike
+    // the composition's clear-on-text step-aside, which is a per-style opt-in
+    // for the text-vs-baked-image case with no video involved) — otherwise
+    // DesignPreview's own opaque fill paints straight over the video even
+    // though the text visually sits "on top".
+    // Only the TAKEN INPUT still occupies a QML layer of its own below the
+    // engine frame (its tap is the PAL's, not the compositor's). Media is no
+    // longer part of this: it arrives with the engine frame, above this
     readonly property bool videoUnderneath: root.inputTaken
-        || (root.mediaOnAir && !LiveOutputService.mediaIsAudio)
 
     // Pixel-kind decision: when the on-air slide carries media-like blocks
     // (camera/media/audio/image), DesignPreview could only draw the source's
@@ -192,17 +234,14 @@ Rectangle {
     // for those, so it wins. Text/shape/clock/timer slides draw true in
     // DesignPreview and take the crisp block rendering (the frame can lag a
     // slide change; the blocks cannot).
-    readonly property bool framePriority: {
-        if (!hasFrame || !hasSlidePreview)
-            return false
-        const blocks = onAirSlide.blocks
-        for (let i = 0; i < blocks.length; ++i) {
-            const kind = String(blocks[i] && blocks[i].kind ? blocks[i].kind : "")
-            if (kind === "camera" || kind === "media" || kind === "audio" || kind === "image")
-                return true
-        }
-        return false
-    }
+    // WHICH KINDS those are is the composition's answer, not this tile's: the
+    // output window carried a second, identical copy of the kind test, and a
+    // rule with two copies is a rule that eventually answers two ways (see
+    // SlideRules::NeedsDistributedFrame). `hasFrame` stays this tile's own read —
+    // whether a distributed frame exists at all is service state, not the
+    // slide's — and the composition has already said there IS a slide to draw.
+    readonly property bool framePriority: root.hasFrame
+                                           && root.onAirSlide.framePriority === true
 
     // Caller sets width (or anchors); height follows as border + pane +
     // border (the meters and the taken-input marker OVERLAY the pane — see
@@ -210,24 +249,27 @@ Rectangle {
     implicitWidth: 182
     implicitHeight: 2 + previewPane.height
 
-    // ---- Program-mix meters (the Main Output's L/R LED strips) ------------
-    // The strips OVERLAY the preview pane's bottom-left and only appear when
-    // AUDIO metering is engaged anywhere (an audio card clicked in Media, or
-    // the program-mix tap while live) — meters-on-click, not permanent
-    // chrome. The tap itself runs while live on this (active) tile.
-    readonly property bool meterThis: root.active && LiveOutputService.live
-    onMeterThisChanged: {
-        if (meterThis)
-            EngineBridge.startOutputMeter()
-        else if (typeof EngineBridge !== "undefined")
-            EngineBridge.maybeStopOutputMeter()
-    }
-    Component.onCompleted: if (meterThis) EngineBridge.startOutputMeter()
-    Component.onDestruction: if (meterThis) EngineBridge.maybeStopOutputMeter()
+    // ---- The L/R meter strips --------------------------------------------
+    // The strips OVERLAY the preview pane's edges. They are fed by the INPUT
+    // taps the app already holds (a Media card, a Settings row) and read only
+    // while this output is ON AIR — a tap is not audio anybody is hearing, so
+    // off air there is no input audio in the program and the bars rest at
+    // silence (see MeterBar.rawLevel).
+    //
+    // (2026-10) There is no program-mix meter any more. It read
+    // EngineBridge.outputLevels, which came from AudioMixer::ProgramLevel — the
+    // mixer only published from the WASAPI render callback of setAudioRender,
+    // which nothing ever called, so the branch read a flat zero for its whole
+    // life and this tile's bars were really driven by the input taps below.
+    // `meterThis`/startOutputMeter existed to keep that program meter (and its
+    // pump) alive while live, and the pump's ticks were what silently opened a
+    // WASAPI capture per routed input — the "go live is opening WASAPI" report.
+    // Both are gone; the tile needs no bridge call at all now.
     radius: 8
-    // Live = danger-red border; inactive = visible slate border so an off
+    // Live = the live red the GO LIVE pill uses (Theme.liveBgOnAir) — NOT danger,
+    // which is reserved for faults; inactive = visible slate border so an off
     // tile reads as "inactive", not just black.
-    border.color: root.active && LiveOutputService.live ? "#85261f" : "#2b2e3d"
+    border.color: root.active && LiveOutputService.live ? Theme.liveBgOnAir : "#2b2e3d"
     border.width: 1
     color: "#16171e"
     // Disabled screens dim everywhere — same model, same state.
@@ -243,22 +285,57 @@ Rectangle {
     // styled output shows ITS look, not the transparency checkerboard.
     Rectangle {
         id: previewPane
+        // Self-test hook (run_style_bg_test.sh): the layer-order check walks
+        // this pane's children by name to prove the transparency checkerboard
+        // really sits BELOW the media/block layers (so it can never bury a
+        // pushed media frame). Names are per-instance, like the tile's own.
+        objectName: "selfTestTilePane"
         x: 1
         y: 1
         width: parent.width - 2
         height: width * 9 / 16
         clip: true
         radius: 7
-        // The style's colour (the engine's OutputStyleSpec): the pane's base.
-        color: root.styleBg.color !== "" ? root.styleBg.color : "transparent"
+        // The style's colour (the engine's OutputStyleSpec), from the
+        // composition: the pane's base.
+        color: root.onAirSlide.styleColor !== "" ? root.onAirSlide.styleColor : "transparent"
+
+        // TRANSPARENCY CONVENTION: the checkerboard lives at the BOTTOM of this
+        // pane's stack — under the style image, the taken input/media layer, the
+        // block render and the distributed frame alike — so it can only ever
+        // show where NOTHING paints. It used to be drawn by the DesignPreview
+        // above those layers (and by a second copy above the block render),
+        // which is opaque: with a style whose background is "transparent" (a
+        // keyable template) the checkers painted straight over a pushed media /
+        // camera frame, so the tile showed transparency where the media was
+        // meant to show — while the real output window, which never draws them
+        // (showCheckerboard: false), showed the media correctly. Ownership is
+        // now the pane's alone, in the one z-order position that cannot hide
+        // content; every DesignPreview in here draws with checkers off.
+        // Visible wherever the style paints NO background — an explicitly
+        // "transparent" one, or one that names no colour at all (both are
+        // keyable frames in the engine, see ComposeSlide) — and for an UNSTYLED
+        // output's clear slide; never while a video layer underneath IS the
+        // picture, exactly as before.
+        Checkerboard {
+            objectName: "selfTestTileCheckers"
+            anchors.fill: parent
+            visible: root.onAirSlide.explicitTransparent === true
+                     || (root.onAirSlide.stylePaintless === true && !root.videoUnderneath)
+            tileSize: 9
+            shadeA: "#3a3c48"
+            shadeB: "#25262f"
+        }
+
         // The style's background IMAGE above the colour, under the content —
         // the engine paints it behind every frame; the block-only preview
         // cannot, so the tile does (cover-fit, like SceneBuilder's CoverRect).
+        // WHETHER it paints (and which file) is the composition's answer.
         Image {
             anchors.fill: parent
-            visible: root.styleBg.hasImage && !root.suppressStyleBgImage && !root.videoUnderneath
-            source: root.styleBg.hasImage && !root.suppressStyleBgImage && !root.videoUnderneath
-                    ? "file:///" + root.styleBg.image : ""
+            visible: root.onAirSlide.styleImagePainted === true && !root.videoUnderneath
+            source: (root.onAirSlide.styleImagePainted === true && !root.videoUnderneath)
+                    ? "file:///" + root.onAirSlide.styleImage : ""
             fillMode: Image.PreserveAspectCrop
         }
 
@@ -267,8 +344,29 @@ Rectangle {
         // the style background. Fill the pane: feeds are 16:9-shaped like the
         // pane itself. Placeholder glyphs from the shared pane's art keep the
         // warm-up seconds honest.
+        // THE BACKDROP PASS — the blocks the ENGINE paints under the
+        // compositor's video layer, drawn where the engine draws them: under the
+        // taken-input layer below, above the style's own colour/image above.
+        // Without this the tile painted EVERY on-air block over the feed while
+        // the outputs painted the design's backdrops under it, so the tile and
+        // the outputs disagreed about what covers a live feed. `paintOnly`
+        // because a backdrop block's TEXT belongs above the feed: the block
+        // render further down draws it (with these blocks' own boxes skipped
+        // there, so one box is never painted on both sides of the feed).
+        DesignPreview {
+            objectName: "selfTestTileBackdropPreview"
+            anchors.fill: parent
+            visible: root.hasSlidePreview && !root.framePriority
+            showCheckerboard: false
+            background: "transparent"
+            backgroundImage: ""
+            blocks: root.backdropBlocks
+            paintOnly: true
+        }
+
         Image {
             id: inputImage
+            objectName: "selfTestTileInputFeed"
             anchors.fill: parent
             visible: root.inputTaken
             source: root.inputSource
@@ -298,51 +396,17 @@ Rectangle {
             }
         }
 
-        // The MEDIA-ON-AIR layer — the taken file's frames (service-owned
-        // decoder, image://mediaplay) with the same warm-up honesty as the
-        // input layer: the provider answers not-yet-decoded requests with a
-        // 1×1 transparent, so the pulsing ring below keeps the seconds
-        // before the first frame honest. AUDIO has no frame at all — never
-        // requested (it would sit "loading" forever, since mediaRev_ never
-        // bumps for it) — its own signal is the output tile's L/R meters
-        // actually moving, not a frame layer.
-        Image {
-            id: mediaImage
-            anchors.fill: parent
-            visible: root.mediaOnAir && !LiveOutputService.mediaIsAudio
-            source: root.mediaSource
-            fillMode: Image.PreserveAspectFit
-            cache: false   // every rev IS a new frame
-            asynchronous: false
-        }
-
-        // Media warm-up: the same pulsing-ring art, keyed on the provider's
-        // own Ready status (a decoded still flips it immediately).
-        Item {
-            anchors.centerIn: parent
-            visible: root.mediaOnAir && !LiveOutputService.mediaIsAudio
-                     && (mediaImage.status !== Image.Ready || mediaImage.sourceSize.width <= 1)
-            width: 48; height: 48
-
-            SequentialAnimation on scale {
-                loops: Animation.Infinite
-                NumberAnimation { from: 0.85; to: 1.1; duration: 700 }
-                NumberAnimation { from: 1.1; to: 0.85; duration: 700 }
-            }
-            Rectangle {
-                anchors.centerIn: parent
-                width: 34; height: 34; radius: 17
-                color: "transparent"
-                border.width: 2.4
-                border.color: Theme.accent
-            }
-            Rectangle {
-                anchors.centerIn: parent
-                width: 10; height: 10; radius: 5
-                color: Theme.accent
-            }
-        }
-
+        // MEDIA-ON-AIR IS NOT DRAWN HERE ANY MORE. The tile used to paint its
+        // own copy of the taken file's frames from image://mediaplay (the
+        // service's decoder), while every real output got theirs from the
+        // ENGINE's composited frame — two sources for one picture, and the tile
+        // showed media the outputs did not have (reported live: "it shows in
+        // the monitor preview but not on the output — NDI goes black"). The
+        // engine frame below IS the output's own frame (it already carries the
+        // media compositor layer), so the tile now shows exactly what every
+        // real output shows: if the engine has no media layer, neither does the
+        // tile, and the two can never disagree. AUDIO has no frame at all — its
+        // own signal is the output tile's L/R meters moving, not a picture.
         // Overlays on air, UNDER-SLIDE group (OverlayLibraryService's own
         // per-design placeUnderSlide flag) — a lower-third-behind-the-text
         // kind of layer: above the video/media layer, below the slide's own
@@ -367,6 +431,7 @@ Rectangle {
         // means "the style's colour/image underneath shows through", and the
         // tile paints that (the pane below).
         DesignPreview {
+            objectName: "selfTestTileDesignPreview"
             anchors.fill: parent
             visible: root.hasSlidePreview && !root.framePriority
             // This IS on-air content, never a template/library card — a
@@ -375,12 +440,12 @@ Rectangle {
             // the style's own template, whose bound field then has no real
             // slide text to resolve).
             showBindPlaceholders: false
-            // Checkers only when NOTHING paints a background here: an
-            // unstyled output's clear slide shows the transparency
-            // convention, a styled output's clear slide shows the STYLE's
-            // colour/image through (the pane under this item) — and a video
-            // layer underneath must show through instead of checkers too.
-            showCheckerboard: !root.styled && !root.videoUnderneath
+            // Checkers OFF: the pane owns the transparency convention (see the
+            // Checkerboard at the bottom of previewPane). This item is drawn
+            // ABOVE the taken input/media layer, so any checkerboard it painted
+            // was opaque and buried a pushed media frame — the reported "the
+            // checkerboard area is where the media is meant to show".
+            showCheckerboard: false
             // The style's own image rides the block render (mirrors the
             // engine: the style's colour OR the slide's composed colour,
             // then the style image, then content — a clear slide background
@@ -388,10 +453,16 @@ Rectangle {
             // Suppressed the same as the outer style-bg Image above (both
             // paint the identical image — this is DesignPreview's own copy,
             // under its blocks) so a video layer underneath is never hidden
-            // by it, and clearOnText applies here too.
-            backgroundImage: (root.styleBg.hasImage && !root.suppressStyleBgImage && !root.videoUnderneath)
-                ? root.styleBg.image : ""
-            blocks: root.onAirSlide.blocks ?? []
+            // by it. The clear-on-text step-aside rides `styleImagePainted`:
+            // the composition's answer, not a second test here.
+            backgroundImage: (root.onAirSlide.styleImagePainted === true && !root.videoUnderneath)
+                ? root.onAirSlide.styleImage : ""
+            // Marked blocks (the engine's own backdrop answer, above) draw here
+            // WITHOUT their own paint: the backdrop pass below the feed already
+            // painted it, and painting it again in this pass would put a covered
+            // stage's slab back OVER the feed — the whole defect. Their text
+            // still draws here, on top, exactly as the engine composes it.
+            blocks: root.markedBlocks
             // The slide's OWN composed colour is just as opaque as the style
             // image — with a video layer underneath, it must step aside the
             // same way (the video is the true background; the slide's colour
@@ -399,18 +470,40 @@ Rectangle {
             background: root.videoUnderneath ? "transparent" : (root.onAirSlide.background ?? "transparent")
         }
 
-        // The distributed frame: wins when the on-air slide is media content
-        // (a block render would be a name-on-a-tile placeholder) — but NOT
-        // over a taken media/input layer: a live raster feed outranks the
-        // engine's placeholder for the media block (the frame is where that
-        // feed is SUPPOSED to show).
+        // (The transparency checkerboard for an explicitly transparent style —
+        // which also lets the distributed frame's alpha-0 pixels read as
+        // transparency instead of a black picture — is the pane's, at the BOTTOM
+        // of this stack. Nothing between it and a frame/block/text layer, so it
+        // can never paint over the picture.)
+
+        // The distributed frame: the ENGINE's own picture for this output, and
+        // — since the tile stopped painting media itself (see the
+        // "MEDIA-ON-AIR IS NOT DRAWN HERE ANY MORE" note above) — the ONLY
+        // layer that carries a taken media file at all. So media on air must
+        // NOT hide it: gating this on !mediaOnAir was left behind by the
+        // layer it was written for, and with that layer gone the pane had
+        // nothing left to draw but the style's own background — the reported
+        // "media is on the monitor preview, I press GO LIVE and it goes black",
+        // strobing between black and the style's background image as this
+        // layer blinked in and out under it.
+        // A TAKEN camera/screen input is the one case that still outranks the
+        // frame: its tap is the PAL's, drawn by the inputImage layer below, and
+        // an identically-fed engine frame would simply cover it.
         Image {
+            id: frameImage
             anchors.fill: parent
             visible: root.hasFrame
-                     && (root.framePriority && !root.mediaOnAir && !root.inputTaken
-                         || (!root.hasSlidePreview && !root.mediaOnAir && !root.inputTaken))
+                     && (root.framePriority || !root.hasSlidePreview)
+                     && !root.inputTaken
             source: root.frameSource
             fillMode: Image.Stretch
+            // SYNCHRONOUS on purpose: every frameRev bump is a NEW url, and an
+            // async load BLANKS the item until the new frame lands — over the
+            // style background underneath, one live feed therefore read as a
+            // strobe between the picture and the background. The provider hands
+            // back an already-decoded, already-scaled in-memory QImage, so the
+            // load is a copy; the taken-input layer above already loads its own
+            // frames synchronously for the same reason.
             asynchronous: false
             cache: false
             // The provider hands back an ARGB32 of the exact requested size;
@@ -441,7 +534,8 @@ Rectangle {
         // colour/image instead ("black bg + image" looked unstyled before).
         Checkerboard {
             anchors.fill: parent
-            visible: !root.hasFrame && !root.hasSlidePreview && !root.styled
+            visible: !root.hasFrame && !root.hasSlidePreview
+                     && root.onAirSlide.stylePaintless === true
                      && !root.inputTaken && !root.mediaOnAir
             tileSize: 9
             shadeA: "#3a3c48"
@@ -475,48 +569,67 @@ Rectangle {
         y: previewPane.y + 4
         width: 4
         height: previewPane.height - 8
-        // Was gated on EngineBridge.anyAudioMetering (a metering tap
-        // actually running somewhere) — meant the whole strip vanished
-        // outside GO LIVE instead of sitting at its own "ghost" resting
-        // state (which the gradient below already draws for exactly this:
-        // a readable scale even at silence). Always present chrome now;
-        // it only animates once a real tap feeds rawLevel.
+        // Was gated on whether a metering tap was running somewhere — meant
+        // the whole strip vanished outside GO LIVE instead of sitting at its
+        // own "ghost" resting state (which the gradient below already draws for
+        // exactly this: a readable scale even at silence). Always present
+        // chrome now; it only animates once a real tap feeds rawLevel.
         visible: root.isEnabled
 
         readonly property real rawLevel: {
-            // Real program-mix signal (the loopback tap) always wins when
-            // it's actually showing something. GATING on outputMetering
-            // (whether the tap is merely RUNNING) was the bug: it runs
-            // continuously the whole time a tile is active/live regardless
-            // of whether there is any real audio, so that branch was taken
-            // — and returned a flat 0 — permanently, and the input-tap
-            // fallback below was never reached during the one case anyone
-            // actually cares about (the show IS live). Comparing the real
-            // NUMBERS instead means whichever source is genuinely louder
-            // wins, every time.
-            let level = 0
-            const s = EngineBridge.outputLevels
-            if (s && s.peaks !== undefined && s.peaks.length >= 1) {
-                const idx = Math.min(bar.channelIndex, s.peaks.length - 1)
-                level = Math.max(0, Math.min(1, s.peaks[idx]))
-            }
-            if (level > 0)
-                return level
-            // No real program signal: fall back to the loudest currently-
-            // tapped INPUT device (the Media pane's audio/bus card double-
-            // click — see MediaLibraryPane.qml's onDoubleClicked comment;
-            // there is no real path from a routed input to program output
-            // yet). Not real program signal, but an honest confirmation the
-            // gesture is doing something instead of the bars sitting dead.
+            // ONE source decides this bar: the loudest currently TAPPED input,
+            // honoring the source mute, fader, and matching channel gain so a
+            // closed L/R side stays dark. A program-mix reading
+            // (EngineBridge.outputLevels) used to win here whenever it was
+            // non-zero — and it never was: the mixer only published from a
+            // render callback nothing ever started, so that branch was taken
+            // and returned a flat 0 permanently, which is exactly the "the
+            // preview meter never moves" behaviour. Gone with the program mix
+            // itself (see the meter note on the tile's root).
+            //
+            // ONLY WHILE THIS OUTPUT IS ON AIR. A tap is not audio anybody is
+            // hearing: the rows in Settings · Audio & Video meter their devices
+            // so their strips move while you aim them, and the Media pane's
+            // cards hold their own. Reading those here animated the preview
+            // with nothing selected and nothing live — "just connecting an
+            // audio source made the monitor preview start animating", with no
+            // wall-side state that Clear all could release. Off air there is no
+            // input audio in the program, so the bars rest at silence.
+            if (!LiveOutputService.live)
+                return 0
             const list = EngineBridge.inputLevels
             let loudest = 0
             for (let i = 0; i < list.length; ++i) {
                 const snap = list[i]
                 if (!snap || snap.peaks === undefined || snap.peaks.length < 1)
                     continue
-                const idx = Math.min(bar.channelIndex, snap.peaks.length - 1)
-                const v = Math.max(0, Math.min(1, snap.peaks[idx]))
-                if (v > loudest) loudest = v
+                // A snapshot with NO device name is not attributable to any
+                // input row, so it can only be the machine's default input —
+                // never a source this output is showing. Drawing it here put a
+                // moving meter on the preview with nothing selected; the bridge
+                // refuses those taps now, and this keeps the reading honest if
+                // one ever reaches the list again.
+                if (String(snap.label || "").trim() === "")
+                    continue
+                const channelCount = Number(snap.channelCount) || snap.peaks.length
+                const sourceChannel = channelCount === 1 ? 0 : bar.channelIndex
+                const gainChannel = channelCount === 1 ? 0 : bar.channelIndex
+                if (sourceChannel >= snap.peaks.length)
+                    continue
+                const label = String(snap.label || "").trim()
+                for (let row = 0; row < AudioInputListModel.rowCount(); ++row) {
+                    const input = AudioInputListModel.getInput(row)
+                    if (!input || String(input.sublabel || "").trim() !== label
+                        || input.muted || Number(input.level) <= 0)
+                        continue
+                    const gain = AudioInputListModel.channelGain(row, gainChannel)
+                    if (Db.isChannelOff(gain))
+                        continue
+                    const v = Math.max(0, Math.min(1, snap.peaks[sourceChannel]))
+                              * gain * Math.max(0, Math.min(1, Number(input.level) / 100))
+                    if (v > loudest) loudest = v
+                    break
+                }
             }
             return loudest
         }
@@ -539,6 +652,12 @@ Rectangle {
             running: bar.visible
             repeat: true
             onTriggered: {
+                if (bar.rawLevel <= Db.floorLinear) {
+                    bar.smoothed = 0
+                    bar.peakValue = 0
+                    bar.peakHeldAt = Date.now()
+                    return
+                }
                 const target = bar.rawLevel
                 bar.smoothed = target > bar.smoothed
                     ? target : bar.smoothed + (target - bar.smoothed) * 0.2
@@ -559,10 +678,10 @@ Rectangle {
         // the opposite order CSS's `linear-gradient(0deg, ...)` lists them.
         readonly property Gradient barGradient: Gradient {
             orientation: Gradient.Vertical
-            GradientStop { position: 0.0; color: "#c80000" }
-            GradientStop { position: 0.16; color: "#ffc800" }
-            GradientStop { position: 0.45; color: "#00ff32" }
-            GradientStop { position: 1.0; color: "#00c8c8" }
+            GradientStop { position: 0.0; color: Theme.meterClip }
+            GradientStop { position: 0.16; color: Theme.meterHot }
+            GradientStop { position: 0.45; color: Theme.meterLoud }
+            GradientStop { position: 1.0; color: Theme.meterQuiet }
         }
 
         // Ghost — the full range, always faintly visible.
@@ -599,7 +718,7 @@ Rectangle {
             anchors.right: parent.right
             height: 2
             y: parent.height * (1 - Db.dbPct(bar.peakValue)) - 1
-            color: "#ffffff"
+            color: Theme.controlInk
             opacity: 0.55
         }
 
@@ -610,7 +729,7 @@ Rectangle {
             anchors.right: parent.right
             anchors.bottom: parent.bottom
             height: 2
-            color: "#00c8c8"
+            color: Theme.meterQuiet
             opacity: bar.active ? 1 : 0.15
             Behavior on opacity { NumberAnimation { duration: 100 } }
         }
@@ -625,6 +744,45 @@ Rectangle {
         channelIndex: 1
         anchors.right: previewPane.right
         anchors.rightMargin: 4
+    }
+
+    // STYLE GATE CHIP. A style's content gates are a Styles-screen decision
+    // (SceneBuilder::StyleAdmitsSlide, mirrored for the preview in
+    // LiveOutputService::styleAdmits), and a refused family renders as a
+    // background-only frame on EVERY output — including this tile, which
+    // composes under the same rule. That is correct behaviour, but a
+    // background-only frame is indistinguishable from a broken one, so the
+    // tile says which family the style blocks, by name, right on the pane.
+    // Sits opposite the input/media marker so the two never overlap.
+    Rectangle {
+        anchors.top: previewPane.top
+        anchors.topMargin: 4
+        anchors.left: previewPane.left
+        anchors.leftMargin: 4
+        width: gateRow.width + 12
+        height: gateRow.height + 6
+        radius: 9
+        color: "#b3101219"
+        visible: root.onAirSlide.refusedByStyle === true
+
+        Row {
+            id: gateRow
+            anchors.centerIn: parent
+            spacing: 4
+
+            Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                width: 6; height: 6; radius: 3
+                color: Theme.warning
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: qsTr("Style blocks %1").arg(root.familyLabel(root.onAirSlide.contentType))
+                color: "#9aa0b5"
+                font.family: "Segoe UI"
+                font.pixelSize: 10
+            }
+        }
     }
 
     // Taken-input marker (the old name footer's right side): purple dot /
@@ -652,12 +810,17 @@ Rectangle {
             Rectangle {
                 anchors.verticalCenter: parent.verticalCenter
                 width: 16; height: 16; radius: 8
-                color: root.mediaOnAir ? "#1d2a4d" : "#2a2450"
+                // The key the operator has taken, in its own blue wash and ink
+                // (Theme.armedReadyBg / armedReadyInk — the pair the flow
+                // runner's Run button wears). Both this colour and `visible` key
+                // on the same flag, so the circle only ever paints the blue: the
+                // violet it used to fall back to was unreachable.
+                color: Theme.armedReadyBg
                 visible: root.mediaOnAir
                 IconGlyph {
                     anchors.centerIn: parent
                     name: "play"
-                    color: "#8fb4ff"
+                    color: Theme.armedReadyInk
                     fit: true
                     width: 8; height: 8
                 }

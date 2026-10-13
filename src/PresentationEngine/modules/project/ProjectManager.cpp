@@ -4,6 +4,7 @@
 #include "core/events/EventBus.hpp"
 #include "core/events/Events.hpp"
 #include "core/logging/Logger.hpp"
+#include "core/recovery/DocumentRecovery.hpp"
 #include "platform/PlatformAccessor.hpp"
 
 #include <chrono>
@@ -89,9 +90,24 @@ Result<Project> ProjectManager::Open(std::string_view hostPath) {
     auto text = fs.ReadText(hostPath);
     if (!text.ok()) return text.error();
     auto parsed = json::Parse(text.value());
-    if (!parsed.ok()) return parsed.error();
-    auto p = ProjectFromJson(parsed.value());
-    if (!p.ok()) return p.error();
+    auto p = parsed.ok() ? ProjectFromJson(parsed.value())
+                         : Result<Project>(parsed.error());
+    if (!p.ok()) {
+        // A SHOW is the user's own authored document, so it is NOT rebuilt behind
+        // their back — an empty show standing in for their work would be worse
+        // than the error. But it must not be a dead end either: a damaged file is
+        // set aside as evidence, and the error says WHERE, so the bytes survive
+        // the open attempt instead of being overwritten by the next save.
+        const auto report = recovery::SetAsideDamagedDocument(
+            hostPath, "ProjectManager", p.error().message);
+        return Error::Make(p.error().code, "ProjectManager",
+                           report.preserved
+                               ? std::format("this file is not a readable show; its contents "
+                                             "were kept as '{}' so they can be recovered",
+                                             report.quarantine)
+                               : std::string("this file is not a readable show and could not be "
+                                             "set aside; open it in a text editor to inspect it"));
+    }
     // The on-disk path is authoritative.
     p.value().path = std::string(hostPath);
     p.value().modifiedAtMs = MsNow();
@@ -132,7 +148,10 @@ Result<void> ProjectManager::Save(std::string_view id, bool autosave) {
         proj.path = path;
     }
     auto bytes = ProjectToJson(proj).ToString();
-    if (auto r = fs.Write(path, bytes); !r.ok()) return r.error();
+    // ATOMIC: a project file is the user's work. Written in place, a save that
+    // died mid-write left the project file unreadable with nothing to fall back
+    // to; the swap means Open() sees the previous save or this one.
+    if (auto r = fs.WriteAtomic(path, bytes); !r.ok()) return r.error();
 
     if (auto r = registry_.Update(proj); !r.ok()) return r.error();
     if (auto r = Persist(proj); !r.ok()) return r.error();
@@ -148,7 +167,7 @@ Result<Project> ProjectManager::SaveAs(std::string_view id, std::string_view hos
     proj.modifiedAtMs = MsNow();
 
     auto& fs = platform::PlatformAccessor::Get().Filesystem();
-    if (auto r = fs.Write(proj.path, ProjectToJson(proj).ToString()); !r.ok()) return r.error();
+    if (auto r = fs.WriteAtomic(proj.path, ProjectToJson(proj).ToString()); !r.ok()) return r.error();
     if (auto r = registry_.Update(proj); !r.ok()) return r.error();
     if (auto r = Persist(proj); !r.ok()) return r.error();
     (void)EventBus::Instance().Publish(events::ProjectSaved{proj.id, proj.name, false});
@@ -180,7 +199,7 @@ Result<Project> ProjectManager::Rename(std::string_view id, std::string_view new
     if (auto r = Persist(proj); !r.ok()) return r.error();
     // Keep the on-disk file in sync so Open() sees the new name.
     if (!proj.path.empty()) {
-        if (auto w = platform::PlatformAccessor::Get().Filesystem().Write(
+        if (auto w = platform::PlatformAccessor::Get().Filesystem().WriteAtomic(
                 proj.path, ProjectToJson(proj).ToString());
             !w.ok())
             return w.error();
@@ -215,7 +234,7 @@ Result<void> ProjectManager::SetAssetReferences(std::string_view id,
     if (auto r = registry_.Update(proj); !r.ok()) return r.error();
     if (auto r = Persist(proj); !r.ok()) return r.error();
     if (!proj.path.empty()) {
-        if (auto w = platform::PlatformAccessor::Get().Filesystem().Write(
+        if (auto w = platform::PlatformAccessor::Get().Filesystem().WriteAtomic(
                 proj.path, ProjectToJson(proj).ToString());
             !w.ok())
             return w.error();

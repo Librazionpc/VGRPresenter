@@ -26,9 +26,16 @@ Rectangle {
     // grey at rest and light on hover/drag only.
     property bool alwaysColored: false
 
-    signal connectStarted(real x, real y)
-    signal connectMoved(real x, real y)
-    signal connectFinished(real x, real y)
+    // All three carry SCENE (window) coordinates, not the dot's own frame: the
+    // hit area below is deliberately larger than the dot, and mapping the
+    // event's own x/y through the DOT added that margin to every reported
+    // point. The board measures the drop point against the bus rows, so the
+    // old mapping landed 10px right/down of the pointer and drops the user
+    // aimed at a card were refused (or read as the next card along). The owner
+    // converts scene -> its own space once (AudioVideoScreen.dragPoint).
+    signal connectStarted(real sceneX, real sceneY)
+    signal connectMoved(real sceneX, real sceneY)
+    signal connectFinished(real sceneX, real sceneY)
 
     width: 8; height: 8; radius: 4
     // At rest, a source port used Theme.border (#232530) — nearly the same
@@ -37,21 +44,35 @@ Rectangle {
     // source's port read as "missing" against its card, making the connect
     // gesture undiscoverable). textMuted keeps the same "not yet connected"
     // read but is actually visible against the card background.
-    color: root.alwaysColored || root.connected || hover.hovered || root.dragActive
+    // `hover` is this item's own MouseArea (declared below): its hover flag is
+    // `containsMouse`, NOT `hovered` — a HoverHandler's name. Reading
+    // `hover.hovered` left the dot at Theme.textMuted no matter where the
+    // pointer was, so the "this port is live, drag from here" brighten never
+    // happened and the connect gesture stayed undiscoverable.
+    color: root.alwaysColored || root.connected || hover.containsMouse || root.dragActive
            ? root.accent : Theme.textMuted
     border.color: Theme.surface
     border.width: 1
 
     MouseArea {
         id: hover
+        // The grab target is bigger than the 8px dot on purpose: the dot is the
+        // gesture's HANDLE, and a 20x20 target made the connect drag fiddly to
+        // start ("the connection drag is difficult"). 28x28 is well clear of a
+        // neighbouring port — board rows sit 64px apart — so it can never steal
+        // a neighbour's press.
         anchors.fill: parent
-        anchors.margins: -6
+        anchors.margins: -10
         hoverEnabled: true
         enabled: root.interactive
         cursorShape: Qt.CrossCursor
         preventStealing: true
-        onPressed: (mouse) => root.connectStarted(mouse.x, mouse.y)
-        onPositionChanged: (mouse) => root.connectMoved(mouse.x, mouse.y)
-        onReleased: (mouse) => root.connectFinished(mouse.x, mouse.y)
+        // Mapped from the MouseArea that RECEIVED the event (see the signals
+        // above), to scene coordinates, in the same tick as the event.
+        function sceneX(mx) { return hover.mapToItem(null, mx, 0).x }
+        function sceneY(my) { return hover.mapToItem(null, 0, my).y }
+        onPressed: (mouse) => root.connectStarted(hover.sceneX(mouse.x), hover.sceneY(mouse.y))
+        onPositionChanged: (mouse) => root.connectMoved(hover.sceneX(mouse.x), hover.sceneY(mouse.y))
+        onReleased: (mouse) => root.connectFinished(hover.sceneX(mouse.x), hover.sceneY(mouse.y))
     }
 }

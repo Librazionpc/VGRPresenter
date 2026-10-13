@@ -172,7 +172,7 @@ Item {
                                 radius: Theme.radiusMd
                                 color: root.hasExecution
                                        && String(root.execution.flowId ?? "") === flowCard.modelData.id
-                                           ? "#241a19" : "#1d2a4d"
+                                           ? Theme.armedStopBg : Theme.armedReadyBg
                                 Row {
                                     anchors.centerIn: parent
                                     spacing: 7
@@ -183,7 +183,7 @@ Item {
                                               ? "stop" : "play"
                                         color: root.hasExecution
                                                && String(root.execution.flowId ?? "") === flowCard.modelData.id
-                                               ? "#ff8d7f" : "#8fb4ff"
+                                               ? Theme.dangerLight : Theme.armedReadyInk
                                         fit: true; width: 12; height: 12
                                     }
                                     Text {
@@ -194,7 +194,7 @@ Item {
                                               ? qsTr("Stop") : qsTr("Run")
                                         color: root.hasExecution
                                                && String(root.execution.flowId ?? "") === flowCard.modelData.id
-                                               ? "#ff8d7f" : "#8fb4ff"
+                                               ? Theme.dangerLight : Theme.armedReadyInk
                                         font.family: Theme.fontFamily
                                         font.pixelSize: Theme.textSm
                                         font.weight: Font.DemiBold
@@ -254,7 +254,10 @@ Item {
             radius: Theme.radiusLg
             color: "#14151c"
             border.width: 1
-            border.color: root.running ? "#85261f" : "#232530"
+            // A running flow is a LIVE surface, so its card wears the live red the
+            // GO LIVE pill wears (Theme.liveBgOnAir) — this border used to be its own
+            // near-copy of that red, which is how the live red drifted into six values.
+            border.color: root.running ? Theme.liveBgOnAir : "#232530"
 
             Column {
                 id: execCol
@@ -275,7 +278,7 @@ Item {
                         Rectangle {
                             anchors.verticalCenter: parent.verticalCenter
                             width: 8; height: 8; radius: 4
-                            color: root.running ? "#e05a4e" : "#ffb454"
+                            color: root.running ? Theme.liveBg : Theme.warningLight
                             SequentialAnimation on opacity {
                                 running: root.running
                                 loops: Animation.Infinite
@@ -292,7 +295,7 @@ Item {
                                      : s === "completed" ? qsTr("COMPLETED")
                                      : s.toUpperCase()
                             }
-                            color: root.running ? "#ff8d7f" : "#ffb454"
+                            color: root.running ? Theme.dangerLight : Theme.warningLight
                             font.family: Theme.fontFamily
                             font.pixelSize: 11
                             font.weight: Font.Bold
@@ -348,11 +351,11 @@ Item {
                         }
                         Rectangle {
                             width: 30; height: 30; radius: Theme.radiusMd
-                            color: "#241a19"
+                            color: Theme.armedStopBg
                             IconGlyph {
                                 anchors.centerIn: parent
                                 name: "stop"
-                                color: "#ff8d7f"
+                                color: Theme.dangerLight
                                 fit: true; width: 13; height: 13
                             }
                             MouseArea {
@@ -380,12 +383,12 @@ Item {
                             height: 26
                             radius: 13
                             color: st === "completed" ? "#173326"
-                                 : st === "running" ? "#2a1210"
+                                 : st === "running" ? Theme.armedLiveBg
                                  : st === "failed" ? "#3a1410"
                                  : st === "skipped" ? "#22242e"
                                  : Theme.inset
                             border.width: st === "running" ? 1 : 0
-                            border.color: "#e05a4e"
+                            border.color: Theme.liveBg
 
                             Row {
                                 id: stepRow
@@ -395,8 +398,8 @@ Item {
                                     anchors.verticalCenter: parent.verticalCenter
                                     width: 6; height: 6; radius: 3
                                     color: st === "completed" ? "#3ddc84"
-                                         : st === "running" ? "#e05a4e"
-                                         : st === "failed" ? "#ff6b61"
+                                         : st === "running" ? Theme.liveBg
+                                         : st === "failed" ? Theme.danger
                                          : st === "skipped" ? "#5c6475"
                                          : "#3a3c48"
                                 }
@@ -404,8 +407,8 @@ Item {
                                     anchors.verticalCenter: parent.verticalCenter
                                     text: stepPill.modelData.label
                                     color: st === "completed" ? "#8fe0b0"
-                                         : st === "running" ? "#ffd7d2"
-                                         : st === "failed" ? "#ff9a90"
+                                         : st === "running" ? Theme.dangerLight
+                                         : st === "failed" ? Theme.dangerLight
                                          : Theme.textSecondary
                                     font.family: Theme.fontFamily
                                     font.pixelSize: Theme.textXs

@@ -22,6 +22,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace bps::rendering {
@@ -103,12 +104,24 @@ public:
     // (the main pass still feeds the active output + preview feed). Empty
     // entries (or a singleton set equal to the active style) render nothing
     // extra — the zero-overhead case every single-output setup is.
+    // `bufferSizes` is a THIRD parallel vector (optional — default empty):
+    // each output's own configured frame resolution (width, height), parsed
+    // from its Settings · Outputs "Resolution" field. {0,0} or a short vector
+    // means "use the engine's own default" for that entry — every existing
+    // caller that doesn't pass it keeps today's fixed-size behavior. This is
+    // what an NDI/SDI/real-window output's pushed frame actually gets sized
+    // to (RenderPerOutputPasses registers the per-output FrameBufferOutput at
+    // this size instead of always kFrameBufferWidth/Height) — a 4K-configured
+    // output no longer gets silently downscaled to 1080p on its way out.
     Result<void> SetLiveOutputStyles(const std::vector<OutputStyleSpec>& styles,
-                                     const std::vector<std::string>& bufferNames);
+                                     const std::vector<std::string>& bufferNames,
+                                     const std::vector<std::pair<int, int>>& bufferSizes = {});
     // The loop's read side: the specs plus (when outBuffers != nullptr) the
-    // parallel buffer names. Copy under the lock — the loop thread must not
-    // hold mutex_ while rendering.
-    std::vector<OutputStyleSpec> LiveOutputStyles(std::vector<std::string> *outBuffers = nullptr) const;
+    // parallel buffer names, plus (when outSizes != nullptr) the parallel
+    // configured sizes. Copy under the lock — the loop thread must not hold
+    // mutex_ while rendering.
+    std::vector<OutputStyleSpec> LiveOutputStyles(std::vector<std::string> *outBuffers = nullptr,
+                                                  std::vector<std::pair<int, int>> *outSizes = nullptr) const;
     // The scene builder, for the live loop's style rebuilds (RebuildScenes
     // runs on the loop thread; the builder itself is stateless per call).
     SceneBuilder& Builder() const { return *builder_; }
@@ -173,6 +186,7 @@ private:
     // Guarded by mutex_; consumed by the live loop.
     std::vector<OutputStyleSpec> liveOutputStyles_;
     std::vector<std::string> liveOutputBuffers_;
+    std::vector<std::pair<int, int>> liveOutputSizes_;
     std::shared_ptr<PresentationCompiler> compiler_;
     std::shared_ptr<SceneBuilder> builder_;
     // The "presentation" document handler (open/save the working show as .vgr),

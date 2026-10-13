@@ -30,7 +30,9 @@
 #include <windows.h>
 #endif
 
+#include "services/CallTrace.h"
 #include "services/CrashHandler.h"
+#include "services/GuardedApplication.h"
 #include "services/EngineBridge.h"
 #include "services/SearchService.h"
 #include "services/MediaLibraryService.h"
@@ -40,6 +42,13 @@
 #include "services/SettingsService.h"
 #include "services/MediaThumbnailProvider.h"
 #include "services/EventBus.h"
+
+#include "models/AudioInputListModel.h"
+#include "models/BusListModel.h"
+#include "models/VideoSourceListModel.h"
+
+#include "core/logging/QtMessagePolicy.hpp"
+#include "modules/rendering/RenderEngine.hpp"
 #ifdef VGR_ENABLE_SELFTEST
 #include "SelfTestDriver.h"
 #endif
@@ -111,12 +120,32 @@ void ForwardToEventBus(QtMsgType type, const QMessageLogContext &context, const 
         && QLatin1String(context.category).contains(QLatin1String(".progress"));
 
     // The same line goes to the engine log, so one file holds everything that went wrong (QML errors included).
-    EngineBridge::write(level, isQml ? QStringLiteral("QML") : QStringLiteral("Qt"), msg);
+    //
+    // WHAT WAS RUNNING (CallTrace): engine.log is the only window onto a
+    // failure after the fact, and a bare "TypeError: Cannot read property" says
+    // nothing about WHICH call was executing. A warning/error line therefore
+    // carries the breadcrumb chain of the LOGGING thread, falling back to the
+    // GUI thread's (a worker's warning usually fires while the GUI thread is
+    // waiting on it). Info/debug/heartbeat lines stay
+    // verbatim: the chain is empty outside the instrumented entry points and
+    // would only add noise to the normal-operation narration.
+    QString logged = msg;
+    if (level == QLatin1String("warning") || level == QLatin1String("error")
+        || level == QLatin1String("critical")) {
+        QString where = calltrace::current();
+        if (where.isEmpty())
+            where = calltrace::guiChain();
+        if (!where.isEmpty())
+            logged += QStringLiteral(" [in flight: ") + where + QLatin1Char(']');
+    }
+    EngineBridge::write(level, isQml ? QStringLiteral("QML") : QStringLiteral("Qt"), logged);
 
-    // Qt's own Windows font backend, probing a legacy system font ("Fixedsys") while resolving a monospace-style hint: a harmless
-    // fallback-candidate miss (the font that actually gets used renders fine), not anything wrong in the app - logged above, but never
-    // a toast, so it stops looking like an application error.
-    if (msg.contains(QLatin1String("DirectWrite: CreateFontFaceFromHDC")))
+    // Qt narrating the PLATFORM is not an application error, so it is logged
+    // above and never toasted - the whole rule, and the amber "Application -
+    // Retrying to obtain clipboard." notice that made the need for it obvious,
+    // are in core/logging/QtMessagePolicy.hpp. The app's own warnings (no
+    // category, or a "vgr.*" one) and every QML warning still reach the user.
+    if (!bps::logging::QtMessageIsUserFacing(isQml, context.category, msg.toStdString()))
         return;
 
     // Logged, never published (see isProgress above).
@@ -393,7 +422,10 @@ int main(int argc, char *argv[])
 
     qInstallMessageHandler(ForwardToEventBus);
 
-    QGuiApplication app(argc, argv);
+    // GuardedApplication, not QGuiApplication: it catches a C++ exception from
+    // any QML/service handler at the event boundary, reports it, and KEEPS the
+    // event loop running (see services/GuardedApplication.h).
+    GuardedApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("VGRPresenter"));
     app.setOrganizationName(QStringLiteral("VGR"));
     const QString sourceSerifResource = QStringLiteral(":/fonts/SourceSerif4-VariableFont_opsz,wght.ttf");
@@ -459,6 +491,9 @@ int main(int argc, char *argv[])
         // SDK/provider must never be torn down under an in-flight frame send
         // (same quit-crash class as the indexer above).
         LiveOutputService::instance().shutdownNdiWorker();
+        // The hang watchdog's thread, so a late stall report can never touch a
+        // service that is already being torn down.
+        calltrace::shutdown();
         EngineBridge::instance().shutdown();
     });
 #ifdef Q_OS_WIN
@@ -484,6 +519,20 @@ int main(int argc, char *argv[])
                         QStringLiteral("engine boot finished in %1 ms (native splash; interface loads after boot)")
                             .arg(bootClock.elapsed()));
 
+    // EVERY WINDOW GETS AN ALPHA BUFFER — asked for BEFORE any window exists.
+    // The live Output windows composite with alpha, so a keyable frame (one the
+    // engine left unpainted, alpha 0) shows whatever is keyed or recorded
+    // behind the window instead of a black slab — the frame's own alpha IS the
+    // output's alpha, one hop from the engine to the screen (OutputWindow.qml).
+    // Qt honours a WINDOW COLOUR with alpha on the RHI backends, but the
+    // OpenGL/software scene graphs only give a top-level window an alpha buffer
+    // when the process requests one here; without it every transparent pixel is
+    // composited onto black and the keyable frame dies at the last hop — the
+    // "it only shows on the tile" report. Windows that paint their own opaque
+    // background (the app's main window among them) are unaffected: their
+    // pixels are opaque either way.
+    QQuickWindow::setDefaultAlphaBuffer(true);
+
     QQmlApplicationEngine engine;
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed,
@@ -502,8 +551,36 @@ int main(int argc, char *argv[])
     // Component.onCompleted turns it into a standard "Recovered from a crash"
     // toast on the normal EventBus pipeline. Rotated aside = reported exactly
     // once.
-    engine.rootContext()->setContextProperty(
-        QStringLiteral("pendingCrashSummary"), ConsumePendingCrashSummary());
+    // A crash from a previous run is reported BOTH ways: the QML banner (so it
+    // is seen without opening anything) and engine.log — the log is
+    // the one file that holds the whole story, and a crash that only ever
+    // reaches a toast is gone the moment the toast fades. The summary carries
+    // the breadcrumb (see CrashHandler), so this line names the call the
+    // process died in.
+    const QString crashSummary = ConsumePendingCrashSummary();
+    if (!crashSummary.isEmpty())
+        EngineBridge::write(QStringLiteral("error"), QStringLiteral("CrashRecovery"),
+                            QStringLiteral("the previous run ended in a crash — ") + crashSummary);
+    engine.rootContext()->setContextProperty(QStringLiteral("pendingCrashSummary"), crashSummary);
+
+    // Transparency inspection flag for QML (OutputWindow's checkerboard base
+    // layer). Same env the engine's own frame compositor reads — one switch
+    // proves the alpha on every surface: in-app tile, real output window, NDI
+    // and HDMI.
+    const bool alphaInspect = qEnvironmentVariableIsSet("VGR_ALPHA_INSPECT");
+    engine.rootContext()->setContextProperty(QStringLiteral("alphaInspectEnabled"), QVariant(alphaInspect));
+
+    // Transparency inspection (VGR_ALPHA_INSPECT=1): composite every rendered
+    // frame's transparent pixels over a checkerboard so a keyed feed's alpha is
+    // VISIBLE on the real bound output window, the NDI feed and HDMI — instead
+    // of only in the in-app monitor tile. Opt-in and diagnostic: it repaints the
+    // frame's alpha, so it must never ride a normal run.
+    if (alphaInspect) {
+        bps::rendering::RenderEngine::Instance().SetAlphaInspect(true);
+        EngineBridge::write(QStringLiteral("warn"), QStringLiteral("Render"),
+                            QStringLiteral("alpha inspection ON — transparent pixels are drawn as a checkerboard on every output "
+                                           "(NDI/HDMI/output window); the feed is NOT keyable while this is on"));
+    }
 
     // Video preview frames for the Media tab (image://mediathumb/<path>).
     engine.addImageProvider(QStringLiteral("mediathumb"), new MediaThumbnailProvider);
@@ -524,6 +601,14 @@ int main(int argc, char *argv[])
     // tile under the on-air content), same up-front registration convention.
     engine.addImageProvider(QStringLiteral("mediaplay"), new LiveMediaFrameProvider);
 
+    // NOTE (2026-10-11): do NOT register the style/output models here with
+    // qmlRegisterSingletonInstance. Measured twice: a manual registration under
+    // the same URI/name makes the generated module registration skip doing its
+    // job, and then NO C++ type in VGRPresenterUI resolves ("SlideListModel is
+    // not a type", "Type EditScreen unavailable" — the app cannot build its
+    // window). The roster is shared the other way round instead: Main.qml hands
+    // the QML-side instance to OutputListModel at startup
+    // (OutputListModel.adoptStyleRoster), which is what C++ readers then use.
     QElapsedTimer qmlLoadClock;
     qmlLoadClock.start();
     EngineBridge::write(QStringLiteral("info"), QStringLiteral("StartupTrace"),
@@ -533,6 +618,42 @@ int main(int argc, char *argv[])
                         QStringLiteral("QML load returned after %1 ms; root objects=%2")
                             .arg(qmlLoadClock.elapsed())
                             .arg(engine.rootObjects().size()));
+
+    // ---- ONE OBJECT PER ROUTING MODEL -------------------------------------
+    // The QML engine DEFAULT-CONSTRUCTS a QML_SINGLETON C++ type (measured — see
+    // StyleListModel::create's note; the note below records the same finding as
+    // the reason the style roster is handed over by hand). So the Audio & Video
+    // board's BusListModel is NOT the object BusListModel::Instance() returns,
+    // and the rosters the board edits are not the ones the C++ readers translate
+    // a row against. Two live copies is what the board's own reports came from:
+    // a connection LINE still drawn to a row that had been deleted (the board's
+    // cached rows were never re-derived from the roster being edited, so a bus
+    // kept naming a row that no longer exists), and "That source can no longer
+    // be routed" for a source created seconds earlier (the reader resolved the
+    // row against a roster that never saw it). The engine's registry is the only
+    // way to reach the objects QML actually uses — a manual
+    // qmlRegisterSingletonInstance breaks the generated module registration
+    // (see the note below the image providers).
+    auto *buses = engine.singletonInstance<BusListModel *>(
+        QStringLiteral("VGRPresenterUI"), QStringLiteral("BusListModel"));
+    if (buses) {
+        buses->adoptRoutingModels(
+            engine.singletonInstance<AudioInputListModel *>(
+                QStringLiteral("VGRPresenterUI"), QStringLiteral("AudioInputListModel")),
+            engine.singletonInstance<VideoSourceListModel *>(
+                QStringLiteral("VGRPresenterUI"), QStringLiteral("VideoSourceListModel")));
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("StartupTrace"),
+                            QStringLiteral("routing models adopted from the QML engine "
+                                           "(one object per model)"));
+    } else {
+        // Falling back to today's behavior (two instances) rather than failing
+        // the boot: the board still works, it just keeps the two-copy defect
+        // until this resolves — and a boot that dies here would hide that.
+        EngineBridge::write(QStringLiteral("warn"), QStringLiteral("Startup"),
+                            QStringLiteral("routing models: the QML singletons could not be "
+                                           "resolved, so the board and the engine face may "
+                                           "hold different instances of them"));
+    }
 
     // The window's own taskbar/alt-tab icon: a QQuickWindow does NOT reliably
     // adopt QGuiApplication::setWindowIcon() on Windows — the exe carried the
@@ -578,6 +699,22 @@ int main(int argc, char *argv[])
     });
     uiHeartbeat.start();
 
+    // CALL TRACE (see services/CallTrace.h): a cheap GUI-thread liveness tick
+    // (one relaxed atomic store, 4x a second — the 5 s timer above is a LOG
+    // heartbeat and far too coarse to detect a stall promptly) plus the hang
+    // watchdog that reads it. When the GUI thread stops ticking, the watchdog
+    // writes the call it was inside to engine.log and raises a toast — the
+    // context every previous AppHangB1 report was missing.
+    QTimer callTraceHeartbeat;
+    callTraceHeartbeat.setInterval(250);
+    QObject::connect(&callTraceHeartbeat, &QTimer::timeout, &app, [] { calltrace::heartbeat(); });
+    callTraceHeartbeat.start();
+    calltrace::heartbeat();   // arm it now: the watchdog stays quiet until this is set
+    calltrace::installHangWatchdog(5);
+    // Env-gated (VGR_CALLTRACE_SELFTEST=1): proves the breadcrumb wiring on a
+    // real run — an annotated warning and a reported exception in engine.log.
+    calltrace::runEnvSelfTest();
+
     // Env-gated taken-input self-test: takes a real window through the
     // whole output-preview chain ~2.5s after launch and logs PASS/FAIL.
     // Inert without VGR_OUTPUT_INPUT_TEST=1 (the static itself checks).
@@ -603,6 +740,156 @@ int main(int argc, char *argv[])
         QStringLiteral("SelfTestInsets"),
         QVariant(qEnvironmentVariableIsSet("VGR_INSETS_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The Settings-modal fit scenario has its own env var for the same reason:
+    // it opens Settings and quits, so it must never ride a plain VGR_SELFTEST=1
+    // run (the NDI probes' launch).
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestModalFit"),
+        QVariant(qEnvironmentVariableIsSet("VGR_MODALFIT_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The split-drag scenario: it drags a sidebar divider and quits, so it gets its
+    // own env var for the same reason as the two above.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestSplit"),
+        QVariant(qEnvironmentVariableIsSet("VGR_SPLIT_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The "open a search result" scenario: it drives the app-wide search, picks a
+    // sermon result and quits, so it gets its own env var like the three above.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestOpen"),
+        QVariant(qEnvironmentVariableIsSet("VGR_OPEN_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The exact-word lock scenario: it drives the app-wide search, clicks the
+    // padlock and quits, so it gets its own env var like the four above.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestExact"),
+        QVariant(qEnvironmentVariableIsSet("VGR_EXACT_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The search-ranking scenario: it types one query into the app-wide search
+    // and prints the rows in display order — its own env var like the rest, so a
+    // plain VGR_SELFTEST=1 run never opens the dialog.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestRank"),
+        QVariant(qEnvironmentVariableIsSet("VGR_RANK_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The pane-highlight scenario: it types into The Table pane's own search box
+    // and prints every row's snippet as the pane RENDERS it (hit centred, every
+    // typed word wrapped) — its own env var like the rest.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestPaneHighlight"),
+        QVariant(qEnvironmentVariableIsSet("VGR_PANEHL_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The edit-canvas scenario: it opens a show, frames a text item to the
+    // canvas edge, walks the real cursor onto every adjustment point and resizes
+    // the window — so it gets its own env var like the rest (a plain
+    // VGR_SELFTEST=1 run must never create a show).
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestCanvasCursor"),
+        QVariant(qEnvironmentVariableIsSet("VGR_CANVAS_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The chapter-lock scenario: it opens a passage in each reference tab,
+    // searches the library, clicks the book pill and quits — its own env var
+    // like the rest, so a plain VGR_SELFTEST=1 run never touches the search.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestScopeLock"),
+        QVariant(qEnvironmentVariableIsSet("VGR_SCOPELOCK_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The output-edit-save scenario: it adds a style, opens Settings · Outputs,
+    // opens the Edit dialog, presses Save and quits — its own env var like the
+    // rest, so a plain VGR_SELFTEST=1 run never rewrites the roster.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestOutputSave"),
+        QVariant(qEnvironmentVariableIsSet("VGR_OUTSAVE_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The style-background update scenario: it restyles a style with and
+    // without a background image and quits, so it owns an env var like the rest.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestStyleBg"),
+        QVariant(qEnvironmentVariableIsSet("VGR_STYLEBG_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The blank GO LIVE carrier scenario: it takes a real window input, presses
+    // GO LIVE with nothing staged (which sends the one blank carrier slide) and
+    // quits — the exact live state the "only media doesn't go" report is about,
+    // so it owns an env var like the rest.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestBlankLive"),
+        QVariant(qEnvironmentVariableIsSet("VGR_BLANKLIVE_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The cursor-scaling scenario: it parks the pointer on a plain-cursorShape
+    // button at uiScale 1 and again with the window 20% over the design size,
+    // so the shell runner can read the live OS cursor at both. Its own env var
+    // like the rest, so a plain VGR_SELFTEST=1 run never moves the window.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestCursorScale"),
+        QVariant(qEnvironmentVariableIsSet("VGR_CURSORSCALE_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The post-fix warning scenario: it opens the logo menu, hovers the
+    // section flyout, flips a Table setting and double-clicks a verse row —
+    // real input the two warnings only appear under. Its own env var for the
+    // same reason as the rest.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestUiWarn"),
+        QVariant(qEnvironmentVariableIsSet("VGR_UIWARN_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The pill scenario: it opens the Media pane, clicks a channel pill on a bus
+    // card and on a video card and quits — its own env var like the rest, so
+    // a plain VGR_SELFTEST=1 run never clicks a channel button (and never writes
+    // a channel trim) on its own.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestPill"),
+        QVariant(qEnvironmentVariableIsSet("VGR_PILL_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The bus-status-light scenario: it opens Media · Inputs, lets the status
+    // light's own device ping settle and reads each bus card's reported state —
+    // its own env var like the rest, so a plain VGR_SELFTEST=1 run never opens
+    // the Media pane (only reads, but it does hold the buses' devices while the
+    // pane is up).
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestBusLight"),
+        QVariant(qEnvironmentVariableIsSet("VGR_BUSLIGHT_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The media-meter scenario: it adds a media row pointed at a REAL audio file
+    // and one pointed at a file that is not there, opens Settings · Audio &
+    // Video and reads the row's own level bar back — its own env var like the
+    // rest, so a plain VGR_SELFTEST=1 run never touches the video roster.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestMediaMeter"),
+        QVariant(qEnvironmentVariableIsSet("VGR_MEDIAMETER_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The file that scenario points its live row at: the runner passes one it
+    // has checked exists (any file the platform's decoder can open — a Windows
+    // system sound is one every machine has). Empty ⇒ the scenario falls back to
+    // its own candidate list, so the script is optional.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestMediaMeterFile"),
+        QVariant(qEnvironmentVariable("VGR_MEDIAMETER_FILE")));
+    // The header/caption-clearance scenario: it resizes the window down to the
+    // minimum, parks the real cursor on the caption buttons and quits — its own
+    // env var like the rest, so a plain VGR_SELFTEST=1 run never moves the window.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestHeader"),
+        QVariant(qEnvironmentVariableIsSet("VGR_HEADER_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The metadata-palette scenario: it opens a show, walks + -> Metadata -> a
+    // field chip and drops another field on the canvas, then quits — its own env
+    // var like the rest, so a plain VGR_SELFTEST=1 run never edits a show.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestMetaPalette"),
+        QVariant(qEnvironmentVariableIsSet("VGR_METAPAL_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The sermon-folder scenario: it runs the real "Add sermons folder" sweep
+    // over a folder the runner prepared, reads the toast it produced and quits —
+    // its own env var like the rest, so a plain VGR_SELFTEST=1 run never imports
+    // anything. The folder comes from the runner (VGR_TABLEFOLDER_DIR), because
+    // the scenario's whole point is the files the runner chose: a sermon beside
+    // files that are not sermons.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestTableFolder"),
+        QVariant(qEnvironmentVariableIsSet("VGR_TABLEFOLDER_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestTableFolderDir"),
+        QVariant(qEnvironmentVariable("VGR_TABLEFOLDER_DIR")));
 #endif
 
     // A safety net for exceptions that escape the event loop (e.g. from a
@@ -624,10 +911,14 @@ int main(int argc, char *argv[])
         return code;
     } catch (const std::exception &e) {
         qCritical() << "Unhandled exception:" << e.what();
+        // Names the call in flight in engine.log — an exception unwinds and pops
+        // every breadcrumb, so the reporter reads the sticky last-entered slot.
+        calltrace::reportException(e.what(), "escaped the application event loop");
         RecordingService::instance().shutdown();
         return 1;
     } catch (...) {
         qCritical() << "Unhandled unknown exception.";
+        calltrace::reportException("non-std exception", "escaped the application event loop");
         RecordingService::instance().shutdown();
         return 1;
     }

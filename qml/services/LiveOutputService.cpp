@@ -1,6 +1,8 @@
+#include "services/CallTrace.h"
 #include "services/LiveOutputService.h"
 
 #include "services/ShowConverter.h"
+#include "services/StyleSpecBuilder.h"
 #include "services/DesignLibraryService.h"
 
 #include <QSet>
@@ -9,6 +11,7 @@
 #include "modules/presentation/PresentationEngine.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
 #include "modules/presentation/SceneBuilder.hpp"
+#include "modules/presentation/SlideRules.hpp"
 #include "modules/rendering/RenderOutputs.hpp"
 #include "modules/rendering/RenderEngine.hpp"
 
@@ -30,7 +33,12 @@
 #include <QUrl>
 #include <QVideoFrame>
 #include <QVideoSink>
+#include <algorithm>
 #include <cstring>
+#include <format>
+#include <map>
+#include <mutex>
+#include <string>
 
 // ---------------------------------------------------------------------------
 // NDI progress notes are NOT toasts.
@@ -70,8 +78,19 @@ namespace {
 // image clears the engine's copy instead of pushing empty bytes.
 void pushMediaFrameToCompositor(const QImage &frame)
 {
+    // ONE-SHOT TRANSITION LOG, never per frame (a video hands a frame in at its
+    // own frame rate — a per-frame line would bury engine.log). A media layer
+    // that renders black is either a frame the ENGINE never received or one it
+    // received and mis-drew; this line, together with the engine-side
+    // "media layer" line SceneBuilder writes when it builds the scene, is what
+    // tells the two apart in ONE run. Both greppable by "media hand-off".
+    static bool hadFrame = false;
     if (frame.isNull()) {
         pl::CompositorState::Instance().ClearMedia();
+        if (hadFrame) {
+            hadFrame = false;
+            qInfo("media hand-off: cleared (no frame) — engine media layer will be blank");
+        }
         return;
     }
     // Format_RGBA8888 is byte order R,G,B,A on every platform — exactly the
@@ -91,6 +110,11 @@ void pushMediaFrameToCompositor(const QImage &frame)
                     rgba.constScanLine(y), static_cast<size_t>(mf.width) * 4);
     }
     pl::CompositorState::Instance().SetMediaFrame(std::move(mf));
+    if (!hadFrame) {
+        hadFrame = true;
+        qInfo("media hand-off: %dx%d (%zu bytes RGBA) sent to the engine",
+              rgba.width(), rgba.height(), mf.rgba.size());
+    }
 }
 
 // Resolves the current activeOverlays_ list ({id,name} pairs — see
@@ -125,133 +149,218 @@ void pushActiveOverlaysToCompositor(const QVariantList &activeOverlays)
     pl::CompositorState::Instance().SetActiveOverlays(std::move(out));
 }
 
-// The slide's CONTENT text — what a bound "text" block shows. Mirrors
-// SceneBuilder's SlideContentText: slide.text first; when empty (content
-// tabs go live with the verse riding in their OWN template's blocks and
-// only the reference in `title`), the first text-bearing slide block's
-// text; else the title.
-std::string slideContentText(const pl::Slide *slide)
-{
-    if (!slide->text.empty())
-        return slide->text;
-    for (const pl::ContentBlock &b : slide->blocks)
-        if (b.kind == "text" && !b.text.empty() && b.text.front() != '{')
-            return b.text;
-    return slide->title;
-}
+// THE PREVIEW READS THE ENGINE'S OWN RULES, it does not keep copies of them.
+//
+// This file used to carry its own slideContentType / familyTemplateIndexFor /
+// styleAdmits / slideContentText — near-exact mirrors of SceneBuilder's, with
+// comments admitting as much. Two copies of the rule that decides a slide's
+// family, its style slot, its bound text and whether a style's gates admit it
+// is exactly how a tile comes to paint one thing and an output another: the
+// preview and the builder now call ONE implementation
+// (modules/presentation/SlideRules). Nothing here may re-derive them.
+//
+// The STYLE is the other half of that promise. This file also spelled out
+// "style row -> the engine's OutputStyleSpec" for itself (bakePreviewTemplate
+// plus its own field list and inherit/fallback pass), beside two copies of the
+// same composition in OutputListModel. The three had drifted: the preview's
+// spec never carried the style's category and fell back to the Bible layout on
+// a different condition than the engine's did, so a tile could render a layout
+// the outputs were not rendering. That composition is now ONE function
+// (services/StyleSpecBuilder), called by the spec pushed for the active output,
+// by each other styled output's spec, and here.
+//
+// What this file still owns is the PREVIEW-SHAPED plumbing around those rules:
+// composing the block list the tile draws (ShowConverter's mapping) and asking
+// the engine which layout owns a slide (SceneBuilder::ComposeSlide below).
 
-// The slide's content family ("scripture" | "table" | …), as tagged by
-// ShowConverter in the slide's meta — mirrors SceneBuilder's
-// slideContentType. Empty = untagged = SHOWS content (it follows the shows
-// family slot).
-std::string slideContentType(const pl::Slide *slide)
+pl::OutputStyleSpec outputStyleForPreview(const QString &styleId)
 {
-    if (auto meta = bps::json::Parse(slide->metaJson); meta.ok())
-        if (const bps::json::Value *v = meta.value().Find("contentType"); v && v->type() == bps::json::Value::Type::String)
-            return std::string(v->asString());
-    return {};
-}
-
-// The OutputStyleSpec::familyTemplateKeys/Blocks slot a content family maps
-// to — EXACTLY SceneBuilder's own FamilyTemplateIndexFor (shows | media |
-// scripture | table, in the show* gates' order). Untagged slides are SHOWS
-// content (imported/Quick-Lyrics slides carry no tag) — they follow the
-// shows slot; only an unknown tag falls through to 4.
-size_t familyTemplateIndexFor(const std::string &contentType)
-{
-    if (contentType == "media")     return 1;
-    if (contentType == "scripture") return 2;
-    if (contentType == "table")     return 3;
-    return 0;   // "shows" — and untagged slides, which are shows content
+    return StyleSpecBuilder::specForStyleId(styleId);
 }
 
 // One slide as the QML preview shape: { valid, title, blocks, background } —
 // the same { blocks, background } maps DesignPreview draws everywhere else
 // (ShowConverter::blockToVariant is the single QML<->engine block mapping).
 //
-// STYLE COMPOSITION, mirrored from SceneBuilder::BuildSlideScene so the
-// monitor tile shows what the OUTPUT shows: when the active output's style
-// wears an engine template (baked blocks in the spec), the preview composes
-// THE STYLE'S template (slide content bound in, unfilled {scripture_*}
-// placeholders blanked) INSTEAD of the slide's own blocks, and the style's
-// background colour sits UNDER the slide's own (a slide background still
-// wins unless it is unset). A template-less style leaves the slide as-is
-// and the tile's own colour fallback handles the rest.
-QVariantMap slideToVariantMap(const pl::Slide *slide)
+// THE COMPOSITION IS THE ENGINE'S. Which layout owns this slide (the style's
+// per-family template, the whole-style one, a built-in preset, the slide's own
+// blocks), what the template blocks bound to, and what background the output
+// paints are all decided ONCE, by SceneBuilder::ComposeSlide — the same call
+// every real output's scene is built from — and this function only maps that
+// decision into the QML shapes the tile draws. It used to make these decisions
+// itself, in a mirror of SceneBuilder's branch chain: the two drifted, and a
+// preview that reads a slide differently from the frame going on air is exactly
+// the "it shows on the monitor but the output is black" class of report.
+QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec &style)
 {
     if (!slide)
         return {};
+    const pl::SceneBuilder::SlideComposition comp =
+        pl::SceneBuilder::ComposeSlide(*slide, style, /*applyGates=*/true);
 
-    const pl::OutputStyleSpec style = pl::PresentationEngine::Instance().ActiveOutputStyle();
-    QString background = QString::fromStdString(slide->background);
-    QVariantList blocks;
-
-    // Per-family rule, mirrored from SceneBuilder: a FAMILY-specific template
-    // (the Styles screen's own "Template for Shows/Media/Scripture/Table"
-    // row — style.familyTemplateBlocks[familyIdx]) wins outright when the
-    // style carries one for this slide's family; otherwise fall back to the
-    // whole-style default (style.templateBlocks, gated by contentType so a
-    // scripture-keyed style doesn't steamroll The Table's own layout);
-    // otherwise the slide's own blocks carry the look. Previously this only
-    // ever checked the whole-style default — a per-family pick (e.g. "Big"
-    // set as the Shows family's template) silently never reached this
-    // preview, even though SceneBuilder's real engine-composited frame
-    // already honored it correctly.
-    // A genuinely blank slide (the "go live with nothing" fallback: no
-    // blocks, no title, no text) must NOT bake a family/whole-style template
-    // in — doing so produced non-empty `blocks` (the template's own bound-
-    // to-nothing decorative blocks) for content that is really empty,
-    // which made hasSlidePreview read true downstream and suppressed the
-    // style's own idle background image in its place — reported live as
-    // "go live with nothing shows a black window instead of the bg."
-    const bool slideHasContent = !slide->blocks.empty() || !slide->title.empty()
-        || !slide->text.empty();
-    const std::string slideType = slideContentType(slide);
-    const size_t familyIdx = familyTemplateIndexFor(slideType);
-    const std::vector<pl::ContentBlock> *activeTemplateBlocks = nullptr;
-    if (slideHasContent) {
-        if (familyIdx < 4 && !style.familyTemplateBlocks[familyIdx].empty())
-            activeTemplateBlocks = &style.familyTemplateBlocks[familyIdx];
-        else if (!style.templateBlocks.empty()
-                 && (style.contentType.empty() || slideType.empty() || slideType == style.contentType))
-            activeTemplateBlocks = &style.templateBlocks;
-    }
-
-    if (activeTemplateBlocks) {
-        const QString styleBg = QString::fromStdString(style.backgroundColor);
-        if (!styleBg.isEmpty() && styleBg != QLatin1String("transparent")
-            && (background.isEmpty() || background == QLatin1String("transparent")
-                || !style.clearBackgroundOnText))
-            background = styleBg;
-        for (const pl::ContentBlock &b : *activeTemplateBlocks) {
-            pl::ContentBlock bound = b;
-            if (b.kind == "text") {
-                if (!b.bind.empty()) {
-                    std::string value = pl::SlideResolver::BoundValue(*slide, b.bind);
-                    if (value.empty()) {
-                        if (b.bind == "text")
-                            value = slideContentText(slide);
-                        else if (b.bind == "ref")
-                            value = slide->title;
-                    }
-                    bound.text = std::move(value);
-                } else if (b.text.find('{') != std::string::npos) {
-                    bound.text.clear();
-                }
-            }
-            blocks.append(ShowConverter::blockToVariant(bound));
-        }
-    } else {
-        for (const pl::ContentBlock &b : slide->blocks)
-            blocks.append(ShowConverter::blockToVariant(b));
-    }
-
-    return QVariantMap{
-        { QStringLiteral("valid"), true },
-        { QStringLiteral("title"), QString::fromStdString(slide->title) },
-        { QStringLiteral("blocks"), blocks },
-        { QStringLiteral("background"), background },
+    // ---- THE STYLE'S OWN FACTS, answered here so nobody else has to ---------
+    // A surface that draws this output needs more than the slide's picture: it
+    // needs to know whether this STYLE paints anything of its own (so it can
+    // leave a transparent/empty frame to its own convention — the checkerboard
+    // or a keyable window), whether its background image exists on disk AND is
+    // not stepped aside for this slide, and whether the style CHOSE
+    // transparency (which reads the same in pixels as naming nothing at all).
+    //
+    // These are the answers the monitor tile and the output window each used to
+    // work out for themselves, from the model's style role plus their own copy of
+    // `isClearColor` / `styled` / the clear-on-text image gate — two surfaces, two
+    // derivations, and one of them (the image gate) already disagreed with the
+    // engine about what "content on air" means. They come from the ONE call that
+    // composes the frame the outputs consume, so a preview cannot answer
+    // differently from the frame: same spec, same composition, same source.
+    const QString styleImage = QString::fromStdString(style.backgroundImage);
+    const bool styleImageOnDisk = !styleImage.isEmpty() && QFile::exists(styleImage);
+    // A colour that really paints: "" names none, "transparent" (ParseColor
+    // alpha 0) is the keyable choice, and a 0-alpha colour paints nothing.
+    const bool stylePaintsColor = !style.backgroundColor.empty()
+        && pl::StyleBuilder::ParseColor(style.backgroundColor).a > 0.0f;
+    const bool stylePaints = stylePaintsColor || styleImageOnDisk;
+    // The frame has nothing of the style's OWN in it — either the style paints
+    // nothing, or its only paint (the image) is stepped aside for this slide. A
+    // surface bases its own transparency on this.
+    const bool stylePaintless = !stylePaints
+        || (styleImageOnDisk && comp.styleImageSuppressed);
+    const bool styleImagePainted = styleImageOnDisk && !comp.styleImageSuppressed;
+    // WOULD A BLOCK RENDER OF THIS FRAME BE A STAND-IN? The camera / media /
+    // audio / image decision rides the composition too, so it is answered here
+    // once instead of by each surface for itself: the monitor tile and the
+    // output window each tested their own composed blocks for those kinds and
+    // handed the frame priority when they found one. Same question, two copies —
+    // the shape of rule this whole file is about. A REFUSED frame carries no
+    // blocks at all, and a preset's are its two text regions, so neither can
+    // want the frame.
+    const std::vector<pl::ContentBlock> &drawn =
+        comp.source == pl::SceneBuilder::SlideComposition::Source::SlideBlocks
+            ? slide->blocks : comp.blocks;
+    const bool framePriority = pl::SlideRules::NeedsDistributedFrame(drawn);
+    const QVariantMap styleFacts{
+        { QStringLiteral("styleColor"), QString::fromStdString(style.backgroundColor) },
+        { QStringLiteral("styleImage"), styleImage },
+        { QStringLiteral("stylePaints"), stylePaints },
+        { QStringLiteral("stylePaintless"), stylePaintless },
+        { QStringLiteral("styleImagePainted"), styleImagePainted },
+        // The distributed frame must win over a block render for this slide —
+        // see SlideRules::NeedsDistributedFrame. Both preview surfaces read this
+        // one answer (gated on their own `hasFrame`: whether a frame exists at
+        // all is the service's state, not the slide's).
+        { QStringLiteral("framePriority"), framePriority },
+        // The style CHOSE "transparent" (as opposed to naming no colour): a
+        // surface that shows transparency as transparency needs the difference,
+        // and only the composition has it.
+        { QStringLiteral("explicitTransparent"), comp.explicitTransparent },
     };
+
+    // The background, as a QML string: an EXPLICITLY transparent style is
+    // "transparent" (the tile's checkerboard belongs there), a colour that won
+    // is that colour, and NOTHING NAMED is "" — the tile's own layering (its
+    // style colour, its style image, the checkerboard) decides what an unpainted
+    // frame looks like, exactly as the engine leaves such a frame unpainted.
+    const QString background = comp.explicitTransparent
+        ? QStringLiteral("transparent")
+        : QString::fromStdString(comp.background);
+
+    if (comp.source == pl::SceneBuilder::SlideComposition::Source::Refused) {
+        QVariantMap refused = styleFacts;
+        refused.insert(QStringLiteral("valid"), true);
+        refused.insert(QStringLiteral("title"), QString());
+        refused.insert(QStringLiteral("contentType"), QString::fromStdString(comp.contentType));
+        refused.insert(QStringLiteral("blocks"), QVariantList{});
+        refused.insert(QStringLiteral("background"), background);
+        // The style image rule still applies to a refused frame (the engine
+        // paints it on the same flag — see the note on the styled return below).
+        refused.insert(QStringLiteral("suppressStyleImage"), comp.styleImageSuppressed);
+        // WHY THIS IS EMPTY, not just that it is: the monitor tile reads this to
+        // say "Style blocks Media" on the tile itself, so a deliberately refused
+        // output can never be mistaken for a broken one — the exact confusion a
+        // background-only frame invites.
+        refused.insert(QStringLiteral("refusedByStyle"), true);
+        return refused;
+    }
+
+    QVariantList blocks;
+    using Source = pl::SceneBuilder::SlideComposition::Source;
+    if (comp.source == Source::FamilyTemplate || comp.source == Source::StyleTemplate) {
+        // The style's template, with the slide's content already bound in.
+        blocks = ShowConverter::blocksToVariant(comp.blocks);
+    } else if (comp.source == Source::FamilyPreset || comp.source == Source::StylePreset) {
+        // A BUILT-IN LAYOUT PRESET: the engine draws its two text regions as
+        // Title/Body text objects on these rectangles, so the tile draws the
+        // same two regions — synthesized as text blocks on the canvas grid the
+        // preview works in (754x428), from the preset's own fractions.
+        // The text style is the engine's default for a preset region (no
+        // TextStyleComponent on those objects): the builtin font, 24 OUTPUT
+        // pixels — which on the canvas grid is 24 * 428 / 1080, unglamorous
+        // but what a legacy preset actually renders on air, and the tile says
+        // what the output says.
+        const double kCanvasW = 754.0, kCanvasH = 428.0, kEngineStageH = 1080.0;
+        auto presetRegion = [&](const pl::StyleBuilder::LayoutRect &r, const QString &text) {
+            QVariantMap region{
+                { QStringLiteral("key"), QString() },
+                { QStringLiteral("kind"), QStringLiteral("text") },
+                { QStringLiteral("text"), text },
+                { QStringLiteral("x"), r.x * kCanvasW },
+                { QStringLiteral("y"), r.y * kCanvasH },
+                { QStringLiteral("width"), r.w * kCanvasW },
+                { QStringLiteral("height"), r.h * kCanvasH },
+                { QStringLiteral("bind"), QString() },
+                { QStringLiteral("meta"), QVariantMap{
+                    { QStringLiteral("fontSize"), 24.0 * kCanvasH / kEngineStageH },
+                    { QStringLiteral("color"), QStringLiteral("#ffffff") },
+                    { QStringLiteral("align"), QStringLiteral("left") },
+                    { QStringLiteral("verticalAlign"), QStringLiteral("top") },
+                } },
+                { QStringLiteral("style"), QVariantMap{
+                    { QStringLiteral("backgroundColor"), QStringLiteral("transparent") },
+                } },
+            };
+            blocks.append(region);
+        };
+        if (!slide->title.empty() && comp.preset.showTitle)
+            presetRegion(comp.preset.title, QString::fromStdString(slide->title));
+        if (!slide->text.empty())
+            presetRegion(comp.preset.body, QString::fromStdString(slide->text));
+    } else {
+        // Source::SlideBlocks — the slide's own blocks carry the layout.
+        blocks = ShowConverter::blocksToVariant(slide->blocks);
+    }
+
+    QVariantMap composed = styleFacts;
+    composed.insert(QStringLiteral("valid"), true);
+    composed.insert(QStringLiteral("title"), QString::fromStdString(slide->title));
+    composed.insert(QStringLiteral("contentType"), QString::fromStdString(comp.contentType));
+    composed.insert(QStringLiteral("blocks"), blocks);
+    composed.insert(QStringLiteral("background"), background);
+    // DOES THE STYLE'S OWN BACKGROUND IMAGE STEP ASIDE FOR THIS SLIDE?
+    // The engine's rule (clearBackgroundOnText, and only for a slide that
+    // CARRIES content — a blank go-live carrier keeps the branded backdrop),
+    // handed over so the monitor tile and the output window paint the style
+    // image exactly when the engine does. Both surfaces used to re-derive it
+    // from their own idea of "has content", which is how a blank carrier
+    // lost the image on the tile while the output still baked it.
+    composed.insert(QStringLiteral("suppressStyleImage"), comp.styleImageSuppressed);
+    // ...AND THE FACTS A PREVIEW RE-ENTERS WITH. Every preview surface hands this
+    // map straight back through previewWithStyle() -> ShowConverter::slideFromVariant(),
+    // so the slide's body and its fill vocabulary have to be IN it. They were
+    // not: the monitor tile re-composed a slide whose body was gone and fell back
+    // to guessing it from the design's block ORDER, which drew the date code where
+    // the sermon text belonged — while the real NDI/HDMI frame, built from the
+    // engine's own Slide (which still had them), drew it correctly. Three
+    // surfaces, two answers, from one pick: the tile disagreed with the output it
+    // monitors. Same list as the fill's own writer, so the spelling cannot drift.
+    composed.insert(QStringLiteral("body"), QString::fromStdString(slide->text));
+    composed.insert(QStringLiteral("fill"),
+                    ShowConverter::fillFromMeta(ShowConverter::metaOf(*slide)));
+    return composed;
+}
+
+QVariantMap slideToVariantMap(const pl::Slide *slide)
+{
+    return slideToVariantMap(slide, pl::PresentationEngine::Instance().ActiveOutputStyle());
 }
 
 } // namespace
@@ -261,7 +370,7 @@ LiveOutputService *LiveOutputService::s_instance = nullptr;
 // ---- NDI send worker (runs on the dedicated NDI QThread) ------------------
 //
 // Everything heavy about the NDI program feed happens here, OFF the GUI
-// thread: the ~8 MB frame copy into the provider's send buffer, the
+    // thread: the ~8 MB frame copy into the provider's send buffer, the
 // force-alpha pass over every pixel, the LAZY SENDER CREATION (the first
 // SendFrame after a reset builds the real NDI SDK sender — the single
 // heaviest step of GO LIVE with an NDI main output, hundreds of ms), and
@@ -274,11 +383,18 @@ LiveOutputService *LiveOutputService::s_instance = nullptr;
 // counter, slow-send reports) crosses back through LiveOutputService's
 // mutex-guarded members and its worker-report slot.
 void LiveOutputService::ndiWorkerSendFrame(QObject *worker, void *providerVoid,
-                                           QImage frame, QString senderName, float fps, qint64 sendId)
+                                           std::shared_ptr<const pr::Frame> frame,
+                                           QString senderName, float fps, qint64 sendId)
 {
     Q_UNUSED(worker)
     auto *provider = static_cast<bps::display::NdiDisplayProvider *>(providerVoid);
     auto &svc = LiveOutputService::instance();
+    if (!frame || frame->empty()) {
+        std::lock_guard<std::mutex> lock(svc.ndiStateMutex_);
+        if (sendId > svc.ndiSendDone_)
+            svc.ndiSendDone_ = sendId;
+        return;
+    }
 
     // Identity BEFORE the send: SetSenderName only takes effect before the
     // sender's first SendFrame (NDI can't rename a live sender), and the
@@ -293,9 +409,9 @@ void LiveOutputService::ndiWorkerSendFrame(QObject *worker, void *providerVoid,
     QElapsedTimer clock;
     clock.start();
     bps::display::RenderFrameView view;
-    view.width = frame.width();
-    view.height = frame.height();
-    view.pixels = reinterpret_cast<const uint32_t *>(frame.constBits());
+    view.width = frame->width;
+    view.height = frame->height;
+    view.pixels = frame->pixels.data();
     const bool sent = provider->SendFrame(view).ok();
     const qint64 sendMs = clock.elapsed();
 
@@ -419,19 +535,25 @@ LiveOutputService *LiveOutputService::create(QQmlEngine *engine, QJSEngine *jsEn
 // ---------------------------------------------------------------------------
 void LiveOutputService::goLive()
 {
+    // Breadcrumb: GO LIVE is the heaviest QML-facing call in the app (compile +
+    // prepare + output bring-up), so a stall or exception here names itself in
+    // engine.log instead of leaving a heartbeat line as the last word.
+    VGR_CALL_TRACE("LiveOutputService.goLive");
     // A staged ad-hoc pick (stageSlides() — a slide double-clicked in
-    // ShowCenter, say) wins over the open document: the whole point of
-    // staging is that the user's next real GO LIVE press commits whatever
-    // is sitting in the tile right now, not whatever happens to be open
-    // in the editor behind it.
+    // ShowCenter, say) wins over the open document: what is sitting in the
+    // tile right now is what a real GO LIVE press sends, not whatever happens
+    // to be open in the editor behind it. It stays staged afterwards (see the
+    // branch below) — GO LIVE decides only what leaves the outputs.
     if (!stagedSlidesRaw_.isEmpty()) {
-        const QString name = stagedName_;
-        const QVariantList slides = stagedSlidesRaw_;
-        stagedName_.clear();
-        stagedSlidesRaw_.clear();
-        stagedSlide_ = QVariantMap{};
-        emit stagedChanged();
-        goLiveWithSlides(name, slides);
+        // SEND IT, DON'T CONSUME IT. GO LIVE is the OUTPUT gate: it puts the
+        // picture the preview is ALREADY showing on the outputs and decides
+        // nothing about the preview. Clearing the staged slot here (what this
+        // used to do) dropped the slide the tile was showing and sent the next
+        // GO LIVE down to the blank holding slide — content the operator never
+        // asked for, and the reason a GO LIVE / STOP pair looked like it was
+        // committing and discarding picks. The stage belongs to the preview;
+        // only Clear all, the slide-clear button, or a new pick change it.
+        goLiveWithSlides(stagedName_, stagedSlidesRaw_);
         return;
     }
 
@@ -443,16 +565,20 @@ void LiveOutputService::goLive()
                                 QStringLiteral("info"), QStringLiteral("Go Live"));
     auto r = bps::live::LiveOutputController::Instance().StartFromOpenShow();
     if (!r.ok()) {
-        // No open document (nothing staged either, or this would already
-        // have returned above) — rather than refuse outright, go live with
-        // a single BLANK slide instead: the active output's own style
-        // (background colour/image) composites and shows on the real
-        // output the SAME way it would under real content, since
-        // SceneBuilder paints the style's background unconditionally,
-        // before/regardless of any blocks. A holding screen with the
-        // church's own branding before a service starts is a real, common
-        // need — GO LIVE with nothing queued should show that, not an
-        // error toast and a black screen.
+        // No open show to mirror — but the preview is still showing something:
+        // the COMPOSITOR's own layers (a taken camera/screen, media on air, any
+        // overlays) over the active style's background. Those layers hang off
+        // the scene, so they only reach the outputs with a slide under them;
+        // sending the ONE blank carrier slide transmits exactly what the
+        // preview shows and nothing more.
+        //
+        // This is deliberately NOT the old "blank holding screen" decision: the
+        // carrier has no content of its own (no blocks, no title, transparent),
+        // so GO LIVE is not committing or inventing a pick, and it does not
+        // touch the preview — a staged slide stays staged, the tile keeps its
+        // pixels, and the next GO LIVE re-sends the same thing. The style's own
+        // background paints over it, because SceneBuilder composites the active
+        // style unconditionally.
         goLiveBlank();
         return;
     }
@@ -483,10 +609,26 @@ void LiveOutputService::goLive()
 // onAirChanged path as goLive (the UI toasts off the failure reason).
 void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList &slides)
 {
+    VGR_CALL_TRACE("LiveOutputService.goLiveWithSlides");
     bps::presentation::Presentation content;
     content.name = name.toStdString();
-    for (const QVariant &v : slides)
-        content.slides.push_back(ShowConverter::slideFromVariant(v.toMap()));
+    for (const QVariant &v : slides) {
+        const QVariantMap raw = v.toMap();
+        auto slide = ShowConverter::slideFromVariant(raw);
+        // ONE-SHOT DIAGNOSTIC (this log is the boot/behaviour source of truth):
+        // "the outputs draw the code where the text belongs" can only be argued
+        // from the DATA the engine was handed — whether the fill's body and its
+        // whole vocabulary actually arrived, or the scene builder is once again
+        // inferring something. One line per slide, per go-live.
+        qInfo("live slide: title='%s' rawHasBody=%d bodyChars=%d textChars=%d blocks=%d fill=%s",
+              slide.title.c_str(),
+              raw.contains(QStringLiteral("body")) ? 1 : 0,
+              static_cast<int>(raw.value(QStringLiteral("body")).toString().size()),
+              static_cast<int>(slide.text.size()),
+              static_cast<int>(slide.blocks.size()),
+              raw.value(QStringLiteral("fill")).toMap().isEmpty() ? "no" : "yes");
+        content.slides.push_back(std::move(slide));
+    }
     if (content.slides.empty()) {
         qWarning("LiveOutputService: goLiveWithSlides: no slides in '%s'", name.toUtf8().constData());
         EventBus::instance().notify(QStringLiteral("Nothing selected to put on air"),
@@ -494,8 +636,9 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         emit onAirChanged();
         return;
     }
-    auto r = bps::live::LiveOutputController::Instance().StartFromSlides(name.toStdString(),
-                                                                         content.slides);
+    auto &controller = bps::live::LiveOutputController::Instance();
+    const bool replacingLiveContent = controller.IsLive();
+    auto r = controller.StartFromSlides(name.toStdString(), content.slides);
     if (!r.ok()) {
         const QString reason = QString::fromStdString(r.error().message);
         qWarning("LiveOutputService: goLiveWithSlides failed: %s", r.error().message.c_str());
@@ -511,8 +654,13 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         live_ = true;
         emit liveChanged();
     }
-    refreshOnAirSlide();
-    emit onAirChanged();
+    // A live replacement is applied by the render worker. Let pollTick read
+    // the new runtime state after its replacement guard clears instead of
+    // racing the worker's presentation swap here on the UI thread.
+    if (!replacingLiveContent) {
+        refreshOnAirSlide();
+        emit onAirChanged();
+    }
     if (!poll_) {
         poll_ = new QTimer(this);
         poll_->setInterval(100);
@@ -560,6 +708,87 @@ void LiveOutputService::stageSlides(const QString &name, const QVariantList &sli
     // LIVE). Staging should already show what it will look like once live.
     stagedSlide_ = slides.isEmpty() ? QVariantMap{} : previewWithActiveStyle(slides.first().toMap());
     emit stagedChanged();
+}
+
+// ---- CLEAR ALL / SHOW ALL ------------------------------------------------
+// The toolbar's Clear all, and its undo in one place. The button used to run
+// its four clears itself in QML, which is why adding an undo would have meant
+// two places to keep in step; the snapshot and the clears live together here.
+void LiveOutputService::clearAll()
+{
+    VGR_CALL_TRACE("LiveOutputService.clearAll");
+    ClearedSnapshot snap;
+    // The CONTENT slot: what was actually on the monitor. Live, that is the
+    // on-air presentation; off air it is the staged pick (stop() puts the
+    // last on-air pick there, so this covers "I stopped, then cleared").
+    if (live_) {
+        snap.contentSlidesRaw = onAirSlidesRaw();
+        if (!snap.contentSlidesRaw.isEmpty()) {
+            snap.contentWasOnAir = true;
+            snap.contentTitle = onAirTitle_;
+            snap.contentStyled = onAirSlide_;
+        }
+    } else {
+        snap.contentSlidesRaw = stagedSlidesRaw_;
+        snap.contentWasOnAir = false;
+        snap.contentTitle = stagedName_;
+        snap.contentStyled = stagedSlide_;
+    }
+    snap.inputLabel = inputLabel_;
+    snap.inputKind = inputKind_;
+    snap.inputMode = inputMode_;
+    snap.overlays = activeOverlays_;
+    snap.valid = !snap.contentSlidesRaw.isEmpty() || !snap.inputLabel.isEmpty()
+                 || !snap.overlays.isEmpty();
+    cleared_ = snap;
+    emit clearedChanged();
+
+    // The same four clears the button ran itself, in the same order and with
+    // the same gates. Note what is NOT here: live_.
+    if (!inputLabel_.isEmpty())
+        clearInput();
+    if (!activeOverlays_.isEmpty())
+        clearAllOverlays();
+    // The on-air slide only means something while live (off air it already
+    // sits in the preview slot, cleared as content above).
+    if (live_ && !onAirSlide_.value(QStringLiteral("blocks")).toList().isEmpty())
+        clearOnAirSlide();
+    if (!stagedSlidesRaw_.isEmpty())
+        clearStaged();
+}
+
+void LiveOutputService::restoreCleared()
+{
+    VGR_CALL_TRACE("LiveOutputService.restoreCleared");
+    if (!cleared_.valid)
+        return;
+    const ClearedSnapshot snap = cleared_;
+    cleared_ = ClearedSnapshot{};   // one-shot: consumed the moment it is used
+    emit clearedChanged();
+
+    // The layer order the tiles composite: the input underneath, then the
+    // overlays, then the content.
+    if (!snap.inputLabel.isEmpty())
+        takeInput(snap.inputLabel, snap.inputKind, snap.inputMode);
+    for (const QVariant &v : snap.overlays) {
+        const QVariantMap o = v.toMap();
+        takeOverlay(o.value(QStringLiteral("id")).toString(),
+                    o.value(QStringLiteral("name")).toString());
+    }
+    if (snap.contentSlidesRaw.isEmpty())
+        return;
+    // Where it goes back depends on where it was: content that was ON AIR
+    // goes straight back out (the user asked for exactly this), while content
+    // that was only being previewed returns to the preview slot — a restore
+    // must never be the thing that puts frames on a real screen.
+    if (snap.contentWasOnAir && live_)
+        goLiveWithSlides(snap.contentTitle, snap.contentSlidesRaw);
+    else {
+        stagedName_ = snap.contentTitle;
+        stagedSlidesRaw_ = snap.contentSlidesRaw;
+        stagedSlide_ = snap.contentStyled;
+        emit stagedChanged();
+    }
 }
 
 void LiveOutputService::clearStaged()
@@ -613,6 +842,10 @@ void LiveOutputService::takeInput(const QString &label, const QString &kind, con
 
     inputLabel_ = label;
     inputKind_ = kind;
+    // Kept for Clear all's undo only (see clearAll/restoreCleared): restoring
+    // the take must re-open the same camera at the same capture mode, and the
+    // mode is not derivable from anything else the service stores.
+    inputMode_ = mode;
     bool started = false;
     if (kind == QLatin1String("screen")) {
         // startScreenPreview reports whether the label resolved to a live
@@ -842,12 +1075,21 @@ void LiveOutputService::previewInput(const QString &label, const QString &kind, 
         emit inputChanged();
         return;
     }
+    bool started = true;
     if (kind == QLatin1String("screen"))
-        EngineBridge::instance().startScreenPreview(label, QStringLiteral("card"));
+        started = EngineBridge::instance().startScreenPreview(label, QStringLiteral("card"));
     else if (kind == QLatin1String("ndi"))
-        EngineBridge::instance().startNdiPreview(label, QStringLiteral("card"));
+        started = EngineBridge::instance().startNdiPreview(label, QStringLiteral("card"));
     else
         EngineBridge::instance().startVideoPreview(label, mode, QStringLiteral("card"));
+    if (!started) {
+        // Refused (window closed / SDK load failure between the reachability
+        // check above and the actual take) — same unwind as takeInput(): no
+        // card entry, no pump, so the card keeps its idle/slashed state
+        // instead of parking a placeholder that can never fill.
+        emit inputChanged();
+        return;
+    }
     cardPreviews_[label] = QVariantMap{
         { QStringLiteral("kind"), kind },
         { QStringLiteral("mode"), mode },
@@ -878,6 +1120,45 @@ void LiveOutputService::endPreviewInput(const QString &label)
     emit inputChanged();
 }
 
+QString LiveOutputService::inputFailure(const QString &label, const QString &kind) const
+{
+    if (label.isEmpty())
+        return {};
+    // ONLY A HELD TAP has a reason to give: a released one is not failing, it is
+    // closed, and a stale reason on a card nobody is previewing would be a lie.
+    if (!cardPreviews_.contains(label) && label != inputLabel_)
+        return {};
+    // An NDI receiver reports its refusal through empty frames (its runtime is
+    // loaded by the engine's own provider) — there is no per-tap reason to ask.
+    if (kind == QLatin1String("ndi"))
+        return {};
+    return EngineBridge::instance().previewFailure(label);
+}
+
+bool LiveOutputService::inputAvailable(const QString &label, const QString &kind)
+{
+    // A row that names no device has nothing to be available: the same "no" the
+    // cached probe gives, and (see EngineBridge::inputSourceAlive) no ping either.
+    if (label.isEmpty())
+        return false;
+    // The one difference from inputHealthy: this one may ASK (see the header).
+    // Reachability of the DEVICE is the question — a window is "there" while it
+    // is open, a camera while it is plugged in — so the answer is the bridge's
+    // own probe, which pings when its cache cannot say.
+    return EngineBridge::instance().inputSourceAlive(label, kind);
+}
+
+QString LiveOutputService::inputDelivery(const QString &label, const QString &kind)
+{
+    // The engine owns every tap this could be about (the card thumbnails, the
+    // monitor holds, the output take and the input meters all live in the
+    // bridge's tables), so this is a read-through — and a read-through that
+    // OPENS NOTHING: it reports what the taps already deliver.
+    if (label.trimmed().isEmpty())
+        return {};
+    return EngineBridge::instance().inputDelivery(label, kind);
+}
+
 bool LiveOutputService::inputHealthy(const QString &label, const QString &kind) const
 {
     // Unreachable BY RESOLUTION (window closed / device unplugged): the
@@ -900,10 +1181,16 @@ void LiveOutputService::clearInput()
         EngineBridge::instance().stopNdiPreview(inputLabel_, QStringLiteral("output"));
     else
         EngineBridge::instance().stopVideoPreview(inputLabel_, QStringLiteral("output"));
+    // Remove BEFORE clearing — producing_.remove(inputLabel_) after
+    // inputLabel_.clear() removed the empty-string key instead of the real
+    // one, leaving a permanently-stale entry in producing_ and making
+    // inputProducing(label) keep answering true for a tap that no longer
+    // exists.
+    producing_.remove(inputLabel_);
     inputLabel_.clear();
     inputKind_.clear();
+    inputMode_.clear();
     inputLive_ = false;
-    producing_.remove(inputLabel_);
     clearNdiInputFrame();   // the compositor frame side of an NDI take
     pl::CompositorState::Instance().ClearTakenInput();
     // A held card preview keeps the pump (and its rev bumps) alive.
@@ -1034,8 +1321,35 @@ void LiveOutputService::stop()
         live_ = false;
         emit liveChanged();
     }
-    // Off air: the slide preview goes with it (also on a failed start).
+    // OFF AIR KEEPS THE PICTURE. STOP is the OUTPUT gate, not a content
+    // action — live report: "the GO LIVE button always clears the screen; its
+    // only responsibility is the outgoing frames, it has nothing to do with
+    // the content on the monitor preview". This used to blank onAirSlide_ on
+    // the way out, so pressing STOP threw the monitor tile back to the empty
+    // checkerboard and the pick was gone for good (a second GO LIVE then fell
+    // through to the blank holding slide).
+    //
+    // The slide that was just on air moves back into the STAGED slot — the
+    // same place stageSlides() puts a pick that is only being previewed —
+    // which is exactly "on the monitor but not on the outputs":
+    //   * the tile keeps the identical picture (OutputMonitorTile already
+    //     prefers stagedSlideRaw, and it is the same raw slide the tile was
+    //     reading a moment ago);
+    //   * GO LIVE again re-commits that same pick (goLive()'s staged branch)
+    //     instead of broadcasting a blank holding screen;
+    //   * the toolbar's staged gate keeps Clear all / the slide-clear button
+    //     reachable off air, so retained content is never unclearable;
+    //   * and a new pick staged afterwards simply replaces it, as always.
+    // stagedSlide_ takes onAirSlide_ (both are the slide run through the
+    // active style, so the swap changes no pixels).
+    if (!onAirSlideRaw_.isEmpty()) {
+        stagedName_ = onAirTitle_;
+        stagedSlidesRaw_ = QVariantList{ onAirSlideRaw_ };
+        stagedSlide_ = onAirSlide_;
+        emit stagedChanged();
+    }
     onAirSlide_ = QVariantMap{};
+    onAirSlideRaw_ = QVariantMap{};
     // onAirTitle_/onAirIndex_/onAirTotal_ are ONLY otherwise written by
     // pollTick(), which stops running the moment live_ flips false (below) —
     // without this reset they held their last live values forever, so
@@ -1065,6 +1379,7 @@ void LiveOutputService::stop()
 
 void LiveOutputService::goLiveBlank()
 {
+    VGR_CALL_TRACE("LiveOutputService.goLiveBlank");
     QVariantMap blank;
     blank.insert(QStringLiteral("blocks"), QVariantList{});
     blank.insert(QStringLiteral("background"), QStringLiteral("transparent"));
@@ -1183,11 +1498,12 @@ void LiveOutputService::takeMedia(const QString &path, const QString &name)
         // Audio rides the SAME QMediaPlayer/QAudioOutput path video already
         // uses — it just never feeds mediaSink_ a video frame, so mediaRev_
         // never bumps and the tiles' frame layer stays honestly empty. The
-        // audio itself plays through the system's default output device,
-        // which is exactly what the output tile's L/R meters already
-        // capture (EngineBridge.outputLevels, a real WASAPI loopback tap on
-        // that same default device) — those bars move on their own once
-        // this actually plays, no separate wiring needed.
+        // audio plays straight through Qt's own QAudioOutput (see mediaAudio_
+        // above), NOT through the engine's AudioMixer: that mixer's render path
+        // was unreachable and has been removed (2026-10, see the removal note
+        // in EngineBridge.cpp), so there is no program-mix meter for the tile's
+        // L/R bars to read. Those bars show the loudest TAPPED input while the
+        // output is on air and nothing else.
         mediaPlayer_->setSource(QUrl::fromLocalFile(clean));
         mediaAudio_->setMuted(mediaMuted_);
         mediaState_ = QStringLiteral("playing");
@@ -1352,10 +1668,28 @@ bool LiveOutputService::jumpTo(int index)
 // ---------------------------------------------------------------------------
 // The on-air slide as design blocks (the QML preview feed)
 // ---------------------------------------------------------------------------
+QVariantList LiveOutputService::onAirSlidesRaw() const
+{
+    QVariantList out;
+    if (!live_)
+        return out;
+    auto &pres = pl::PresentationEngine::Instance();
+    const pl::Presentation *active = pres.Runtime().ActivePresentation();
+    if (!active)
+        return out;
+    for (const pl::Slide &s : active->slides) {
+        if (s.hidden)
+            continue;
+        out.append(slideToVariantMap(&s, pl::OutputStyleSpec{}));
+    }
+    return out;
+}
+
 void LiveOutputService::refreshOnAirSlide()
 {
-    onAirSlide_ = live_ ? slideToVariantMap(pl::PresentationEngine::Instance().CurrentSlide())
-                        : QVariantMap{};
+    const pl::Slide *slide = live_ ? pl::PresentationEngine::Instance().CurrentSlide() : nullptr;
+    onAirSlide_ = slide ? slideToVariantMap(slide) : QVariantMap{};
+    onAirSlideRaw_ = slide ? slideToVariantMap(slide, pl::OutputStyleSpec{}) : QVariantMap{};
 }
 
 QVariantMap LiveOutputService::onAirSlideAt(int index) const
@@ -1386,11 +1720,18 @@ QVariantMap LiveOutputService::onAirSlideAt(int index) const
 // actually look like once on air (the active output's style/template),
 // not just its own raw, unstyled blocks. Round-trips the QML block shape
 // through a real engine Slide only because slideToVariantMap's contentType
-// tagging (slideContentType) reads it off pl::Slide::metaJson.
+// tagging (SlideRules::ContentType) reads it off pl::Slide::metaJson.
 QVariantMap LiveOutputService::previewWithActiveStyle(const QVariantMap &slide) const
 {
     const pl::Slide engineSlide = ShowConverter::slideFromVariant(slide);
     return slideToVariantMap(&engineSlide);
+}
+
+QVariantMap LiveOutputService::previewWithStyle(const QVariantMap &slide,
+                                                 const QString &styleId) const
+{
+    const pl::Slide engineSlide = ShowConverter::slideFromVariant(slide);
+    return slideToVariantMap(&engineSlide, outputStyleForPreview(styleId));
 }
 
 // ---------------------------------------------------------------------------
@@ -1401,11 +1742,14 @@ void LiveOutputService::pollTick()
     if (!live_)
         return;
 
+    auto &ctrl = bps::live::LiveOutputController::Instance();
+    if (ctrl.IsLiveContentReplacementPending())
+        return;
+
     // NDI monitor-connection telemetry rides the live poll (the bridge
     // caps itself at ~1 Hz internally and emits only on change).
     EngineBridge::instance().refreshNdiConnections();
 
-    auto &ctrl = bps::live::LiveOutputController::Instance();
     const qulonglong sent = ctrl.FramesSent();
     if (sent != framesSent_) {
         framesSent_ = sent;
@@ -1461,8 +1805,10 @@ void LiveOutputService::pollTick()
         // re-reads them so the QML preview stays honest. Cheap when unchanged:
         // a property write with no matching QML binding change is free.
         const QVariantMap next = slideToVariantMap(slide);
-        if (next != onAirSlide_) {
+        const QVariantMap nextRaw = slideToVariantMap(slide, pl::OutputStyleSpec{});
+        if (next != onAirSlide_ || nextRaw != onAirSlideRaw_) {
             onAirSlide_ = next;
+            onAirSlideRaw_ = nextRaw;
             emit onAirChanged();
         }
     }
@@ -1525,8 +1871,21 @@ void LiveOutputService::pushNdiFrame()
     // (a real configuration — the row outlives the feature toggle) tried to
     // build an SDK sender it was not allowed to have, every single tick.
     const bool ndiUsable = EngineBridge::instance().ndiAvailable();
+    // "unknown" is NOT a verdict — it is the state the runtime probe sits in
+    // until its worker answers. That probe is ASYNC (see
+    // EngineBridge::probeNdiAsync) and a device refresh re-runs it (a settings
+    // visit, a display-mode change), so for the few ms between the refresh and
+    // the answer ndiAvailable() reads false with an EMPTY status. Warning on
+    // that window toasted a false
+    //   "NDI output requested but NDI is not usable () — no frames will be sent"
+    // every time one landed mid-live — the log shows the warning at 48.024 and
+    // "NDI program sending started" 36 ms later, i.e. the feed was fine and
+    // the operator got a crash-flavoured error box for a probe in flight.
+    // Only a REAL verdict (disabled / notInstalled / error) earns the warning.
+    const QString ndiState = EngineBridge::instance().ndiState();
+    const bool ndiVerdict = ndiState != QLatin1String("unknown");
     if (want && !ndiUsable) {
-        if (!ndiGateLogged_) {
+        if (ndiVerdict && !ndiGateLogged_) {
             ndiGateLogged_ = true;
             qWarning("LiveOutputService: NDI output requested but NDI is not usable (%s) — no frames will be sent",
                      qUtf8Printable(EngineBridge::instance().ndiStatus()));
@@ -1537,7 +1896,9 @@ void LiveOutputService::pushNdiFrame()
     if (want && !ndiUsable) {
         // Tear the feed state down and stop. The gate re-opens by itself:
         // ndiGateLogged_ and this early return both clear the moment the
-        // feature is switched back on, and the next tick resumes sending.
+        // feature is switched back on (or the probe answers Ready), and the
+        // next tick resumes sending. A probe still in flight takes this same
+        // exit without a word — the answer is milliseconds away.
         if (ndiSending_) {
             std::lock_guard<std::mutex> lock(ndiStateMutex_);
             ndiSending_ = false;
@@ -1606,11 +1967,23 @@ void LiveOutputService::pushNdiFrame()
         }
         return;
     }
-    auto *fb = dynamic_cast<pr::FrameBufferOutput *>(out.value().get());
+    auto fb = std::dynamic_pointer_cast<pr::FrameBufferOutput>(out.value());
     if (!fb || !fb->Enabled())
         return;
-    const pr::Frame frame = fb->LastFrame();
-    if (frame.empty()) {
+
+    // Check backpressure before retaining a shared snapshot. When the NDI SDK
+    // is slow, timer ticks are dropped without touching frame pixels on the UI
+    // thread. The immutable snapshot keeps the selected frame alive until the
+    // worker finishes its send.
+    {
+        std::lock_guard<std::mutex> lock(ndiStateMutex_);
+        if (ndiSendDone_ < ndiSendSeq_)
+            return;   // a job is in flight — skip this frame before copying it
+        ndiBackoff_ = false;   // recovered: the last send finished within its slot
+    }
+
+    const auto frame = fb->LastFrameSnapshot();
+    if (!frame || frame->empty()) {
         if (!ndiWaitLogged_) {
             ndiWaitLogged_ = true;
             qCWarning(lcNdiProgress, "LiveOutputService: NDI output waiting for the live loop's first rendered frame");
@@ -1628,18 +2001,6 @@ void LiveOutputService::pushNdiFrame()
     // hundreds of ms building the SDK sender inside the first GUI-thread
     // send) and the SDK send.
     {
-        // IN-FLIGHT CAP (FreeShow's MAX_INFLIGHT_SENDS, reduced to 1 — we are
-        // not compositing multiple NDI outputs): when the worker is still mid-
-        // send, DROP this tick's frame instead of queueing (latest-wins — the
-        // next tick carries a fresher frame anyway). This is the second half
-        // of "no GUI lag": the queue can never back up under a slow sender,
-        // so no tick ever waits behind a backlog.
-        {
-            std::lock_guard<std::mutex> lock(ndiStateMutex_);
-            if (ndiSendDone_ + 1 < ndiSendSeq_)
-                return;   // a job is in flight — skip this frame
-            ndiBackoff_ = false;   // recovered: the last send finished within its slot
-        }
         // Worker lifecycle (lazy, GUI-side): one thread, created on demand.
         if (!ndiThread_) {
             ndiThread_ = new QThread(this);
@@ -1663,11 +2024,6 @@ void LiveOutputService::pushNdiFrame()
         // non-owning wrap of the engine's buffer, copy() is the deep copy.
         // Repro pinned in tools/ndi_copy_repro.cpp — do not "tidy" this back
         // into one expression without re-testing on this compiler.
-        const QImage wrapped(reinterpret_cast<const uchar *>(frame.pixels.data()),
-                             frame.width, frame.height,
-                             frame.width * 4, QImage::Format_RGBA8888);
-        QImage owned = wrapped.copy();
-
         // The Output row's own name IS the network-visible NDI source name —
         // re-resolved per tick (a mid-session rename lands next session;
         // the sender's SDK identity is fixed at creation). The cadence
@@ -1681,10 +2037,10 @@ void LiveOutputService::pushNdiFrame()
 
         // Queue on the worker (event-loop serialized — one send at a time,
         // no queue buildup: each tick replaces the previous workload).
-        QMetaObject::invokeMethod(ndiWorker_, [this, provider, owned = std::move(owned),
+        QMetaObject::invokeMethod(ndiWorker_, [this, provider, frame,
                                                senderName, fps, sendId]() mutable {
             LiveOutputService::ndiWorkerSendFrame(ndiWorker_, static_cast<void *>(provider),
-                                                  std::move(owned), senderName, fps, sendId);
+                                                  frame, senderName, fps, sendId);
         }, Qt::QueuedConnection);
 
         // GUI-side state: the pill lights NOW (the send may take a moment on
@@ -1754,12 +2110,15 @@ float LiveOutputService::ndiConfiguredFps()
             || !out.value("isEnabled").toBool())
             continue;
         // The row EXISTS — an unusable/blank refresh value falls back to
-        // the engine's own 30 fps default cadence rather than returning 0
-        // (which would stop the clock and kill the feed entirely).
+        // the engine's own default cadence rather than returning 0 (which
+        // would stop the clock and kill the feed entirely), through THE
+        // ENGINE'S OWN RULE (bps::display::AcceptedOutputFrameRate): the
+        // provider advertises whatever that call accepts, so the clock has to
+        // ask it rather than keep its own copy of the bound.
         const QString rate = out.value("refresh").toString();
         bool ok = false;
         const float fps = rate.left(rate.indexOf(QLatin1Char(' '))).toFloat(&ok);
-        return (ok && fps > 0.0f && fps <= 240.0f) ? fps : 30.0f;
+        return bps::display::AcceptedOutputFrameRate(ok ? fps : 0.0f);
     }
     return 0.0f;   // no enabled NDI row at all
 }
@@ -1771,15 +2130,32 @@ float LiveOutputService::ndiConfiguredFps()
 // for The Table).
 void LiveOutputService::shutdownNdiWorker()
 {
-    if (ndiThread_) {
-        ndiThread_->quit();
-        ndiThread_->wait();
-        delete ndiWorker_;      // plain context object; its thread is gone
+    if (!ndiThread_)
+        return;
+    ndiThread_->quit();
+    // BOUNDED join: quit() only stops the worker's event loop — a send already
+    // RUNNING cannot be interrupted, and an NDI SDK send on a stalled network
+    // can take arbitrarily long. An unbounded wait() froze the GUI thread at
+    // quit (Windows: AppHangB1, process killed — "it crashes when I close
+    // it"), so bound it.
+    if (!ndiThread_->wait(2000)) {
+        // Still mid-send. Do NOT delete the thread/worker: destroying them
+        // under a running send is exactly the quit-crash the join was added to
+        // prevent. Leak both deliberately — the process is exiting, and the
+        // thread dies with it. Re-parent so nothing here dangles.
+        ndiWorker_->setParent(nullptr);
+        ndiThread_->setParent(nullptr);
         ndiWorker_ = nullptr;
-        delete ndiThread_;      // `this`-parented, but explicit for clarity
         ndiThread_ = nullptr;
         ndiClockStarted_ = false;
+        qWarning("LiveOutputService: NDI send worker did not stop within 2s — leaving it detached rather than hanging the UI");
+        return;
     }
+    delete ndiWorker_;      // plain context object; its thread is gone
+    ndiWorker_ = nullptr;
+    delete ndiThread_;      // `this`-parented, but explicit for clarity
+    ndiThread_ = nullptr;
+    ndiClockStarted_ = false;
 }
 
 void LiveOutputService::startNdiSendClock()
@@ -1819,10 +2195,13 @@ void LiveOutputService::stopNdiSendClock()
 void LiveOutputService::ndiSendTick()
 {
     // Re-sync the cadence EVERY tick from the roster: a Settings change
-    // takes effect within one tick, live, no restart needed. The clamping
-    // mirror of the provider's own SetFrameRate guard (0 < fps <= 240).
+    // takes effect within one tick, live, no restart needed. The value is
+    // ALREADY the engine's accepted cadence (ndiConfiguredFps ->
+    // bps::display::AcceptedOutputFrameRate — the provider's own rule), so
+    // there is no second copy of the bound here: the only check left is the 0
+    // that means "no enabled NDI row", which stops the clock below.
     const float fps = ndiConfiguredFps();
-    if (fps > 0.0f && fps <= 240.0f && fps != ndiSendFps_) {
+    if (fps > 0.0f && fps != ndiSendFps_) {
         ndiSendFps_ = fps;
         ndiSendTimer_->setInterval(int(1000.0f / fps));
     }
@@ -1954,8 +2333,8 @@ void LiveOutputService::checkNdiFeedRate()
         QStringLiteral("outputs.framerate.drift"));
 }
 
-// The network-visible NDI source name: "<AppName> . <Row name>" ("VGRPresenter
-// . New Screen 2") — how Studio Monitor lists a machine's sources — falling
+// The network-visible NDI source name: "<AppName> - <Row name>"
+// ("VGRPresenter - New Screen 2") — how Studio Monitor lists a machine's sources — falling
 // back to the bare row name when the app name is unavailable, and to "" (the
 // provider's own "VGR Program" default) when the row has no name at all.
 QString LiveOutputService::ndiSenderDisplayName(const QString &rowName)
@@ -1977,7 +2356,7 @@ QString LiveOutputService::ndiSenderDisplayName(const QString &rowName)
     if (resolved.isEmpty())
         return {};
     const QString app = QCoreApplication::applicationName();
-    return app.isEmpty() ? resolved : QStringLiteral("%1 . %2").arg(app, resolved);
+    return app.isEmpty() ? resolved : QStringLiteral("%1 - %2").arg(app, resolved);
 }
 
 // Per-live-session NDI sender identity (see the header comment): NDI's SDK
@@ -2042,11 +2421,11 @@ QImage LivePreviewProvider::requestImage(const QString &id, QSize *size,
         : name.toStdString();
     if (auto o = pr::RenderEngine::Instance().GetOutput(bufferName); o.ok()) {
         if (auto *fb = dynamic_cast<pr::FrameBufferOutput *>(o.value().get())) {
-            const pr::Frame frame = fb->LastFrame();
-            if (!frame.empty()) {
-                QImage ref(reinterpret_cast<const uchar *>(frame.pixels.data()),
-                           frame.width, frame.height,
-                           frame.width * 4, QImage::Format_RGBA8888);
+            const auto frame = fb->LastFrameSnapshot();
+            if (frame && !frame->empty()) {
+                QImage ref(reinterpret_cast<const uchar *>(frame->pixels.data()),
+                           frame->width, frame->height,
+                           frame->width * 4, QImage::Format_RGBA8888);
                 // The engine packs colors 0xAABBGGRR (Color::Pack — R in the
                 // LOW byte). Format_RGBA8888 reads bytes R,G,B,A — exactly
                 // that layout on little-endian. (ARGB32 was WRONG here: it
@@ -2055,6 +2434,57 @@ QImage LivePreviewProvider::requestImage(const QString &id, QSize *size,
                 out = ref.copy();
             }
         }
+    }
+
+    // ONE-SHOT FRAME SANITY, per buffer per STATE — never per request (this
+    // runs at the tiles' frame cadence). It lives in the provider because the
+    // provider is the ONLY place that sees the ENGINE's own pixels, and it is
+    // what separates the two halves of "the outputs are black":
+    //   * allBlack=1 (or "no frame") here ⇒ the engine really is rendering a
+    //     black frame — the fault is upstream of every output, in the scene;
+    //   * a real picture here with black NDI/HDMI ⇒ the engine is fine and the
+    //     output path is dropping it (send/present), not the render.
+    // Sampled with a stride (~16x16 samples), so it costs nothing per frame.
+    {
+        static std::mutex sanityMutex;
+        static std::map<std::string, std::string> lastSanity;
+        std::string state;
+        if (out.isNull()) {
+            state = "no frame";
+        } else {
+            long long sum = 0;
+            int count = 0;
+            int maxLuma = 0;
+            int maxAlpha = 0;
+            const int stepY = std::max(1, out.height() / 16);
+            const int stepX = std::max(1, out.width() / 16);
+            for (int y = 0; y < out.height(); y += stepY) {
+                const unsigned char *row = out.constScanLine(y);
+                for (int x = 0; x < out.width(); x += stepX) {
+                    const unsigned char *px = row + x * 4;   // RGBA8888
+                    const int luma = (px[0] * 299 + px[1] * 587 + px[2] * 114) / 1000;
+                    sum += luma;
+                    ++count;
+                    if (luma > maxLuma) maxLuma = luma;
+                    if (px[3] > maxAlpha) maxAlpha = px[3];
+                }
+            }
+            const double mean = count > 0 ? static_cast<double>(sum) / count : 0.0;
+            state = std::format("{}x{} meanLuma={:.1f} maxLuma={} maxAlpha={} allBlack={}",
+                                out.width(), out.height(), mean, maxLuma, maxAlpha,
+                                maxLuma == 0 ? "yes" : "no");
+        }
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(sanityMutex);
+            std::string &last = lastSanity[bufferName];
+            if (last != state) {
+                last = state;
+                changed = true;
+            }
+        }
+        if (changed)
+            qInfo("livepreview frame sanity: buffer '%s' — %s", bufferName.c_str(), state.c_str());
     }
 
     if (out.isNull()) {

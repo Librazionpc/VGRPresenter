@@ -1,4 +1,6 @@
 import QtQuick
+import QtQuick.Controls
+import VGRPresenterUI
 
 // "Add Shape" picker — pops up when "Shape" is picked from the Edit
 // screen's "+" Add Content menu, matching
@@ -48,6 +50,15 @@ Item {
     anchors.fill: parent
     visible: root.open
 
+    // The dialog belongs to the WINDOW, not to the pane that declares it. A modal
+    // declared inside a settings page (every Add / Edit dialog in Settings) must dim
+    // the whole app, not just that page's content column: parented in place its scrim
+    // covered one side of the settings card, so the dialog read as half-modal (user
+    // report: "the black box doesn't cover the whole settings modal, only one side").
+    // Reparented to the window overlay, this component has no scaled ancestor to
+    // inherit a scale from, so its CARD applies the app scale itself (see AppScale.qml).
+    parent: Overlay.overlay
+
     ModalScrim {
         anchors.fill: parent
         onDismissed: root.cancelled()
@@ -55,12 +66,16 @@ Item {
 
     Rectangle {
         id: card
+        // The app's one scale, on the card (see AppScale.qml) — never on the root,
+        // whose scrim IS the dialog's black box and has to stay window-sized.
+        scale: AppScale.cardScale(card)
+        transformOrigin: Item.Center
         anchors.centerIn: parent
         width: 520
         height: content.height + 40
         radius: 14
-        color: "#13151c"
-        border.color: "#232530"
+        color: Theme.surface
+        border.color: Theme.border
         border.width: 1
 
         MouseArea { anchors.fill: parent; onClicked: {} }
@@ -84,8 +99,8 @@ Item {
                         anchors.left: parent.left
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Add Shape")
-                        color: "#f1f3f8"
-                        font.family: "Segoe UI"
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
                         font.pixelSize: 18
                         font.weight: Font.DemiBold
                     }
@@ -97,13 +112,13 @@ Item {
                         width: 28
                         height: 28
                         radius: 7
-                        color: closeArea.containsMouse ? "#20222c" : "transparent"
+                        color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
                         Behavior on color { ColorAnimation { duration: 100 } }
 
                         Text {
                             anchors.centerIn: parent
                             text: "✕"
-                            color: "#8a94a6"
+                            color: Theme.textSecondary
                             font.pixelSize: 14
                         }
 
@@ -120,13 +135,13 @@ Item {
                 Text {
                     width: parent.width
                     text: qsTr("Choose a shape to add to this slide")
-                    color: "#8a94a6"
-                    font.family: "Segoe UI"
+                    color: Theme.textSecondary
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                 }
             }
 
-            Rectangle { width: parent.width; height: 1; color: "#232530" }
+            Rectangle { width: parent.width; height: 1; color: Theme.border }
 
             // Shape cells — four columns, matching the ground truth's
             // 106-wide cells with 12px gutter in a 472-wide content area.
@@ -146,8 +161,8 @@ Item {
                         width: (parent.width - 36) / 4
                         height: 90
                         radius: 8
-                        color: shapeCell.selected ? "#206c5ce7" : (cellArea.containsMouse ? "#20222c" : "#1a1c26")
-                        border.color: shapeCell.selected ? Theme.accent : "#262a38"
+                        color: shapeCell.selected ? Qt.alpha(Theme.accent, 0.125) : (cellArea.containsMouse ? Theme.hoverBg : Theme.inset)
+                        border.color: shapeCell.selected ? Theme.accent : Theme.borderSubtle
                         border.width: 1
                         Behavior on color { ColorAnimation { duration: 100 } }
 
@@ -155,7 +170,7 @@ Item {
                             anchors.centerIn: parent
                             anchors.verticalCenterOffset: -10
                             text: root.glyphs[shapeCell.modelData.key]
-                            color: shapeCell.selected ? "#9b8ff5" : "#525a72"
+                            color: shapeCell.selected ? Theme.accentLight : Theme.textMuted
                             font.pixelSize: 30
                         }
 
@@ -165,8 +180,10 @@ Item {
                             width: parent.width
                             horizontalAlignment: Text.AlignHCenter
                             text: shapeCell.modelData.label
-                            color: shapeCell.selected ? "#eef1f8" : "#c8cdd9"
-                            font.family: "Segoe UI"
+                            // Selected cell's label is the brightest; an unselected one takes
+                            // the second-level tone — the same pairing SelectableChip uses.
+                            color: shapeCell.selected ? Theme.textPrimary : Theme.textSecondary
+                            font.family: Theme.fontFamily
                             font.pixelSize: 13
                         }
 
@@ -181,7 +198,7 @@ Item {
                 }
             }
 
-            Rectangle { width: parent.width; height: 1; color: "#232530" }
+            Rectangle { width: parent.width; height: 1; color: Theme.border }
 
             Row {
                 anchors.right: parent.right
@@ -191,16 +208,16 @@ Item {
                     width: 90
                     height: 32
                     radius: 9
-                    color: cancelArea.containsMouse ? "#20222c" : "#1a1c26"
-                    border.color: "#2a2f3a"
+                    color: cancelArea.containsMouse ? Theme.hoverBg : Theme.inset
+                    border.color: Theme.borderSubtle
                     border.width: 1
                     Behavior on color { ColorAnimation { duration: 100 } }
 
                     Text {
                         anchors.centerIn: parent
                         text: qsTr("Cancel")
-                        color: "#c8cdd9"
-                        font.family: "Segoe UI"
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: Font.Medium
                     }
@@ -226,7 +243,7 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Add Shape")
                         color: "#ffffff"
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: Font.DemiBold
                     }

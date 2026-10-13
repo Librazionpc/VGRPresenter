@@ -30,7 +30,9 @@ void TestAppSettings() {
     CHECK(!s.GetBool("appearance.lockInMode"));
     CHECK(s.GetString("appearance.accent") == "purple" && s.GetString("appearance.theme") == "dark");
     CHECK(!s.GetBool("startup.openLastProject") && !s.GetBool("startup.launchAtLogin") && !s.GetBool("startup.autosave"));
-    CHECK(s.GetBool("preferences.restoreLastSession") && !s.GetBool("preferences.closeToTray") && !s.GetBool("preferences.startMinimized"));
+    // Restore-last-session is OFF by default: the app starts on the home (Show)
+    // screen with nothing opened. Resuming is opt-in (see AppSettings.cpp).
+    CHECK(!s.GetBool("preferences.restoreLastSession") && !s.GetBool("preferences.closeToTray") && !s.GetBool("preferences.startMinimized"));
     CHECK(s.GetBool("backups.automatic") && s.GetInt("backups.intervalMinutes") == 30 && s.GetInt("backups.keepLast") == 10);
     CHECK(s.GetBool("backups.crashRecovery") && s.GetBool("notifications.show") && s.GetString("notifications.logLevel") == "info");
     // The extra categories a backup may carry: opt-in, so a fresh store backs up
@@ -91,9 +93,37 @@ void TestAppSettings() {
         CHECK(text.ok() && text.value().find("lockInMode") == std::string::npos && text.value().find("appearance.accent") != std::string::npos);
     }
 
-    // ---- a damaged file is reported and the defaults are used ----
+    // ---- a damaged file SELF-HEALS: set aside as evidence, then rebuilt ----
+    // (was: Load() failed outright and the damaged bytes were left in place for
+    // the next save to overwrite — the file could be neither read nor recovered)
     CHECK(Fs().Write(file, "{ not json").ok());
-    { st::AppSettings broken(file); CHECK(!broken.Load().ok()); CHECK(broken.GetString("appearance.accent") == "purple"); }
+    {
+        st::AppSettings broken(file);
+        CHECK(broken.Load().ok());                        // damage never fails the read
+        CHECK(broken.GetString("appearance.accent") == "purple");   // the defaults stand
+
+        // The damaged bytes are preserved VERBATIM under a name that says what
+        // they are — the evidence a "why did my settings reset?" needs.
+        std::vector<std::string> quarantine;
+        auto entries = Fs().FindFiles(kRoot, "");
+        CHECK(entries.ok());
+        if (entries.ok())
+            for (const auto& e : entries.value())
+                if (e.find(".corrupt-") != std::string::npos) quarantine.push_back(e);
+        CHECK(quarantine.size() == 1);
+        if (quarantine.size() == 1) {
+            auto kept = Fs().ReadText(quarantine.front());
+            CHECK(kept.ok() && kept.value() == "{ not json");
+        }
+
+        // ...and the next save REBUILDS a healthy file at the original path, so
+        // the very next launch reads a real settings file again.
+        CHECK(broken.Set("appearance.accent", J::String("green")).ok());
+        auto rebuilt = Fs().ReadText(file);
+        CHECK(rebuilt.ok() && json::Parse(rebuilt.value()).ok());
+        if (rebuilt.ok()) CHECK(rebuilt.value().find("green") != std::string::npos);
+        CHECK(broken.GetString("appearance.accent") == "green");
+    }
     // ...and a value the rules refuse is dropped while the good ones stay
     CHECK(Fs().Write(file, R"({"version":1,"settings":{"appearance.accent":"pink","smart.gpuBudgetPct":55,"unknown.key":1}})").ok());
     { st::AppSettings partial(file); CHECK(partial.Load().ok());
@@ -108,6 +138,55 @@ void TestAppSettings() {
         st::AppSettings again(file);
         CHECK(again.Load().ok());
         CHECK(again.GetString("session.videoRoster") == R"([{\"label\":\"Cam\",\"kind\":\"ndi\"}])");
+    }
+
+    // ---- the main screen's Projects sidebar: a dragged width, with -1 meaning "auto" ----
+    // (an unregistered key refused every write — the new session.projectsColumnWidth toasted
+    // "there is no setting 'session.projectsColumnWidth'" as soon as the pane's save timer fired)
+    CHECK(s.Set("session.projectsColumnWidth", J::Number(360)).ok());
+    CHECK(s.GetInt("session.projectsColumnWidth") == 360);
+    CHECK(!s.Set("session.projectsColumnWidth", J::Number(900)).ok());   // wider than the handle can ever drag
+    {
+        st::AppSettings again(file);
+        CHECK(again.Load().ok());
+        CHECK(again.GetInt("session.projectsColumnWidth") == 360);
+    }
+    CHECK(s.Set("session.projectsColumnWidth", J::Number(-1)).ok());     // double-click: back to auto
+    CHECK(s.GetInt("session.projectsColumnWidth") == -1);
+    {
+        auto text = Fs().ReadText(file);   // auto is the default, so nothing of it is kept in the file
+        CHECK(text.ok() && text.value().find("projectsColumnWidth") == std::string::npos);
+    }
+
+    // ---- the other two main-screen side columns: independent widths, both remembered ----
+    // (the output monitors column and the template inspector were runtime-only, so
+    // every restart put them back to their defaults and one drag moved the other)
+    CHECK(s.Set("session.outputsColumnWidth", J::Number(420)).ok());
+    CHECK(s.Set("session.templateColumnWidth", J::Number(300)).ok());
+    CHECK(s.GetInt("session.outputsColumnWidth") == 420 && s.GetInt("session.templateColumnWidth") == 300);
+    CHECK(!s.Set("session.outputsColumnWidth", J::Number(-40)).ok());     // below the -1 "auto" sentinel
+    CHECK(!s.Set("session.templateColumnWidth", J::Number(561)).ok());     // wider than the handle can drag
+    {
+        st::AppSettings again(file);
+        CHECK(again.Load().ok());
+        CHECK(again.GetInt("session.outputsColumnWidth") == 420);
+        CHECK(again.GetInt("session.templateColumnWidth") == 300);
+    }
+
+    // ---- the Shows template inspector: the All default plus ONE JSON key for the per-category picks ----
+    // (a category's name only exists at runtime, so a per-name "shows.categoryTemplate.<name>" key could
+    // never be declared — every pick was refused and nothing was remembered. The overrides ride a single
+    // declared key, the session.audioRoster shape.)
+    CHECK(s.Set("shows.defaultTemplate", J::String("tpl-default")).ok());
+    CHECK(s.Set("session.showsCategoryTemplates", J::String(R"({"Verse":"tpl-verse"})")).ok());
+    CHECK(s.Set("song.template", J::String("tpl-default")).ok());               // Quick Lyrics' song profile
+    CHECK(!s.Set("shows.categoryTemplate.Verse", J::String("tpl-verse")).ok());  // a per-name key is still not a setting
+    {
+        st::AppSettings again(file);
+        CHECK(again.Load().ok());
+        CHECK(again.GetString("shows.defaultTemplate") == "tpl-default");
+        CHECK(again.GetString("session.showsCategoryTemplates") == R"({"Verse":"tpl-verse"})");
+        CHECK(again.GetString("song.template") == "tpl-default");
     }
 
     // ---- ResetAll: back to the defaults, remembering where the user was ----
@@ -202,6 +281,15 @@ void TestSmartConfig() {
     laptop.onBattery = false;
     CHECK(st::RecommendProfile(laptop) == "performance");
     CHECK(rowOf(st::BuildHardwareReport(laptop, true, {}), "battery").value == "Plugged in · 40%");
+    // Plugged in AND topping up is its own state, not "plugged in": the row the
+    // user reads (and the Smart Config battery dial) has to say Charging.
+    laptop.batteryCharging = true;
+    CHECK(rowOf(st::BuildHardwareReport(laptop, true, {}), "battery").value == "Charging · 40%");
+    CHECK(rowOf(st::BuildHardwareReport(laptop, true, {}), "battery").ok);
+    laptop.batteryPercent = -1;   // no readable charge, but the state is known
+    CHECK(rowOf(st::BuildHardwareReport(laptop, true, {}), "battery").value == "Charging");
+    laptop.batteryCharging = false;
+    CHECK(rowOf(st::BuildHardwareReport(laptop, true, {}), "battery").value == "Plugged in");
     {
         // Thermals appear only when the backend exposes a temperature.
         ad::HardwareInfo warm = strong; warm.thermalCelsius = 91.0;
@@ -356,6 +444,24 @@ void TestDataProtection() {
     CHECK(Fs().Write(recovery.Path(), "unsaved work").ok());
     CHECK(recovery.Info().has_value() && recovery.Info()->showName == "Untitled show" && recovery.Info()->originalPath.empty());
     CHECK(recovery.Clear().ok() && !recovery.Info().has_value());
+
+    // A DAMAGED note never costs the operator their crashed work: the offer
+    // stands with a generic name and the unreadable bytes are kept as evidence.
+    CHECK(Fs().Write(recovery.Path(), "unsaved work").ok());
+    const std::string note = kRoot + "/recovery/unsaved-show.json";
+    CHECK(Fs().Write(note, "{ showName: ").ok());
+    auto damaged = recovery.Info();
+    CHECK(damaged.has_value() && damaged->showName == "Untitled show");
+    std::vector<std::string> quarantine;
+    auto listed = Fs().Enumerate(kRoot + "/recovery");
+    CHECK(listed.ok());
+    if (listed.ok())
+        for (const auto& f : listed.value())
+            if (f.find("unsaved-show.json.corrupt-") != std::string::npos) quarantine.push_back(f);
+    CHECK(quarantine.size() == 1);
+    if (quarantine.size() == 1) CHECK(Fs().ReadText(quarantine.front()).value() == "{ showName: ");
+    CHECK(recovery.RestoreTo(shows + "/Recovered2.vgr").ok());      // the work is still recoverable
+    CHECK(Fs().ReadText(shows + "/Recovered2.vgr").value() == "unsaved work");
 
     // restoring writes a new file, never over an existing one, and clears what was waiting
     CHECK(!recovery.RestoreTo(shows + "/Recovered.vgr").ok());                     // nothing to recover

@@ -1,0 +1,140 @@
+{
+  "_note": "Known pre-existing lock-scope findings, keyed by file + rule + flagged source line (counts allow repeats). Anything not listed here fails the build. Regenerate with `node tools/check_lock_scope.mjs --update-baseline`; keep this ledger shrinking.",
+  "files": {
+    "src/PresentationEngine/modules/adaptive/AdaptiveRuntime.cpp": [
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(",
+        "count": 2
+      }
+    ],
+    "src/PresentationEngine/modules/automation/FlowEngine.cpp": [
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(",
+        "count": 3
+      },
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(events::AutomationEmergencyStopped{id});",
+        "count": 1
+      },
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(events::FlowPaused{std::string(executionId)});",
+        "count": 1
+      },
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(events::FlowRecovered{execId, snapshot.currentNodeId});",
+        "count": 1
+      },
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(events::FlowResumed{std::string(executionId)});",
+        "count": 1
+      },
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(events::FlowStarted{",
+        "count": 1
+      },
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(events::FlowStarted{exec.flowId, exec.executionId, \"\"});",
+        "count": 1
+      },
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(events::FlowStopped{std::string(executionId)});",
+        "count": 2
+      },
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(events::FlowValidated{result, warnings.value()});",
+        "count": 1
+      },
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(events::VariableChanged{",
+        "count": 1
+      }
+    ],
+    "src/PresentationEngine/modules/broadcast/BroadcastProviders.cpp": [
+      {
+        "rule": "stored callback (member)",
+        "text": "long hr = createIterator_(&iterRaw);",
+        "count": 1
+      }
+    ],
+    "src/PresentationEngine/modules/content/AssetWatcher.cpp": [
+      {
+        "rule": "stored callback (member)",
+        "text": "for (const auto& c : changes) callback_(c);",
+        "count": 1
+      }
+    ],
+    "src/PresentationEngine/modules/content/ContentManager.cpp": [
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(",
+        "count": 1
+      }
+    ],
+    "src/PresentationEngine/modules/display/DisplayEngine.cpp": [
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(",
+        "count": 4
+      }
+    ],
+    "src/PresentationEngine/modules/media/MediaEngine.cpp": [
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(",
+        "count": 2
+      },
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(events::MediaPlaybackStopped{std::string(mediaId)});",
+        "count": 1
+      },
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(events::MediaRemoved{std::string(mediaId)});",
+        "count": 1
+      }
+    ],
+    "src/PresentationEngine/modules/notification/NotificationScheduler.cpp": [
+      {
+        "rule": "stored callback (member)",
+        "text": "if (deliver_) deliver_(n);",
+        "count": 1
+      }
+    ],
+    "src/PresentationEngine/modules/rendering/RenderEngine.cpp": [
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(events::RenderFrameDropped{",
+        "count": 1
+      },
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(events::RenderFrameRendered{",
+        "count": 1
+      }
+    ],
+    "src/PresentationEngine/modules/songs/SongEngine.cpp": [
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(events::SongArrangementChanged{",
+        "count": 1
+      },
+      {
+        "rule": "event-bus dispatch",
+        "text": "(void)EventBus::Instance().Publish(events::SongKeyChanged{",
+        "count": 1
+      }
+    ]
+  }
+}

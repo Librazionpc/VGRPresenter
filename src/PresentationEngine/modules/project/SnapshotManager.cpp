@@ -61,7 +61,7 @@ Result<std::string> SnapshotManager::Create(std::string_view projectId, std::str
         for (auto it = std::next(first); it != snapshots_.end(); ++it) {
             if (isProject(*it) && it->createdAtMs < oldest->createdAtMs) oldest = it;
         }
-        (void)DatabaseManager::Instance().Remove("snapshots", oldest->id);
+        (void)DatabaseManager::Instance().Remove("snapshots", oldest->id);  // lock-ok: in-memory map erase
         snapshots_.erase(oldest);
         --count;
     }
@@ -102,7 +102,7 @@ Result<void> SnapshotManager::Remove(std::string_view snapshotId) {
     if (it == snapshots_.end())
         return Error::Make(Err::Project_RecoveryNotFound, "Snapshot", "no such snapshot");
     snapshots_.erase(it);
-    return DatabaseManager::Instance().Remove("snapshots", std::string(snapshotId));
+    return DatabaseManager::Instance().Remove("snapshots", std::string(snapshotId));  // lock-ok: in-memory map erase
 }
 
 Result<void> SnapshotManager::ClearProject(std::string_view projectId) {
@@ -114,7 +114,7 @@ Result<void> SnapshotManager::ClearProject(std::string_view projectId) {
                                     [&](const Snapshot& s) { return s.projectId == projectId; }),
                      snapshots_.end());
     for (const auto& id : toRemove)
-        (void)DatabaseManager::Instance().Remove("snapshots", id);
+        (void)DatabaseManager::Instance().Remove("snapshots", id);  // lock-ok: in-memory map erase
     return Ok();
 }
 

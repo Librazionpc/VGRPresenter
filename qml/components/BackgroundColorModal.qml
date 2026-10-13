@@ -1,4 +1,6 @@
 import QtQuick
+import QtQuick.Controls
+import VGRPresenterUI
 
 // Reusable color/gradient palette + picker: solid swatches, gradient
 // swatches, a custom hex field, a custom from/to gradient builder, a live
@@ -10,12 +12,22 @@ import QtQuick
 // in anywhere a color needs picking, not just the Edit screen's Background
 // row.
 //
-// OPACITY: an Opacity slider (0-100%, default 100). The first version of it only faded the preview - the
+// OPACITY: an Opacity slider (0-100%). The first version of it only faded the preview - the
 // value was handed to consumers that ignored it, so it was removed. It is back and it WORKS: the alpha is
 // written INTO the applied colour (#AARRGGBB), so consumers need no change and nothing else is carried in the
 // payload. It applies to solid colours and to both stops of a gradient; Transparent stays transparent.
-// Besides that the palette offers Transparent (nothing is drawn - the checkerboard shows it, and it renders out
-// transparent) and six TINTS: black / white at 25%, 50% and 75% (#AARRGGBB), also typeable in the custom field.
+//
+// THE SLIDER IS THE ITEM'S OWN OPACITY, not a multiplier over it. It SEEDS from the alpha of the colour being
+// edited (a #89000000 tint opens at 54%) and WRITES that alpha back on Apply, so what the slider shows is
+// always the value the item carries. It used to open at a hardcoded 100% and multiply while applying: the
+// picker for a 54% tint read "100%", and nothing the user could do with the slider told them what the item
+// actually held ("it doesn't remember the item opacity level, it always defaults back to 100").
+//
+// The palette is REAL COLOURS + Transparent, and nothing else: the six hardcoded TINTS (black / white at 25%,
+// 50% and 75% as #AARRGGBB) that used to sit at the end were removed at the user's call - a translucent swatch
+// can only be drawn as a checkerboard with a faint tint over it, which read as a broken/missing swatch ("the
+// hardcoded error"). Transparency is the Opacity slider's job now (pick the real colour, then set how opaque it
+// is), or the CUSTOM field for anyone who wants to type an alpha hex directly (#80ffffff).
 //
 // The whole picker state is a single `selection` value —
 //   { kind: "color", color } | { kind: "gradient", from, to, name, subtitle }
@@ -34,9 +46,11 @@ Item {
 
     property bool open: false
 
-    // 0-100. Written into the applied colour's alpha (see withOpacity); reset to fully opaque whenever the picker opens.
+    // 0-100 — the alpha the item is being edited AT. Seeded from the colour it
+    // is opened on (seedWith), written back into the applied colour
+    // (withOpacity). No reset-on-open: that reset is what made the picker drop
+    // a translucent tint back to 100% every time it was reopened.
     property real opacityPct: 100
-    onOpenChanged: if (open) root.opacityPct = 100
 
     // Header text — rename when reusing the picker for something other than
     // the slide background (e.g. an item's border color).
@@ -51,11 +65,13 @@ Item {
     // themselves, so there's exactly one definition to change.
     readonly property string transparentValue: "transparent"
 
+    // Real colours only (+ Transparent, the deliberate "no background" pick): a
+    // translucent preset can only render as checkerboard + faint tint, which reads
+    // as a broken swatch. Opacity comes from the slider (or a typed alpha hex in
+    // CUSTOM), never from a hardcoded #AARRGGBB entry here.
     property var colorSwatches: [
         root.transparentValue, "#ffffff", "#000000", "#e74c3c", "#f39c12", "#f1c40f",
-        "#2ecc71", "#14b8a6", "#3b82f6", "#8b5cf6", "#6b7280",
-        // tints: translucent black and white (#AARRGGBB) for dimming bars and lower thirds
-        "#40000000", "#80000000", "#bf000000", "#40ffffff", "#80ffffff", "#bfffffff"
+        "#2ecc71", "#14b8a6", "#3b82f6", "#8b5cf6", "#6b7280"
     ]
     property var gradientSwatches: [
         { name: "Gradient #1", subtitle: "Purple → Blue", from: "#8b5cf6", to: "#3b82f6" },
@@ -91,6 +107,9 @@ Item {
         root.selectedColorIndex = -1
         root.liveKind = ""
         const hex = String(color ?? "")
+        // The slider follows the value being edited, whichever way the colour
+        // arrived (a saved #89000000 tint, a typed alpha hex, a swatch).
+        root.opacityPct = root.isValidHex(hex) ? root.alphaPctOf(hex) : 100
         if (root.isValidHex(hex)) {
             root.customHex = hex
             hexInput.text = hex   // (onTextChanged may set liveKind — cleared right after)
@@ -118,6 +137,16 @@ Item {
     function isValidHex(h) {
         return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(h)   // 8 digits = #AARRGGBB
     }
+    // The opacity percentage a colour value carries, for seeding the slider:
+    // 100 for an opaque #RRGGBB (and for anything unparseable — "transparent"
+    // is a swatch, not an alpha), and the leading byte's share of 255 for the
+    // #AARRGGBB form this picker itself writes on Apply (see fadedColor).
+    function alphaPctOf(color) {
+        const hex = String(color ?? "").trim()
+        if (hex.length === 9 && hex.charAt(0) === "#")
+            return Math.round(parseInt(hex.substr(1, 2), 16) / 255 * 100)
+        return 100
+    }
     function normalizeHex(h) {
         let hex = h.trim()
         if (hex.length > 0 && hex[0] !== "#")
@@ -137,6 +166,11 @@ Item {
         }
         root.customHex = hex
         hexInput.text = hex
+        // A typed alpha hex IS an opacity choice: hand it to the slider, so the
+        // two controls never show two different values for the one colour
+        // (typing #80ffffff moves the slider to 50%, and Apply then writes back
+        // what the slider says).
+        root.opacityPct = root.alphaPctOf(hex)
         const existing = root.colorSwatches.indexOf(hex)
         if (existing >= 0) {
             root.selectedColorIndex = existing
@@ -185,6 +219,21 @@ Item {
 
     // The one value Apply carries — swatch-driven or typed live, unified
     // into the same { kind, ... } shape either way.
+    // Does the Opacity row have anything to act on?
+    //
+    // NO for the Transparent swatch, and only for it: withOpacity() below
+    // deliberately hands Transparent back UNCHANGED (`sel.color ===
+    // transparentValue ? sel : …` — "no background" is not a colour with an
+    // alpha of 0%), and customSelection() applies the slider to a gradient's
+    // stops, never to this swatch. So on Transparent the slider could be
+    // dragged to any percentage and the applied value never moved — a control
+    // that reads as live but does nothing, which is exactly the confusion the
+    // row is disabled to prevent. A colour the user typed with its own alpha
+    // (`#80000000`) is NOT this case: the slider legitimately re-writes that
+    // alpha, so it stays live.
+    readonly property bool opacityApplies: !(root.selection.kind === "color"
+                                             && root.selection.color === root.transparentValue)
+
     readonly property var selection: {
         if (root.liveKind === "color")
             return { kind: "color", color: root.customHex }
@@ -216,15 +265,19 @@ Item {
         return -1
     }
 
-    // `color` (a colour string or value) with its alpha scaled by the Opacity slider, as "#AARRGGBB" / "#RRGGBB".
+    // `color` with its alpha REPLACED by the Opacity slider, as "#AARRGGBB" /
+    // "#RRGGBB". Replaced, not scaled: the slider holds the item's own opacity,
+    // so applying it twice (open → Apply without touching anything) must land on
+    // the same value rather than compounding 54% into 29%.
     function fadedColor(color) {
         const c = Qt.color(color)
-        return Qt.rgba(c.r, c.g, c.b, c.a * root.opacityPct / 100).toString()
+        return Qt.rgba(c.r, c.g, c.b, root.opacityPct / 100).toString()
     }
-    // A selection with the Opacity slider applied. Transparent stays transparent; at 100% nothing changes.
+    // A selection with the Opacity slider applied. Transparent stays transparent
+    // (it is a swatch, not a colour). At 100% an opaque colour comes back out
+    // unchanged; a translucent one comes back fully opaque, which is exactly
+    // what the slider then reads.
     function withOpacity(sel) {
-        if (root.opacityPct >= 100)
-            return sel
         if (sel.kind === "color")
             return sel.color === root.transparentValue ? sel : Object.assign({}, sel, { color: root.fadedColor(sel.color) })
         return Object.assign({}, sel, { from: root.fadedColor(sel.from), to: root.fadedColor(sel.to) })
@@ -271,6 +324,15 @@ Item {
     // Dim scrim behind the card; clicking it cancels, same as an
     // outside-click on any other overlay in this app. Shared ModalScrim —
     // also consumes wheel so the canvas behind can't scroll through it.
+    // The dialog belongs to the WINDOW, not to the pane that declares it. A modal
+    // declared inside a settings page (every Add / Edit dialog in Settings) must dim
+    // the whole app, not just that page's content column: parented in place its scrim
+    // covered one side of the settings card, so the dialog read as half-modal (user
+    // report: "the black box doesn't cover the whole settings modal, only one side").
+    // Reparented to the window overlay, this component has no scaled ancestor to
+    // inherit a scale from, so its CARD applies the app scale itself (see AppScale.qml).
+    parent: Overlay.overlay
+
     ModalScrim {
         anchors.fill: parent
         onDismissed: root.cancelled()
@@ -284,6 +346,10 @@ Item {
     // scrollable). Height now caps against the parent; the middle scrolls.
     Rectangle {
         id: card
+        // The app's one scale, on the card (see AppScale.qml) — never on the root,
+        // whose scrim IS the dialog's black box and has to stay window-sized.
+        scale: AppScale.cardScale(card)
+        transformOrigin: Item.Center
         anchors.centerIn: parent
         width: Math.min(460, root.width - 80)
         // Height is decided HERE, in one place: the content plus the chrome,
@@ -397,8 +463,9 @@ Item {
                     spacing: 12
 
                     // Checkerboard backing + the swatch on top. The
-                    // checkerboard stays useful for light colors with
-                    // transparency of their own (#80ffffff and friends).
+                    // checkerboard stays useful for a colour carrying its OWN
+                    // transparency: a typed alpha hex (#80ffffff), the opacity
+                    // slider's result, or a tint a document already used.
                     Item {
                         width: 36
                         height: 36
@@ -495,7 +562,8 @@ Item {
                             required property int index
                             required property string modelData
                             readonly property bool isTransparent: modelData === root.transparentValue
-                            // opaque swatches are just their colour; Transparent and the tints sit on a checkerboard
+                            // opaque swatches are just their colour; Transparent and a
+                            // colour with its own alpha (a typed hex, an old tint) sit on a checkerboard
                             readonly property bool isSolid: !isTransparent && Qt.color(modelData).a >= 1
                             readonly property bool selected: root.selectedSwatch === index
 
@@ -556,6 +624,10 @@ Item {
             }
 
             // OPACITY - the alpha of whatever is picked (colour or gradient); 100% = as chosen.
+            // GREYED OUT on the Transparent swatch: see opacityApplies. The row
+            // keeps its place in the layout (nothing moves when the pick
+            // changes) and dims, so it reads as "not available for this pick"
+            // rather than as a control that ignores the pointer.
             LabeledSlider {
                 objectName: "selfTestPaletteOpacity"
                 width: parent.width
@@ -565,6 +637,8 @@ Item {
                 suffix: "%"
                 value: root.opacityPct
                 onMoved: (v) => root.opacityPct = v
+                enabled: root.opacityApplies
+                opacity: root.opacityApplies ? 1 : 0.45
             }
 
             // GRADIENTS

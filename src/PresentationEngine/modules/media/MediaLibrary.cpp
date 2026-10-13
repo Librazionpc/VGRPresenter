@@ -1,6 +1,7 @@
 #include "modules/media/MediaLibrary.hpp"
 
 #include "core/config/Json.hpp"
+#include "core/recovery/DocumentRecovery.hpp"
 #include "modules/search/TextMatching.hpp"
 #include "platform/PlatformAccessor.hpp"
 
@@ -152,8 +153,23 @@ Result<void> MediaLibrary::Load() {
     auto text = fs.ReadText(storageFile_);
     if (!text.ok()) return text.error();
     auto parsed = json::Parse(text.value());
-    if (!parsed.ok())
-        return Error::Make(Err::ParseError, kModule, "media folder list is damaged: " + parsed.error().message);
+    // A parse failure AND a document with no 'folders' array are the same loss:
+    // nothing loadable is in there, and reading it as "no folders" then saving
+    // over it is how the bytes disappear.
+    const std::string problem =
+        parsed.ok() ? recovery::DocumentShapeProblem(parsed.value(), "folders", json::Value::Type::Array)
+                    : parsed.error().message;
+    if (!problem.empty()) {
+        // SELF-HEALING: the folder list is an internal document; set the damaged
+        // file aside as evidence and load no folders, so the Media pane opens on
+        // an empty (re-scannable) library instead of failing every read.
+        (void)recovery::SetAsideDamagedDocument(storageFile_, kModule, problem);
+        std::lock_guard<std::mutex> lock(mutex_);
+        order_.clear();
+        items_.clear();
+        scanned_.clear();
+        return {};
+    }
 
     std::lock_guard<std::mutex> lock(mutex_);
     order_.clear();
@@ -170,16 +186,23 @@ Result<void> MediaLibrary::Load() {
                 if (!known) order_.push_back(path);
             }
 
-    // The remembered index (what was in each folder last time). Anything wrong with it is ignored:
-    // it is only a head start, and the first Scan() of each folder replaces it.
+    // The remembered index (what was in each folder last time). It is an
+    // internal document like the folder list above, so a damaged one is set
+    // aside as evidence and the library comes up unscanned — the first Scan()
+    // of each folder rebuilds it — instead of the bytes being overwritten by a
+    // save the operator never got told about.
     if (!fs.Exists(indexFile_)) return {};
     auto indexText = fs.ReadText(indexFile_);
     if (!indexText.ok()) return {};
     auto index = json::Parse(indexText.value());
-    if (!index.ok()) return {};
-    const auto* byFolder = index.value().Find("folders");
-    const auto* object = byFolder ? byFolder->asObject() : nullptr;
-    if (!object) return {};
+    const std::string indexProblem =
+        index.ok() ? recovery::DocumentShapeProblem(index.value(), "folders", json::Value::Type::Object)
+                   : index.error().message;
+    if (!indexProblem.empty()) {
+        (void)recovery::SetAsideDamagedDocument(indexFile_, kModule, indexProblem);
+        return {};
+    }
+    const auto* object = index.value().Find("folders")->asObject();
     for (const std::string& folder : order_) {
         auto entry = object->find(folder);
         if (entry == object->end()) continue;
@@ -227,10 +250,10 @@ std::string MediaLibrary::BuildIndexLocked() const {
 }
 
 void MediaLibrary::SaveIndex(const std::string& text) const {
-    auto& fs = platform::PlatformAccessor::Get().Filesystem();
-    const size_t cut = indexFile_.find_last_of("/\\");
-    if (cut != std::string::npos && cut > 0) (void)fs.CreateDirectories(std::string_view(indexFile_).substr(0, cut));
-    (void)fs.Write(indexFile_, text);
+    // ATOMIC: the media index is the only record of the user's folders and
+    // metadata; a truncated one loses the whole library view. Best-effort by
+    // signature, but the swap still guarantees a readable file.
+    (void)platform::PlatformAccessor::Get().Filesystem().WriteAtomic(indexFile_, text);
 }
 
 Result<void> MediaLibrary::Save() const {
@@ -240,13 +263,8 @@ Result<void> MediaLibrary::Save() const {
     root["folders"] = json::Value(std::move(folders));
     const std::string text = json::Value(std::move(root)).ToString();
 
-    auto& fs = platform::PlatformAccessor::Get().Filesystem();
-    const size_t cut = storageFile_.find_last_of("/\\");
-    if (cut != std::string::npos && cut > 0) {
-        auto made = fs.CreateDirectories(std::string_view(storageFile_).substr(0, cut));
-        if (!made.ok()) return made.error();
-    }
-    return fs.Write(storageFile_, text);
+    // ATOMIC: same document class as the index above (folder order, metadata).
+    return platform::PlatformAccessor::Get().Filesystem().WriteAtomic(storageFile_, text);
 }
 
 Result<void> MediaLibrary::AddFolder(std::string_view path) {
@@ -395,6 +413,15 @@ std::vector<LibrarySubfolder> MediaLibrary::Subfolders(std::string_view libraryF
 }
 
 std::vector<LibraryItem> MediaLibrary::Items(std::string_view folder) const {
+    // The PAL path resolution runs BEFORE the library lock: a filesystem call
+    // must never sit under mutex_ (the lock-scope guard flags it, and a slow
+    // volume would otherwise stall every other library reader).
+    std::string absoluteFolder;
+    if (!folder.empty()) {
+        auto absolute = platform::PlatformAccessor::Get().Filesystem().Absolute(folder);
+        absoluteFolder = absolute.ok() ? absolute.value() : std::string(folder);
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<LibraryItem> out;
     if (!folder.empty()) {
@@ -403,8 +430,7 @@ std::vector<LibraryItem> MediaLibrary::Items(std::string_view folder) const {
             return out;
         }
         // A folder inside a library folder: everything under it (its own files and its subfolders').
-        auto absolute = platform::PlatformAccessor::Get().Filesystem().Absolute(folder);
-        std::string prefix = Norm(absolute.ok() ? absolute.value() : std::string(folder));
+        std::string prefix = Norm(absoluteFolder);
         prefix.push_back('/');
         for (const std::string& f : order_)
             if (auto it = items_.find(f); it != items_.end())

@@ -45,6 +45,21 @@ struct KernelPanic : IEvent {
     explicit KernelPanic(const Error& e) : error(e) {}
 };
 
+// One subsystem could not initialize, so the kernel booted WITHOUT it: the
+// engine is up and the feature behind that system is not. Boot degrades rather
+// than aborting (see Kernel::Boot) — the abort is what turned one unreadable
+// data file into a session where every screen answered "the engine is not
+// running yet". Published once per degraded system, right after the boot walk.
+struct SubsystemDegraded : IEvent {
+    static constexpr const char* kTopic = "engine.kernel.subsystem_degraded";
+    std::string system;   // the boot step's name, e.g. "Database"
+    int code = 0;
+    std::string message;
+    SubsystemDegraded() = default;
+    SubsystemDegraded(std::string s, int c, std::string m)
+        : system(std::move(s)), code(c), message(std::move(m)) {}
+};
+
 // --- Cross-system diagnostics (00 §7) ---
 struct SystemHealthChanged : IEvent {
     static constexpr const char* kTopic = "engine.system.health_changed";

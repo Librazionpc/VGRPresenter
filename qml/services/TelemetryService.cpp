@@ -108,6 +108,11 @@ QVariantMap TelemetryService::sampleHealth()
     // resource dials, which show charge as its own gauge.
     double batteryPct = -1.0;
     bool onBattery = false;
+    // Plugged in AND topping up (platform::Snapshot::batteryCharging). Smart
+    // Config's battery dial caption reads it: "Battery · charging" is a
+    // different state from plain "Battery" (on AC, holding), and the dial the
+    // user watches while the app runs on a laptop has to say which one it is.
+    bool charging = false;
 
     if (bps::platform::PlatformAccessor::Installed()) {
         const bps::platform::Snapshot s = bps::platform::PlatformAccessor::Get().Sample();
@@ -128,6 +133,7 @@ QVariantMap TelemetryService::sampleHealth()
         if (s.batteryPercent >= 0)
             batteryPct = s.batteryPercent;
         onBattery = s.onBattery;
+        charging = s.batteryCharging;
         if (s.totalRamBytes > 0)
             memUsedPct = std::clamp(100.0 * static_cast<double>(s.totalRamBytes - s.availableRamBytes)
                                         / static_cast<double>(s.totalRamBytes),
@@ -177,5 +183,6 @@ QVariantMap TelemetryService::sampleHealth()
         { QStringLiteral("reason"), reason },
         { QStringLiteral("batteryPct"), batteryPct < 0.0 ? -1 : static_cast<int>(std::lround(batteryPct)) },
         { QStringLiteral("onBattery"), onBattery },
+        { QStringLiteral("charging"), charging },
     };
 }

@@ -139,12 +139,35 @@ Item {
     // after clicking the logo, over "New show", …), so counting it kept
     // the flyout popped open over the menu without Settings ever being
     // touched (the reported overlay bug).
+    // RE-ENTRANCY GUARD. The remaining "Binding loop detected for property
+    // settingsFlyoutOpen" was not an accidental binding: showing the flyout
+    // (settingsFlyoutVisible, written from the changed-handler below) puts it
+    // under a pointer that has not moved, and DropdownPanel delivers that row
+    // enter (itemHovered → settingsFlyoutHovered → recomputeSettingsFlyout)
+    // while the previous recompute is still writing settingsFlyoutOpen. Qt
+    // reports the nested write as a loop on that property. The nested call is
+    // COALESCED rather than dropped — its inputs are the newer truth (the
+    // flyout's own geometry can only be read once it is visible) — so the
+    // outer call re-runs its computation and settles; the iteration cap means
+    // a source that fires on every iteration cannot spin.
+    property bool flyoutRecomputing: false
+    property bool flyoutRecomputeQueued: false
     function recomputeSettingsFlyout() {
-        settingsFlyoutOpen = root.openMenu === "logo"
-            && (root.settingsPinned
-                || root.settingsRowHovered
-                || root.settingsFlyoutHovered
-                || (root.settingsFlyoutVisible && AppCursor.hovered(settingsFlyout)))
+        if (flyoutRecomputing) {
+            flyoutRecomputeQueued = true
+            return
+        }
+        flyoutRecomputing = true
+        let settle = 0
+        do {
+            flyoutRecomputeQueued = false
+            settingsFlyoutOpen = root.openMenu === "logo"
+                && (root.settingsPinned
+                    || root.settingsRowHovered
+                    || root.settingsFlyoutHovered
+                    || (root.settingsFlyoutVisible && AppCursor.hovered(settingsFlyout)))
+        } while (flyoutRecomputeQueued && ++settle < 8)
+        flyoutRecomputing = false
     }
     // Clicking "Settings" pins the flyout open (click again to unpin) —
     // so the section list is selectable at leisure, not in a race against
@@ -154,7 +177,10 @@ Item {
 
     property bool settingsFlyoutVisible: false
     onSettingsFlyoutOpenChanged: {
-        if (root.settingsFlyoutOpen) {
+        // The implicit handler value, not `root.settingsFlyoutOpen`: reading the
+        // property this handler is reacting to, inside the write that triggered
+        // it, is the other half of what Qt flagged.
+        if (settingsFlyoutOpen) {
             settingsCloseTimer.stop()
             root.settingsFlyoutVisible = true
         } else {
@@ -291,6 +317,9 @@ Item {
 
         Item {
             id: logoButton
+            // Self-test handle: the logo is what opens the menu whose
+            // "Settings" row the binding-loop scenario hovers.
+            objectName: "selfTestMenuLogo"
             width: logoText.implicitWidth
             height: parent.height
 
@@ -482,6 +511,9 @@ Item {
     // own `clip: true`; positioned imperatively via positionSettingsFlyout.
     DropdownPanel {
         id: settingsFlyout
+        // Self-test handle: the scenario reads this panel's own `visible` as
+        // evidence the hover sequence really flew the flyout out.
+        objectName: "selfTestSettingsFlyout"
         visible: root.settingsFlyoutVisible
         fitContentWidth: true
         model: root.settingsSubmenuItems

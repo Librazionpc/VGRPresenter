@@ -23,6 +23,7 @@
 #include "core/common/Common.hpp"
 
 #include <atomic>
+#include <array>
 #include <functional>
 #include <map>
 #include <unordered_map>
@@ -63,6 +64,7 @@ struct TheTableSearchHit {
     int chapter = 0;
     int verse = 0;
     std::string snippet;     // the hit's paragraph (trimmed)
+    std::string fullText;    // matched paragraph (and successor when spanned)
     double score = 0.0;
     // True when the words were spread across this paragraph AND its next one
     // (neither alone had them all) — the preview shows both paragraphs for
@@ -81,6 +83,18 @@ struct TableNote {
     std::string text;
     int64_t createdMs = 0;
     int64_t modifiedMs = 0;
+};
+
+// A sermon's citation, taken apart: each of the three pieces the citation line
+// is built from, on its own. A template that puts the date code, the year or the
+// sermon's title in a slot of its own asks for one of these ({table_code},
+// {table_year}, {table_title}) instead of slicing the assembled line. Unknown
+// chapter -> every field empty.
+struct SermonParts {
+    std::string year;     // the year book's display name: "1947"
+    std::string code;     // "47-0412"
+    std::string title;    // "Faith Is The Substance" (the stored code prefix removed)
+    std::string citation; // the whole line: "47-0412 - Faith Is The Substance"
 };
 
 class TheTableLibrary final {
@@ -111,7 +125,23 @@ public:
     // --- Search -------------------------------------------------------------------
     // Whole-library word search (case-insensitive, ALL terms must appear in a
     // paragraph). Best-first by term coverage. `limit` caps the result count.
-    Result<std::vector<TheTableSearchHit>> Search(std::string_view query, size_t limit = 60) const;
+    //
+    // `exactWords` is the search boxes' padlock ("i want exact word search"): the
+    // typed words must appear VERBATIM as whole words. The default fuzzy mode
+    // completes and corrects the spelling ("friend" -> "friends", "thn" ->
+    // "then") and counts a word-start extension or an inner substring as a hit
+    // ("friend" in "boyfriend"); locked, none of that happens — a paragraph
+    // qualifies only when it carries exactly the words that were typed.
+    // `scopeBookId` + `scopeChapter` are the reference panes' CHAPTER LOCK: when
+    // the pane's search is locked to what is open, only that one sermon is
+    // searched (and its paragraphs are the results) — "faith is the substance"
+    // open means the words are looked for in that sermon, not in the 1,205 others.
+    // `scopeChapter == 0` = every sermon of `scopeBookId`; empty `scopeBookId` =
+    // the whole library, which is the search every other surface still gets.
+    Result<std::vector<TheTableSearchHit>> Search(std::string_view query, size_t limit = 60,
+                                                 bool exactWords = false,
+                                                 std::string_view scopeBookId = "",
+                                                 int scopeChapter = 0) const;
 
     // A sermon's citation line in the way these sermons are cited: the year
     // without its "19", the sermon's date code, its title stripped to
@@ -121,6 +151,30 @@ public:
     // `chapter` is the sermon's number within its year book; `verse` 0 gives
     // the sermon-level citation (no paragraph number). Unknown chapter -> {}.
     std::string Citation(std::string_view bookId, int chapter, int verse = 0) const;
+
+    // The citation's LEADING CODE alone: the same "<yy>-<code>" the citation
+    // line opens with, with no title and no paragraph number —
+    //   "47-0412 - Faith Is The Substance 3"  ->  "47-0412"
+    // A sermon is cited by that code far more often than by its full title, and
+    // a template that has room for a date code has nowhere to put eleven words
+    // ({table_code}). Unknown chapter -> {}.
+    std::string CitationCode(std::string_view bookId, int chapter) const;
+
+    // The same citation, in its parts (see SermonParts). Built from the SAME
+    // SermonCitation line the reader sees — one formatter — so a template that
+    // places the title alone can never disagree with the citation that carries it.
+    SermonParts Parts(std::string_view bookId, int chapter) const;
+
+    // The one form a typed HANDLE and a stored citation line are compared in:
+    // lower case with the spaces beside a dash removed, so "47-1020",
+    // "47 - 1020" and "47 -1020" all name the same sermon — people write a date
+    // code either way — while a title's own spaces still have to match
+    // literally. Static (and the library's, not a caller's): the citation line
+    // is WRITTEN here (SermonCitation), so the rule for reading one back belongs
+    // beside it. The QML service that searches citations and the reference pane's
+    // dropdown both call it, so the box that jumps and the list that appears
+    // can never disagree about what was typed.
+    static std::string CitationNeedle(std::string_view handle);
 
     // --- User data (notes and highlights, the Bible module's counterpart) ---
     // Always keyed by the SERMON'S OWN location, never inside the text: a
@@ -164,21 +218,46 @@ public:
     // Returns the new verse's reference ("1953 12:1") on success.
     Result<std::string> ImportSermon(std::string_view fileName, std::string_view content);
 
+    // The one FORMAT gate both import flows go through, before anything is
+    // parsed or stored: a file that is not a .txt or a .pdf is refused by name
+    // (the file dialog's "All files" option lets anything be picked, and a
+    // .docx read as text is pages of mangled bytes, not a sermon), and a file
+    // whose own first bytes say it is something else - a renamed ZIP/Office
+    // document, an image, an executable - is refused whatever it is called.
+    // Answers the reason as the message the caller shows, or nothing when the
+    // name and the leading bytes are a sermon file.
+    // (`true` = the content may be read as a sermon: .txt or .pdf.)
+    static bool IsSermonFile(std::string_view fileName, std::string_view content,
+                             std::string& whyNot);
+
     // The clean-up stage every import goes through first: a .pdf (its text read out) or a .txt (of any encoding) becomes plain UTF-8
     // text - running heads, page numbers, control characters and stray spacing removed, one paragraph per block, a blank line between.
-    // Stores nothing; fails when the file has no readable text.
+    // Stores nothing; fails when the file is not a sermon file (see IsSermonFile) or has no readable text.
     static Result<std::string> ConvertToCleanText(std::string_view fileName, std::string_view content);
 
     // Whole-folder import (the "Add sermons folder" flow): every .pdf/.txt
     // under `folderPath`, recursively, imported by the same name mapping.
     // `progress` fires per file (done, total, current name); returns the
-    // imported / skipped-duplicate / failed counts.
+    // imported / skipped-duplicate / failed counts, and NAMES what it refused.
     // With `convertedRoot`, each PDF's clean text is also kept there as "<convertedRoot>/<version>/<year>/<name>.txt" (to read and check),
     // and reused on a later import while it is newer than the PDF.
     struct ImportReport {
         int imported = 0;
         int skipped = 0;   // a sermon with the same year + title is already in
-        int failed = 0;
+        int failed = 0;    // a .txt/.pdf that could not be read or parsed
+        // Files under the folder that are not sermon formats at all. They are
+        // never read, and they are NOT failures - but they are counted and
+        // named, because a folder of 40 PDFs and 300 spreadsheets used to
+        // report "40 imported" and say nothing about the other 300.
+        int unsupported = 0;
+        // WHY a file was refused, as "<name>: <reason>", in the library's own
+        // words - the same sentence the single-file flow shows. ONE ENTRY PER
+        // REFUSED FILE, no cap: a list that stopped at five explained only the
+        // first five of a folder's rejects, so the operator could not tell which
+        // files to fix (the counts above are exact either way, but a count is
+        // not an answer). Each entry is one short sentence, so the list is
+        // bounded by the folder it came from.
+        std::vector<std::string> rejected;
     };
     Result<ImportReport> ImportFolder(
         std::string_view folderPath,
@@ -232,6 +311,15 @@ private:
     // Search()'s scan and kept — the fallback scan must not re-lowercast the
     // library per query. Cleared whenever sermons change (Load/imports).
     mutable std::unordered_map<std::string, std::vector<std::string>> lowerParagraphs_;
+    // 16k bits keeps false positives low for a sermon with thousands of unique
+    // words, while staying small enough to keep summaries for the whole library.
+    using WordBloom = std::array<uint64_t, 256>;
+    // Coarse, no-false-negative sermon summaries built by the background
+    // search indexer. Exact searches use them to skip sermons missing a query
+    // word before entering the paragraph scorer.
+    std::unordered_map<std::string, WordBloom> exactWordBlooms_;
+    bool exactWordBloomsReady_ = false;
+    uint64_t libraryRevision_ = 0;
 };
 
 } // namespace bps::library

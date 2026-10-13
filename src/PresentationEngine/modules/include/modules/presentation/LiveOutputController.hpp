@@ -24,6 +24,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -78,6 +79,9 @@ public:
     void StopLiveAsync();
 
     bool IsLive() const noexcept { return running_.load(); }
+    bool IsLiveContentReplacementPending() const noexcept {
+        return liveContentReplacementPending_.load();
+    }
     uint64_t FramesSent() const noexcept { return frames_.load(); }
 
     // --- Idle preview (a show is open but nothing is on air) ---------------
@@ -118,6 +122,7 @@ private:
     LiveOutputController() = default;
 
     void Loop();
+    void ApplyPendingLiveContent();
     // The shared off-air cleanup both stop paths run (unbind the runtime,
     // clear per-session state). Caller holds lifecycle_.
     Result<void> StopLiveTail();
@@ -147,6 +152,12 @@ private:
     // std::thread over the still-joinable one — std::terminate), and two
     // rapid stops can't race each other's reaper threads.
     std::mutex lifecycle_;
+    // Live picks are produced by the UI thread, but replacing a presentation
+    // recompiles scenes for every output. Queue the newest pick here so the
+    // render worker can apply it without making the UI wait on control_.
+    std::mutex pendingContentMutex_;
+    std::optional<presentation::Presentation> pendingLiveContent_;
+    std::atomic<bool> liveContentReplacementPending_{false};
     // The stop reaper: joins the render worker OFF the GUI thread (StopLive
     // keeps its synchronous form for Shutdown/Reset, which must finish
     // before the process ends). Started detached per async stop; lifecycle_

@@ -28,9 +28,17 @@ Item {
         ghost.visible = true
         ghost.Drag.active = true
     }
+    // (x, y) arrive as WINDOW coordinates of the pointer (every DragSource hands
+    // them over that way), but this layer is placed in the screens' scaled design
+    // space (Main.qml) so the chip matches the scale of the pane it came from.
+    // The pointer position is therefore converted into that space here — the two
+    // must stay in step: drawing the chip in window units over a scaled UI made it
+    // visibly larger than the row being dragged.
     function move(x, y) {
-        ghost.x = x + 12
-        ghost.y = y + 12
+        const origin = root.mapToItem(null, 0, 0)
+        const s = root.scale > 0 ? root.scale : 1
+        ghost.x = (x - origin.x) / s + 12
+        ghost.y = (y - origin.y) / s + 12
     }
     // The pointer was released: whatever DropArea is under the chip gets the drop.
     function drop() {

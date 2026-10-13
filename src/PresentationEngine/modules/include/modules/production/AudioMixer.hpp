@@ -58,6 +58,26 @@ public:
     void BindSourceDevice(const std::string &sourceNodeId, uint32_t waveinId);
     void UnbindSource(const std::string &sourceNodeId);
 
+    // ---- program-mix metering ---------------------------------------------
+    // What this mixer ACTUALLY renders, per channel, for the UI's output meters.
+    // Those meters used to read a WASAPI LOOPBACK capture of the machine's default
+    // render endpoint, which was wrong in two visible ways: merely going live opened
+    // a capture session on the OS (the app appeared in Windows' audio-session list
+    // uninvited), and a loopback picks up every OTHER app's audio on that endpoint,
+    // so the bars moved whenever the machine made any sound. Reading the mix the app
+    // itself renders is the honest source: silence here means the program mix really
+    // is silent.
+    struct ProgramLevels {
+        uint32_t channelCount = 0;          // 0 = nothing rendered yet
+        float peaks[2] = {0.0f, 0.0f};      // peak-held across chunks, decaying
+        float rms[2] = {0.0f, 0.0f};
+        uint64_t framesRendered = 0;        // since construction
+    };
+    // Safe from any thread (the UI polls it at ~20 Hz while the render thread
+    // writes it). Peaks are HELD across chunks with a decay, so a reader slower
+    // than the render callback sees a level, not a peak-then-zero flicker.
+    ProgramLevels ProgramLevel() const;
+
     // Diagnostics for the settings screen.
     bool Attached() const { return graph_ != nullptr; }
 
@@ -69,7 +89,21 @@ private:
     // TapFormat().sampleRateHz, the tap is linearly resampled to match
     // (found in review: this used to be silently skipped, playing a
     // mismatched-rate tap at the wrong pitch/speed).
-    bool SumSource(const std::string &sourceNodeId, const VolumeControl &busVol,
+    //
+    // busGainL/busGainR are the BUS plane's own per-side trims (its node's
+    // "uiChannelGain<n>" meta, read by Render) — a bus card's L/R buttons
+    // write those, so closing one side of a BUS closes that side of the bus's
+    // summed output here, exactly the way closing a side of a SOURCE closes
+    // it in this same function.
+    //
+    // busNodeId is the BUS PLANE being summed ("bus:N#a"): a source row's
+    // routing matrix writes a per-channel mask FOR THAT BUS
+    // ("uiRouteMask:<busNodeId>"), so one source can contribute its left channel
+    // to one bus and its right to another. No mask = the whole source, the
+    // contract an older graph and the bus dialog's own route carry.
+    bool SumSource(const std::string &sourceNodeId, const std::string &busNodeId,
+                   const VolumeControl &busVol,
+                   float busGainL, float busGainR,
                    float *out, uint32_t frames, uint32_t channels, uint32_t outRateHz);
 
     // Runs `node`'s ProcessingStage chain over one already-resampled STEREO
@@ -99,6 +133,13 @@ private:
     void ApplyProcessing(const NodeInfo &node, SourceDspState &state,
                         float &l, float &r, uint32_t outRateHz);
 
+    // Publishes the program levels of one rendered chunk (see ProgramLevels).
+    // `out` is interleaved at `channels`; only the first two channels are kept.
+    void PublishLevels(const float *out, uint32_t frames, uint32_t channels);
+    // A chunk that rendered nothing: decay the held peaks toward zero instead of
+    // leaving the meter frozen at the last thing it happened to catch.
+    void PublishSilence();
+
     ProductionGraph *graph_ = nullptr;   // not owned
     bps::platform::IAudio *taps_ = nullptr;   // not owned; the sample source
     std::mutex mutex_;                   // guards deviceTable_ and dspState_
@@ -115,6 +156,14 @@ private:
     // in SumSource. Resize-only, reused.
     std::vector<float> scratch_;
     std::atomic<float> masterGain_{1.0f};
+    // Program-level publication: written on the render thread, read on the UI
+    // thread. A separate mutex from mutex_ (which the render path already holds
+    // when it publishes) and never taken while holding that one.
+    mutable std::mutex levelMutex_;
+    ProgramLevels programLevel_;
+    // How much of the held peak survives one chunk — a readable fall-off for a
+    // meter, not an instant drop to zero the moment a source goes quiet.
+    static constexpr float kPeakHold = 0.85f;
 };
 
 } // namespace bps::production

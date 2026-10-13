@@ -86,6 +86,9 @@ signals:
 private:
     explicit ProjectService(QObject *parent = nullptr);
     void load();
+    // Opens the project recorded as "session.lastProject". NOT called at startup
+    // (see the definition): the app starts on the home screen with no project
+    // open, and a project opens when the operator opens one.
     void restoreLastProject();
     void refresh();
     void report(const QString &message) const;

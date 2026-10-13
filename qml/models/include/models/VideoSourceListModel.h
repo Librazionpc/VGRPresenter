@@ -41,6 +41,25 @@ struct VideoSourceItem
     // streams (NDI embeds audio with its video), 0-100. Ignored (and shown
     // as no slider) for camera/screen kinds.
     qreal level = 0;   // silence by default — a new source starts muted-down
+    // PER-SIDE trim of this row's audio, index 0 = L, 1 = R (1.0 = open,
+    // 0.0 = that side closed). The SAME convention AudioInputListModel's
+    // channelGains and a bus's use, so an L/R pill means the same thing on
+    // every card in the app.
+    //
+    // WHY A ROW NEEDS IT AT ALL: the Media pane's video cards show the small
+    // L/R pair over their state window, and both pills used to write the
+    // row's single `muted` flag — clicking L closed BOTH sides and both pills
+    // went red at once (the "if i click on the L or R it closes all"
+    // report). A pill is a per-side control everywhere else in the app, so
+    // it is one here too. Stored state like level/mute (a camera/screen feed
+    // has no engine audio node to push a trim into yet).
+    QList<qreal> channelGains;
+    // The per-side TRIM each side was closed with (index 0 = L, 1 = R; 0/absent
+    // = nothing remembered). Closing writes gain 0 to channelGains, which loses
+    // the level — this keeps it, so reopening the side from the video card's
+    // pill (or from the Edit Video Source dialog's knob) gives the trim back
+    // instead of unity (models/ChannelTrim.h). Persisted with the roster.
+    QList<qreal> channelTrims;
 };
 
 // QML singleton backing Settings · Audio & Video's Video Sources column and
@@ -66,11 +85,22 @@ public:
     // BusListModel's construction-time rebuild, before any QML screen exists.
     static VideoSourceListModel *Instance();
     static VideoSourceListModel *create(QQmlEngine *engine, QJSEngine *jsEngine);
+    // THE ONE OBJECT — the video half of AudioInputListModel::adoptInstance's
+    // contract, adopted from the engine by main.cpp once the module is imported,
+    // because the engine default-constructs its own QML_SINGLETON instance (see
+    // StyleListModel::create's note). The displaced instance is deactivated: it
+    // may not write the roster or push a row's state into the graph any more.
+    static void adoptInstance(VideoSourceListModel *roster);
 
     // Row <-> stable id. rowForStableId returns -1 when the id belongs to a
     // removed row — callers treat that as "no such route".
     static QString stableIdForRow(int row);
     static int rowForStableId(const QString &id);
+
+    // The row's stable id, HEALING a row that has none (see
+    // AudioInputListModel::idForRow — the video half of the same guarantee:
+    // a row the board can see can always be routed).
+    Q_INVOKABLE QString idForRow(int row);
     enum Role {
         NameRole = Qt::UserRole + 1,
         KindRole,
@@ -78,6 +108,7 @@ public:
         ModeRole,
         MutedRole,
         LevelRole,
+        ChannelGainsRole,
     };
     Q_ENUM(Role)
 
@@ -108,12 +139,54 @@ public:
     Q_INVOKABLE void setMode(int index, const QString &mode);
     Q_INVOKABLE void setMuted(int index, bool muted);
     Q_INVOKABLE void setLevel(int index, qreal level);
+    // One side of this row's audio trim — the video card's L/R pill.
+    // Mirrors AudioInputListModel::channelGain/setChannelGain exactly
+    // (absent = unity, and 0 IS "this side is closed").
+    Q_INVOKABLE qreal channelGain(int index, int channel) const;
+    Q_INVOKABLE void setChannelGain(int index, int channel, qreal gain);
+    // The video card's L/R pill write — the same one reopen policy the source
+    // and bus cards use (models/ChannelTrim.h).
+    Q_INVOKABLE void toggleChannelGain(int index, int channel);
+    // The gain this side should come back at (never the 0 that "closed" stores).
+    Q_INVOKABLE qreal channelTrim(int index, int channel) const;
+    Q_INVOKABLE void setChannelTrim(int index, int channel, qreal trim);
 
     // Snapshot for the Edit Video Source dialog.
     Q_INVOKABLE QVariantMap getSource(int index) const;
 
+    // Has the store ANSWERED this roster yet? Same contract as
+    // AudioInputListModel::restoreDone: BusListModel's ghost sweep
+    // (pruneOrphanSourceEdges) treats a roster as the authority for which
+    // "vsrc:<id>" nodes are still live, and an empty roster that simply has not
+    // loaded yet must never be read as "every video source is an orphan".
+    static bool restoreDone();
+
+    // REAL PUSH — this row's audio state onto its PRODUCTION GRAPH SOURCE NODE
+    // ("vsrc:<id>"), the same way AudioInputListModel::pushEffectsToGraph
+    // writes an input row's. Level/mute become the node's VolumeControl and the
+    // per-side trims its "uiChannelGain<n>" meta, which is exactly what the
+    // playout mixer (AudioMixer::SumSource) reads when a bus sums this row.
+    //
+    // WHY IT DID NOT EXIST: every video row's volume, mute and L/R trims were
+    // STORED state only (the roster JSON) — nothing ever reached the graph, so a
+    // media/NDI row fed into a bus played at unity whatever its card said, and
+    // clicking its L/R pill changed nothing audible. No-op when the row is
+    // unrouted (no node = nothing to feed) or the engine is not booted; the
+    // route-creating call re-pushes, so a saved fader survives being patched
+    // later.
+    void pushAudioToGraph(int index);
+
 private:
     static inline VideoSourceListModel *s_instance = nullptr;
+
+    // False once this instance has been displaced by an adopted one (see
+    // adoptInstance).
+    bool m_active = true;
+    void deactivate();
+
+    // The single write of the trim list (the public faces above only decide WHEN
+    // a trim is worth remembering). true when it changed anything.
+    bool writeChannelTrim(int index, int channel, qreal trim);
 
     // ---- Roster persistence (session.videoRoster via the settings store,
     // the SAME contract as AudioInputListModel's session.audioRoster): every
@@ -129,4 +202,5 @@ private:
 
     QList<VideoSourceItem> m_sources;
     int m_nextId = 1;   // stable-id counter ("v<n>"): renumbered past the restored max at restore time
+    bool m_restoreDone = false;   // the store has answered once (see restoreDone)
 };

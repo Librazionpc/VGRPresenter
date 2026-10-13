@@ -125,7 +125,7 @@ size_t AssetManager::ShrinkTo(size_t targetBytes) {
 
 void AssetManager::OnPressure(const events::ResourcePressureHigh& e) {
     if (e.level < PressureLevel::High) return;
-    // Only memory pressure justifies dropping cached assets â evicting them because the
+    // Only memory pressure justifies dropping cached assets — evicting them because the
     // CPU is busy frees nothing that matters and just makes the next load slower.
     if (e.resource != "memory") return;
     size_t target = 0;

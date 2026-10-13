@@ -174,6 +174,16 @@ Item {
     }
 
     Rectangle {
+        id: dialogCard
+        // Hook for the modal-fit scenario — same convention as ModalCard's card:
+        // the modal ROOT always fills the window, so only the card can show the
+        // scale it is drawn at.
+        objectName: root.objectName === "" ? "" : root.objectName + "_card"
+        // The app's one scale, on the card (see AppScale.qml) — never on the root
+        // above, whose scrim IS the dialog's black box and has to stay
+        // window-sized.
+        scale: AppScale.cardScale(dialogCard)
+        transformOrigin: Item.Center
         width: Math.min(560, root.width - 80)
         height: Math.min(root.height - 80, bodyCol.implicitHeight + 2 * Theme.space6)
         anchors.centerIn: parent

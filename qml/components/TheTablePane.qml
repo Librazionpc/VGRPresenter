@@ -41,12 +41,20 @@ ReferencePane {
         readonly property var setTemplate: (id) => TheTableService.setTemplate(id)
         readonly property var books: (id) => TheTableService.books(id)
         readonly property var chapter: (src, bookId, n) => TheTableService.chapter(bookId, n)
+        readonly property var chapterAsync: (src, bookId, n, token) => TheTableService.chapterAsync(bookId, n, token)
         readonly property var reference: (book, ch, nums) => TheTableService.reference(book, ch, nums)
         readonly property var resolve: (text, srcId) => TheTableService.resolve(text)
-        readonly property var search: (text, srcId) => TheTableService.search(text)
+        // `exact` = the pane's padlock: the typed words must appear verbatim as
+        // whole words in the sermon (the library matches them exactly when set).
+        // CHAPTER LOCK: The Table's books are the year collections and its
+        // chapters are the sermons, so the pane's search field offers the same
+        // lock Scripture has — the search is limited to the sermon on screen
+        // (the year id and sermon number the pane passes as `bookId`/`chapter`).
+        readonly property bool supportsChapterLock: true
+        readonly property var search: (text, srcId, exact, bookId, chapter) => TheTableService.search(text, 60, exact, false, bookId, chapter)
         // ASYNC pill search: the pane prefers this when present (token-guarded,
         // answers via TheTableService.searchResultsReady -> the pane's Connections).
-        readonly property var searchAsync: (text, srcId, token) => TheTableService.searchAsync(text, 60, token)
+        readonly property var searchAsync: (text, srcId, token, exact, bookId, chapter) => TheTableService.searchAsync(text, 60, token, exact, bookId, chapter)
         readonly property var preview: (src, bookId, ch, nums) => TheTableService.preview(bookId, ch, nums)
         // The picked paragraphs as show slides, template-split by the tab's options.
         readonly property var slides: (src, bookId, ch, nums) => TheTableService.slides(bookId, ch, nums)
@@ -70,9 +78,13 @@ ReferencePane {
         // TheTableService, once); writes take the pane's display reference
         // ("1953 12:3" or a citation) and the service resolves it.
         readonly property var chapterUserData: (src, bookId, ch) => TheTableService.chapterUserData(bookId, ch)
-        readonly property var setNote: (reference, text) => TheTableService.setNote(reference, text)
-        readonly property var setHighlighted: (reference, on) => TheTableService.setHighlighted(reference, on)
-        readonly property var notes: () => TheTableService.notes()
+        // Same shape as chapterUserData above: ReferencePane.qml now passes
+        // its root.sourceId uniformly to every adapter (Scripture needs it
+        // to pick a Bible translation; The Table has one source and just
+        // ignores the extra argument, same as chapterUserData already did).
+        readonly property var setNote: (src, reference, text) => TheTableService.setNote(reference, text)
+        readonly property var setHighlighted: (src, reference, on) => TheTableService.setHighlighted(reference, on)
+        readonly property var notes: (src) => TheTableService.notes()
         readonly property var userData: ({
             chapterUserData: ad.chapterUserData,
             setNote: ad.setNote,

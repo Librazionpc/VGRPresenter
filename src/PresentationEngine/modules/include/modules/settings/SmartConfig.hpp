@@ -49,6 +49,12 @@ HardwareReport BuildHardwareReport(const adaptive::HardwareInfo& hw, bool hardwa
 // The report for THIS machine: the adaptive runtime's hardware view, its encode capability, and the PAL's audio devices.
 AudioCounts CountAudioDevices();
 HardwareReport CurrentHardwareReport();
+// The same report with CALLER-SUPPLIED audio counts, for a caller that already
+// holds the platform's device roster: the Qt bridge caches it and refreshes it
+// off the GUI thread, so building a report from it costs nothing. Prefer this
+// from UI paths — CurrentHardwareReport() calls IAudio::Enumerate() inline,
+// which queries device caps and mix formats per endpoint on the calling thread.
+HardwareReport CurrentHardwareReport(AudioCounts audio);
 
 // Applies the settings to the running engine:
 //   configuration mode  Smart -> Automatic layer, Strict -> Assisted layer (prefers a low memory footprint), Manual -> Expert

@@ -101,12 +101,18 @@ HardwareReport BuildHardwareReport(const adaptive::HardwareInfo& hw, bool hardwa
                             hw.displayCount > 0 });
 
     // A desktop has no battery row (nothing to say); a laptop always does.
+    // THREE states, because "plugged in" was hiding one the user needs: while the
+    // pack is topping up the machine is on AC AND still charging, which is not
+    // the same as sitting at 100% — the row (and the Smart Config battery dial,
+    // which reads the same flag) says "Charging".
     if (hw.hasBattery)
         report.rows.push_back({ "battery", "Battery",
                                 hw.batteryPercent >= 0
                                     ? (hw.onBattery ? std::format("On battery · {}%", hw.batteryPercent)
-                                                    : std::format("Plugged in · {}%", hw.batteryPercent))
-                                    : (hw.onBattery ? std::string("On battery") : std::string("Plugged in")),
+                                                    : (hw.batteryCharging ? std::format("Charging · {}%", hw.batteryPercent)
+                                                                          : std::format("Plugged in · {}%", hw.batteryPercent)))
+                                    : (hw.onBattery ? std::string("On battery")
+                                                    : (hw.batteryCharging ? std::string("Charging") : std::string("Plugged in"))),
                                 !hw.onBattery });
 
     if (hw.thermalCelsius > 0)
@@ -175,9 +181,13 @@ AudioCounts CountAudioDevices() {
     return counts;
 }
 
-HardwareReport CurrentHardwareReport() {
+HardwareReport CurrentHardwareReport(AudioCounts audio) {
     auto& runtime = adaptive::AdaptiveRuntime::Instance();
-    return BuildHardwareReport(runtime.Hardware(), runtime.Supports(adaptive::Capability::HardwareVideoEncode), CountAudioDevices());
+    return BuildHardwareReport(runtime.Hardware(), runtime.Supports(adaptive::Capability::HardwareVideoEncode), audio);
+}
+
+HardwareReport CurrentHardwareReport() {
+    return CurrentHardwareReport(CountAudioDevices());
 }
 
 Result<void> ApplyToEngine(const AppSettings& settings, adaptive::AdaptiveRuntime& runtime) {

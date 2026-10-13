@@ -50,6 +50,14 @@ struct SearchFilter {
     std::string tag;                               // "" = all
     std::string language;                          // "" = all
     std::string author;                            // "" = all
+    // Scope by document id PREFIX, e.g. "bible:kjv:Rev:1:" — the reference
+    // panes' chapter lock: search only the passage that is open instead of the
+    // whole library. The id's own namespace is the only addressing the engine
+    // has (it never knows what a Bible or a sermon is), so a caller that wants a
+    // narrower search than "this content type" narrows it here. Applied like
+    // every other filter — before the candidate cap, so a scoped query does not
+    // spend its result slots on documents outside the scope.
+    std::string idPrefix;                          // "" = all
     int64_t modifiedAfterMs = 0;
     int64_t modifiedBeforeMs = 0;                  // 0 = unbounded
 };

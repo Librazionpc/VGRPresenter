@@ -22,10 +22,20 @@ ModalCard {
     property string query: ""
     property var results: []
     property int current: 0
+    // EXACT WORDS (the padlock at the field's far end — user call: "add a pad
+    // lock icon at the extreme end of the search so once it lock it means i want
+    // exact word search for the both word search"). Locked, every typed word
+    // must appear VERBATIM as a whole word: no completion ("word" stops finding
+    // "words"), no inner substring, no typo correction — and the engine's
+    // resolved-words hint (which offers those corrections) stays quiet, since
+    // accepting it would contradict the lock. Kept across opens: the mode is the
+    // user's, not the query's.
+    property bool exact: false
     // What the engine actually searched for ("frend" -> "friend"): the highlight
     // must wrap the CORRECTED words or a typo query lights nothing (the snippet
     // says "friend", the raw query said "frend"). Falls back to the live query.
     property string highlightSource: query
+    property bool searchPending: false
     // Snippets are engine-anchored on the first query-word occurrence, so the
     // highlighted words are inside the visible text — not past the 2-line cap
     // where they only appear on hover.
@@ -56,6 +66,9 @@ ModalCard {
         // 2026-09-24; user rejected it the same day — do not reintroduce).
         root.query = ""
         queryInput.text = ""
+        root.searchPending = false
+        root.searchToken++
+        root.resolveToken++
         root.results = []
         root.current = 0
         root.highlightSource = ""
@@ -96,8 +109,105 @@ ModalCard {
         // store refuses Text values past 4096 chars — slim keeps 40 picks far clear.
         SettingsService.setValue(picksKey, JSON.stringify(root.picks))
     }
+    // Which KIND carries the query as a NEAR-VERBATIM PHRASE (the typed words in
+    // order, close together) in one of its rows. Comparable across kinds without
+    // pretending the Bible's and The Table's scores share a scale — and it is the
+    // signal the user named: a sentence The Table has word-for-word must not sit
+    // below a kind that merely has the words scattered around ("this exist in the
+    // table but it showing bible at the top when the table has a better
+    // percentage"). PUNCTUATION never counts as part of the match, for exact and
+    // loose search alike (user call: "punctuation [is] not counted the same for
+    // normal search as well") — "compulsory, that" and "compulsory that" are the
+    // same phrase. UP TO 2 extra words may sit between each typed word too (user
+    // call: "because i missed some words in between ... if it can find [a]
+    // similar sentence['s] exact words" — a real connector the typed query itself
+    // skipped, like "and" in "compelling AND compulsory, that", must not make an
+    // otherwise near-exact sentence read as mere scattered words): bounded so a
+    // genuinely scattered match (the words anywhere in a long paragraph) still
+    // does not count as "the sentence".
+    function queryMatchRank(result) {
+        const words = root.highlightSource.toLowerCase().match(/[A-Za-z0-9]+/g) || []
+        if (words.length === 0) return 3
+        const esc = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        const exactPhrase = new RegExp("\\b" + esc.join("\\b\\W+") + "\\b", "i")
+        const nearPhrase = new RegExp("\\b" + esc.join("\\b\\W+(?:\\w+\\W+){0,2}") + "\\b", "i")
+        let best = 3
+        for (const value of [result.title, result.subtitle, result.text, result.fullText]) {
+            const source = String(value ?? "")
+            if (source === "") continue
+            if (!words.every((word) => new RegExp("\\b" + word + "\\b", "i").test(source))) continue
+            if (exactPhrase.test(source)) return 0
+            best = Math.min(best, nearPhrase.test(source) ? 1 : 2)
+        }
+        return best
+    }
+    // HOW MUCH OF THE QUERY a single row carries: the count of the typed words
+    // that appear in it WHOLE. The cross-kind order below needs a signal that is
+    // comparable between a verse, a sermon paragraph and a show name, and this is
+    // it — deliberately not the engines' own scores (a Bible score and a sermon
+    // score are not the same scale) and deliberately not the kind groups (which
+    // said a verse carrying only "you that" outranks the sermon that says
+    // "compelling and compulsory, that you receive": the user's report, twice).
+    function queryCoverage(result) {
+        const words = root.highlightSource.toLowerCase().match(/[A-Za-z0-9]+/g) || []
+        if (words.length === 0) return 0
+        const source = [result.title, result.subtitle, result.text, result.fullText]
+            .map((v) => String(v ?? "")).join(" ")
+        if (source === "") return 0
+        let carried = 0
+        for (let i = 0; i < words.length; ++i) {
+            const safe = words[i].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+            // The LAST word is the one under the caret: it counts at a WORD START,
+            // not only whole — the same prefix rule the engine matched with — so a
+            // row that says "received" for a typed "rec" is not billed as missing
+            // the word it plainly carries.
+            const re = new RegExp(i + 1 === words.length ? "\\b" + safe : "\\b" + safe + "\\b", "i")
+            if (re.test(source)) carried++
+        }
+        return carried
+    }
+    // How tightly a row's covered words sit together (an afterthought on top of
+    // queryCoverage, ordered 0 = the exact sentence, 1 = nearly exact, 2 = the
+    // words merely scattered, 3 = the row does not carry them all). Deliberately
+    // worth LESS THAN ONE WORD, so adjacency can only order rows that carry the
+    // SAME number of words — it can never lift a row that is missing a typed
+    // word above one that has them all.
+    readonly property var adjacencyBonus: [0.90, 0.55, 0.20, 0.0]
+    // A ROW'S MATCH RATING: the percentage of the typed query the row itself
+    // carries — the ranking key, shown on every row so the order reads instead of
+    // having to be taken on trust (user call, looking at "compelling that you
+    // recieve" listing verses that carry only "you that": "why is showing me that
+    // when there is a better one with the word compelling in there").
+    // Whole-word coverage over the row's own text, plus a sub-word adjacency
+    // bonus; see rankByPicks — the same two terms, so a higher rating always
+    // means a higher rank.
+    function matchRating(result) {
+        const words = root.highlightSource.toLowerCase().match(/[A-Za-z0-9]+/g) || []
+        if (words.length === 0)
+            return 0
+        const carried = root.queryCoverage(result)
+        const bonus = root.adjacencyBonus[root.queryMatchRank(result)] ?? 0
+        return Math.min(100, Math.round(100 * (carried + bonus) / words.length))
+    }
+    function isExactWordsMatch(result) {
+        const words = root.highlightSource.toLowerCase().match(/[A-Za-z0-9]+/g) || []
+        if (words.length === 0)
+            return false
+        const source = [result.text, result.fullText]
+            .map((v) => String(v ?? "")).join(" ")
+        return words.every((word) => {
+            const safe = word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+            return new RegExp("\\b" + safe + "\\b", "i").test(source)
+        })
+    }
     function rankByPicks(results) {
-        if (root.picks.length === 0 || results.length < 2)
+        // The padlock keeps exact whole words, but allows other words between
+        // them. Service-side ranking puts nearby/orderly matches first; this is
+        // the final guard against broad index candidates.
+        if (root.exact)
+            results = results.filter((r) => (r.kind === "bible" || r.kind === "table")
+                                            ? root.isExactWordsMatch(r) : true)
+        if (results.length < 2)
             return results
         // QML's Array.sort is NOT stable: a comparator returning 0 for
         // different kinds let equal-key swaps SCRAMBLE the groups (sermons
@@ -122,12 +232,34 @@ ModalCard {
             return i < 0 ? MISSING : i   // unpicked = after every pick
         }
         return results.slice().sort((a, b) => {
+            // RELEVANCE FIRST: the rating shown on the row — how much of the
+            // typed query it carries — decides the order across EVERY kind, so
+            // the column of percentages never goes up as you read down. This is
+            // the fix for the report this dialog's ranking kept failing: verses
+            // carrying only "you that" sat above the sermon that says
+            // "compelling and compulsory, that you receive".
+            const ra = root.matchRating(a), rb = root.matchRating(b)
+            if (ra !== rb) return rb - ra
+            // Equal rating: the tighter phrase leads (the exact sentence before
+            // a nearly-exact one before the words merely scattered).
+            const ma = root.queryMatchRank(a), mb = root.queryMatchRank(b)
+            if (ma !== mb) return ma - mb
+            // Same relevance: keep the engine's kind groups together, in the
+            // order the service found them (the Bible reference row, then its
+            // verses, then the sermons, ...).
             const ga = groupOf[a.kind], gb = groupOf[b.kind]
             if (ga !== gb) return ga - gb
+            // Within a kind the ENGINE SCORE ranks the rows when the service
+            // provides one (table rows do); a previously-picked row floats only
+            // within a score tie, then the engine's own order stands. The old
+            // pick-over-everything rule let one stale click bury the verbatim
+            // "Then, friends" paragraph under ¶s the engine scored far lower —
+            // the user saw the wrong passage lead and called the scoring faulty.
+            // Rows without a score (bible etc.) keep pick-then-engine order.
             const sa = scoreOf(a), sb = scoreOf(b)
             if (sa !== null && sb !== null && sa !== sb) return sb - sa   // engine first
-            const ra = rankOf(a), rb = rankOf(b)
-            if (ra !== rb) return ra === MISSING ? 1 : (rb === MISSING ? -1 : ra - rb)
+            const pa = rankOf(a), pb = rankOf(b)
+            if (pa !== pb) return pa === MISSING ? 1 : (pb === MISSING ? -1 : pa - pb)
             return 0                                   // stable sort: engine order
         })
     }
@@ -135,32 +267,68 @@ ModalCard {
     // The request counter for the async search: only the latest token's rows
     // are applied (SearchService drops stale ones too — belt and braces).
     property int searchToken: 0
+    property int resolveToken: 0
+    function applyResolvedWords(token, words) {
+        if (token !== root.resolveToken || root.query.trim() === "")
+            return
+        // The hint reads the corrections AND the half-typed last word's candidate
+        // ladder (most confident first): "recieve -> receive" as before, and
+        // "rec -> receive \u00b7 received \u00b7 record" while the word is still being
+        // typed — several readings, the likeliest named first (user call).
+        const interesting = words.filter((w) => w.changed === true
+                                           || (w.candidates && w.candidates.length > 0))
+        hint.text = interesting.length === 0 ? ""
+            : interesting.map((w) => (w.candidates && w.candidates.length > 0)
+                 ? w.typed + " \u2192 " + w.candidates.slice(0, 3).join(" \u00b7 ")
+                 : w.typed + " \u2192 " + w.resolved).join("   ")
+        root.highlightSource = words.length === 0 ? root.query
+            : words.reduce((acc, w) => acc.concat(
+                  (root.exact && Number(w.weight) >= 1.0
+                   ? String(w.typed) : String(w.resolved)).split(/\s+/)), []).join(" ")
+        if (root.exact)
+            return
+        root.results = root.rankByPicks(root.results)
+    }
     function refresh() {
         // OFF the GUI thread: a big query ("the", ~1,200 candidates) blocked
         // typing for hundreds of ms synchronously. Rows come back via
         // resultsReady; the empty query path clears inline as before.
-        if (root.query.trim() === "") { root.results = []; root.current = 0 }
-        else { root.searchToken++; SearchService.searchAsync(root.query, 4, root.searchToken) }
+        if (root.query.trim() === "") {
+            root.searchToken++
+            root.resolveToken++
+            root.searchPending = false
+            root.results = []
+            root.current = 0
+            hint.text = ""
+            root.highlightSource = ""
+        } else {
+            root.searchToken++
+            root.searchPending = true
+            root.results = []
+            root.current = 0
+            SearchService.searchAsync(root.query, 4, root.searchToken, root.exact)
+            root.resolveToken++
+            SearchService.resolveWordsAsync(root.query, root.resolveToken)
+            hint.text = ""
+            root.highlightSource = root.query
+        }
         flick.contentY = 0
         root.current = 0
-        // The engine's own word resolution surfaced: incomplete words completed,
-        // typos corrected, typed-together words split ("thn frend" shows "then
-        // friends"). Shown as a hint under the box; Tab accepts it. The highlight
-        // uses the SAME resolved words, so corrected words glow in the snippets.
-        // resolveWords returns EVERY word (changed: true only on the fixed
-        // ones): the hint lists the corrections, the highlight wraps ALL the
-        // resolved words — "then frend" glows both "then" and "friend".
-        const words = SearchService.resolveWords(root.query)
-        hint.text = words.filter((w) => w.changed === true).length === 0 ? ""
-            : words.filter((w) => w.changed === true)
-                   .map((w) => w.typed + " \u2192 " + w.resolved).join("   ")
-        root.highlightSource = words.length === 0 ? root.query
-            : words.reduce((acc, w) => acc.concat(String(w.resolved).split(/\s+/)), []).join(" ")
+    }
+    // The padlock's click: flip the mode and re-run what is already typed, so the
+    // result list changes under the user's eyes instead of on the next keystroke.
+    function toggleExact() {
+        root.exact = !root.exact
+        if (root.query.trim() !== "")
+            root.refresh()
     }
 
     function choose(result) {
         console.log("[QS] choose:", result.kind, result.title)
         root.rememberPick(result)
+        root.searchPending = false
+        root.searchToken++
+        root.resolveToken++
         root.close()
         // Let the row's click finish and the modal close settle before the host
         // switches tabs and opens a pane. Doing both synchronously from the
@@ -228,8 +396,10 @@ ModalCard {
         // latest (a fast typist's older keystrokes answer into the void).
         function onResultsReady(token, rows) {
             if (token !== root.searchToken || !root.shown) return
+            root.searchPending = false
             root.results = root.rankByPicks(rows)
         }
+        function onWordsResolved(token, rows) { root.applyResolvedWords(token, rows) }
     }
 
     // ---- the search box ----
@@ -256,8 +426,9 @@ ModalCard {
             id: queryInput
             anchors.left: glass.right
             anchors.leftMargin: 10
-            anchors.right: parent.right
-            anchors.rightMargin: 12
+            // Room for the padlock at the field's far end (the exact-word lock).
+            anchors.right: exactLock.left
+            anchors.rightMargin: 8
             anchors.verticalCenter: parent.verticalCenter
             color: Theme.textPrimary
             font.family: Theme.fontFamily
@@ -266,8 +437,22 @@ ModalCard {
             selectByMouse: true
             onTextChanged: {
                 root.query = text
-                if (text.trim() === "") { debounce.stop(); root.results = []; root.current = 0 }
-                else debounce.restart()
+                if (text.trim() === "") {
+                    debounce.stop()
+                    root.searchPending = false
+                    root.searchToken++
+                    root.resolveToken++
+                    root.results = []
+                    root.current = 0
+                    hint.text = ""
+                    root.highlightSource = ""
+                } else {
+                    root.searchPending = true
+                    root.searchToken++
+                    root.resolveToken++
+                    root.results = []
+                    debounce.restart()
+                }
             }
             Keys.onDownPressed: root.move(1)
             Keys.onUpPressed: root.move(-1)
@@ -300,6 +485,63 @@ ModalCard {
                 font: queryInput.font
             }
         }
+
+        // The exact-words padlock, at the extreme end of the search field (user
+        // call). Open (dim) = the search's normal fuzzy matching; closed (accent)
+        // = every typed word must appear verbatim as a whole word. Text on the
+        // state so the meaning is not left to the icon alone.
+        Item {
+            id: exactLock
+            anchors.right: parent.right
+            anchors.rightMargin: 10
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.max(22, exactLockLabel.implicitWidth + 30)
+            height: 24
+            Rectangle {
+                anchors.fill: parent
+                radius: 12
+                // The locked chip is an ACCENT tint (never a literal purple): the
+                // padlock reads in whatever accent Settings > General carries.
+                color: exactLockHover.hovered ? (root.exact ? Qt.alpha(Theme.accent, 0.18) : Theme.hoverBg)
+                                              : (root.exact ? Qt.alpha(Theme.accent, 0.12) : "transparent")
+                border.width: root.exact ? 1 : 0
+                border.color: Theme.accent
+            }
+            IconGlyph {
+                id: exactLockIcon
+                anchors.left: parent.left
+                anchors.leftMargin: 6
+                anchors.verticalCenter: parent.verticalCenter
+                name: root.exact ? "locked" : "unlocked"
+                color: root.exact ? Theme.accent : Theme.textMuted
+                width: 12; height: 12
+                fit: true
+            }
+            Text {
+                id: exactLockLabel
+                anchors.left: exactLockIcon.right
+                anchors.leftMargin: 5
+                anchors.verticalCenter: parent.verticalCenter
+                text: qsTr("Exact")
+                color: root.exact ? Theme.accent : Theme.textMuted
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs + 1
+                font.bold: root.exact
+            }
+            PositionHoverArea {
+                id: exactLockHover
+                // The self-test names the CLICK-SINK itself (not the wrapper Item):
+                // it is the object that knows whether the pointer is genuinely over
+                // the control, and the one a synthetic click has to reach.
+                objectName: "selfTestSearchExactLock"
+                anchors.fill: parent
+                checkAncestors: false
+                onClicked: {
+                    root.toggleExact()
+                    queryInput.forceActiveFocus()
+                }
+            }
+        }
     }
 
     // The engine's resolved-words hint: "thn frend → then friends", gold like the
@@ -308,6 +550,7 @@ ModalCard {
     // implicitHeight here was the binding loop Qt reported.)
     Text {
         id: hint
+        objectName: "selfTestSearchHint"   // (the self-test reads the gold spell-fix line)
         width: parent.width
         visible: text !== ""
         leftPadding: 4
@@ -367,7 +610,12 @@ ModalCard {
                 readonly property bool isLocatedVerse: (modelData.kind === "bible" || modelData.kind === "table")
                                                         && modelData.bookId !== undefined && modelData.bookId !== ""
                                                         && !sermonCodeResult
-                property string fullText: ""
+                // SearchService already supplies the full matched passage for
+                // Bible and sermon results. Reuse it here: fetching a sermon
+                // chapter synchronously on hover can block the UI behind an
+                // in-flight library search and make a result click look like a
+                // crash.
+                property string fullText: String(modelData.fullText ?? "")
                 width: parent.width
 
                 // Group header
@@ -388,9 +636,9 @@ ModalCard {
                     width: parent.width
                     height: rowText.implicitHeight + 16
                     radius: Theme.radiusMd
-                    color: entry.selected ? "#221c6ce7" : "transparent"
+                    color: entry.selected ? Qt.alpha(Theme.accent, 0.13) : "transparent"
                     border.width: entry.selected ? 1 : 0
-                    border.color: "#556c5ce7"
+                    border.color: Qt.alpha(Theme.accent, 0.33)
 
                     Rectangle {
                         id: badge
@@ -414,12 +662,43 @@ ModalCard {
                         }
                     }
 
+                    // The row's MATCH RATING: the percentage of the typed query this
+                    // row itself carries — the very key the list is ordered by (see
+                    // matchRating), so it explains the order instead of asking the
+                    // reader to trust it. Rows that carry none of the query (a kind
+                    // match, a code hit) show no pill rather than a "0%".
+                    Rectangle {
+                        id: ratingPill
+                        readonly property int percent: root.matchRating(entry.modelData)
+                        readonly property color tone: percent >= 90 ? "#4ae0b0"
+                                                     : (percent >= 60 ? "#e0b04a" : "#8a94a6")
+                        visible: root.canHighlight && root.queryCoverage(entry.modelData) > 0
+                        anchors.right: parent.right
+                        anchors.rightMargin: 10
+                        anchors.top: parent.top
+                        anchors.topMargin: 10
+                        width: ratingText.implicitWidth + 14
+                        height: 18
+                        radius: 4
+                        color: Qt.rgba(tone.r, tone.g, tone.b, 0.16)
+                        Text {
+                            id: ratingText
+                            anchors.centerIn: parent
+                            text: qsTr("MATCH %1%").arg(ratingPill.percent)
+                            color: ratingPill.tone
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 10
+                            font.bold: true
+                            font.letterSpacing: 0.5
+                        }
+                    }
+
                     Column {
                         id: rowText
                         anchors.left: badge.right
                         anchors.leftMargin: 12
                         anchors.right: parent.right
-                        anchors.rightMargin: 12
+                        anchors.rightMargin: 12 + (ratingPill.visible ? ratingPill.width + 6 : 0)
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: 2
                         Text {
@@ -513,9 +792,15 @@ ModalCard {
             horizontalAlignment: Text.AlignHCenter
             text: root.query.trim() === ""
                   ? qsTr("Start typing to search. A Bible reference like “Romans 8:1” goes straight to the verse.")
-                  : (SearchService.bibleLoading
-                     ? qsTr("No matches yet — the Bible is still loading…")
-                     : qsTr("No results for “%1”.").arg(root.query.trim()))
+                  : (root.searchPending
+                     ? qsTr("Searching…")
+                     : (root.exact
+                     // Locked and nothing found: say why (the padlock is easy to
+                     // forget), and how to get loose results back.
+                     ? qsTr("No exact match for “%1” — every word must appear as a whole word in the same verse or sermon paragraph. Unlock it to search loosely.").arg(root.query.trim())
+                     : (SearchService.bibleLoading
+                        ? qsTr("No matches yet — the Bible is still loading…")
+                        : qsTr("No results for “%1”.").arg(root.query.trim()))))
             color: Theme.textMuted
             font.family: Theme.fontFamily
             font.pixelSize: Theme.textSm

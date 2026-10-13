@@ -20,6 +20,17 @@ Rectangle {
     clip: true
     color: Theme.panelBg
 
+    // The editor keeps a usable center workspace as the window narrows:
+    // side panels yield width first, then the stage preview scales to fit.
+    readonly property real slidePanelWidth: Math.min(280, Math.max(160, width * 0.195))
+    readonly property real inspectorPanelWidth: Math.min(400, Math.max(240, width * 0.278))
+    readonly property real centerRegionWidth: Math.max(0, width - slidePanelWidth - inspectorPanelWidth)
+    // The stage's own fit rule, asked through the ONE grid definition
+    // (qml/settings/StageGrid.qml) so this canvas and every other picture of a
+    // stage (a library card, a thumbnail) can never scale one differently.
+    readonly property real canvasFitScale: Math.max(0.3, Math.min(1,
+        StageGrid.fitScale(centerRegionWidth - 20, height - 160)))
+
     // Mock CRUD backend (qml/models/SlideListModel.cpp) — stands in for the
     // real show/slide data source. Seeded with the same ground-truth
     // content the static array used to hold, but "Add slide" and selecting
@@ -798,6 +809,84 @@ Rectangle {
     property bool timerModalOpen: false
     property bool clockModalOpen: false
     property bool shapeModalOpen: false
+    // The Metadata palette (the + menu's Metadata chip). Its fields come from
+    // MetadataFields.qml — the one list of placeholders the engine's filler
+    // knows, so a template being built here can be given any of them. `group`
+    // picks which section is showing (the list is grouped: Scripture / The Table).
+    property bool metadataPaletteOpen: false
+    // The hovered field's own sentence (MetadataFields), shown at the foot of
+    // the palette so the list explains itself.
+    property string metadataHint: ""
+
+    // Adds a text item carrying ONE metadata placeholder — what clicking (or
+    // dropping) a field in the palette does. `at` places it under the pointer
+    // when the field was DRAGGED onto the canvas; without it the item lands
+    // where every other added item does.
+    function addMetadataItem(token, at) {
+        if (!token)
+            return null
+        const field = MetadataFields.fieldForToken(token)
+        const item = root.addCanvasItem("text")
+        if (!item)
+            return null
+        item.text = token
+        // ONE SIZE for both halves below: the meta's `fontSize` and the box
+        // measured from it have to be the same number, or the fit solver starts
+        // out needing to squeeze what the box was sized for.
+        const fontSize = 40
+        // BUILT LIKE A REGISTERED LAYOUT BLOCK, not like a bare text box.
+        // DesignCatalogs' Text() gives every shipped block two things this
+        // insert used to leave out:
+        //
+        //   * its BIND — the engine slot it feeds. The scene builder binds a
+        //     design/style template to a slide through that slot
+        //     (BindTemplateBlocks), so without it the engine held an unbound
+        //     placeholder block, could not resolve it, and the outputs drew an
+        //     EMPTY box while the panel showed the field. The registry names the
+        //     slot per field (MetadataFields' `bind`), so the insert asks it
+        //     rather than parsing the token. A field that is not a slot (the
+        //     number series, the code, the year…) stays unbound on purpose: its
+        //     value comes from the fill, which the engine cannot re-derive from
+        //     a slide on its own.
+        //   * the FULL STYLE META — the same key set Text() writes (color,
+        //     fontFamily, fontSize, bold, italic, align, autoSize, textCase,
+        //     verticalAlign); a new item arrives with an EMPTY meta, and every
+        //     surface then fell back to its own idea of the defaults.
+        item.bind = String(field && field.bind ? field.bind : "")
+        item.meta = Object.assign({}, item.meta, {
+            color: "#ffffff",
+            fontFamily: "Segoe UI",
+            fontSize: fontSize,
+            bold: false,
+            italic: false,
+            align: "left",
+            autoSize: "shrinkToFit",
+            textCase: "none",
+            verticalAlign: "center"
+        })
+        // AND SIZED TO ITS TOKEN. This canvas sizes the FONT to the box —
+        // EditableCanvasLabel's fit solver is explicit that "the BOX is always
+        // the master … the FONT adapts, never the other way around" — so a field
+        // dropped into the default 220x44 box arrived squeezed (a long token
+        // like {table_code_paragraphs} worst of all). Measure the box from the
+        // token with the same rough estimate the engine's own BoxFill/Capacity()
+        // uses (0.5 x fontSize per character, 1.4 x fontSize per line); with
+        // shrinkToFit pinned above, the text keeps to whatever box the operator
+        // then drags it to.
+        const wantW = Math.round(String(token).length * fontSize * 0.5) + 24
+        const wantH = Math.round(fontSize * 1.4)
+        item.width = Math.min(wantW, Math.max(160, mCanvas.width - 80))
+        item.height = wantH
+        if (at) {
+            // Centred on the drop, then pulled inside the canvas so a drop at
+            // the very edge cannot land the item half off the slide.
+            item.x = Math.max(0, Math.min(mCanvas.width - item.width,
+                                           Math.round(at.x - item.width / 2)))
+            item.y = Math.max(0, Math.min(mCanvas.height - item.height,
+                                           Math.round(at.y - item.height / 2)))
+        }
+        return item
+    }
     readonly property var baseContentTypes: [
         // `icon` is an IconGlyph name (qml/components/IconGlyph.qml — Lucide
         // path data), not a Text glyph: the old "⏱"/"◷"/"◎" unicode
@@ -808,9 +897,13 @@ Rectangle {
         { kind: "camera", icon: "camera",  label: "Camera" },
         { kind: "media",  icon: "play",    label: "Media" },
         { kind: "audio",  icon: "music",   label: "Audio" },
-        { kind: "shape",  icon: "shape",   label: "Shape" },
-        { kind: "timer",  icon: "timer",   label: "Timer" },
-        { kind: "clock",  icon: "clock",   label: "Clock" }
+        { kind: "shape",  icon: "shape",   label: "Shape" },        { kind: "timer",  icon: "timer",  label: "Timer" },
+        { kind: "clock",  icon: "clock",  label: "Clock" },
+        // Not an item kind: this chip opens the METADATA palette (MetadataFields.qml)
+        // instead of adding an item, because a metadata field is a text item whose
+        // text is a placeholder — the operator picks the field, the item is made
+        // for them. See the chip handler below and addMetadataItem().
+        { kind: "metadata", icon: "textLines", label: "Metadata" }
     ]
     // How the extra block kinds a library declares are shown in the Add menu (which kinds exist is the ENGINE's call -
     // DesignLibraryConfig::extraBlockKinds, via the service; this is only their icon and label).
@@ -830,11 +923,11 @@ Rectangle {
     // ---- Middle toolbar ----
     Rectangle {
         id: mHdr
-        x: 280
+        x: root.slidePanelWidth
         y: 48
         height: 48
         // Everything between the two side panels (the window is no longer a fixed 1440 wide).
-        width: root.width - 680
+        width: root.centerRegionWidth
         color: Theme.surface
 
         Rectangle {
@@ -1023,30 +1116,55 @@ Rectangle {
         }
     }
     Rectangle {
-        x: 280
+        x: root.slidePanelWidth
         y: 96
         height: 1
-        width: root.width - 680
+        width: root.centerRegionWidth
         color: Theme.border
     }
 
     // ---- Canvas ----
-    // width: 754, not 760 — 286 + 760 = 1046 overlapped 6px into rightPanel
-    // (x: 1040). 754 lands exactly on rightPanel's left edge.
+    // The stage keeps its native editing coordinates; its display scale fits
+    // the available center region without changing saved item geometry.
     Rectangle {
         id: mCanvas
-        // The design's slot at 1440 x 900, kept centred in the middle region as the window grows.
-        x: 286 + (root.width - 1440) / 2
-        y: 308 + (root.height - 900) / 2
-        height: 428
-        width: 754
+
+        // Dropping a metadata field makes its item where the pointer is — the + 
+        // palette's chips are DragSources, and this is the canvas half of that 
+        // gesture. Scoped to the CANVAS (inside mCanvas) rather than the whole 
+        // screen so a field can only be dropped onto a slide, and only this 
+        // payload is accepted: the library panes' drags carry engine item kinds, 
+        // which this screen has no drop for. drop.x/y arrive in mCanvas 
+        // coordinates — the same space canvas items are laid out in.
+        DropArea {
+            id: metadataDrop
+            anchors.fill: parent
+            keys: ["app-drag"]
+            onEntered: (drag) => {
+                const p = drag.source ? drag.source.payload : null
+                drag.accepted = !!p && p.kind === "metadata"
+            }
+            onDropped: (drop) => {
+                const p = drop.source ? drop.source.payload : null
+                if (p && p.kind === "metadata" && p.items && p.items.length > 0)
+                    root.addMetadataItem(p.items[0].ref, { x: drop.x, y: drop.y })
+            }
+        }
+        // Named so a scenario can ask where the edit canvas actually IS on
+        // screen (the resize dots have to stay inside it — see
+        // DraggableCanvasText's roomFor).
+        objectName: "selfTestCanvas"
+        x: root.slidePanelWidth + (root.centerRegionWidth - width * scale) / 2
+        y: (root.height - height * scale) / 2 + 72
+        height: StageGrid.h
+        width: StageGrid.w
         clip: true
         // Visual zoom (see root.canvasZoom's header comment) — scales from
         // the top-left corner so the canvas stays pinned to its own x/y
         // slot in the surrounding layout instead of drifting from the
         // default center-origin scale.
         transformOrigin: Item.TopLeft
-        scale: root.canvasZoom
+        scale: root.canvasZoom * root.canvasFitScale
         // No active slide = nothing to edit: every child MouseArea (empty-
         // canvas click, drag areas, resize handles) and the keyboard nudge
         // go inert. The empty-state veil below lives OUTSIDE this item at
@@ -1161,8 +1279,12 @@ Rectangle {
                 // Position truth only: containsMouse latches in this build
                 // (hover-exit never delivers — KNOWN_ISSUES.md); the pointer-
                 // position stream tracks both directions reliably.
+                // priorityFallback: the plain arrow over empty space is the floor
+                // of the pointer's claims — it must never outrank a real
+                // affordance (the old push order alone let it shadow a handle's
+                // size arrow whenever its Connections happened to run later).
                 if (visible && enabled && AppCursor.hovered(canvasBackgroundArea))
-                    AppCursor.push(Qt.ArrowCursor, canvasBackgroundArea)
+                    AppCursor.push(Qt.ArrowCursor, canvasBackgroundArea, AppCursor.priorityFallback)
                 else
                     AppCursor.pop(canvasBackgroundArea)
             }
@@ -1175,6 +1297,9 @@ Rectangle {
             onEnabledChanged: syncCursor()
             Component.onDestruction: AppCursor.pop(canvasBackgroundArea)
             onClicked: {
+                // A press on empty canvas is "done choosing" — the metadata palette
+                // closes with it, the same way the + menu does.
+                root.metadataPaletteOpen = false
                 // Steals focus from any object's TextInput mid-edit, so
                 // clicking empty canvas both exits edit mode and clears
                 // selection instead of leaving the old edit stuck open.
@@ -1204,6 +1329,11 @@ Rectangle {
             delegate: DraggableCanvasText {
                 id: canvasItemObject
                 required property var modelData
+                // The delegate names itself after the engine's stable item key:
+                // every handle and dot hangs its own objectName off this (see
+                // DraggableCanvasText.handleSuffix), so a scenario reaches THIS
+                // item's adjustment points — not another item's.
+                objectName: "canvasItem_" + modelData.key
                 // Exposed so canvasContextMenu's "Edit" case (below) can
                 // reach into whichever delegate matches the clicked item and
                 // enter edit mode directly, without a fixed/named id to
@@ -1257,6 +1387,14 @@ Rectangle {
                     // NOT Qt's Text.Fit: Fit converged differently on the canvas than
                     // in the scaled-down DesignPreview subtree (lineHeight + wrap at
                     // large sizes) and the canvas could still spill text below the box.
+                    // A bound placeholder is drawn at the item's OWN type size and
+                    // clipped to its box instead of being squeezed into it (see the
+                    // exception in recomputeFit), so a box too small for that size shows
+                    // the token running past its edge rather than shrinking the type
+                    // behind the operator's back — and it can never overlap a
+                    // neighbouring block either way.
+                    clip: MetadataFields.isToken(itemTextLabel.shownText)
+
                     // recomputeFit() bisects candidate sizes, re-measuring through the
                     // twin at each step (each write re-lays the twin's text out,
                     // wrapping included) and stores the largest size whose REAL laid-
@@ -1292,11 +1430,39 @@ Rectangle {
                         // the text must always sit inside it — a block renders at its set
                         // size while that fits and SQUEEZES the moment it doesn't. Nothing
                         // is ever cut or spilled on any surface.
+                        //
+                        // ONE EXCEPTION, and it is why the branch below exists: A BOUND
+                        // PLACEHOLDER IS NOT CONTENT (MetadataFields.isToken).
+                        // "{table_code_paragraphs}" is 23 characters standing in for a
+                        // value of ANOTHER length, and the frame sizes the real value
+                        // ("47-0412 3", 9 characters) at the item's own fontSize — so
+                        // squeezing the TOKEN to fit made this canvas show a type size the
+                        // output never uses. Measured on a Table template: the token was
+                        // squeezed to ~18 stage units here while the NDI frame drew the
+                        // value at ~26 — same box, same centre, ~1.5x the size. A bound
+                        // block therefore renders at its OWN size (clipped to its box
+                        // above), whatever the auto-size mode, so what is sized here is what
+                        // the frame will draw.
+                        // "growToFit" and the other modes keep shaping the CONTENT: the
+                        // engine fits the real value to the box on air.
                         const pad = canvasItemObject.modelData.style ? (canvasItemObject.modelData.style.padding ?? 0) : 0
                         const bw = canvasItemObject.modelData.width - pad * 2
                         const bh = canvasItemObject.modelData.height - pad * 2
+                        // A BOUND PLACEHOLDER IS NOT CONTENT, so the size is the DECLARED
+                        // one in EVERY mode — including growToFit. The question this branch
+                        // asks is "is this text a stand-in?", not "which mode is it?": the
+                        // modes describe what may happen to CONTENT (the box caps it, or it
+                        // fills the box), and a token is not content — the canvas has nothing
+                        // to size. Growing a placeholder to fill its box told the operator
+                        // nothing about the real value, which on air is what gets fitted
+                        // (the engine still solves every mode for the VALUE). Special-casing
+                        // "grow" here would also have to be spelled twice — "grow" here,
+                        // "growToFit" in DesignPreview — which is how one rule becomes two.
                         if (bw <= 0 || bh <= 0) {
                             fittedSize = baseFontSize
+                        } else if (MetadataFields.isToken(itemTextLabel.shownText)) {
+                            fittedSize = baseFontSize
+                            measureSize = baseFontSize
                         } else {
                             let lo = 3, hi = 400
                             for (let i = 0; i < 11; ++i) {
@@ -1819,7 +1985,7 @@ Rectangle {
                     DesignPreview {
                         anchors.fill: parent
                         blocks: [{
-                            kind: canvasItemObject.modelData.kind, x: 0, y: 0, width: 754, height: 428,
+                            kind: canvasItemObject.modelData.kind, x: 0, y: 0, width: StageGrid.w, height: StageGrid.h,
                             meta: canvasItemObject.modelData.meta,
                             style: { backgroundColor: canvasItemObject.style.backgroundColor.toString() }
                         }]
@@ -1949,8 +2115,8 @@ Rectangle {
     Rectangle {
         x: mCanvas.x
         y: mCanvas.y
-        width: mCanvas.width
-        height: mCanvas.height
+        width: mCanvas.width * mCanvas.scale
+        height: mCanvas.height * mCanvas.scale
         visible: !root.hasActiveSlide
         color: Qt.alpha(Theme.panelBg, 0.69)
 
@@ -2005,7 +2171,7 @@ Rectangle {
     }
 
     Rectangle {
-        x: root.width - 558
+        x: rightPanel.x - 158
         y: root.height - 59
         height: 32
         width: 124
@@ -2067,7 +2233,11 @@ Rectangle {
 
     Rectangle {
         id: addContentChip
-        x: 286
+        // The + menu's own entry point, named for the metadata-palette scenario
+        // (tools/selftest/run_meta_palette_test.sh) — it drives the real path:
+        // + -> the Metadata chip -> the palette, never metadataPaletteOpen directly.
+        objectName: "selfTestAddChip"
+        x: root.slidePanelWidth + 6
         y: root.height - 62
         height: 46
         width: 46
@@ -2088,12 +2258,16 @@ Rectangle {
         MouseArea {
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
-            onClicked: root.addMenuOpen = !root.addMenuOpen
+            onClicked: {
+                root.addMenuOpen = !root.addMenuOpen
+                root.metadataPaletteOpen = false   // the + chip owns both panels
+            }
         }
     }
 
     Rectangle {
         id: addContentMenu
+        objectName: "selfTestAddMenu"
         x: 344
         y: root.height - 63
         height: 46
@@ -2121,6 +2295,10 @@ Rectangle {
                     required property var modelData
                     required property int index
                     readonly property bool active: chipHover.hoveredIndex === index
+                    // One name per KIND, not per index: a scenario asks for the
+                    // chip it means ("selfTestAddKindChip_metadata") and the name
+                    // survives the roster gaining kinds.
+                    objectName: "selfTestAddKindChip_" + modelData.kind
 
                     height: 34
                     width: 48
@@ -2248,8 +2426,365 @@ Rectangle {
                     root.shapeModalOpen = true
                 else if (kind === "vignette" || kind === "corners")
                     root.addScreenTreatment(kind)
-                else
+                else if (kind === "metadata") {
+                    // Not an item: show the palette of every metadata field the
+                    // engine fills (MetadataFields.qml). Kept open after the + menu
+                    // closes — the palette IS the choice the chip was asking for.
+                    root.metadataPaletteOpen = true
+                    return
+                } else
                     root.addCanvasItem(kind)
+            }
+        }
+    }
+
+    // ---- While the metadata palette is open, it OWNS the pointer ------------
+    // AppCursor.pushBlocker marks it as the panel the pointer is on: every hover
+    // area under it then reports not-hovered (PositionHoverArea's blocked()
+    // check) and every cursor claimed from underneath it is dropped
+    // (AppCursor.push) — which is what makes the panel read as lifted ABOVE the
+    // canvas instead of a sheet the canvas' own I-beam shines through.
+    function syncMetadataBlocker() {
+        if (root.metadataPaletteOpen)
+            AppCursor.pushBlocker(metadataPalette)
+        else
+            AppCursor.popBlocker(metadataPalette)
+    }
+    onMetadataPaletteOpenChanged: root.syncMetadataBlocker()
+    Component.onDestruction: AppCursor.popBlocker(metadataPalette)
+
+    // The palette's DISMISS layer: a click anywhere outside the panel closes it.
+    //
+    // It used to close only on a click on the canvas BACKGROUND
+    // (canvasBackgroundArea's onClicked) — so a click on a panel, on the toolbar,
+    // on the slide list or on a canvas object left the panel standing (the
+    // report "when i click outside it box it doesnt deselect it still stays
+    // up"). One z under the panel: presses ON the panel belong to the panel,
+    // every other press inside this screen is "outside".
+    //
+    // CLICK-ONLY, deliberately NOT hoverEnabled — MenuCatcher's own rule (see its
+    // header): a hover-enabled catcher becomes a hover TARGET, the window-root
+    // AppCursorCatcher below it stops receiving pointer moves, and every
+    // position-truth hover in the screen freezes on a stale point.
+    MouseArea {
+        id: metadataCatcher
+        objectName: "selfTestMetadataCatcher"
+        anchors.fill: parent
+        z: metadataPalette.z - 1
+        visible: root.metadataPaletteOpen
+        enabled: visible
+        acceptedButtons: Qt.AllButtons
+        hoverEnabled: false
+        onPressed: root.metadataPaletteOpen = false
+        // A wheel outside the panel dismisses it too, the way the app's menus
+        // behave: scrolling the canvas under an open popup is never intended.
+        onWheel: (wheel) => {
+            wheel.accepted = true
+            root.metadataPaletteOpen = false
+        }
+    }
+
+    // ---- The metadata palette (the + menu's Metadata chip) ----------------
+    // Every placeholder the engine's filler resolves (MetadataFields.qml), grouped
+    // and drawn from that one list: click a field to add a text item carrying it,
+    // or drag one onto the canvas to land it where the pointer is. Building a
+    // template used to mean knowing the spelling of {scripture_text} by heart —
+    // the fields existed only inside the shipped designs. Each chip shows its
+    // label over the literal token, because the token is what ends up in the text.
+    Rectangle {
+        id: metadataPalette
+        objectName: "selfTestMetadataPalette"
+        // Anchored above the + menu (which sits at height - 63) and lifted ABOVE
+        // the canvas' own chrome: the canvas' snap guides draw at z 1000 while an
+        // object is being moved, and a panel the user opened must sit on top of
+        // what it covers.
+        x: 344
+        y: root.height - 63 - height - 8
+        width: 560
+        height: paletteCol.height + 24
+        z: 1200
+        radius: Theme.radiusXl
+        color: Theme.card
+        border.color: Qt.alpha(Theme.accent, 0.22)
+        border.width: 1
+        visible: root.metadataPaletteOpen
+
+        // A soft accent halo just outside the edge — depth without pulling in a
+        // shadow effect, and it reads as a RAISED surface in both themes (the
+        // same corona the L/R pills and the monitor tiles wear).
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: -3
+            radius: parent.radius + 3
+            color: "transparent"
+            border.width: 3
+            border.color: Qt.alpha(Theme.accent, 0.10)
+            z: -1
+        }
+        // The lit top edge every raised card in this app wears.
+        Rectangle {
+            x: parent.radius
+            y: 0
+            width: parent.width - parent.radius * 2
+            height: 1
+            color: Qt.alpha(Theme.accentLight, 0.35)
+        }
+
+        // THE PANEL'S OWN BACKDROP. Hover-enabled so the pointer STOPS here —
+        // nothing painted under the panel claims hover (or a cursor) through it —
+        // and press-accepting so a click on the panel's padding is the panel's
+        // business: without it such a click fell through to the canvas and
+        // cleared the selection behind an open popup.
+        MouseArea {
+            id: paletteBackdrop
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.AllButtons
+            cursorShape: Qt.ArrowCursor
+        }
+
+        Column {
+            id: paletteCol
+            x: 14
+            y: 12
+            width: metadataPalette.width - 28
+            spacing: 10
+
+            // The panel's own header: WHAT this is, and the two gestures it takes.
+            // A grid of tokens does not explain itself, and "click to add · drag
+            // onto the canvas" is the whole interaction.
+            Item {
+                width: paletteCol.width
+                height: 15
+
+                Row {
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 7
+
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 7; height: 7
+                        radius: 3.5
+                        color: Theme.accent
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: qsTr("METADATA")
+                        color: Theme.textSecondary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 10
+                        font.letterSpacing: 1.2
+                        font.bold: true
+                    }
+                }
+                Text {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("click to add · drag onto the canvas")
+                    color: Theme.textMuted
+                    font.family: Theme.fontFamily
+                    font.pixelSize: 10
+                }
+            }
+            Rectangle {
+                width: paletteCol.width
+                height: 1
+                color: Qt.alpha(Theme.border, 0.8)
+            }
+
+            Repeater {
+                model: MetadataFields.groups
+                delegate: Column {
+                    id: metaGroup
+                    required property var modelData
+                    // Named, not reached through the scope chain: the inner
+                    // Repeater below lists THIS group's fields, and a chip has to
+                    // know which group it came from to draw its header row.
+                    readonly property var groupFields: modelData.fields
+                    width: paletteCol.width
+                    spacing: 6
+
+                    // The group's own header: a small accent tick plus the name in
+                    // tracked caps, so a section reads as a section instead of as
+                    // two more chips in the same grid.
+                    Row {
+                        spacing: 7
+
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 3; height: 10
+                            radius: 1.5
+                            color: Qt.alpha(Theme.accent, 0.85)
+                        }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: metaGroup.modelData.name
+                            color: Theme.textSecondary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 10
+                            font.letterSpacing: 1.0
+                            font.bold: true
+                        }
+                    }
+
+                    Flow {
+                        width: parent.width
+                        spacing: 7
+
+                        Repeater {
+                            model: groupFields
+                            delegate: Rectangle {
+                                id: metaChip
+                                required property var modelData
+                                readonly property string label: String(modelData.label)
+                                readonly property string token: String(modelData.token)
+                                // Named after its TOKEN with the braces stripped
+                                // ("selfTestMetaChip_scripture_text"): the scenario
+                                // resolves the field it means out of
+                                // MetadataFields.all and clicks that chip by name.
+                                objectName: "selfTestMetaChip_" + metaChip.token.replace(/[{}]/g, "")
+
+                                // Both widths are STATIC (the label's and the token
+                                // pill's own text), and the hover only repaints —
+                                // the palette must never re-flow under the pointer
+                                // (see the hint slot's note below).
+                                width: Math.max(metaLabelText.implicitWidth, metaTokenPill.width) + 22
+                                height: 40
+                                radius: Theme.radiusMd
+                                color: metaHover.hovered ? Qt.alpha(Theme.accent, 0.16)
+                                                         : Qt.alpha(Theme.chip, 0.45)
+                                border.width: 1
+                                border.color: metaHover.hovered ? Qt.alpha(Theme.accent, 0.55)
+                                                                : Qt.alpha(Theme.borderSubtle, 0.85)
+                                Behavior on color { ColorAnimation { duration: 110 } }
+                                Behavior on border.color { ColorAnimation { duration: 110 } }
+
+                                // A tick down the left edge while the pointer is on
+                                // the chip — the hover state, drawn without moving
+                                // anything (opacity only, never a size).
+                                Rectangle {
+                                    visible: metaHover.hovered
+                                    x: 0
+                                    y: 9
+                                    width: 3
+                                    height: metaChip.height - 18
+                                    radius: 1.5
+                                    color: Theme.accent
+                                }
+
+                                Text {
+                                    id: metaLabelText
+                                    x: 11
+                                    y: 5
+                                    text: metaChip.label
+                                    color: metaHover.hovered ? Theme.accentLight : Theme.textPrimary
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: 12
+                                }
+                                // The literal, in a mono inset: the token is what
+                                // ends up in the text, so it reads as code rather
+                                // than as a second caption.
+                                Rectangle {
+                                    id: metaTokenPill
+                                    x: 11
+                                    y: 21
+                                    height: 14
+                                    width: metaTokenText.implicitWidth + 10
+                                    radius: 4
+                                    color: Qt.alpha(Theme.windowBg, 0.6)
+
+                                    Text {
+                                        id: metaTokenText
+                                        anchors.centerIn: parent
+                                        text: metaChip.token
+                                        color: Theme.textMuted
+                                        font.family: "Consolas"
+                                        font.pixelSize: 9
+                                    }
+                                }
+
+                                // The drag carries the token itself, and the click
+                                // adds it — one control for both gestures, which is
+                                // what "easily add / drag all the metadata" asks for.
+                                DragSource {
+                                    anchors.fill: parent
+                                    label: metaChip.label
+                                    payload: ({
+                                        kind: "metadata",
+                                        items: [ { ref: metaChip.token, name: metaChip.label } ]
+                                    })
+                                    onActivated: root.addMetadataItem(metaChip.token)
+                                }
+                                // Pointer-position hover for the highlight (containsMouse
+                                // latches in this build); the click sink is OFF so the
+                                // DragSource under it still takes presses.
+                                PositionHoverArea {
+                                    id: metaHover
+                                    anchors.fill: parent
+                                    // The hand is claimed through AppCursor, NOT left to
+                                    // the DragSource's own MouseArea.cursorShape: while
+                                    // any override is on the stack the catcher owns the
+                                    // OS cursor app-wide, so a plain cursorShape here
+                                    // showed as the default ARROW over every chip
+                                    // (measured: chipCursor=ARROW). The click sink
+                                    // stays OFF so the DragSource under it still takes
+                                    // presses (drag + click are that one control).
+                                    showCursor: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    clickEnabled: false
+                                    onEntered: root.metadataHint = metaChip.modelData.hint
+                                    onExited: if (root.metadataHint === metaChip.modelData.hint) root.metadataHint = ""
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // What the field under the pointer renders — the registry's own
+            // sentence, so the palette explains itself without a doc.
+            //
+            // A FIXED-SIZE slot that is always laid out — never `visible: text
+            // !== ""`. This line is a child of the Column that sizes the
+            // palette, and the palette places ITSELF by that size (above the +
+            // menu: y = root.height - 63 - height - 8). Letting the line appear
+            // therefore grew the palette UPWARD the instant a hover filled it:
+            // every chip moved up under the pointer, the pointer landed on
+            // another chip (or off the palette), that hover left, the line
+            // emptied, the palette dropped back down and the hover returned —
+            // the report "when i hover this it starts flickering". A hover must
+            // never move the thing it is hovering: the slot is always here, so
+            // the palette's geometry cannot change with metadataHint.
+            Rectangle {
+                width: paletteCol.width
+                height: 28          // two lines of 10px, reserved whether used or not
+                radius: Theme.radiusMd
+                color: Qt.alpha(Theme.inset, 0.85)
+
+                Row {
+                    x: 9
+                    width: parent.width - 18
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 7
+
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 5; height: 5
+                        radius: 2.5
+                        color: Theme.textMuted
+                    }
+                    Text {
+                        width: parent.width - 12
+                        text: root.metadataHint
+                        color: Theme.textSecondary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 10
+                        wrapMode: Text.WordWrap
+                        maximumLineCount: 2
+                        elide: Text.ElideRight
+                    }
+                }
             }
         }
     }
@@ -2259,7 +2794,7 @@ Rectangle {
         id: leftPanel
         y: 48
         height: root.height - 48
-        width: 280
+        width: root.slidePanelWidth
         border.color: Theme.border
         border.width: 1
         color: Theme.panelBg
@@ -2297,7 +2832,7 @@ Rectangle {
             id: slideListFlick
             x: 12
             y: 30
-            width: 256
+            width: leftPanel.width - 24
             height: leftPanel.height - 30 - 12
             clip: true
             contentWidth: width
@@ -2319,6 +2854,7 @@ Rectangle {
                 // initialized"), which is exactly why thumbnails never
                 // appeared even though slides were created.
                 delegate: SlideListItem {
+                    width: slideListFlick.width
                     // Live thumbnail: the slide's items straight from the
                     // per-slide store — the same objects the canvas edits,
                     // so a row re-renders the moment its content does —
@@ -2343,7 +2879,7 @@ Rectangle {
                 // A design (overlay / template) is one canvas: there is nothing to add.
                 visible: !root.designMode
                 height: 36
-                width: 256
+                width: slideListFlick.width
                 border.color: Theme.borderSubtle
                 border.width: 1
                 color: addSlideArea.containsMouse ? Theme.hoverBg : Theme.inset
@@ -2369,7 +2905,7 @@ Rectangle {
         }
 
         AppScrollBar {
-            x: 272
+            x: leftPanel.width - width - 2
             y: slideListFlick.y
             height: slideListFlick.height
             flickable: slideListFlick
@@ -2379,10 +2915,10 @@ Rectangle {
     // ---- Right panel ----
     Rectangle {
         id: rightPanel
-        x: root.width - 400
+        x: root.width - root.inspectorPanelWidth
         y: 48
         height: root.height - 48
-        width: 400
+        width: root.inspectorPanelWidth
         color: Theme.windowBg
         // Greyed with the canvas in the empty state — Background/Size & Style
         // target the active slide, which doesn't exist yet.
@@ -2502,7 +3038,7 @@ Rectangle {
             Behavior on x { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
             Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
         }
-        Rectangle { y: 43; height: 1; width: 400; color: Theme.border }
+        Rectangle { y: 43; height: 1; width: parent.width; color: Theme.border }
 
         // ITEMS tab content — Outputs grid + the selected item's Background/
         // Size & Style. Not literally "canvas items" despite the tab's
@@ -2721,7 +3257,7 @@ Rectangle {
             id: textPanelFlick
             x: 8
             y: 56
-            width: 384
+            width: parent.width - 16
             height: rightPanel.height - 56 - 12
             visible: root.rightPanelTab === "text" && root.primarySelectedItem !== null
                 && root.primarySelectedItem.kind === "text"
@@ -2732,7 +3268,13 @@ Rectangle {
 
             TextItemPanel {
                 id: textItemPanel
-                width: textPanelFlick.width - (textPanelScrollBar.visible ? 12 : 0)
+                // The scrollbar's 12px strip is ALWAYS reserved: sizing this
+                // panel from the bar's own visibility made showing the bar
+                // narrower content, which wrapped text taller, which raised
+                // textPanelFlick.contentHeight, which was the bar's own
+                // visible condition — a loop that never settled (a GUI-thread
+                // spin inside polish, AppHangB1).
+                width: textPanelFlick.width - 12
                 target: textPanelFlick.visible ? root.primarySelectedItem : null
                 undoHook: root.pushUndoSnapshot
                 focusHook: function () { mCanvas.forceActiveFocus() }
@@ -2757,7 +3299,7 @@ Rectangle {
         Text {
             x: 8
             y: 56
-            width: 384
+            width: parent.width - 16
             wrapMode: Text.Wrap
             visible: root.rightPanelTab === "text" && !(root.primarySelectedItem !== null && root.primarySelectedItem.kind === "text")
             color: Theme.textMuted
@@ -2772,7 +3314,7 @@ Rectangle {
         Text {
             x: 8
             y: 56
-            width: 384
+            width: parent.width - 16
             horizontalAlignment: Text.AlignHCenter
             visible: root.rightPanelTab === "slide"
             color: Theme.textMuted

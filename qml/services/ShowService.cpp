@@ -1,3 +1,4 @@
+#include "services/CallTrace.h"
 #include "services/ShowService.h"
 
 #include "services/EngineBridge.h"
@@ -13,6 +14,8 @@
 #include "platform/PlatformAccessor.hpp"
 
 #include <QDir>
+#include <QPointer>
+#include <QThreadPool>
 #include <QJSEngine>
 #include <QQmlEngine>
 #include <QStandardPaths>
@@ -238,7 +241,9 @@ QString ShowService::pickShowToOpen()
 {
     if (!EngineBridge::instance().booted()) return {};
     auto r = bps::platform::PlatformAccessor::Get().Dialogs().OpenFileDialog(
-        "Open show", { "VGR shows (*.vgr)", "All files (*.*)" });
+        // .vgr only: the show loader refuses anything else, so offering
+        // "All files" just moved the refusal from the picker to the import.
+        "Open show", { "VGR shows (*.vgr)" });
     return r.ok() && r.value() ? QString::fromStdString(*r.value()) : QString();
 }
 
@@ -763,7 +768,7 @@ bp::ShowLibrary *ShowService::library()
     if (!EngineBridge::instance().booted())
         return nullptr;
     if (!library_)
-        library_ = std::make_unique<bp::ShowLibrary>(libraryPath_.toStdString());
+        library_ = std::make_shared<bp::ShowLibrary>(libraryPath_.toStdString());
     return library_.get();
 }
 
@@ -794,12 +799,46 @@ void ShowService::setLibraryPath(const QString &path)
 
 void ShowService::refreshLibrary()
 {
-    if (auto *lib = library()) {
-        if (auto r = lib->Refresh(); !r.ok())
-            reportError(QStringLiteral("Couldn't read the show library"), message(r.error()));
-        publishLibrary();
-        EngineBridge::write(QStringLiteral("info"), QStringLiteral("Library"), QStringLiteral("Show library scanned: %1 show(s) in %2").arg(libraryShows().size()).arg(libraryPath_));
+    // Breadcrumb: this now walks the library on a worker, but the entry point
+    // still runs on the GUI thread — a stall here names itself in the log.
+    VGR_CALL_TRACE("ShowService.refreshLibrary");
+    // Create the library on the GUI thread first (library() lazily builds it and
+    // every other entry point calls it there), then hand the WALK to a worker.
+    // The filesystem pass (Refresh -> ScanLocked, one stat/read per show) used
+    // to run inline here, which stalled the UI on engine boot, when the Show
+    // screen opened, and after every import — the AppHangB1 class.
+    if (!library())
+        return;
+    if (refreshBusy_) {
+        refreshPending_ = true;   // one rescan follows the pass in flight
+        return;
     }
+    refreshBusy_ = true;
+    std::shared_ptr<bp::ShowLibrary> keep = library_;   // alive past a path change
+    QPointer<ShowService> guard(this);
+    QThreadPool::globalInstance()->start([guard, keep]() {
+        // ShowLibrary is internally mutex-guarded, so the worker's walk is safe
+        // against the GUI's own reads; the GUI only blocks if IT asks while the
+        // scan holds the lock, and never for the walk it did not start.
+        auto r = keep->Refresh();
+        const QString failure = r.ok() ? QString() : QString::fromStdString(r.error().message);
+        QMetaObject::invokeMethod(guard, [guard, failure]() {
+            if (!guard)
+                return;
+            ShowService *self = guard.data();
+            self->refreshBusy_ = false;
+            if (!failure.isEmpty())
+                self->reportError(QStringLiteral("Couldn't read the show library"), failure);
+            self->publishLibrary();
+            EngineBridge::write(QStringLiteral("info"), QStringLiteral("Library"),
+                                QStringLiteral("Show library scanned: %1 show(s) in %2")
+                                    .arg(self->libraryShows().size()).arg(self->libraryPath_));
+            if (self->refreshPending_) {
+                self->refreshPending_ = false;
+                self->refreshLibrary();   // a request that arrived mid-scan
+            }
+        }, Qt::QueuedConnection);
+    });
 }
 
 QVariantList ShowService::libraryShowsIn(const QString &category) const

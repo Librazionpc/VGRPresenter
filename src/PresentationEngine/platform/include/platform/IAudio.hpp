@@ -36,6 +36,31 @@ public:
     // without a supported audio stack).
     virtual    std::vector<AudioDeviceInfo> Enumerate() const = 0;
 
+    // TARGETED device lookup: the same roster, limited to the friendly names a
+    // caller actually needs (this app's saved roster — see
+    // EngineBridge::requestUsedDevices). Enumerating every endpoint is not free
+    // (each one is activated and mix-format-queried), so the boot path asks for
+    // its own devices instead of the machine's. An EMPTY `names` means "none":
+    // no device is wanted, so none is returned. Backends override this with a
+    // walk that never touches a device it isn't asked for; the default filters
+    // the bulk roster, which is what a backend without a targeted path has.
+    virtual std::vector<AudioDeviceInfo> EnumerateFor(
+        const std::vector<std::string> &names) const
+    {
+        std::vector<AudioDeviceInfo> out;
+        if (names.empty())
+            return out;
+        for (const AudioDeviceInfo &d : Enumerate()) {
+            for (const std::string &want : names) {
+                if (d.name == want) {
+                    out.push_back(d);
+                    break;
+                }
+            }
+        }
+        return out;
+    }
+
     virtual Result<AudioDeviceInfo> DefaultOutput() const = 0;
     virtual Result<AudioDeviceInfo> DefaultInput() const = 0;
 
@@ -95,9 +120,11 @@ public:
     // output). Idempotent: a second Start on a running tap is a no-op.
     // NotFound when the device doesn't exist, Unsupported on platforms
     // without capture support.
-    virtual Result<void> StartInputMeter(uint32_t deviceId)
+    virtual Result<void> StartInputMeter(uint32_t deviceId,
+                                         const std::string &deviceName = {})
     {
         (void)deviceId;
+        (void)deviceName;
         return Error::Make(Err::Unsupported, "Audio",
                            "input metering is not implemented on this platform");
     }
@@ -145,6 +172,60 @@ public:
         (void)dst;
         (void)frames;
         return 0;
+    }
+
+    // ---- STREAM taps (audio that is not a capture device) ---------------
+    // A video source's own audio — a media file's track, an NDI stream's
+    // embedded audio — is real audio the device taps cannot reach. A stream tap
+    // is the SAME carrier as an input tap (peak/RMS snapshots plus a sample FIFO
+    // the mixer drains), fed by whoever owns the source: the audio subsystem
+    // needs no second copy of the codec stack, and a stream is metered and mixed
+    // through exactly the path a device is.
+    //
+    // IDS: a stream tap lives in its own id range, disjoint from the
+    // wavein:<n> / waveout:<n> roster numbers, so one id can be passed to
+    // TapFormat / ReadTapAudio / InputLevels with no ambiguity.
+    static constexpr uint32_t kStreamTapBase = 0x40000000u;
+    static bool IsStreamTap(uint32_t id) { return id >= kStreamTapBase; }
+
+    // Open a stream tap (idempotent). `kind` says who owns the audio:
+    //   "media" — `source` is a media file: the backend decodes its audio track
+    //             itself (Media Foundation) and feeds the tap in real time.
+    //   "ndi"   — `source` names an NDI stream: its receiver pushes the samples
+    //             as they arrive (PushStreamTapAudio).
+    // NotFound when the source cannot be opened, Unsupported where the backend
+    // has no stream taps — the caller then shows no level, never a made-up one.
+    virtual Result<void> StartStreamTap(uint32_t tapId, const std::string &source,
+                                        const std::string &kind)
+    {
+        (void)tapId;
+        (void)source;
+        (void)kind;
+        return Error::Make(Err::Unsupported, "Audio",
+                           "stream audio taps are not implemented on this platform");
+    }
+    // Close the tap and release whatever feeds it. Idempotent.
+    virtual Result<void> StopStreamTap(uint32_t tapId)
+    {
+        (void)tapId;
+        return Ok();
+    }
+    // Stream taps with a live feed (the caller's own bookkeeping check).
+    virtual std::vector<uint32_t> ActiveStreamTaps() const { return {}; }
+
+    // Feed a stream tap its samples: interleaved float32 at `rate`, callable
+    // from any thread — a decoder thread or a network receiver. Pushing to a
+    // tap nobody holds is ignored (the reader went away).
+    virtual Result<void> PushStreamTapAudio(uint32_t tapId, const float *interleaved,
+                                            uint32_t channels, uint32_t frames,
+                                            uint32_t rate)
+    {
+        (void)tapId;
+        (void)interleaved;
+        (void)channels;
+        (void)frames;
+        (void)rate;
+        return Ok();
     }
 
     // ---- OUTPUT metering (the program mix) ------------------------------

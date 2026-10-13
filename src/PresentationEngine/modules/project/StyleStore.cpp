@@ -116,6 +116,7 @@ json::Value StyleStore::StyleToJson(const StoredStyle& s) {
     tmpl["media"] = json::Value::Bool(s.showTemplates[1]);
     tmpl["scripture"] = json::Value::Bool(s.showTemplates[2]);
     tmpl["table"] = json::Value::Bool(s.showTemplates[3]);
+    tmpl["overlay"] = json::Value::Bool(s.showTemplates[4]);
     o["showTemplates"] = json::Value(std::move(tmpl));
     // Per-family template keys ("" = inherit the whole-style templateKey).
     json::Value::Object famKeys;
@@ -167,6 +168,7 @@ Result<StoredStyle> StyleStore::StyleFromJson(const json::Value& v) {
         s.showTemplates[1] = tflag("media", true);
         s.showTemplates[2] = tflag("scripture", true);
         s.showTemplates[3] = tflag("table", true);
+        s.showTemplates[4] = tflag("overlay", true);
     }
     if (const json::Value* famKeys = v.Find("templateKeys"); famKeys && famKeys->asObject()) {
         const auto fkey = [famKeys](std::string_view key) {

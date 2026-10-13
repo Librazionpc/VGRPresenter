@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 namespace bps::production {
@@ -45,6 +46,63 @@ void PanGains(const VolumeControl &busVol, float &left, float &right)
     const float p = std::clamp(static_cast<float>(busVol.pan), -1.0f, 1.0f);
     left = p <= 0.0f ? 1.0f : 1.0f - p;
     right = p >= 0.0f ? 1.0f : 1.0f + p;
+}
+
+// The per-channel ROUTING mask a source row's matrix writes for ONE bus: bit
+// <c> set = that row's channel c is routed into this bus
+// ("uiRouteMask:<busNodeId>", written by AudioInputListModel::pushRoutingToGraph).
+// 0 = NO MASK = the whole source feeds the bus, which is what an older graph, a
+// bus-dialog route or a video row carries — the honest default, never a silence
+// nobody asked for.
+unsigned RouteMaskFor(const NodeInfo &node, const std::string &busNodeId)
+{
+    const auto it = node.meta.find("uiRouteMask:" + busNodeId);
+    if (it == node.meta.end())
+        return 0u;
+    try {
+        return static_cast<unsigned>(std::stoul(it->second));
+    } catch (const std::exception &) {
+        return 0u;   // unreadable mask reads as "no mask" (the whole source)
+    }
+}
+
+// One node's per-side trim, index 0 = L, 1 = R. Written on a node's meta by
+// the L/R controls — a SOURCE row's channel buttons
+// (AudioInputListModel::setChannelGain) and a BUS's (BusListModel::
+// setChannelGain) both use this same key, so the mixer needs no knowledge of
+// which kind of card wrote it. Absent = unity (an older graph).
+float SourceChannelGain(const NodeInfo &node, uint32_t channel)
+{
+    const std::string key = "uiChannelGain" + std::to_string(channel);
+    const auto it = node.meta.find(key);
+    if (it == node.meta.end())
+        return 1.0f;  // older graphs default to unity
+    char *end = nullptr;
+    const float value = std::strtof(it->second.c_str(), &end);
+    if (end == it->second.c_str() || !std::isfinite(value))
+        return 1.0f;
+    return std::clamp(value, 0.0f, 1.0f);
+}
+
+// What feeds one BUS plane, in the order the mix should consider it: the
+// plane's own upstream sources (the routing board's edges on that plane) plus —
+// for an AUDIO plane — the sources of its paired VIDEO plane ("bus:N#a" ↔
+// "bus:N#v", the pairing BusListModel derives both ids from). A video row
+// routed into a "both"/video bus carries its own audio (a media file's track,
+// NDI's embedded audio); that audio belongs to this bus's mix, and the app's
+// bridge binds those rows to stream taps exactly as it binds an audio row's
+// device. SumSource contributes nothing for a node it has no tap bound for, so
+// a camera or a silent NDI feed costs one map lookup and stays silent.
+std::vector<std::string> FeedsForBus(const ProductionGraph &graph, const std::string &planeId)
+{
+    std::vector<std::string> out = graph.Upstream(planeId);
+    if (!planeId.ends_with("#a"))
+        return out;
+    const std::string twin = planeId.substr(0, planeId.size() - 2) + "#v";
+    for (const std::string &up : graph.Upstream(twin))
+        if (std::find(out.begin(), out.end(), up) == out.end())
+            out.push_back(up);
+    return out;
 }
 
 // One-pole envelope follower toward `target`, attack/release in seconds —
@@ -168,7 +226,9 @@ void AudioMixer::ApplyProcessing(const NodeInfo &node, SourceDspState &state,
 // already-held lock on the same non-recursive std::mutex — is a genuine
 // self-deadlock on the very first render with any routed source, not a
 // theoretical risk.
-bool AudioMixer::SumSource(const std::string &sourceNodeId, const VolumeControl &busVol,
+bool AudioMixer::SumSource(const std::string &sourceNodeId, const std::string &busNodeId,
+                           const VolumeControl &busVol,
+                           float busGainL, float busGainR,
                            float *out, uint32_t frames, uint32_t channels, uint32_t outRateHz)
 {
     if (!graph_ || !taps_)
@@ -192,17 +252,35 @@ bool AudioMixer::SumSource(const std::string &sourceNodeId, const VolumeControl 
     if (gain <= 0.0f)
         return false;
 
+    // The row's per-channel routing to THIS bus: a mask's bit c gates channel c,
+    // so a source the matrix routed on one side only stays on that side here.
+    // (No mask — the common case — leaves both sides open.)
+    const unsigned routeMask = RouteMaskFor(node.value(), busNodeId);
+    if (routeMask != 0u && (routeMask & 0x3u) == 0u)
+        return false;   // nothing routed into this bus at all
+    const float routeOpenL = (routeMask == 0u || (routeMask & 0x1u)) ? 1.0f : 0.0f;
+    const float routeOpenR = (routeMask == 0u || (routeMask & 0x2u)) ? 1.0f : 0.0f;
+
     // THE CARRIER: real captured samples. A drained FIFO yields fewer
     // frames than asked — only what arrived is mixed (the remainder stays
     // silence; a stalled tap goes quiet, it never repeats its last buffer).
     const auto fmt = taps_->TapFormat(deviceId);
     if (fmt.channels == 0 || fmt.sampleRateHz == 0)
         return false;   // no live tap behind this source
+    const float sourceGainL = SourceChannelGain(node.value(), 0);
+    const float sourceGainR = fmt.channels == 1
+        ? sourceGainL : SourceChannelGain(node.value(), 1);
+    if (sourceGainL <= 0.0f && sourceGainR <= 0.0f)
+        return false;   // both source channels are explicitly closed
 
     float panL = 1.0f, panR = 1.0f;
     PanGains(busVol, panL, panR);
-    const float sampleGainL = gain * panL;
-    const float sampleGainR = gain * panR;
+    // The BUS's own per-side trim folds in beside the pan — the bus card's
+    // L/R buttons write it, so a closed side of the bus is silent here even
+    // while the source feeding it is wide open, which is the whole point of
+    // the bus having its own L/R at all.
+    const float sampleGainL = gain * panL * busGainL * routeOpenL;
+    const float sampleGainR = gain * panR * busGainR * routeOpenR;
 
     SourceDspState &dsp = dspState_[sourceNodeId];   // creates on first use; fine, small and rare
 
@@ -218,6 +296,8 @@ bool AudioMixer::SumSource(const std::string &sourceNodeId, const VolumeControl 
             float l = scratch_[base];
             float r = fmt.channels == 1 ? scratch_[base] : scratch_[base + 1];
             ApplyProcessing(node.value(), dsp, l, r, outRateHz);
+            l *= sourceGainL;
+            r *= sourceGainR;
             if (channels == 1)
                 out[f] += (l * sampleGainL + r * sampleGainR) * 0.5f;
             else {
@@ -257,6 +337,8 @@ bool AudioMixer::SumSource(const std::string &sourceNodeId, const VolumeControl 
         float l = l0 + (l1 - l0) * t;
         float r = r0 + (r1 - r0) * t;
         ApplyProcessing(node.value(), dsp, l, r, outRateHz);
+        l *= sourceGainL;
+        r *= sourceGainR;
         if (channels == 1)
             out[f] += (l * sampleGainL + r * sampleGainR) * 0.5f;
         else {
@@ -268,10 +350,59 @@ bool AudioMixer::SumSource(const std::string &sourceNodeId, const VolumeControl 
     return any;
 }
 
+void AudioMixer::PublishLevels(const float *out, uint32_t frames, uint32_t channels)
+{
+    const uint32_t n = std::min<uint32_t>(channels, 2);
+    float peaks[2] = {0.0f, 0.0f};
+    float sums[2] = {0.0f, 0.0f};
+    for (uint32_t f = 0; f < frames; ++f) {
+        for (uint32_t c = 0; c < n; ++c) {
+            const float v = out[static_cast<size_t>(f) * channels + c];
+            const float a = std::fabs(v);
+            if (a > peaks[c]) peaks[c] = a;
+            sums[c] += v * v;
+        }
+    }
+    const std::lock_guard<std::mutex> lock(levelMutex_);
+    for (uint32_t c = 0; c < 2; ++c) {
+        const float held = programLevel_.peaks[c] * kPeakHold;
+        if (c < n && peaks[c] > 0.0005f) {
+            programLevel_.peaks[c] = std::max(peaks[c], held);
+            programLevel_.rms[c] = frames > 0 ? std::sqrt(sums[c] / static_cast<float>(frames))
+                                              : programLevel_.rms[c] * kPeakHold;
+        } else {
+            // A channel with no signal must go dark, especially when its
+            // source-side L/R gain was closed. Holding its old peak made a
+            // muted side keep animating after the signal was cut.
+            programLevel_.peaks[c] = 0.0f;
+            programLevel_.rms[c] = 0.0f;
+        }
+    }
+    programLevel_.channelCount = n;
+    programLevel_.framesRendered += frames;
+}
+
+void AudioMixer::PublishSilence()
+{
+    const std::lock_guard<std::mutex> lock(levelMutex_);
+    for (uint32_t c = 0; c < 2; ++c) {
+        programLevel_.peaks[c] = 0.0f;
+        programLevel_.rms[c] = 0.0f;
+    }
+}
+
+AudioMixer::ProgramLevels AudioMixer::ProgramLevel() const
+{
+    const std::lock_guard<std::mutex> lock(levelMutex_);
+    return programLevel_;
+}
+
 bool AudioMixer::Render(float *out, uint32_t frameCount, uint32_t channelCount, uint32_t sampleRateHz)
 {
-    if (!graph_ || frameCount == 0 || channelCount == 0 || out == nullptr)
+    if (!graph_ || frameCount == 0 || channelCount == 0 || out == nullptr) {
+        PublishSilence();      // the meter follows the real thing down to zero
         return false;
+    }
 
     // The routing pump mutates the device table on the GUI side; the mix
     // holds the same lock (a sub-millisecond hold against a tiny setter).
@@ -289,13 +420,26 @@ bool AudioMixer::Render(float *out, uint32_t frameCount, uint32_t channelCount, 
     for (const auto &[id, node] : graph_->Nodes()) {
         if (node.kind != NodeKind::Bus || node.signalType != SignalType::Audio)
             continue;
+
         if (!node.enabled)
             continue;
-        for (const auto &upstream : graph_->Upstream(id))
-            anything |= SumSource(upstream, node.volume, out, frameCount, channelCount, sampleRateHz);
+        // The bus plane's own per-side trims (its node meta — the bus card's
+        // L/R buttons). Both closed means this bus contributes nothing, the
+        // same early-out a fully-closed source takes in SumSource.
+        const float busGainL = SourceChannelGain(node, 0);
+        const float busGainR = SourceChannelGain(node, 1);
+        if (busGainL <= 0.0f && busGainR <= 0.0f)
+            continue;
+        for (const auto &upstream : FeedsForBus(*graph_, id))
+            anything |= SumSource(upstream, id, node.volume, busGainL, busGainR,
+                                  out, frameCount, channelCount, sampleRateHz);
     }
-    if (!anything)
+    if (!anything) {
+        // A muted/empty graph IS silence — the platform emits it, and the
+        // program meter has to say so rather than freeze at the last peak.
+        PublishSilence();
         return false;
+    }
 
     // Master scale + safety ceiling: never let a pathological stack clip.
     const float master = masterGain_.load(std::memory_order_relaxed);
@@ -306,6 +450,9 @@ bool AudioMixer::Render(float *out, uint32_t frameCount, uint32_t channelCount, 
         if (s < -1.0f) s = -1.0f;
         out[i] = s;
     }
+    // Publish AFTER the master scale and the ceiling: the meter shows what is
+    // actually going out, clipped, not the pre-limiter sum.
+    PublishLevels(out, frameCount, channelCount);
     return true;
 }
 

@@ -52,6 +52,11 @@ BOOL CALLBACK MonitorEnumProc(HMONITOR hMonitor, HDC, LPRECT, LPARAM lParam) {
     m.name = m.id;
     m.x = mi.rcMonitor.left;
     m.y = mi.rcMonitor.top;
+    // rcMonitor is the monitor's rect in the session's VIRTUAL coordinates — the
+    // ones DWM's display scaling produces — so on a 125%-scaled panel it reports
+    // the LOGICAL size (a 1920x1200 laptop panel reads as 1536x960). Every
+    // resolution this app shows for a display, and every size it derives from the
+    // panel, must be the panel's REAL pixels, so the mode's dmPels* below wins.
     m.widthPx = mi.rcMonitor.right - mi.rcMonitor.left;
     m.heightPx = mi.rcMonitor.bottom - mi.rcMonitor.top;
     m.primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
@@ -62,7 +67,17 @@ BOOL CALLBACK MonitorEnumProc(HMONITOR hMonitor, HDC, LPRECT, LPARAM lParam) {
     dm.dmSize = sizeof(dm);
     if (EnumDisplaySettingsExW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm, 0)) {
         m.refreshRateHz = static_cast<int>(dm.dmDisplayFrequency);
-        // dmPelsWidth/Height match rcMonitor for the current mode.
+        // The current mode's real pixel size (the panel's own resolution).
+        if (dm.dmPelsWidth > 0 && dm.dmPelsHeight > 0) {
+            // The scale factor is the ratio between the two coordinate spaces;
+            // 96 dpi is the unscaled reference, so a panel running at 125% comes
+            // back as 120 rather than a hard-coded 96 ("the display I have
+            // connected is bigger than the laptop's and the list says otherwise").
+            if (m.widthPx > 0 && static_cast<LONG>(dm.dmPelsWidth) != m.widthPx)
+                m.dpi = static_cast<int>((96.0 * dm.dmPelsWidth) / m.widthPx + 0.5);
+            m.widthPx = static_cast<int>(dm.dmPelsWidth);
+            m.heightPx = static_cast<int>(dm.dmPelsHeight);
+        }
     }
     out->push_back(std::move(m));
     return TRUE;

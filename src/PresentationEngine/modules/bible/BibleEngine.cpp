@@ -1,6 +1,7 @@
 #include "modules/bible/BibleEngine.hpp"
 
 #include "core/logging/Logger.hpp"
+#include "core/recovery/DocumentRecovery.hpp"
 #include "modules/search/SearchEngine.hpp"
 #include "platform/PlatformAccessor.hpp"
 
@@ -76,34 +77,73 @@ BibleEngine& BibleEngine::Instance() {
 // Lifecycle
 // ---------------------------------------------------------------------------
 Result<void> BibleEngine::Initialize() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (initialized_.load()) return Ok();
-    initialized_.store(true);
-    if (providers_.empty()) {
-        providers_.push_back(CreateXmlBibleProvider());
-        providers_.push_back(CreateJsonBibleProvider());
-        providers_.push_back(CreateUsfmBibleProvider());
-        providers_.push_back(CreateOsisBibleProvider());
-        providers_.push_back(CreatePlainTextBibleProvider());
-    }
-    WireEvents();
-    // Restore the installed-bible store (imported bibles survive restarts —
-    // the user must never re-upload a full translation). A missing store is
-    // the normal first boot; a corrupt one degrades to an empty library with
-    // a warning, the same shape as a first run.
-    size_t restored = 0;
+    std::vector<BibleVersion> reindex;
+    // Store read + parse + recovery with NO lock held: the read is a PAL call and
+    // setting a damaged store aside is disk work, and neither may run under
+    // mutex_. The locked section below only consumes the parsed document.
+    json::Value store;
+    bool haveStore = false;
     if (!storePath_.empty()) {
-        if (auto loaded = LoadStoreLocked(); loaded.ok())
-            restored = loaded.value();
-        else
-            Logger::Instance().Warning("BibleEngine: bible store restore failed: " +
-                                           loaded.error().message, "BibleEngine");
+        auto& fsys = platform::PlatformAccessor::Get().Filesystem();
+        if (fsys.Exists(storePath_)) {
+            auto body = fsys.ReadText(storePath_);
+            if (body.ok()) {
+                if (auto parsed = json::Parse(body.value()); parsed.ok()) {
+                    store = std::move(parsed.value());
+                    haveStore = true;
+                } else {
+                    // SELF-HEALING: the operator's notes and highlights live in
+                    // this one file — a damaged store is set aside as evidence
+                    // and the engine comes up empty instead of failing the
+                    // boot, and the next save rebuilds it at the same path.
+                    (void)recovery::SetAsideDamagedDocument(
+                        storePath_, "BibleEngine", parsed.error().message);
+                }
+            }
+        }
     }
-    if (restored > 0) {
-        // The Search Engine's index is per-process: re-index what the store
-        // brought back, off the boot path (the The Table library's precedent).
-        std::vector<BibleVersion> reindex;
-        for (const auto& [id, b] : bibles_) reindex.push_back(b);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (initialized_.load()) return Ok();
+        initialized_.store(true);
+        if (providers_.empty()) {
+            providers_.push_back(CreateXmlBibleProvider());
+            providers_.push_back(CreateJsonBibleProvider());
+            providers_.push_back(CreateUsfmBibleProvider());
+            providers_.push_back(CreateOsisBibleProvider());
+            providers_.push_back(CreatePlainTextBibleProvider());
+        }
+        WireEvents();
+        // Restore the installed-bible store (imported bibles survive restarts —
+        // the user must never re-upload a full translation). A missing store is
+        // the normal first boot, and a damaged one was already set aside as
+        // evidence above; both leave the library empty, exactly like a first run.
+        size_t restored = 0;
+        if (haveStore) {
+            if (auto loaded = LoadStoreLocked(store); loaded.ok())
+                restored = loaded.value();
+            else
+                Logger::Instance().Warning("BibleEngine: bible store restore failed: " +
+                                               loaded.error().message, "BibleEngine");
+        }
+        if (restored > 0) {
+            // The Search Engine's index is per-process: re-index what the store
+            // brought back, off the boot path (the The Table library's
+            // precedent). Only the snapshot is taken here — the thread itself
+            // is started BELOW, with the lock released.
+            for (const auto& [id, b] : bibles_) reindex.push_back(b);
+            Logger::Instance().Info(std::format("BibleEngine: restored {} bible(s) from store",
+                                                bibles_.size()), "BibleEngine");
+        }
+    }
+    if (!reindex.empty()) {
+        // Join/start with mutex_ RELEASED: IndexBible takes that lock itself,
+        // so joining a still-running re-index under the lock would deadlock
+        // (Shutdown joins the same thread the same way — outside its locked
+        // block). The body is a lambda here (not a free function) because
+        // IndexBible is private — a lambda inside a member function keeps this
+        // function's access — and it is DEFINED below the locked scope so the
+        // lock-scope guard can see no lock is held above the call.
         if (reindexThread_.joinable()) reindexThread_.join();   // a prior restore's re-index
         reindexThread_ = std::thread([bibles = std::move(reindex)] {
             for (const BibleVersion& b : bibles) {
@@ -119,8 +159,6 @@ Result<void> BibleEngine::Initialize() {
             Logger::Instance().Info("BibleEngine: restored bibles re-indexed for search",
                                     "BibleEngine");
         });
-        Logger::Instance().Info(std::format("BibleEngine: restored {} bible(s) from store",
-                                            bibles_.size()), "BibleEngine");
     }
     return Ok();
 }
@@ -590,18 +628,10 @@ void BibleEngine::FlattenVersesLocked(BibleVersion& bible) const {
     }
 }
 
-Result<size_t> BibleEngine::LoadStoreLocked() {
+Result<size_t> BibleEngine::LoadStoreLocked(const json::Value& root) {
     bibles_.clear();
-    if (storePath_.empty()) return size_t{0};
-    auto& platform = platform::PlatformAccessor::Get();
-    auto body = platform.Filesystem().ReadText(storePath_);
-    if (!body.ok()) return size_t{0};   // first boot: no store yet
-    auto parsed = json::Parse(body.value());
-    if (!parsed.ok())
-        return Error::Make(Err::Bible_ValidationFailed, "BibleEngine",
-                           "corrupt bible store JSON: " + parsed.error().message);
     size_t count = 0;
-    if (const json::Value* arr = parsed.value().Find("bibles"); arr && arr->asArray()) {
+    if (const json::Value* arr = root.Find("bibles"); arr && arr->asArray()) {
         for (const json::Value& bv : *arr->asArray()) {
             BibleVersion bible = BibleFromJsonLocked(bv);
             if (bible.metadata.id.empty() || bible.books.empty() || bible.chapters.empty())
@@ -613,7 +643,7 @@ Result<size_t> BibleEngine::LoadStoreLocked() {
     // User data rides in the same file (schema 2): restore notes, highlights,
     // and collections with the bibles they belong to. Absent = first boot or
     // schema 1, both of which mean "no user data yet".
-    ReadUserDataLocked(parsed.value());
+    ReadUserDataLocked(root);
     return count;
 }
 
@@ -628,10 +658,11 @@ Result<void> BibleEngine::SaveStoreLocked() {
     root["bibles"] = J(std::move(arr));
     WriteUserDataLocked(root);   // the store is ONE file: never orphan user data
 
+    // ATOMIC (WriteAtomic creates the parent dir too): the store holds the user's
+    // highlights and notes — written after every mark, so it is precisely the file
+    // an interrupted save would damage.
     auto& platform = platform::PlatformAccessor::Get();
-    (void)platform.Filesystem().CreateDirectories(
-        std::filesystem::path(storePath_).parent_path().generic_string());
-    return platform.Filesystem().Write(storePath_, J(std::move(root)).ToString());
+    return platform.Filesystem().WriteAtomic(storePath_, J(std::move(root)).ToString());
 }
 
 // --- User-data <-> JSON (schema 2) -----------------------------------------
@@ -772,7 +803,7 @@ Result<void> BibleEngine::SaveUserDataLocked() {
 
     (void)platform.Filesystem().CreateDirectories(
         std::filesystem::path(storePath_).parent_path().generic_string());
-    return platform.Filesystem().Write(storePath_, J(std::move(root)).ToString());
+    return platform.Filesystem().WriteAtomic(storePath_, J(std::move(root)).ToString());
 }
 
 std::vector<std::string> BibleEngine::BibleIds() const {
@@ -935,8 +966,19 @@ Result<std::vector<PassageRef>> BibleEngine::ResolveReferences(std::string_view 
 // Search (docs/specs/24 §Search Integration)
 // ---------------------------------------------------------------------------
 Result<std::vector<BibleSearchHit>> BibleEngine::Search(std::string_view query,
-                                                        std::string_view bibleId) const {
+                                                        std::string_view bibleId,
+                                                        std::string_view bookId,
+                                                        int chapter) const {
     std::vector<BibleSearchHit> hits;
+    // The chapter lock's test, in one place: is this verse inside the passage the
+    // search is scoped to? (Empty bookId = the whole Bible, chapter 0 = the whole
+    // book, so the unlocked search runs through the same code it always did.)
+    const auto inScope = [&](std::string_view hitBible, std::string_view hitBook, int hitChapter) {
+        if (!bookId.empty() && hitBook != bookId) return false;
+        if (chapter > 0 && hitChapter != chapter) return false;
+        if (!bibleId.empty() && hitBible != bibleId) return false;
+        return true;
+    };
     // 1. Reference resolution: "John 3:16" is a lookup, not a text search.
     if (auto refs = ResolveReferences(query, bibleId); refs.ok()) {
         std::vector<std::string> ids;
@@ -963,6 +1005,10 @@ Result<std::vector<BibleSearchHit>> BibleEngine::Search(std::string_view query,
                         hit.verse = v.verse;
                         hit.snippet = v.text;
                         hit.score = 100.0;   // exact reference beats text ranking
+                        // Locked, even a typed reference stays inside the open
+                        // passage: the search box must not jump the lock.
+                        if (!inScope(hit.bibleId, hit.bookId, hit.chapter))
+                            continue;
                         hits.push_back(std::move(hit));
                     }
                 }
@@ -975,6 +1021,15 @@ Result<std::vector<BibleSearchHit>> BibleEngine::Search(std::string_view query,
     search::SearchFilter filter;
     filter.type = "bible";
     if (!bibleId.empty()) filter.author = std::string(bibleId);
+    // Push the scope INTO the engine as the document id prefix the Bible
+    // documents carry ("bible:<bible>:<book>:<chapter>:<verse>"), so the
+    // candidate slice is drawn from inside the one open passage instead of being
+    // filtered after the cap — which would answer a scoped query with whatever
+    // the global top-N happened to be.
+    if (!bookId.empty() && !bibleId.empty()) {
+        filter.idPrefix = std::format("bible:{}:{}:", bibleId, bookId);
+        if (chapter > 0) filter.idPrefix += std::format("{}:", chapter);
+    }
     if (auto results = search.Search(query, filter, 50); results.ok()) {
         for (const auto& r : results.value()) {
             // Document id: bible:<bible>:<book>:<chapter>:<verse>
@@ -993,6 +1048,10 @@ Result<std::vector<BibleSearchHit>> BibleEngine::Search(std::string_view query,
             hit.reference = std::format("{} {}:{}", hit.bookId, hit.chapter, hit.verse);
             hit.snippet = r.snippet.empty() ? r.title : r.snippet;
             hit.score = r.score;
+            // (The id prefix above already narrowed the slice; this keeps the
+            // scope honest when only a book was named, or no bible id was.)
+            if (!inScope(hit.bibleId, hit.bookId, hit.chapter))
+                continue;
             // Deduplicate against reference hits.
             bool dup = false;
             for (const auto& h : hits)

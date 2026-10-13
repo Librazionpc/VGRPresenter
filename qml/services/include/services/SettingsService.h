@@ -12,6 +12,7 @@
 
 #include <functional>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "modules/settings/AppSettings.hpp"
@@ -120,9 +121,9 @@ public:
     Q_INVOKABLE QVariantMap capsFor(const QString &profile) const;
 
     // The scripture options (the Scripture tab's settings) in the form the engine's slide builder takes them.
-    bps::presentation::ScriptureSettings scriptureSettings() const;
+    bps::presentation::BookFillOptions scriptureSettings() const;
     // The Table's slide-builder options (the "table." keys).
-    bps::presentation::ScriptureSettings theTableSettings() const;
+    bps::presentation::BookFillOptions theTableSettings() const;
 
     // ---- Output style (Settings · Styles applied to the on-air output) ----
     // Bridges OutputListModel's UI state into the engine's live render loop
@@ -131,9 +132,12 @@ public:
     void setActiveOutputStyle(const bps::presentation::OutputStyleSpec &spec);
     // The per-output pass set (one gated render per style-wearing output —
     // PresentationEngine::SetLiveOutputStyles). Safe before boot, like the
-    // single-spec push above.
+    // single-spec push above. `bufferSizes` (optional — parallel to
+    // bufferNames) is each output's own configured frame resolution; empty
+    // or a {0,0} entry means "use the engine's own default".
     void setLiveOutputStyles(const std::vector<bps::presentation::OutputStyleSpec> &specs,
-                             const std::vector<std::string> &bufferNames);
+                             const std::vector<std::string> &bufferNames,
+                             const std::vector<std::pair<int, int>> &bufferSizes = {});
 
     // Whether a file is there (the last show may have been moved or deleted since the app was closed).
     Q_INVOKABLE bool fileExists(const QString &path) const;
@@ -200,8 +204,14 @@ private:
     void refreshValues();
     void applyLaunchAtLogin();
     // Puts appearance.language in force: the default QLocale (dates, times,
-    // numbers follow it at once) and any installed translation for it.
-    void applyLanguage();
+    // numbers follow it at once) and any installed translation for it. Answers
+    // whether a TRANSLATION was actually found — the string half is a no-op in a
+    // build that ships none.
+    bool applyLanguage();
+    // A language change, applied and then said out loud (see the definition).
+    void announceLanguage();
+    // The chosen language as a person reads it ("Deutsch"), for the notice.
+    QString languageLabel() const;
     void report(const QString &message, const QString &level = QStringLiteral("error")) const;
 
     std::unique_ptr<bps::settings::AppSettings> settings_;

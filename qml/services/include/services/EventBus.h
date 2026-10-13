@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QVariant>
 #include <QVariantMap>
 #include <qqml.h>
 
@@ -57,10 +58,25 @@ public:
     //
     // level: "info" (default) | "success" | "warning" | "error" — error
     // toasts stick longer (NotificationCenter's own rule).
+    // crux: the NAMES the notice is about (a device, a source, a show), as a
+    // string or a list of strings. Purely presentational — it rides the payload
+    // as "crux" and NotificationCenter/NotificationToast render those spans bold
+    // so the eye lands on the subject instead of reading the sentence (see
+    // NotificationToast.crux). Optional: a notice with no crux renders exactly
+    // as before.
+    // action: what the notice OFFERS, if anything — a map {"id": "recovery.open",
+    // "label": "Open recovered show"}, or a bare id string with the label left to
+    // the card. Same rules as crux: presentational, optional, and carried on the
+    // payload as "action". The id is looked up in QML's own registry
+    // (NotificationCenter.registerAction) when the button is clicked, so a notice
+    // raised from anywhere — this C++ door included — can offer one click to the
+    // work it is about without handing a function through a payload map.
     Q_INVOKABLE void notify(const QString &message,
                             const QString &level = QStringLiteral("info"),
                             const QString &title = QStringLiteral("Application"),
-                            const QString &topic = QString());
+                            const QString &topic = QString(),
+                            const QVariant &crux = QVariant(),
+                            const QVariant &action = QVariant());
 
 signals:
     void eventPosted(const QString &topic, const QVariantMap &payload);

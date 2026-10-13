@@ -2,6 +2,7 @@
 
 #include "core/config/Json.hpp"
 #include "core/logging/Logger.hpp"
+#include "core/recovery/DocumentRecovery.hpp"
 #include "modules/content/AssetCompressor.hpp"
 #include "modules/search/SearchEngine.hpp"
 #include "modules/search/TextMatching.hpp"
@@ -16,6 +17,7 @@
 #include <cstring>
 #include <format>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -35,6 +37,68 @@ constexpr const char* kConvertedVersion = "v1";   // bump when the conversion ch
 
 using J = json::Value;
 
+template <size_t N>
+void AddWordBloom(std::array<uint64_t, N>& bloom, std::string_view word) {
+    const uint64_t h1 = static_cast<uint64_t>(std::hash<std::string_view>{}(word));
+    uint64_t h2 = (h1 >> 29) ^ (h1 << 17) ^ 0x9e3779b97f4a7c15ull;
+    h2 |= 1ull;
+    constexpr uint64_t bitCount = N * 64;
+    for (uint64_t i = 0; i < 4; ++i) {
+        const uint64_t bit = (h1 + i * h2) % bitCount;
+        bloom[bit / 64] |= uint64_t{1} << (bit % 64);
+    }
+}
+
+template <size_t N>
+bool MightHaveWord(const std::array<uint64_t, N>& bloom, std::string_view word) {
+    const uint64_t h1 = static_cast<uint64_t>(std::hash<std::string_view>{}(word));
+    uint64_t h2 = (h1 >> 29) ^ (h1 << 17) ^ 0x9e3779b97f4a7c15ull;
+    h2 |= 1ull;
+    constexpr uint64_t bitCount = N * 64;
+    for (uint64_t i = 0; i < 4; ++i) {
+        const uint64_t bit = (h1 + i * h2) % bitCount;
+        if ((bloom[bit / 64] & (uint64_t{1} << (bit % 64))) == 0)
+            return false;
+    }
+    return true;
+}
+
+size_t NearPhrasePosition(std::string_view text, const std::vector<std::string>& terms,
+                          size_t maxGapWords) {
+    if (terms.empty()) return std::string_view::npos;
+    std::vector<std::string_view> words;
+    std::vector<size_t> starts;
+    for (size_t i = 0; i < text.size();) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if (!std::isalnum(c) && c < 0x80) { ++i; continue; }
+        const size_t start = i++;
+        while (i < text.size()) {
+            const unsigned char next = static_cast<unsigned char>(text[i]);
+            if (!std::isalnum(next) && next < 0x80) break;
+            ++i;
+        }
+        words.emplace_back(text.substr(start, i - start));
+        starts.push_back(start);
+    }
+    for (size_t start = 0; start < words.size(); ++start) {
+        if (words[start] != terms.front()) continue;
+        size_t pos = start;
+        bool matched = true;
+        for (size_t t = 1; t < terms.size(); ++t) {
+            size_t next = pos + 1;
+            while (next < words.size() && next <= pos + maxGapWords + 1
+                   && words[next] != terms[t]) ++next;
+            if (next >= words.size() || next > pos + maxGapWords + 1) {
+                matched = false;
+                break;
+            }
+            pos = next;
+        }
+        if (matched) return starts[start];
+    }
+    return std::string_view::npos;
+}
+
 std::string Trim(const std::string& s) {
     size_t b = s.find_first_not_of(" \t\r\n");
     if (b == std::string::npos) return {};
@@ -45,6 +109,7 @@ std::string Trim(const std::string& s) {
 using textmatch::Lower;   // shared with the Search Engine (see TextMatching.hpp)
 using textmatch::ContainsWord;
 using textmatch::ContainsPhrase;
+using textmatch::ContainsNearPhrase;
 using textmatch::StartsWord;
 
 std::string Collapse(const std::string& s) {
@@ -192,6 +257,39 @@ std::string SermonCitation(const std::string& year, const std::string& code,
     if (!display.empty()) out += " - " + display;
     if (verse > 0) out += " " + std::to_string(verse);
     return out;
+}
+
+// The typed-HANDLE formatter, file-local: the class method of the same idea
+// (TheTableLibrary::CitationNeedle) is the public door, defined with the rest of
+// the public surface further down — this is the body it delegates to, so the
+// rule sits next to SermonCitation, which writes the lines it reads.
+std::string CitationNeedleText(std::string_view handle)
+{
+    // Every run of spaces next to a '-' goes; nothing else is touched. The
+    // stored citation has no spaces beside its dash ("47-0412 - Faith Is The
+    // Substance"), while a hand-typed handle may put them on either side
+    // ("47 - 0412", "47- 0412") — the same sermon, so both sides of a comparison
+    // are squeezed onto this one form. A title's own spaces stay: they are what
+    // makes a typed word findable at all.
+    // Trimmed first and last: a handle arrives with whatever the search box or
+    // a paste left on its ends, and a leading space would otherwise stop the
+    // needle matching the citation line at all.
+    const std::string in = Trim(std::string(handle));
+    std::string out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(in[i]);
+        if (c == ' ' || c == '\t') {
+            size_t j = i;
+            while (j < in.size() && (in[j] == ' ' || in[j] == '\t')) ++j;
+            const bool beforeDash = j < in.size() && in[j] == '-';
+            const bool afterDash = !out.empty() && out.back() == '-';
+            if (beforeDash || afterDash)
+                continue;   // the run beside the dash: dropped whole
+        }
+        out.push_back(static_cast<char>(std::tolower(c)));
+    }
+    return Trim(out);
 }
 
 constexpr const char* kUnfiledYear = "Unfiled";
@@ -1480,29 +1578,65 @@ Result<void> TheTableLibrary::Persist(const std::vector<TheTableBook>& books) co
     root["highlights"] = J(std::move(hlArr));
 
     auto& platform = platform::PlatformAccessor::Get();
-    // Ensure the file's own parent exists (the library may live anywhere —
-    // tests use a temp dir; production uses the user data dir).
-    (void)platform.Filesystem().CreateDirectories(
-        std::filesystem::path(filePath_).parent_path().generic_string());
-    return platform.Filesystem().Write(filePath_, J(std::move(root)).ToString());
+    // ATOMIC (WriteAtomic creates the file's own parent, which the library may
+    // need anywhere — tests use a temp dir, production the user data dir): the
+    // file carries the user's highlights and notes, so a truncated save must not
+    // be observable.
+    return platform.Filesystem().WriteAtomic(filePath_, J(std::move(root)).ToString());
 }
 
 Result<void> TheTableLibrary::Load() {
     // scanMutex_ first: a concurrent Search()'s scan must never see the
     // between-clears state (books_ empty, cache alive → stale pointers) nor
     // interleave with the reload.
+    // The PAL file read happens BEFORE either lock: filesystem I/O must never
+    // run under mutex_/scanMutex_ (a slow or network-backed volume would stall
+    // every reader and search). The clear-and-reload below keeps its exact
+    // semantics — a missing file still leaves the library empty.
+    auto& platform = platform::PlatformAccessor::Get();
+    auto body = platform.Filesystem().ReadText(filePath_);
+
+    // The parse — and the set-aside of a damaged store, which is itself disk
+    // work — also happen BEFORE either lock, for the same reason as the read:
+    // the whole read/parse/recover path stays out of the library's locked scope.
+    bool damaged = false;
+    std::string damage;
+    J parsedRoot;
+    if (body.ok()) {
+        if (auto parsed = json::Parse(body.value()); parsed.ok()) {
+            // A store that parses but carries no 'books' section holds neither
+            // the sermons nor the operator's notes and highlights: the same
+            // loss as a parse failure, so it is set aside the same way rather
+            // than being read as "empty" and then saved over.
+            damage = recovery::DocumentShapeProblem(parsed.value(), "books", J::Type::Array);
+            if (damage.empty())
+                parsedRoot = std::move(parsed.value());
+            else
+                damaged = true;
+        } else {
+            damaged = true;
+            damage = parsed.error().message;
+        }
+    }
+    if (damaged) {
+        // SELF-HEALING: set the damaged store aside as evidence and come up
+        // empty. The books are re-imported, but they are the operator's, so the
+        // bytes are kept under `.corrupt-<stamp>` rather than being overwritten
+        // by the next save — which is what repairing from an empty library would
+        // otherwise do.
+        (void)recovery::SetAsideDamagedDocument(filePath_, kModule, damage);
+    }
+
     std::lock_guard<std::mutex> scanLock(scanMutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     books_.clear();
     lowerParagraphs_.clear();
+    exactWordBlooms_.clear();
+    exactWordBloomsReady_ = false;
+    ++libraryRevision_;
 
-    auto& platform = platform::PlatformAccessor::Get();
-    auto body = platform.Filesystem().ReadText(filePath_);
-    if (!body.ok()) return Ok();   // first run: no file yet
-    auto parsed = json::Parse(body.value());
-    if (!parsed.ok())
-        return Error::Make(kTableErr, kModule, "corrupt library JSON: " + parsed.error().message);
-    const J& root = parsed.value();
+    if (!body.ok() || damaged) return Ok();   // first run, or a store just set aside
+    const J& root = parsedRoot;
     const J* booksArr = root.Find("books");
     if (!booksArr || !booksArr->asArray()) return Ok();
 
@@ -1618,9 +1752,11 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine(const std::atomic<bool>* c
     // The library copy happens under the lock; indexing (an upsert per sermon)
     // runs on it so browsing is never held up behind the engine's work.
     std::vector<TheTableBook> snapshot;
+    uint64_t snapshotRevision = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         snapshot = books_;
+        snapshotRevision = libraryRevision_;
     }
 
     size_t total = 0;
@@ -1630,6 +1766,23 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine(const std::atomic<bool>* c
                             kModule);
 
     size_t indexed = 0;
+    std::unordered_map<std::string, WordBloom> exactWordBlooms;
+    exactWordBlooms.reserve(total);
+    auto publishBloomBatch = [&] {
+        if (exactWordBlooms.empty()) return;
+        std::lock_guard<std::mutex> scanLock(scanMutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (snapshotRevision != libraryRevision_) {
+            exactWordBlooms.clear();
+            return;
+        }
+        for (auto& [id, bloom] : exactWordBlooms)
+            exactWordBlooms_.insert_or_assign(std::move(id), bloom);
+        exactWordBlooms.clear();
+        // Missing entries are deliberately scanned normally while indexing is
+        // still in progress; only present summaries are allowed to skip work.
+        exactWordBloomsReady_ = true;
+    };
     // One cache invalidation for the whole batch, not one per sermon.
     engine.SuspendCacheInvalidation();
     for (const TheTableBook& book : snapshot) {
@@ -1644,6 +1797,11 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine(const std::atomic<bool>* c
             }
             search::SearchDocument doc;
             doc.id = TheTableDocId(book.id, ch.number);
+            WordBloom bloom{};
+            for (const TheTableVerse& verse : ch.verses)
+                for (const std::string& word : textmatch::TokenizeWords(verse.text))
+                    AddWordBloom(bloom, word);
+            exactWordBlooms.emplace(doc.id, bloom);
             doc.type = "table";
             doc.title = ch.title;
             doc.content = TheTableContent(ch);
@@ -1664,12 +1822,17 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine(const std::atomic<bool>* c
                 return r.error();
             }
             ++indexed;
+            if (indexed % 25 == 0)
+                publishBloomBatch();
             if (indexed % 25 == 0 || indexed == total)
                 Logger::Instance().Info(std::format("The Table search indexing progress: {}/{}",
                                                     indexed, total), kModule);
         }
     }
     engine.ResumeCacheInvalidation();
+    // A concurrent import/reload invalidates this snapshot. Never publish
+    // summaries from an older library: a false negative would hide a hit.
+    publishBloomBatch();
     return indexed;
 }
 
@@ -1725,6 +1888,52 @@ std::string TheTableLibrary::Citation(std::string_view bookId, int chapter, int 
     return CitationLocked(bookId, chapter, verse);
 }
 
+std::string TheTableLibrary::CitationNeedle(std::string_view handle)
+{
+    return CitationNeedleText(handle);
+}
+
+std::string TheTableLibrary::CitationCode(std::string_view bookId, int chapter) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // The citation builder with no title and no paragraph: "47-0412". Asking for
+    // the same line the reader sees keeps the code and the citation from ever
+    // disagreeing (a second formatter is how they drift).
+    for (const TheTableBook& book : books_) {
+        if (book.id != bookId) continue;
+        for (const TheTableChapter& ch : book.chapters)
+            if (ch.number == chapter)
+                return SermonCitation(book.name, ch.code.empty() ? CodeFromTitle(ch.title) : ch.code,
+                                      std::string(), 0);
+        break;
+    }
+    return {};
+}
+
+SermonParts TheTableLibrary::Parts(std::string_view bookId, int chapter) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    SermonParts out;
+    for (const TheTableBook& book : books_) {
+        if (book.id != bookId) continue;
+        for (const TheTableChapter& ch : book.chapters) {
+            if (ch.number != chapter) continue;
+            const std::string code = ch.code.empty() ? CodeFromTitle(ch.title) : ch.code;
+            out.year = book.name;
+            out.code = SermonCitation(book.name, code, std::string(), 0);
+            // ONE BUILDER: the citation line is written here and the title is
+            // read back OFF it, so the two can never drift apart (a second
+            // title formatter is exactly how "Faith Is The Substance" and
+            // "Faith is the substance" end up on the same slide).
+            out.citation = SermonCitation(book.name, code, ch.title, 0);
+            const size_t dash = out.citation.find(" - ");
+            if (dash != std::string::npos)
+                out.title = out.citation.substr(dash + 3);
+            return out;
+        }
+        break;
+    }
+    return out;
+}
+
 std::string TheTableLibrary::CitationLocked(std::string_view bookId, int chapter, int verse) const {
     for (const TheTableBook& book : books_) {
         if (book.id != bookId) continue;
@@ -1750,7 +1959,10 @@ size_t TheTableLibrary::VerseCount() const {
 // Search
 // ---------------------------------------------------------------------------
 Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view query,
-                                                          size_t limit) const {
+                                                          size_t limit,
+                                                          bool exactWords,
+                                                          std::string_view scopeBookId,
+                                                          int scopeChapter) const {
     // Term extraction: lowercase words >= 2 chars (user call: "my" must find the
     // sermons that have it — the old 3-char floor silently dropped half of English).
     std::vector<std::string> terms;
@@ -1767,6 +1979,17 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     if (terms.empty())
         return Error::Make(Err::InvalidArgument, kModule, "search needs a word");
     if (limit == 0) limit = 1;
+    // THE CHAPTER LOCK (the reference panes' pill): set, the query is answered by
+    // the sermon the pane has OPEN — its paragraphs, never another sermon and
+    // never another year — so "search" inside a sermon means that sermon. Set on
+    // the engine side, not by filtering rows afterwards: the scan then visits one
+    // sermon instead of the corpus, which is also the difference between a keystroke
+    // and a wait. `scopeChapter == 0` = the whole book; empty bookId = the library.
+    const auto inScope = [&](const TheTableBook& book, const TheTableChapter& ch) {
+        if (!scopeBookId.empty() && book.id != scopeBookId) return false;
+        if (scopeChapter > 0 && ch.number != scopeChapter) return false;
+        return true;
+    };
     // Deduplicated, keeping the USER'S word order — the verbatim-phrase test must
     // honor what was typed ("then, friends" looks for then→friends, not a sorted
     // friends→then). Bitmask positions below come from this same vector, so the
@@ -1786,25 +2009,44 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     // differs from its resolution rides along as an optional bonus word — a
     // paragraph containing BOTH the correction and the raw misspelling (a
     // verbatim quote of the typo) outranks one with the correction alone.
+    // EXACT WORDS (the search boxes' padlock): spelling corrections are allowed,
+    // but completion and jam-splitting are not. Every resulting term must still
+    // appear as a whole word in the same paragraph (or adjacent paragraph pair).
+    // (The typing tail: the pane's box searches on every keystroke, so the LAST
+    // word is usually half typed — "compelling that you rec" must find the
+    // paragraph that says "receive" instead of hunting one guessed completion.
+    // The padlock is the exception: locked, words are meant verbatim.)
     std::vector<std::string> bonusWords;
-    {
-        auto resolved = search::SearchEngine::Instance().ResolveTermsWithSplits(terms);
-        if (resolved.ok() && resolved.value().size() == terms.size()) {
-            std::vector<std::string> fixed;
-            fixed.reserve(terms.size() + 1);
-            for (size_t i = 0; i < terms.size(); ++i) {
-                const std::string& r = resolved.value()[i].term;
-                // A jam-split entry ("holy spirit") becomes two real terms so the
-                // paragraph bitmask can match them independently.
-                std::istringstream ins(r.empty() ? terms[i] : r);
-                std::string part;
-                while (ins >> part) fixed.push_back(part);
-                if (!r.empty() && r != terms[i] &&
-                    std::find(bonusWords.begin(), bonusWords.end(), terms[i]) == bonusWords.end())
-                    bonusWords.push_back(terms[i]);
-            }
-            terms = std::move(fixed);
+    auto resolved = search::SearchEngine::Instance().ResolveTermsWithSplits(terms, !exactWords);
+    // THE TYPING TAIL'S CANDIDATE LADDER, most confident first ("rec" -> receive,
+    // received, record, ...). The tail itself stays the TYPED PREFIX — it matches
+    // any word starting with it — and this ladder decides WHICH of those readings
+    // a paragraph is credited for below: earlier candidate = stronger result, so
+    // the list starts with what the user most likely meant and reaches the merely
+    // possible ones after (user call: "start from the ones it confident about then
+    // come as far as possible options exist").
+    std::vector<std::string> tailCandidates;
+    if (resolved.ok() && !exactWords && resolved.value().size() == terms.size()
+        && !resolved.value().empty())
+        tailCandidates = resolved.value().back().candidates;
+    if (resolved.ok() && resolved.value().size() == terms.size()) {
+        std::vector<std::string> fixed;
+        fixed.reserve(terms.size() + 1);
+        for (size_t i = 0; i < terms.size(); ++i) {
+            const std::string& r = resolved.value()[i].term;
+            // The padlock forgives spelling typos, but does not complete a
+            // partial word or split joined words. Those are fuzzy expansions,
+            // while a sub-1 weight specifically marks a typo correction.
+            const bool applyCorrection = !exactWords || resolved.value()[i].weight < 1.0;
+            const std::string& chosen = (applyCorrection && !r.empty()) ? r : terms[i];
+            std::istringstream ins(chosen);
+            std::string part;
+            while (ins >> part) fixed.push_back(part);
+            if (!exactWords && !r.empty() && r != terms[i] &&
+                std::find(bonusWords.begin(), bonusWords.end(), terms[i]) == bonusWords.end())
+                bonusWords.push_back(terms[i]);
         }
+        terms = std::move(fixed);
     }
 
     // WORD QUERIES SCAN EVERY SERMON (the b887811 behavior the user verified):
@@ -1842,9 +2084,31 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     std::lock_guard<std::mutex> scanLock(scanMutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     if (codeShaped) {
+        // The query's RAW whitespace-separated tokens, before any stripping: a
+        // trailing bare number after a citation is the PARAGRAPH the reference
+        // names ("64-0617 54" = sermon 64-0617, paragraph 54). The number must
+        // NOT fold into the code: the old space-stripped "64-061754" matched no
+        // code at all, and the answer was loose sermon-level rows that dropped
+        // the user at the sermon's first paragraph (the "let the quick accept
+        // verse for the table" report).
+        std::vector<std::string> rawTokens;
+        {
+            const std::string rawQuery(query);   // (not `istringstream in(std::string(query))` — that is a function declaration, not a stream)
+            std::istringstream in(rawQuery);
+            std::string t;
+            while (in >> t) rawTokens.push_back(t);
+        }
+        int wantPara = 0;
+        if (rawTokens.size() >= 2 && !rawTokens.back().empty() &&
+            std::all_of(rawTokens.back().begin(), rawTokens.back().end(),
+                        [](char c) { return std::isdigit(static_cast<unsigned char>(c)); }))
+            wantPara = std::atoi(rawTokens.back().c_str());
         std::string norm;   // "47 - 0412" and "47-0412" are the same code
-        for (char c : Lower(std::string(query)))
-            if (c != ' ') norm.push_back(c);
+        for (size_t i = 0; i < rawTokens.size(); ++i) {
+            if (wantPara > 0 && i + 1 == rawTokens.size())
+                break;                      // the paragraph number is not part of the code
+            norm += Lower(rawTokens[i]);
+        }
         // A bare "47" or "7" stays a verse/year query (Genesis 47, Luke 1:47);
         // the CODE shape needs a dash ("47-") or a full date-code ("0412").
         const bool dash = norm.find('-') != std::string::npos;
@@ -1853,6 +2117,7 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         if (!norm.empty() && (dash || digitCount >= 3)) {
             for (const TheTableBook& book : books_)
                 for (const TheTableChapter& ch : book.chapters) {
+                    if (!inScope(book, ch)) continue;   // the chapter lock scopes the code tier too
                     const std::string bare = Lower(ch.code.empty() ? CodeFromTitle(ch.title) : ch.code);
                     // The typed form is the CITATION shape — "47-0412" (yy-code),
                     // possibly with the spoken letter ("47-1100x"). A code may also
@@ -1892,6 +2157,33 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
                              [](const CodeCand& a, const CodeCand& b) {
                                  return a.score > b.score;
                              });
+            // A citation WITH a paragraph ("64-0617 54") names that ONE
+            // paragraph: it answers as its own hit — verse = the typed number,
+            // snippet = the paragraph's text — so BOTH the app-wide quick search
+            // and The Table's own search box list it as a row and open straight
+            // there. Only the EXACT code match answers (a fully-specified
+            // reference must not drag the loose digit matches along), and a
+            // paragraph the sermon does not have falls back to the sermon rows.
+            if (wantPara > 0) {
+                for (const CodeCand& c : codeHits) {
+                    if (c.score != 2000)
+                        continue;                       // exact citation only
+                    if (wantPara > static_cast<int>(c.ch->verses.size()))
+                        break;                          // no such paragraph
+                    TheTableSearchHit hit;
+                    hit.reference = SermonCitation(c.b->name,
+                        c.ch->code.empty() ? CodeFromTitle(c.ch->title) : c.ch->code,
+                        c.ch->title, wantPara);
+                    hit.bookId = c.b->id;
+                    hit.chapter = c.ch->number;
+                    hit.verse = wantPara;
+                    hit.snippet = c.ch->verses[static_cast<size_t>(wantPara) - 1].text.substr(0, 220);
+                    hit.score = c.score + 1000;   // a fully-specified reference leads
+                    std::vector<TheTableSearchHit> out;
+                    out.push_back(std::move(hit));
+                    return out;
+                }
+            }
             std::vector<TheTableSearchHit> out;
             out.reserve(std::min(limit, codeHits.size()));
             for (const CodeCand& c : codeHits) {
@@ -1925,7 +2217,23 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     // large bonus (the paragraph really says what was typed), then whole-word hits
     // outrank partial ones. `sermonRank` keeps the engine's candidate order as the
     // sermon-level tiebreak.
-    struct Acc { const TheTableVerse* v; const TheTableBook* b; const TheTableChapter* ch; int score; bool spanned; int sermonRank; };
+    //
+    // THE SENTENCE FIRST, THEN THE NEXT COMBINATION (user calls: "you have to make
+    // it prioritize the sentence first; if the main sentence does not work then
+    // now you work with other words — so make it more resilient", then "no
+    // individual words, the next available word combination"). `run` is that
+    // tier: the LENGTH of the longest run of the typed words this paragraph
+    // carries as a verbatim COMBINATION (in the typed order, next to each other).
+    // The ladder is then automatic:
+    //   * run == terms.size()  — the sentence as typed;
+    //   * otherwise the longest combination the corpus actually has ("my wife"
+    //     for a typed sentence "and my wife said"), and never a single word: a
+    //     multi-word lock requires at least TWO of its words next to each other
+    //     (floorRun below), so the loose sprinkling of the words is exactly what
+    //     the padlock refuses. A one-word lock is a whole-word search, as before.
+    // `phrase` (run == terms.size()) rides along for the loose path's ordering,
+    // where every hit already carries all the words.
+    struct Acc { const TheTableVerse* v; const TheTableBook* b; const TheTableChapter* ch; int score; bool spanned; bool phrase; int run; int sermonRank; };
     std::vector<Acc> hits;
     auto scanChapter = [&](const TheTableBook& book, const TheTableChapter& ch, int sermonRank) {
         // The lowered paragraphs, computed once per sermon and kept (the fallback
@@ -1941,18 +2249,50 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         }
         const std::vector<std::string>& hay = cached->second;
         const size_t n = ch.verses.size();
+        // The ranking tests below need a paragraph's WORDS. They used to build
+        // one std::string per word (textmatch::TokenizeWords) for every
+        // candidate paragraph — hundreds of allocations per paragraph, tens of
+        // thousands of paragraphs per keystroke, which is what made a
+        // common-word or multi-word sermon search take SECONDS. They work on
+        // WORD SPANS into the already-lowered paragraph text instead, filled
+        // into ONE scratch vector that the whole scan reuses (see
+        // AppendWordSpans): no per-word, no per-paragraph allocation, and the
+        // comparison semantics are unchanged (same word byte class, same
+        // whole-word equality).
+        std::vector<std::string_view> spans;
+        std::string_view spanSegs[2]{};
+        int spansKey = -1;   // paragraph i, or -(i+1) for the pair (i, i+1)
+        const auto fillSpans = [&](size_t i, bool pair) {
+            const int key = pair ? -int(i + 1) : int(i);
+            if (spansKey == key)
+                return;   // this text's spans are already in `spans`
+            spans.clear();
+            spanSegs[0] = hay[i];
+            spanSegs[1] = (pair && i + 1 < n) ? hay[i + 1] : std::string_view{};
+            textmatch::AppendWordSpans(spanSegs, pair ? 2 : 1, spans);
+            spansKey = key;
+        };
         std::vector<unsigned> bm(n, 0u);   // per-paragraph term-hit bitmask (substring)
         std::vector<unsigned> wm(n, 0u);   // of those, whole-word hits
         for (size_t i = 0; i < n; ++i) {
             unsigned m = 0, w = 0;
             for (size_t t = 0; t < terms.size(); ++t) {
-                if (hay[i].find(terms[t]) == std::string::npos) continue;
+                // ONE walk of the paragraph per term for all three questions
+                // (present at all / as a whole word / at a word start) — this
+                // loop is the floor cost of every search, and it used to walk
+                // the paragraph up to three times per term.
+                const textmatch::TermPresence seen = textmatch::PresenceOf(hay[i], terms[t]);
+                if (!seen.found) continue;
+                // LOCKED (exact words): only the word itself counts — a word-start
+                // extension ("friends" for "friend") and a mid-word substring
+                // ("boyfriend") are both NOT what the user asked for.
+                if (exactWords && !seen.whole) continue;
                 m |= (1u << t);
                 // Whole word AND word-start extension count FULL ("friend" in
                 // "friends" is the completion shape — the user's word plus an
                 // ending, exactly what they meant); only a mid-word substring
                 // ("friend" in "boyfriend") is the weak partial.
-                if (ContainsWord(hay[i], terms[t]) || StartsWord(hay[i], terms[t])) w |= (1u << t);
+                if (seen.whole || seen.start) w |= (1u << t);
             }
             bm[i] = m;
             wm[i] = w;
@@ -1974,6 +2314,27 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
             for (; m; m &= m - 1) ++c;
             return c;
         };
+        // THE TYPING TAIL'S LADDER, applied per paragraph: the half-typed last
+        // word is matched as a prefix (any word starting with it), and this says
+        // WHICH of the words it can become the paragraph actually carries. The
+        // likeliest reading (candidate 0 — the one the corpus uses most) earns the
+        // most, each later candidate less, so the results begin with what the user
+        // most likely meant and only then reach the merely possible readings (see
+        // tailCandidates above). Nothing runs when the tail was not half typed: the
+        // ladder is empty for a complete or corrected word.
+        std::vector<int> ladder(n, 0);
+        if (!tailCandidates.empty()) {
+            for (size_t i = 0; i < n; ++i) {
+                if (bm[i] == 0u) continue;
+                for (size_t c = 0; c < tailCandidates.size(); ++c) {
+                    if (ContainsWord(hay[i], tailCandidates[c])) {
+                        ladder[i] = int(tailCandidates.size() - c);
+                        break;
+                    }
+                }
+            }
+        }
+        const auto ladderOf = [&](size_t i) { return ladder.empty() ? 0 : ladder[i]; };
         auto quality = [&](unsigned m, unsigned w) {
             int q = 0;
             for (size_t t = 0; t < terms.size() && t < 32; ++t) {
@@ -1983,24 +2344,186 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
             return q;
         };
         const unsigned all = terms.size() >= 32 ? 0xFFFFFFFFu : ((1u << terms.size()) - 1u);
-        for (size_t i = 0; i < n; ++i)
-            if (bm[i] == all)
+        // Locked, the sentence must be there as typed — the phrase test closes its
+        // last-word tolerance too ("my wife" no longer matches "my wives").
+        const bool phraseWhole = exactWords;
+        const auto bitsOf = [](unsigned m) { int c = 0; for (; m; m &= m - 1) ++c; return c; };
+        if (exactWords) {
+            // THE LOCKED LADDER: the longest verbatim combination of the typed
+            // words this text carries, and a floor of 2 words for a multi-word
+            // query (no individual words). The windows are tried longest first,
+            // so the sentence wins the moment it is there.
+            const size_t floorRun = terms.size() > 1 ? 2 : 1;
+            // Up to 2 OTHER words may sit between consecutive typed words and the
+            // combination still counts as "together" (user call: the padlocked
+            // Quick search and Bible search both got this same tolerance — The
+            // Table's own search box drives this exact ladder too, so it was
+            // asking for the identical fix). A connector word the query itself
+            // skipped ("and" in "compelling AND compulsory, that") must not read
+            // as scattered — but a match spread across the whole paragraph still
+            // must not count as the sentence, hence the bound.
+            constexpr size_t kMaxGapWords = 2;
+            // The longest combination of the typed words this text carries —
+            // longest window first, so the sentence wins the moment it is there.
+            // The window test itself is textmatch::ContainsTermRunWords (the
+            // shared primitive, so this ladder and the search surfaces cannot
+            // drift), run over WORD SPANS rather than freshly built strings.
+            // `present` is the text's own term bitmask: a window can only match
+            // when EVERY one of its terms is in the text at all, so the mask
+            // throws the window away before the span walk — most windows of a
+            // paragraph that carries only some of the typed words die there.
+            const auto longestRun = [&](const std::vector<std::string_view>& words, int& outRun,
+                                        size_t minK = 1, unsigned present = 0xFFFFFFFFu) {
+                outRun = 0;
+                if (minK > terms.size()) return;
+                for (size_t k = terms.size(); k >= std::max(floorRun, minK); --k)
+                    for (size_t s = 0; s + k <= terms.size(); ++s) {
+                        if (s < 32) {   // (a window past the 32-term bitmask is tested unmasked)
+                            const unsigned need =
+                                (k >= 32 ? 0xFFFFFFFFu : ((1u << k) - 1u)) << s;
+                            if ((present & need) != need) continue;   // a term of this window is absent
+                        }
+                        if (textmatch::ContainsTermRunWords(words, terms, s, k, kMaxGapWords)) {
+                            outRun = int(k);
+                            return;
+                        }
+                    }
+            };
+            // The prefilter keeps the window scan off the vast majority: a
+            // paragraph needs at least `floorRun` of the typed words in it before
+            // its combinations are worth testing (the bitmask already knows).
+            std::vector<int> runOf(n, 0);
+            for (size_t i = 0; i < n; ++i) {
+                if (size_t(bitsOf(bm[i])) < floorRun)
+                    continue;
+                // A ONE-WORD lock asks "is this word here" — which the bitmask
+                // already answers (locked, a bit is only set by a WHOLE word).
+                // Splitting the paragraph into word spans to reach the same
+                // answer cost a full pass over the text of every paragraph that
+                // carried the word, which for a common word is the whole corpus;
+                // the run is 1 and the hit is emitted below like any other.
+                if (terms.size() == 1) {
+                    runOf[i] = 1;
+                } else {
+                    fillSpans(i, false);
+                    longestRun(spans, runOf[i], 1, bm[i]);
+                }
+                // No verbatim combination in this paragraph? LOCKED, that is
+                // the end of it: the words merely sprinkled through the text
+                // ("angel" here, "road" a sentence later) are exactly what the
+                // padlock refuses (user call: "no individual words, the next
+                // available word combination"). Emitting them anyway — the old
+                // fallback here — answered a multi-word lock with scattered
+                // words and made the toggle a no-op on pages that held them.
+                // The ladder above already degrades to the SHORTEST real
+                // combination, so a typed sentence the corpus lacks still
+                // answers; it just never answers with loose words.
+                if (size_t(runOf[i]) < floorRun)
+                    continue;
                 hits.push_back({&ch.verses[i], &book, &ch,
                                 1000 + quality(bm[i], wm[i])
-                                    + (ContainsPhrase(hay[i], terms) ? 500 : 0)
+                                    + (size_t(runOf[i]) == terms.size() ? 500 : 0)
                                     + 20 * bonusOf(i, n),
-                                false, sermonRank});
-        for (size_t i = 0; i + 1 < n; ++i) {
-            const unsigned pair = bm[i] | bm[i + 1];
-            // (a pair whose halves already qualify alone was pushed above — only
-            // genuinely spread-out matches land here)
-            if (pair == all && bm[i] != all && bm[i + 1] != all) {
-                const std::string joined = hay[i] + ' ' + hay[i + 1];
+                                false, size_t(runOf[i]) == terms.size(), runOf[i], sermonRank});
+            }
+            // A ONE-WORD lock never needs the pair phase: a word sitting in the
+            // pair is already a hit from whichever paragraph holds it (locked, a
+            // bit is only set by a WHOLE word), and the duplicate is dropped by
+            // the same-combination check below — so the walk only ever burned
+            // spans. For a word like "the" that is every adjacent paragraph pair
+            // in the library.
+            const bool pairPhase = terms.size() > 1;
+            for (size_t i = 0; pairPhase && i + 1 < n; ++i) {
+                const unsigned pair = bm[i] | bm[i + 1];
+                if (size_t(bitsOf(pair)) < floorRun)
+                    continue;
+                // (a pair whose halves already qualify alone was pushed above —
+                // only a spread-out match that BEATS both halves lands here)
+                if (bm[i] == all && bm[i + 1] == all)
+                    continue;
+                // A combination that lives wholly inside one half is that half's
+                // own run, already known — so a pair can only ever offer
+                // something new when its combination CROSSES the boundary, i.e.
+                // some typed word of the pair sits left of the split and the
+                // NEXT typed word sits right of it. The bitmasks answer that
+                // before a single word span is built, which is what keeps the
+                // span walk off most pairs (the spans of a pair used to be built
+                // for every pair in the corpus, valid or not).
+                bool crosses = false;
+                for (size_t t = 0; t + 1 < terms.size() && !crosses; ++t)
+                    crosses = (bm[i] & (1u << t)) && (bm[i + 1] & (1u << (t + 1)));
+                if (!crosses)
+                    continue;
+                int run = 0;
+                // The pair must BEAT both halves (a combination no longer than
+                // one half's own is dropped below), so the ladder starts at that
+                // length and skips the windows that cannot win — same result,
+                // far fewer window scans.
+                const size_t need = size_t(std::max(runOf[i], runOf[i + 1])) + 1;
+                if (need > terms.size())
+                    continue;
+                fillSpans(i, true);   // the pair's words, in one reused scratch
+                longestRun(spans, run, need, pair);
+                // Same rule across the paragraph pair: only a combination that
+                // really sits in the two paragraphs together qualifies, never
+                // the two halves' words read apart.
+                if (size_t(run) < floorRun)
+                    continue;
+                if (run < runOf[i] || run < runOf[i + 1])
+                    continue;
+                if (run == runOf[i] || run == runOf[i + 1])
+                    continue;   // the same combination, already listed from one paragraph
                 hits.push_back({&ch.verses[i], &book, &ch,
                                 quality(pair, wm[i] | wm[i + 1])
-                                    + (ContainsPhrase(joined, terms) ? 500 : 0)
+                                    + (size_t(run) == terms.size() ? 500 : 0)
                                     + 20 * bonusOf(i, i + 1),
-                                true, sermonRank});
+                                true, size_t(run) == terms.size(), run, sermonRank});
+            }
+        } else {
+            for (size_t i = 0; i < n; ++i)
+                if (bm[i] == all) {
+                    // Word spans are built only when a test needs them: for a
+                    // ONE-word query the near-phrase answer IS the phrase answer
+                    // (both are the whole-word test), so the common single-word
+                    // keystroke never pays for the paragraph walk at all.
+                    if (terms.size() > 1)
+                        fillSpans(i, false);
+                    const bool phrase = ContainsPhrase(hay[i], terms, nullptr, phraseWhole);
+                    // Loose mode's SENTENCE tier: the typed words in order with up
+                    // to 2 fillers between them ("compelling AND compulsory,
+                    // that") - not the verbatim phrase, but far from scattered
+                    // words. It must outrank a paragraph that merely holds all
+                    // the words somewhere (user report: the Bible's scattered-
+                    // word rows sat above the sermon carrying the sentence).
+                    // The near-phrase test reads the SAME spans the other
+                    // checks use (it used to re-tokenize the paragraph into a
+                    // fresh vector<string> — the single biggest per-keystroke
+                    // cost on a common-word query).
+                    const bool near = terms.size() > 1
+                        ? textmatch::ContainsNearPhraseWords(spans, terms, 2)
+                        : phrase;
+                    hits.push_back({&ch.verses[i], &book, &ch,
+                                    1000 + quality(bm[i], wm[i])
+                                        + (phrase ? 500 : (near ? 300 : 0))
+                                        + 20 * bonusOf(i, n)
+                                        + 8 * ladderOf(i),
+                                    false, phrase, int(terms.size()), sermonRank});
+                }
+            for (size_t i = 0; i + 1 < n; ++i) {
+                const unsigned pair = bm[i] | bm[i + 1];
+                // (a pair whose halves already qualify alone was pushed above — only
+                // genuinely spread-out matches land here)
+                if (pair == all && bm[i] != all && bm[i + 1] != all) {
+                    const std::string joined = hay[i] + ' ' + hay[i + 1];
+                    const bool phrase = ContainsPhrase(joined, terms, nullptr, phraseWhole);
+                    const bool near = ContainsNearPhrase(joined, terms, 2);
+                    hits.push_back({&ch.verses[i], &book, &ch,
+                                    quality(pair, wm[i] | wm[i + 1])
+                                        + (phrase ? 500 : (near ? 300 : 0))
+                                        + 20 * bonusOf(i, i + 1)
+                                        + 8 * std::max(ladderOf(i), ladderOf(i + 1)),
+                                    true, phrase, 0, sermonRank});
+                }
             }
         }
     };
@@ -2008,16 +2531,35 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     // the walk's original separate scope is what left the sort/cap/materialize
     // reading dangling pointers after an import or Load slipped in between.)
     int rank = 0;
-    for (const TheTableBook& book : books_)
-        for (const TheTableChapter& ch : book.chapters)
-            scanChapter(book, ch, rank++);
-    // ONE order for both paths: score first (verbatim-phrase bonus > scattered
-    // words), the engine's candidate order as the sermon-level tiebreak, then
-    // reading order. Then the per-sermon variety cap — a long sermon matching a
-    // common-word query hundreds of times must not flood the list and push other
+    for (const TheTableBook& book : books_) {
+        for (const TheTableChapter& ch : book.chapters) {
+            bool skip = !inScope(book, ch);
+            if (skip) {
+                ++rank;   // the sermon-level tiebreak counts every sermon, scoped or not
+                continue;
+            }
+            if (exactWords && exactWordBloomsReady_) {
+                const auto bloom = exactWordBlooms_.find(TheTableDocId(book.id, ch.number));
+                if (bloom != exactWordBlooms_.end()) {
+                    skip = std::any_of(terms.begin(), terms.end(), [&](const std::string& term) {
+                        return !MightHaveWord(bloom->second, term);
+                    });
+                }
+            }
+            if (!skip) scanChapter(book, ch, rank);
+            ++rank;
+        }
+    }
+    // ONE order for both paths: THE SENTENCE FIRST (see the ladder above), then
+    // within a shape the score (the verbatim bonus still separates phrase hits
+    // from each other), the engine's candidate order as the sermon-level tiebreak,
+    // then reading order. Then the per-sermon variety cap — a long sermon matching
+    // a common-word query hundreds of times must not flood the list and push other
     // sermons' (often better) matches past the display limit (the para-7 probe).
     std::stable_sort(hits.begin(), hits.end(), [](const Acc& a, const Acc& b) {
+        if (a.run != b.run) return a.run > b.run;    // THE SENTENCE, then the next combination
         if (a.spanned != b.spanned) return !a.spanned;
+        if (a.phrase != b.phrase) return a.phrase;
         if (a.score != b.score) return a.score > b.score;
         if (a.sermonRank != b.sermonRank) return a.sermonRank < b.sermonRank;
         return a.v->number < b.v->number;
@@ -2053,6 +2595,13 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         s.bookId = h.b->id;
         s.chapter = h.ch->number;
         s.verse = h.v->number;
+        s.fullText = h.v->text;
+        if (h.spanned) {
+            const auto verse = std::find_if(h.ch->verses.begin(), h.ch->verses.end(),
+                                            [&](const TheTableVerse& v) { return &v == h.v; });
+            if (verse != h.ch->verses.end() && std::next(verse) != h.ch->verses.end())
+                s.fullText += "\n\n" + std::next(verse)->text;
+        }
         // THE GLOW RULE (The Table's side): the snippet is anchored where the
         // words actually sit, not at the paragraph head — a 400-word paragraph
         // whose match is at word 300 put the match past the visible two lines
@@ -2061,20 +2610,20 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         // per SHOWN row, nothing per candidate).
         {
             const std::string low = Lower(h.v->text);
-            // THE GLOW RULE (The Table's side), phrase first: when the paragraph
-            // holds the query as a VERBATIM phrase ("Then, friends, isn't…"),
-            // anchor THERE — the earliest-word rule picked a lone "And then you
-            // watch It" 1,000 chars before the real match, so the row that the
-            // +500 phrase bonus ranked FIRST showed a snippet with a single
-            // glowable word while the very words that ranked it sat past the
-            // clip. Non-phrase hits keep the earliest-word anchor (the passage's
-            // start; a couple of bounded finds per SHOWN row, nothing per
-            // candidate).
+            // Anchor the snippet to the same nearby ordered word run that makes
+            // this result rank well. A verbatim phrase is best; when the typed
+            // query skipped a connector or source word, its bounded near-phrase
+            // match still anchors at the first word of that sequence. Falling
+            // back to the earliest individual query word showed unrelated text
+            // (for example, an earlier "you" in paragraph 150 instead of the
+            // matching "compelling ... that you receive" in continuation 150-3).
             size_t anchor = std::string::npos;
-            if (!(ContainsPhrase(low, terms, &anchor) && anchor != std::string::npos)) {
+            if (!(ContainsPhrase(low, terms, &anchor) && anchor != std::string::npos))
+                anchor = NearPhrasePosition(low, terms, 2);
+            if (anchor == std::string::npos) {
                 anchor = std::string::npos;
                 for (const auto& t : terms) {
-                    const size_t at = low.find(t);
+                    const size_t at = NearPhrasePosition(low, std::vector<std::string>{t}, 0);
                     if (at != std::string::npos && at < anchor) anchor = at;
                 }
             }
@@ -2137,9 +2686,110 @@ TheTableBook& TheTableLibrary::BookForYear(std::string_view year) {
     return books_.back();
 }
 
+namespace {
+
+// The file name without its directories, for a message that names the file.
+std::string BaseNameOf(const std::string& path) {
+    const size_t slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+// What a file's FIRST BYTES say it really is, or nullptr when they say nothing.
+//
+// WHY THIS EXISTS: the extension is a claim, not a fact. A sermon.docx renamed
+// to sermon.txt (or picked through the dialog's "All files" option) reaches the
+// text reader, and binary bytes read as text are pages of mangled glyphs - they
+// import "successfully", so nothing downstream can tell the user it was never a
+// sermon. Every signature here is one a text file cannot begin with, so a real
+// sermon can never be refused by this check: the refusals are a ZIP (a .docx,
+// .xlsx, .pptx or an outright archive), an image, an older Office document, an
+// executable, a compressed or media container, or a PDF saved under another
+// name. Kept deliberately short - two ASCII letters ("BM", "MZ") are NOT
+// signatures, because "BMW..." can open a paragraph.
+const char* BinaryKindOf(const std::string& data) {
+    struct Signature { const char* magic; size_t length; const char* kind; };
+    static const Signature kSignatures[] = {
+        { "PK\x03\x04", 4, "a ZIP or Office document (.docx/.xlsx/.pptx)" },
+        { "PK\x05\x06", 4, "a ZIP file" },
+        { "\x89PNG\r\n\x1a\n", 8, "a PNG image" },
+        { "\xFF\xD8\xFF", 3, "a JPEG image" },
+        { "GIF87a", 6, "a GIF image" },
+        { "GIF89a", 6, "a GIF image" },
+        { "\x1F\x8B", 2, "a gzip archive" },
+        { "Rar!\x1A\x07", 6, "a RAR archive" },
+        { "7z\xBC\xAF\x27\x1C", 6, "a 7-Zip archive" },
+        { "\xD0\xCF\x11\xE0", 4, "an older Office document (.doc/.xls)" },
+        { "\x7F\x45\x4C\x46", 4, "a Linux program" },
+        { "%PDF-", 5, "a PDF" },
+        { "ID3", 3, "an MP3 audio file" },
+        { "OggS", 4, "an Ogg media file" },
+        { "RIFF", 4, "a WAV or AVI file" },
+        { "\x00\x00\x01\xBA", 4, "an MPEG video" },
+    };
+    for (const Signature& s : kSignatures) {
+        if (data.size() >= s.length && data.compare(0, s.length, s.magic, s.length) == 0)
+            return s.kind;
+    }
+    return nullptr;
+}
+
+// The extension as it is written in the name, lower-cased, INCLUDING the dot -
+// or "" when the name has none. (A name ending in a dot counts as none.)
+std::string ExtensionOf(const std::string& name) {
+    const std::string file = BaseNameOf(name);
+    const size_t dot = file.find_last_of('.');
+    if (dot == std::string::npos || dot + 1 >= file.size())
+        return {};
+    return Lower(file.substr(dot));
+}
+
+} // namespace
+
+bool TheTableLibrary::IsSermonFile(std::string_view fileName, std::string_view content, std::string& whyNot) {
+    const std::string name(fileName);
+    const std::string ext = ExtensionOf(name);
+
+    // 1. The format is decided by the NAME: the library reads .txt and .pdf, and
+    //    anything else is refused before a single byte is parsed. (The dialog's
+    //    "All files (*.*)" option can hand over anything at all.)
+    if (ext != ".txt" && ext != ".pdf") {
+        const std::string shown = BaseNameOf(name);
+        whyNot = ext.empty()
+            ? "\"" + shown + "\" has no file extension - a sermon is a .txt or a .pdf"
+            : "\"" + shown + "\" is " + ext + " - a sermon is a .txt or a .pdf";
+        return false;
+    }
+
+    // 2. The name's claim is then checked against the file's own first bytes -
+    //    the PDF magic is what the .pdf reader itself demands, so a .pdf that
+    //    really is one passes here and every other signature is a lie.
+    const std::string data(content);
+    const bool startsPdf = data.size() >= 5 && data.compare(0, 5, "%PDF-") == 0;
+    if (ext == ".pdf") {
+        if (startsPdf)
+            return true;   // the real thing: the PDF reader takes it from here
+        if (const char* kind = BinaryKindOf(data); kind != nullptr)
+            whyNot = "\"" + BaseNameOf(name) + "\" is " + kind + ", not a PDF";
+        else
+            whyNot = "\"" + BaseNameOf(name) + "\" is not a PDF file";
+        return false;
+    }
+    if (const char* kind = BinaryKindOf(data); kind != nullptr) {
+        whyNot = startsPdf
+            ? "\"" + BaseNameOf(name) + "\" is a PDF saved as .txt - rename it .pdf and it will be read as one"
+            : "\"" + BaseNameOf(name) + "\" is " + kind + ", not a sermon (.txt or .pdf)";
+        return false;
+    }
+    return true;
+}
+
 // Step one of an import: whatever the file is (.pdf or .txt) becomes clean UTF-8 text. Nothing is stored here.
+// The FORMAT gate comes first (IsSermonFile): a file that is not a sermon is refused here with a sentence naming
+// what it actually is, so the one click that imported it says so instead of storing mangled bytes.
 Result<std::string> TheTableLibrary::ConvertToCleanText(std::string_view fileName, std::string_view content) {
     const std::string data(content);
+    if (std::string whyNot; !IsSermonFile(fileName, content, whyNot))
+        return Error::Make(kTableErr, kModule, whyNot);
     std::string text;
     if (Lower(std::string(fileName)).ends_with(".pdf")) {
         if (data.size() < 8 || data.substr(0, 5) != "%PDF-")
@@ -2178,6 +2828,9 @@ Result<std::string> TheTableLibrary::AddCleanText(std::string_view fileName, con
     // Import mutates the topology the scan walks — same pair as Load.
     std::lock_guard<std::mutex> scanLock(scanMutex_);
     std::lock_guard<std::mutex> lock(mutex_);
+    exactWordBlooms_.clear();
+    exactWordBloomsReady_ = false;
+    ++libraryRevision_;
     TheTableBook& book = BookForYear(place.year);
     TheTableChapter ch;
     ch.number = static_cast<int>(book.chapters.size()) + 1;
@@ -2219,12 +2872,25 @@ Result<TheTableLibrary::ImportReport> TheTableLibrary::ImportFolder(
     auto found = platform.Filesystem().FindFiles(folderPath, "");
     if (!found.ok()) return Error::Make(kTableErr, kModule, found.error().message);
     std::vector<std::string> files;
+    ImportReport report;
     for (const std::string& path : found.value()) {
         const std::string lower = Lower(path);
-        if (lower.ends_with(".pdf") || lower.ends_with(".txt")) files.push_back(path);
+        if (lower.ends_with(".pdf") || lower.ends_with(".txt")) {
+            files.push_back(path);
+            continue;
+        }
+        // NOT a sermon format: never read, and not a failure - but counted and
+        // named. A folder of 40 sermons beside 300 spreadsheets used to answer
+        // "40 imported" with nothing said about the rest.
+        ++report.unsupported;
+        // EVERY refusal is named, with its own reason. A bound here (the old
+        // kMaxRejections) meant a folder of 40 spreadsheets reported "40 not
+        // sermon files" and explained only the first few — the operator could
+        // not tell which files to fix. The reasons are short sentences, so the
+        // list is bounded by the folder, not by a guess.
+        report.rejected.push_back(BaseNameOf(path) + ": not a sermon file (the library reads .txt and .pdf)");
     }
     std::sort(files.begin(), files.end());   // deterministic order (year, then code)
-    ImportReport report;
 
     int done = 0;
     const int total = static_cast<int>(files.size());
@@ -2265,12 +2931,16 @@ Result<TheTableLibrary::ImportReport> TheTableLibrary::ImportFolder(
             auto bytes = fs.ReadBinary(path);
             if (!bytes.ok()) {
                 ++report.failed;
+                report.rejected.push_back(BaseNameOf(path) + ": could not be read (" + bytes.error().message + ")");
                 Logger::Instance().Info("Table import: could not read " + path + ": " + bytes.error().message, kModule);
                 continue;
             }
             auto converted = ConvertToCleanText(path, std::string_view(reinterpret_cast<const char*>(bytes.value().data()), bytes.value().size()));
             if (!converted.ok()) {
+                // The reason travels with the count now: "3 failed" said nothing
+                // about a folder whose .txt files are really renamed spreadsheets.
                 ++report.failed;
+                report.rejected.push_back(BaseNameOf(path) + ": " + converted.error().message);
                 Logger::Instance().Info("Table import: " + path + ": " + converted.error().message, kModule);
                 continue;
             }
@@ -2288,6 +2958,7 @@ Result<TheTableLibrary::ImportReport> TheTableLibrary::ImportFolder(
             ++report.imported;
         } else {
             ++report.failed;
+            report.rejected.push_back(BaseNameOf(path) + ": " + r.error().message);
             Logger::Instance().Info("Table import: " + path + ": " + r.error().message, kModule);
         }
         // Saved every so often and once at the end - not after every sermon. Rewriting a library of hundreds of sermons for each one

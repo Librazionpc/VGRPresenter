@@ -1,5 +1,8 @@
 #include "core/config/ConfigurationManager.hpp"
 
+#include "core/recovery/DocumentRecovery.hpp"
+#include "platform/PlatformAccessor.hpp"
+
 #include <algorithm>
 #include <fstream>
 #include <sstream>
@@ -50,12 +53,24 @@ Result<void> ConfigurationManager::LoadFileInto(ConfigScope scope, const std::st
     auto parsed = json::Parse(ss.str());
     if (!parsed.ok()) {
         loadErrors_.fetch_add(1);
-        return Error::Make(Err::Config_ParseFailed, "ConfigurationManager",
-                           "failed to parse " + path, &parsed.error());
+        // SELF-HEALING: a config scope this engine wrote must never stop a load.
+        // The damaged bytes are set aside as evidence and the scope starts
+        // empty, which is exactly the state a first run has — so a torn write
+        // (or a hand edit that broke the JSON) costs the file, not the session.
+        (void)recovery::SetAsideDamagedDocument(path, "ConfigurationManager",
+                                               parsed.error().message);
+        std::lock_guard<std::mutex> lock(mutex_);
+        scopes_[scope] = json::Value(json::Value::Object{});
+        return Ok();
     }
-    if (parsed.value().type() != json::Value::Type::Object)
-        return Error::Make(Err::Config_ParseFailed, "ConfigurationManager",
-                           "config root must be an object: " + path);
+    if (parsed.value().type() != json::Value::Type::Object) {
+        loadErrors_.fetch_add(1);
+        (void)recovery::SetAsideDamagedDocument(path, "ConfigurationManager",
+                                               "config root is not an object");
+        std::lock_guard<std::mutex> lock(mutex_);
+        scopes_[scope] = json::Value(json::Value::Object{});
+        return Ok();
+    }
 
     std::lock_guard<std::mutex> lock(mutex_);
     scopes_[scope] = parsed.value();
@@ -90,12 +105,14 @@ Result<void> ConfigurationManager::Save(ConfigScope scope) {
         path = it->second;
         value = scopes_[scope];
     }
-    std::ofstream out(path, std::ios::trunc);
-    if (!out.is_open())
-        return Error::Make(Err::IoError, "ConfigurationManager", "cannot write: " + path);
-    out << value.ToString() << "\n";
-    if (!out.good())
-        return Error::Make(Err::IoError, "ConfigurationManager", "write failed: " + path);
+    // Through the PAL, and ATOMICALLY: a scope file is read back on the next
+    // load, so a truncated or zero-filled one is a silent settings loss. This
+    // used a raw std::ofstream on the live path — the same in-place truncate
+    // that left kernel.json full of NULs — and bypassed the PAL besides.
+    auto& fs = platform::PlatformAccessor::Get().Filesystem();
+    if (auto wrote = fs.WriteAtomic(path, value.ToString() + "\n"); !wrote.ok())
+        return Error::Make(Err::IoError, "ConfigurationManager",
+                           "cannot write: " + path + ": " + wrote.error().message);
     return Ok();
 }
 

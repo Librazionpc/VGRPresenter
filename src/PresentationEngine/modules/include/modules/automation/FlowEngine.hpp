@@ -139,13 +139,34 @@ private:
         std::vector<std::string> activeConditions;
     };
 
-    // Internal node execution: returns true when the flow advanced at least
-    // one node (may loop), false when waiting/blocked.
-    Result<size_t> Drain(Execution& exec);
-    Result<void> ExecuteNode(Execution& exec, FlowNode& node);
-    void CompleteNode(Execution& exec, FlowNode& node, NodeState state,
-                      const std::string& result);
-    Result<void> HandleFailure(Execution& exec, FlowNode& node, const std::string& message);
+    // The executor. `lk` is the (recursive) engine lock. Registered actions and
+    // conditions run with it RELEASED (see Unlocker / RunActionUnlocked) so a
+    // blocking action never holds the engine lock.
+    Result<size_t> Drain(std::unique_lock<std::recursive_mutex>& lk, Execution& exec);
+    Result<void> ExecuteNode(std::unique_lock<std::recursive_mutex>& lk, Execution& exec,
+                             FlowNode& node);
+    void CompleteNode(std::unique_lock<std::recursive_mutex>& lk, Execution& exec, FlowNode& node,
+                      NodeState state, const std::string& result);
+    Result<void> HandleFailure(std::unique_lock<std::recursive_mutex>& lk, Execution& exec,
+                               FlowNode& node, const std::string& message);
+    // RAII: releases mutex_ for the duration of a provider/action call.
+    struct Unlocker {
+        std::unique_lock<std::recursive_mutex>& lk;
+        explicit Unlocker(std::unique_lock<std::recursive_mutex>& l) : lk(l) { lk.unlock(); }
+        ~Unlocker() { lk.lock(); }
+        Unlocker(const Unlocker&) = delete;
+        Unlocker& operator=(const Unlocker&) = delete;
+    };
+    // Executes a registered action with mutex_ released. The action gets a
+    // private copy of the execution variables; changes are merged back after.
+    Result<ActionOutcome> RunActionUnlocked(std::unique_lock<std::recursive_mutex>& lk,
+                                            Execution& exec, const FlowNode& node,
+                                            const ActionFactory& factory);
+    Result<bool> RunConditionUnlocked(std::unique_lock<std::recursive_mutex>& lk, Execution& exec,
+                                      const FlowNode& node, const ConditionFactory& factory);
+    // Runs a lifecycle cue action (no-op when the cue type is not registered).
+    void RunCueUnlocked(std::unique_lock<std::recursive_mutex>& lk, Execution& exec,
+                        const std::string& actionType);
     void Dispatch(Execution& exec, std::string_view topic);
     void ProcessPendingDispatches();
     static const FlowNode* FindNode(const Execution& exec, std::string_view id);

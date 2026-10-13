@@ -228,18 +228,39 @@ Item {
                         }
 
                         // A label on the left and the engine's list of choices on the right.
+                        // A label (and its engine description, when the row passes
+                        // one) on the left, the engine's list of choices on the right.
                         component ChoiceRow: Item {
                             id: choiceRow
                             property string settingKey: ""
+                            property string sub: ""
                             width: parent.width
-                            height: 36
+                            // As tall as the label + description need: a row that
+                            // guessed a fixed height clipped the longer
+                            // descriptions instead of showing them.
+                            height: Math.max(36, choiceCol.height + 8)
 
-                            Text {
+                            Column {
+                                id: choiceCol
                                 anchors.verticalCenter: parent.verticalCenter
-                                text: root.definitions[choiceRow.settingKey] ? root.definitions[choiceRow.settingKey].label : ""
-                                color: Theme.textPrimary
-                                font.family: Theme.fontFamily
-                                font.pixelSize: Theme.textSm
+                                width: parent.width - 140
+                                spacing: 2
+
+                                Text {
+                                    text: root.definitions[choiceRow.settingKey] ? root.definitions[choiceRow.settingKey].label : ""
+                                    color: Theme.textPrimary
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.textSm
+                                }
+                                Text {
+                                    visible: choiceRow.sub !== ""
+                                    text: choiceRow.sub
+                                    color: Theme.textMuted
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.textSub
+                                    width: parent.width
+                                    wrapMode: Text.WordWrap
+                                }
                             }
                             SettingsChoice {
                                 anchors.right: parent.right
@@ -250,22 +271,39 @@ Item {
 
                         ChoiceRow { settingKey: "appearance.theme" }
                         Rectangle { x: 2; width: parent.width - 2; height: 1; color: Theme.border }
-                        ChoiceRow { settingKey: "appearance.language" }
+                        ChoiceRow { settingKey: "appearance.language"
+                                    sub: root.definitions["appearance.language"].description }
                         Rectangle { x: 2; width: parent.width - 2; height: 1; color: Theme.border }
 
-                        // Lock In Mode — a toggle row.
+                        // Lock In Mode — a toggle row. Its description is shown
+                        // because it carries the one thing this row cannot show:
+                        // that it outranks the Smart Config mode (see
+                        // SmartConfigScreen's locked-in note for the same fact
+                        // stated on that page).
                         Item {
                             width: appearanceCol.width
-                            height: 36
+                            // As tall as the description needs (it is the long one
+                            // — it carries the precedence over Smart Config).
+                            height: lockCol.height
 
                             Column {
+                                id: lockCol
                                 anchors.verticalCenter: parent.verticalCenter
-                                spacing: 1
+                                width: parent.width - 80
+                                spacing: 2
                                 Text {
                                     text: root.definitions["appearance.lockInMode"].label
                                     color: Theme.textPrimary
                                     font.family: Theme.fontFamily
                                     font.pixelSize: Theme.textSm
+                                }
+                                Text {
+                                    text: root.definitions["appearance.lockInMode"].description
+                                    color: Theme.textMuted
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.textSub
+                                    wrapMode: Text.WordWrap
+                                    width: parent.width
                                 }
                             }
                             SettingsToggle {
@@ -425,7 +463,7 @@ Item {
                                 text: qsTr("v%1").arg(SettingsService.appVersion)
                                 color: Theme.textMuted
                                 font.family: Theme.fontFamily
-                                font.pixelSize: Theme.textXs
+                                font.pixelSize: Theme.textSub
                             }
 
                             Rectangle {
@@ -463,9 +501,19 @@ Item {
             }
 
             // ---- Resource profile strip ----
+            // LAID OUT AS ROWS, not as an absolutely positioned header with a
+            // description squeezed in beside it. The description comes from the
+            // engine (AppSettings) and is a full sentence, so the fixed y:38
+            // one-liner it used to be ran the whole card width and the profile
+            // picks and "Manage →" were painted straight over it. Here the
+            // header is one line whose right-hand controls own their space, the
+            // description gets the full width of the row under it (wrapped), and
+            // the card is as tall as its content — so a longer description from
+            // the engine grows the card instead of colliding with anything.
             Rectangle {
+                id: profileStrip
                 width: parent.width
-                height: 152
+                height: profileCol.height + 40
                 radius: Theme.radiusLg
                 color: Theme.card
                 border.color: Theme.border
@@ -480,126 +528,152 @@ Item {
                     color: Theme.accent
                 }
 
-                Text {
+                Column {
+                    id: profileCol
                     x: 20
-                    y: 16
-                    text: root.definitions["resources.profile"].label
-                    color: Theme.textPrimary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: 16
-                    font.weight: Font.DemiBold
-                }
-                Text {
-                    x: 20
-                    y: 38
-                    text: root.definitions["resources.profile"].description
-                    color: Theme.textSecondary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
-                }
+                    y: 20
+                    width: parent.width - 40
+                    spacing: 0
 
-                // Which profile the engine recommends for this machine.
-                Text {
-                    anchors.right: parent.right
-                    anchors.rightMargin: 20
-                    y: 12
-                    visible: SettingsService.recommendedProfile !== ""
-                    text: qsTr("RECOMMENDED · %1").arg(root.profileLabel(SettingsService.recommendedProfile).toUpperCase())
-                    color: Theme.accentLight
-                    font.family: Theme.fontFamily
-                    font.pixelSize: 9
-                    font.weight: Font.Bold
-                }
+                    // Header: the title on the left (eliding before it can touch
+                    // the controls), then the engine's recommendation, the
+                    // profile picks and the way into Smart Config on the right.
+                    Item {
+                        width: parent.width
+                        height: 34
 
-                Row {
-                    id: manageRow
-                    anchors.right: parent.right
-                    anchors.rightMargin: 20
-                    y: 30
-                    spacing: 16
+                        Text {
+                            anchors.left: parent.left
+                            anchors.right: profileActions.left
+                            anchors.rightMargin: 20
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: root.definitions["resources.profile"].label
+                            color: Theme.textPrimary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 16
+                            font.weight: Font.DemiBold
+                            elide: Text.ElideRight
+                        }
 
-                    Repeater {
-                        model: root.definitions["resources.profile"].choices
-                        delegate: Rectangle {
-                            id: segRoot
-                            required property var modelData
-                            readonly property bool active: root.values["resources.profile"] === segRoot.modelData.value
-                            width: segLabel.width + 28
-                            height: 30
-                            radius: Theme.radiusMd
-                            color: segRoot.active ? Theme.accentSoft : (segArea.containsMouse ? Theme.chip : Theme.inset)
-                            border.width: 1
-                            border.color: segRoot.active ? Theme.accent : Theme.border
-                            Behavior on color { ColorAnimation { duration: 100 } }
+                        Row {
+                            id: profileActions
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 14
 
+                            // Which profile the engine recommends for this machine.
+                            // Dropped on a narrow card: the title needs that room
+                            // more than the badge does (Smart Config states the
+                            // same recommendation in full).
                             Text {
-                                id: segLabel
-                                anchors.centerIn: parent
-                                text: segRoot.modelData.label
-                                color: segRoot.active ? Theme.accentLight : Theme.textSecondary
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: SettingsService.recommendedProfile !== "" && profileStrip.width > 700
+                                text: qsTr("RECOMMENDED · %1").arg(root.profileLabel(SettingsService.recommendedProfile).toUpperCase())
+                                color: Theme.accentLight
                                 font.family: Theme.fontFamily
-                                font.pixelSize: Theme.textSm
-                                font.weight: segRoot.active ? Font.DemiBold : Font.Medium
+                                font.pixelSize: 9
+                                font.weight: Font.Bold
                             }
 
-                            MouseArea {
-                                id: segArea
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: SettingsService.setValue("resources.profile", segRoot.modelData.value)
+                            Row {
+                                id: manageRow
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 8
+
+                                Repeater {
+                                    model: root.definitions["resources.profile"].choices
+                                    delegate: Rectangle {
+                                        id: segRoot
+                                        required property var modelData
+                                        readonly property bool active: root.values["resources.profile"] === segRoot.modelData.value
+                                        width: segLabel.width + 28
+                                        height: 30
+                                        radius: Theme.radiusMd
+                                        color: segRoot.active ? Theme.accentSoft : (segArea.containsMouse ? Theme.chip : Theme.inset)
+                                        border.width: 1
+                                        border.color: segRoot.active ? Theme.accent : Theme.border
+                                        Behavior on color { ColorAnimation { duration: 100 } }
+
+                                        Text {
+                                            id: segLabel
+                                            anchors.centerIn: parent
+                                            text: segRoot.modelData.label
+                                            color: segRoot.active ? Theme.accentLight : Theme.textSecondary
+                                            font.family: Theme.fontFamily
+                                            font.pixelSize: Theme.textSm
+                                            font.weight: segRoot.active ? Font.DemiBold : Font.Medium
+                                        }
+
+                                        MouseArea {
+                                            id: segArea
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: SettingsService.setValue("resources.profile", segRoot.modelData.value)
+                                        }
+                                    }
+                                }
+                            }
+
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: qsTr("Manage →")
+                                color: manageArea.containsMouse ? Theme.accent : Theme.accentLight
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.textSm
+
+                                MouseArea {
+                                    id: manageArea
+                                    anchors.fill: parent
+                                    anchors.margins: -6
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.sectionRequested("smart")
+                                }
                             }
                         }
                     }
-                }
 
-                Text {
-                    anchors.right: parent.right
-                    anchors.rightMargin: 20
-                    y: 66
-                    text: qsTr("Manage →")
-                    color: Theme.accentLight
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
-
-                    MouseArea {
-                        anchors.fill: parent
-                        anchors.margins: -6
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.sectionRequested("smart")
+                    // What the profile does — the engine's own words.
+                    Text {
+                        width: parent.width
+                        topPadding: 10
+                        text: root.definitions["resources.profile"].description
+                        color: Theme.textSecondary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.textSm
+                        wrapMode: Text.WordWrap
                     }
-                }
 
-                // The three LIVE usage meters — the engine's Telemetry module
-                // (real frame times, encoder load, output presents), not the
-                // profile's static budget. The allocation split stays visible
-                // as the per-profile targets under the card title.
-                Row {
-                    x: 20
-                    y: 92
-                    width: parent.width - 40
-                    spacing: 24
+                    // The three LIVE usage meters — the engine's Telemetry module
+                    // (real frame times, encoder load, output presents), not the
+                    // profile's static budget. The allocation split stays visible
+                    // as the per-profile targets under the card title.
+                    Row {
+                        width: parent.width
+                        topPadding: 14
+                        spacing: 24
 
-                    // The shared meter component (see LabeledMeter.qml) —
-                    // the same one Smart Config's Resource budgets use, so
-                    // the two screens' meters can't drift apart.
-                    LabeledMeter { label: qsTr("Rendering"); pct: TelemetryService.utilization.rendering; width: (parent.width - 48) / 3 }
-                    LabeledMeter { label: qsTr("Encoding"); pct: TelemetryService.utilization.encoding; width: (parent.width - 48) / 3 }
-                    LabeledMeter { label: qsTr("Output"); pct: TelemetryService.utilization.output; width: (parent.width - 48) / 3 }
-                }
+                        // The shared meter component (see LabeledMeter.qml) —
+                        // the same one Smart Config's Resource budgets use, so
+                        // the two screens' meters can't drift apart.
+                        LabeledMeter { label: qsTr("Rendering"); pct: TelemetryService.utilization.rendering; width: (parent.width - 48) / 3 }
+                        LabeledMeter { label: qsTr("Encoding"); pct: TelemetryService.utilization.encoding; width: (parent.width - 48) / 3 }
+                        LabeledMeter { label: qsTr("Output"); pct: TelemetryService.utilization.output; width: (parent.width - 48) / 3 }
+                    }
 
-                // The profile's budget split (was the meters' only source
-                // before the live feed existed — kept as the stated targets).
-                Text {
-                    x: 20
-                    y: 128
-                    text: qsTr("Budget for this profile · Rendering %1% · Encoding %2% · Output %3%")
-                        .arg(SettingsService.allocation.rendering)
-                        .arg(SettingsService.allocation.encoding)
-                        .arg(SettingsService.allocation.output)
-                    color: Theme.textMuted
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textXs
+                    // The profile's budget split (was the meters' only source
+                    // before the live feed existed — kept as the stated targets).
+                    Text {
+                        topPadding: 8
+                        text: qsTr("Budget for this profile · Rendering %1% · Encoding %2% · Output %3%")
+                            .arg(SettingsService.allocation.rendering)
+                            .arg(SettingsService.allocation.encoding)
+                            .arg(SettingsService.allocation.output)
+                        color: Theme.textMuted
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.textSub
+                    }
                 }
             }
 
@@ -675,7 +749,7 @@ Item {
                             text: prefRow.sub
                             color: Theme.textMuted
                             font.family: Theme.fontFamily
-                            font.pixelSize: Theme.textXs
+                            font.pixelSize: Theme.textSub
                         }
                     }
 
@@ -778,7 +852,7 @@ Item {
                                                                   : qsTr("%n saved copy(s).", "", backupRow.backups.length))
                             color: Theme.textMuted
                             font.family: Theme.fontFamily
-                            font.pixelSize: Theme.textXs
+                            font.pixelSize: Theme.textSub
                         }
                     }
 
@@ -873,7 +947,10 @@ Item {
                 objectName: "selfTestCardNotifications"   // inset self-test grab target
                 title: qsTr("Notifications & logs")
                 PrefRow { key: "notifications.show" }
-                PrefRow { choiceKey: "notifications.logLevel"; last: true }
+                // Its description says what the level does (the engine's log),
+                // which is not something the row's own value can show.
+                PrefRow { choiceKey: "notifications.logLevel"
+                          sub: root.definitions["notifications.logLevel"].description; last: true }
             }
 
             // A row with a label on the left and a small action button on the right.
@@ -1152,7 +1229,7 @@ Item {
                                   + root.backupSizeText(backupItem.modelData.sizeBytes)
                             color: Theme.textMuted
                             font.family: Theme.fontFamily
-                            font.pixelSize: Theme.textXs
+                            font.pixelSize: Theme.textSub
                         }
                     }
 

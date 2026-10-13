@@ -157,13 +157,18 @@ BroadcastEngine& BroadcastEngine::Instance() {
 // --- Lifecycle --------------------------------------------------------------
 
 Result<void> BroadcastEngine::Initialize() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (initialized_.load()) return Ok();
-    // The software loopback provider is always available — CI and rehearsal
-    // exercise the full contract without any SDK (docs/specs/29 §11).
-    (void)RegisterProviderLocked(std::make_shared<SoftwareProvider>());
-    // NDI + SDI providers resolve their SDKs at runtime; on machines without
-    // them Probe() reports Unsupported cleanly (docs/specs/29 §2).
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (initialized_.load()) return Ok();
+        // The software loopback provider is always available — CI and rehearsal
+        // exercise the full contract without any SDK (docs/specs/29 §11).
+        (void)RegisterProviderLocked(std::make_shared<SoftwareProvider>());
+    }
+    // NDI + SDI provider CONSTRUCTION resolves their SDKs at runtime
+    // (LoadLibrary), so it runs OUTSIDE the engine lock — the same rule as
+    // every other provider call here. Registration itself only takes the
+    // registry's short lock. On machines without the SDKs, Probe() reports
+    // Unsupported cleanly (docs/specs/29 §2).
     (void)RegisterBuiltinBroadcastProviders(*this);
     initialized_.store(true);
     return Ok();
@@ -188,25 +193,36 @@ Result<void> BroadcastEngine::Stop() {
 }
 
 Result<void> BroadcastEngine::Shutdown() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     (void)Stop();
-    for (auto& [name, p] : providers_) (void)p->ShutdownProvider();
-    providers_.clear();
-    senders_.clear();
-    receivers_.clear();
-    sdiCaptures_.clear();
+    // Snapshot the registry, then shut providers down OUTSIDE every lock:
+    // ShutdownProvider() closes vendor SDK handles (the NDI finder teardown
+    // alone can take seconds) and must never make a lookup wait.
+    std::vector<std::shared_ptr<IBroadcastProvider>> providers;
+    {
+        std::unique_lock<std::shared_mutex> plock(providersMu_);
+        providers.reserve(providers_.size());
+        for (auto& [name, p] : providers_) providers.push_back(p);
+        providers_.clear();
+    }
+    for (auto& p : providers) (void)p->ShutdownProvider();
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        senders_.clear();
+        receivers_.clear();
+        sdiCaptures_.clear();
+    }
     initialized_.store(false);
     return Ok();
 }
 
 Result<void> BroadcastEngine::Reload() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    for (auto& [name, p] : providers_) {
-        // The "sdi" feature switch gates its probe: reloading with the SDK
-        // absent used to publish "DeckLink SDK not installed" at every boot
-        // (the toast spam). A switched-off provider keeps its registration
-        // and just isn't probed.
-        if (name == "sdi" && !sdiEnabled_.load()) continue;
+    // Probe OUTSIDE the lock: Probe() loads and probes a vendor SDK. The
+    // "sdi" feature switch still gates its own probe (reloading with the SDK
+    // absent used to publish "DeckLink SDK not installed" at every boot); a
+    // switched-off provider keeps its registration and just isn't probed.
+    const bool sdiOn = sdiEnabled_.load();
+    for (const auto& p : ProviderSnapshot()) {
+        if (!sdiOn && std::string_view(p->Name()) == "sdi") continue;
         (void)p->Probe();
     }
     return Ok();
@@ -226,16 +242,21 @@ Result<void> BroadcastEngine::Reset() {
 
 HealthReport BroadcastEngine::GetHealth() const {
     HealthReport hr;
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     hr.errorCount = errorCount_.load();
+    size_t providerCount = 0;
+    {
+        std::shared_lock<std::shared_mutex> plock(providersMu_);
+        providerCount = providers_.size();
+    }
     if (hr.errorCount > 0) {
         hr.state = HealthState::Degraded;
         hr.detail = std::format("provider errors: {}", hr.errorCount);
     } else {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         hr.detail = std::format("providers: {}, senders: {}, receivers: {}",
-                                providers_.size(), senders_.size(), receivers_.size());
+                                providerCount, senders_.size(), receivers_.size());
     }
-    if (providers_.empty() && initialized_.load())
+    if (providerCount == 0 && initialized_.load())
         hr.state = HealthState::Degraded;
     return hr;
 }
@@ -243,7 +264,12 @@ HealthReport BroadcastEngine::GetHealth() const {
 Metrics BroadcastEngine::MetricsSnapshot() const {
     Metrics m;
     m.errorCount = errorCount_.load();
-    m.queueLength = senders_.size() + receivers_.size();
+    {
+        // These two maps were read WITHOUT the lock here; that is a data race
+        // with StopSender/DisconnectReceiver, not just a stale number.
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        m.queueLength = senders_.size() + receivers_.size();
+    }
     m.health = GetHealth().state;
     return m;
 }
@@ -259,16 +285,19 @@ Result<void> BroadcastEngine::RegisterProviderLocked(std::shared_ptr<IBroadcastP
     if (!provider)
         return Error::Make(Err::InvalidArgument, kModule, "null provider");
     const std::string name = provider->Name();
-    if (providers_.count(name))
-        return Error::Make(Err::Broadcast_ProviderExists, kModule,
-                           "provider already registered: " + name);
-    providers_[name] = std::move(provider);
+    {
+        std::unique_lock<std::shared_mutex> plock(providersMu_);
+        if (providers_.count(name))
+            return Error::Make(Err::Broadcast_ProviderExists, kModule,
+                               "provider already registered: " + name);
+        providers_[name] = std::move(provider);
+    }
     (void)EventBus::Instance().Publish(events::BroadcastProviderRegistered{name});
     return Ok();
 }
 
 std::vector<std::string> BroadcastEngine::ProviderNames() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> plock(providersMu_);
     std::vector<std::string> out;
     out.reserve(providers_.size());
     for (const auto& [name, p] : providers_) out.push_back(name);
@@ -305,7 +334,6 @@ Result<ProviderState> BroadcastEngine::Probe(std::string_view name) {
 // --- NDI -----------------------------------------------------------------------
 
 Result<std::vector<NdiSourceInfo>> BroadcastEngine::DiscoverNdiSources() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<NdiSourceInfo> out;
     // The feature switch (Settings · Plugins): NDI off = no sources, ever —
     // a network browse is exactly what the switch promises to stop.
@@ -314,9 +342,11 @@ Result<std::vector<NdiSourceInfo>> BroadcastEngine::DiscoverNdiSources() {
         (void)EventBus::Instance().Publish(events::NdiSourcesChanged{0});
         return out;
     }
-    // Discovery is provider-agnostic: the software provider reports loopback
-    // senders; a real NDI provider reports network sources.
-    for (const auto& [name, p] : providers_) {
+    // Discovery is provider-agnostic (the software provider reports loopback
+    // senders; a real NDI provider browses the network) and it is SLOW, so it
+    // runs OUTSIDE every lock — a network browse under the engine mutex was
+    // what froze unrelated callers.
+    for (const auto& p : ProviderSnapshot()) {
         auto found = p->DiscoverSources();
         out.insert(out.end(), found.begin(), found.end());
     }
@@ -327,7 +357,6 @@ Result<std::vector<NdiSourceInfo>> BroadcastEngine::DiscoverNdiSources() {
 
 Result<BroadcastSenderId> BroadcastEngine::CreateNdiSender(std::string_view name,
                                                            const NdiSenderConfig& cfg) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (name.empty())
         return Error::Make(Err::InvalidArgument, kModule, "sender name required");
     // The feature switch (Settings · Plugins): NDI off refuses every
@@ -337,10 +366,16 @@ Result<BroadcastSenderId> BroadcastEngine::CreateNdiSender(std::string_view name
         return Error::Make(Err::Broadcast_Unsupported, kModule,
                            "NDI is switched off (Settings · Plugins)");
     // Prefer a real NDI provider when it is actually usable (SDK present);
-    // otherwise fall back to the always-available software loopback.
+    // otherwise fall back to the always-available software loopback. The
+    // Probe() below runs OUTSIDE every lock — it opens the vendor SDK.
+    std::string preferred;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        preferred = preferredProvider_;
+    }
     std::shared_ptr<IBroadcastProvider> p;
-    if (!preferredProvider_.empty()) {
-        p = Find(preferredProvider_);
+    if (!preferred.empty()) {
+        p = Find(preferred);
     } else {
         p = Find("ndi");
         if (p) {
@@ -352,9 +387,12 @@ Result<BroadcastSenderId> BroadcastEngine::CreateNdiSender(std::string_view name
     if (!p)
         return Error::Make(Err::Broadcast_ProviderNotFound, kModule,
                            "no sender-capable provider registered");
-    auto r = p->CreateSender(name, cfg);
+    auto r = p->CreateSender(name, cfg);   // SDK call, lock-free
     if (!r.ok()) return r;
-    senders_[r.value()] = p->Name();
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        senders_[r.value()] = p->Name();
+    }
     (void)EventBus::Instance().Publish(events::BroadcastSenderStarted{r.value(),
                                                                       std::string(name)});
     return r;
@@ -363,13 +401,18 @@ Result<BroadcastSenderId> BroadcastEngine::CreateNdiSender(std::string_view name
 Result<void> BroadcastEngine::SendVideoFrame(std::string_view senderId,
                                              const VideoFrameInfo& info,
                                              const void* data, size_t bytes) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto it = senders_.find(std::string(senderId));
-    if (it == senders_.end())
-        return Error::Make(Err::Broadcast_NotFound, kModule,
-                           "unknown sender '" + std::string(senderId) + "'");
-    auto p = Find(it->second);
+    std::shared_ptr<IBroadcastProvider> p;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = senders_.find(std::string(senderId));
+        if (it == senders_.end())
+            return Error::Make(Err::Broadcast_NotFound, kModule,
+                               "unknown sender '" + std::string(senderId) + "'");
+        p = Find(it->second);
+    }
     if (!p) return Error::Make(Err::Broadcast_ProviderNotFound, kModule, "provider gone");
+    // The vendor send is the slow part (30 fps per output) and it runs with NO
+    // lock held, so a stalled SDK send cannot freeze the engine mutex.
     auto r = p->SendVideo(senderId, info, data, bytes);
     if (r.ok()) {
         framesSent_.fetch_add(1);
@@ -384,25 +427,31 @@ Result<void> BroadcastEngine::SendVideoFrame(std::string_view senderId,
 Result<void> BroadcastEngine::SendAudioFrame(std::string_view senderId,
                                              const AudioFrameInfo& info,
                                              const void* data, size_t bytes) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto it = senders_.find(std::string(senderId));
-    if (it == senders_.end())
-        return Error::Make(Err::Broadcast_NotFound, kModule,
-                           "unknown sender '" + std::string(senderId) + "'");
-    auto p = Find(it->second);
+    std::shared_ptr<IBroadcastProvider> p;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = senders_.find(std::string(senderId));
+        if (it == senders_.end())
+            return Error::Make(Err::Broadcast_NotFound, kModule,
+                               "unknown sender '" + std::string(senderId) + "'");
+        p = Find(it->second);
+    }
     if (!p) return Error::Make(Err::Broadcast_ProviderNotFound, kModule, "provider gone");
-    return p->SendAudio(senderId, info, data, bytes);
+    return p->SendAudio(senderId, info, data, bytes);   // SDK call, lock-free
 }
 
 Result<void> BroadcastEngine::StopSender(std::string_view senderId) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto it = senders_.find(std::string(senderId));
-    if (it == senders_.end())
-        return Error::Make(Err::Broadcast_NotFound, kModule,
-                           "unknown sender '" + std::string(senderId) + "'");
-    auto p = Find(it->second);
-    if (p) (void)p->StopSender(senderId);
-    senders_.erase(it);
+    std::shared_ptr<IBroadcastProvider> p;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = senders_.find(std::string(senderId));
+        if (it == senders_.end())
+            return Error::Make(Err::Broadcast_NotFound, kModule,
+                               "unknown sender '" + std::string(senderId) + "'");
+        p = Find(it->second);
+        senders_.erase(it);
+    }
+    if (p) (void)p->StopSender(senderId);   // SDK teardown, lock-free
     (void)EventBus::Instance().Publish(events::BroadcastSenderStopped{std::string(senderId)});
     return Ok();
 }
@@ -418,27 +467,35 @@ std::vector<std::string> BroadcastEngine::SenderIds() const {
 // SDK's connection count; providers that can't tell return -1 (the UI hides
 // the indicator rather than guessing).
 int BroadcastEngine::SenderConnectedReceivers(std::string_view senderId) const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto it = senders_.find(std::string(senderId));
-    if (it == senders_.end()) return -1;
-    auto p = Find(it->second);
+    std::shared_ptr<IBroadcastProvider> p;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = senders_.find(std::string(senderId));
+        if (it == senders_.end()) return -1;
+        p = Find(it->second);
+    }
+    // The SDK connection count is a vendor query — asked with no lock held.
     return p ? p->ConnectedReceiverCount(senderId) : -1;
 }
 
 Result<BroadcastReceiverId> BroadcastEngine::CreateNdiReceiver(std::string_view sourceName) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     // The feature switch (Settings · Plugins): NDI off refuses receivers as
     // well — inputs and outputs stop together, as the switch promises.
     if (!ndiEnabled_.load())
         return Error::Make(Err::Broadcast_Unsupported, kModule,
                            "NDI is switched off (Settings · Plugins)");
+    std::string preferred;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        preferred = preferredProvider_;
+    }
     std::shared_ptr<IBroadcastProvider> p;
-    if (!preferredProvider_.empty()) {
-        p = Find(preferredProvider_);
+    if (!preferred.empty()) {
+        p = Find(preferred);
     } else {
         p = Find("ndi");
         if (p) {
-            auto probe = p->Probe();
+            auto probe = p->Probe();   // OUTSIDE every lock — opens the SDK
             if (!probe.ok() || probe.value() != ProviderState::Available) p = nullptr;
         }
         if (!p) p = Find("software");
@@ -446,9 +503,12 @@ Result<BroadcastReceiverId> BroadcastEngine::CreateNdiReceiver(std::string_view 
     if (!p)
         return Error::Make(Err::Broadcast_ProviderNotFound, kModule,
                            "no receiver-capable provider registered");
-    auto r = p->CreateReceiver(sourceName);
+    auto r = p->CreateReceiver(sourceName);   // SDK call, lock-free
     if (!r.ok()) return r;
-    receivers_[r.value()] = p->Name();
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        receivers_[r.value()] = p->Name();
+    }
     (void)EventBus::Instance().Publish(
         events::BroadcastReceiverConnected{r.value(), std::string(sourceName)});
     return r;
@@ -457,14 +517,17 @@ Result<BroadcastReceiverId> BroadcastEngine::CreateNdiReceiver(std::string_view 
 Result<bool> BroadcastEngine::ReceiveFrame(std::string_view receiverId,
                                            VideoFrameInfo& info,
                                            std::vector<uint8_t>& out) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto it = receivers_.find(std::string(receiverId));
-    if (it == receivers_.end())
-        return Error::Make(Err::Broadcast_NotFound, kModule,
-                           "unknown receiver '" + std::string(receiverId) + "'");
-    auto p = Find(it->second);
+    std::shared_ptr<IBroadcastProvider> p;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = receivers_.find(std::string(receiverId));
+        if (it == receivers_.end())
+            return Error::Make(Err::Broadcast_NotFound, kModule,
+                               "unknown receiver '" + std::string(receiverId) + "'");
+        p = Find(it->second);
+    }
     if (!p) return Error::Make(Err::Broadcast_ProviderNotFound, kModule, "provider gone");
-    auto r = p->ReceiveFrame(receiverId, info, out);
+    auto r = p->ReceiveFrame(receiverId, info, out);   // SDK pull, lock-free
     if (r.ok() && r.value()) {
         framesReceived_.fetch_add(1);
         (void)EventBus::Instance().Publish(
@@ -475,14 +538,17 @@ Result<bool> BroadcastEngine::ReceiveFrame(std::string_view receiverId,
 }
 
 Result<void> BroadcastEngine::DisconnectReceiver(std::string_view receiverId) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto it = receivers_.find(std::string(receiverId));
-    if (it == receivers_.end())
-        return Error::Make(Err::Broadcast_NotFound, kModule,
-                           "unknown receiver '" + std::string(receiverId) + "'");
-    auto p = Find(it->second);
-    if (p) (void)p->DisconnectReceiver(receiverId);
-    receivers_.erase(it);
+    std::shared_ptr<IBroadcastProvider> p;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = receivers_.find(std::string(receiverId));
+        if (it == receivers_.end())
+            return Error::Make(Err::Broadcast_NotFound, kModule,
+                               "unknown receiver '" + std::string(receiverId) + "'");
+        p = Find(it->second);
+        receivers_.erase(it);
+    }
+    if (p) (void)p->DisconnectReceiver(receiverId);   // SDK teardown, lock-free
     (void)EventBus::Instance().Publish(
         events::BroadcastReceiverDisconnected{std::string(receiverId)});
     return Ok();
@@ -498,8 +564,6 @@ std::vector<std::string> BroadcastEngine::ReceiverIds() const {
 // --- SDI -----------------------------------------------------------------------
 
 Result<std::vector<SdiDeviceInfo>> BroadcastEngine::EnumerateSdiDevices() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    std::vector<SdiDeviceInfo> out;
     // Feature switch: a disabled SDI refuses cleanly WITHOUT probing the
     // SDK (the old path LoadLibrary'd DeckLink on every device refresh and
     // published the failure as an error toast each time).
@@ -510,14 +574,13 @@ Result<std::vector<SdiDeviceInfo>> BroadcastEngine::EnumerateSdiDevices() {
     if (!p)
         return Error::Make(Err::Broadcast_NoSdiDevices, kModule,
                            "no SDI provider registered (DeckLink SDK not installed)");
-    auto devs = p->EnumerateSdiDevices();
+    auto devs = p->EnumerateSdiDevices();   // DeckLink enumerate, lock-free
     (void)EventBus::Instance().Publish(events::SdiDevicesChanged{devs.size()});
     return devs;
 }
 
 Result<std::string> BroadcastEngine::ConnectSdiCapture(int deviceIndex,
                                                        std::string_view graphNodeId) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!sdiEnabled_.load())
         return Error::Make(Err::Broadcast_Unsupported, kModule,
                            "SDI is switched off (Settings · Plugins)");
@@ -525,21 +588,27 @@ Result<std::string> BroadcastEngine::ConnectSdiCapture(int deviceIndex,
     if (!p)
         return Error::Make(Err::Broadcast_Unsupported, kModule,
                            "SDI capture requires the DeckLink SDK");
-    auto r = p->ConnectSdiCapture(deviceIndex, graphNodeId);
+    auto r = p->ConnectSdiCapture(deviceIndex, graphNodeId);   // SDK call, lock-free
     if (!r.ok()) return r;
-    sdiCaptures_[r.value()] = p->Name();
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        sdiCaptures_[r.value()] = p->Name();
+    }
     return r;
 }
 
 Result<void> BroadcastEngine::DisconnectSdiCapture(std::string_view captureId) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto it = sdiCaptures_.find(std::string(captureId));
-    if (it == sdiCaptures_.end())
-        return Error::Make(Err::Broadcast_NotFound, kModule,
-                           "unknown SDI capture '" + std::string(captureId) + "'");
-    auto p = Find(it->second);
-    if (p) (void)p->DisconnectSdiCapture(captureId);
-    sdiCaptures_.erase(it);
+    std::shared_ptr<IBroadcastProvider> p;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = sdiCaptures_.find(std::string(captureId));
+        if (it == sdiCaptures_.end())
+            return Error::Make(Err::Broadcast_NotFound, kModule,
+                               "unknown SDI capture '" + std::string(captureId) + "'");
+        p = Find(it->second);
+        sdiCaptures_.erase(it);
+    }
+    if (p) (void)p->DisconnectSdiCapture(captureId);   // SDK teardown, lock-free
     return Ok();
 }
 
@@ -610,7 +679,10 @@ void BroadcastEngine::PreferProvider(std::string_view name) {
 // (tests and non-NDI plumbing rely on it) but its NDI-shaped paths above
 // are gated by the same switch.
 void BroadcastEngine::SetNdiEnabled(bool enabled) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // The switch itself flips atomically (status queries stay lock-free); the
+    // teardown it triggers — SDK shutdown, sender/receiver stops — runs OUTSIDE
+    // every lock. Holding mutex_ across that teardown was the long holder that
+    // froze the GUI: its Find() waited here behind NDI SDK work.
     const bool was = ndiEnabled_.exchange(enabled);
     if (was == enabled) return;
     if (enabled) {
@@ -619,23 +691,31 @@ void BroadcastEngine::SetNdiEnabled(bool enabled) {
     }
     Logger::Instance().Info("[ndi] NDI switched off (Settings · Plugins) — tearing down senders/receivers", kModule);
     std::vector<std::string> toStop;
-    toStop.reserve(senders_.size());
-    for (const auto& [id, provider] : senders_)
-        if (provider == "ndi") toStop.push_back(id);
-    for (const auto& id : toStop) (void)StopSender(id);   // publishes sender-stopped
     std::vector<std::string> toDrop;
-    toDrop.reserve(receivers_.size());
-    for (const auto& [id, provider] : receivers_)
-        if (provider == "ndi") toDrop.push_back(id);
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        toStop.reserve(senders_.size());
+        for (const auto& [id, provider] : senders_)
+            if (provider == "ndi") toStop.push_back(id);
+        toDrop.reserve(receivers_.size());
+        for (const auto& [id, provider] : receivers_)
+            if (provider == "ndi") toDrop.push_back(id);
+    }
+    for (const auto& id : toStop) (void)StopSender(id);   // publishes sender-stopped
     for (const auto& id : toDrop) (void)DisconnectReceiver(id);
     // Fresh provider: closes the SDK handles (incl. the persistent finder)
     // and re-enters the registry under the same name.
-    auto ndi = Find("ndi");
-    if (ndi) {
-        (void)ndi->ShutdownProvider();
-        providers_.erase("ndi");
+    std::shared_ptr<IBroadcastProvider> ndi;
+    {
+        std::unique_lock<std::shared_mutex> plock(providersMu_);
+        auto it = providers_.find("ndi");
+        if (it != providers_.end()) {
+            ndi = it->second;
+            providers_.erase(it);
+        }
     }
-    (void)RegisterProviderLocked(MakeNdiProvider());
+    if (ndi) (void)ndi->ShutdownProvider();   // SDK teardown, lock-free
+    (void)RegisterProvider(MakeNdiProvider());
     (void)EventBus::Instance().Publish(events::NdiSourcesChanged{0});
 }
 
@@ -646,7 +726,6 @@ void BroadcastEngine::SetNdiEnabled(bool enabled) {
 // opens the gate; the next enumerate/refresh re-opens the SDK on demand.
 // Going OFF drops any live captures (same teardown contract as NDI's).
 void BroadcastEngine::SetSdiEnabled(bool enabled) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const bool was = sdiEnabled_.exchange(enabled);
     if (was == enabled) return;
     if (enabled) {
@@ -655,9 +734,12 @@ void BroadcastEngine::SetSdiEnabled(bool enabled) {
     }
     Logger::Instance().Info("[sdi] SDI switched off (Settings · Plugins) — dropping live captures", kModule);
     std::vector<std::string> toDrop;
-    toDrop.reserve(sdiCaptures_.size());
-    for (const auto& [id, provider] : sdiCaptures_) toDrop.push_back(id);
-    for (const auto& id : toDrop) (void)DisconnectSdiCapture(id);
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        toDrop.reserve(sdiCaptures_.size());
+        for (const auto& [id, provider] : sdiCaptures_) toDrop.push_back(id);
+    }
+    for (const auto& id : toDrop) (void)DisconnectSdiCapture(id);   // SDK teardown, lock-free
 }
 
 bool BroadcastEngine::SdiAvailable() const {
@@ -684,9 +766,21 @@ void BroadcastEngine::UnwireEvents() {
 // --- Private helpers ---------------------------------------------------------------
 
 std::shared_ptr<IBroadcastProvider> BroadcastEngine::Find(std::string_view name) const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // The registry has its OWN lock: a lookup is a map find and must never
+    // queue behind a slow provider call (the GUI blocked here, waiting for the
+    // engine mutex held across an NDI SDK teardown). Readers do not block each
+    // other; only (rare) registration does.
+    std::shared_lock<std::shared_mutex> plock(providersMu_);
     auto it = providers_.find(std::string(name));
     return it == providers_.end() ? nullptr : it->second;
+}
+
+std::vector<std::shared_ptr<IBroadcastProvider>> BroadcastEngine::ProviderSnapshot() const {
+    std::shared_lock<std::shared_mutex> plock(providersMu_);
+    std::vector<std::shared_ptr<IBroadcastProvider>> out;
+    out.reserve(providers_.size());
+    for (const auto& [name, p] : providers_) out.push_back(p);
+    return out;
 }
 
 void BroadcastEngine::RecordError(std::string_view provider, std::string_view message) {

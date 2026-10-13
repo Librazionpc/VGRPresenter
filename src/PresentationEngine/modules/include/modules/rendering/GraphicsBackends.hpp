@@ -93,6 +93,8 @@ public:
 private:
     void Execute(const DrawCommand& cmd);
     void FillRectBlended(int x, int y, int w, int h, Color c, BlendMode mode);
+    void FillRoundedRectBlended(int x, int y, int w, int h, float radius, Color c,
+                                BlendMode mode);
     void Blit(int x, int y, int w, int h, const RgbaImage& src, const Rect& srcRect,
               Color tint, BlendMode mode);
     void RasterizeShape(const DrawCommand& cmd);

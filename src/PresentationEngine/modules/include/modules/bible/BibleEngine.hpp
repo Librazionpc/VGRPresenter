@@ -84,8 +84,16 @@ public:
                                                       std::string_view bibleId = "") const;
 
     // --- Search (actual verse content, via the Search Engine) ---
+    // `bookId` + `chapter` are the reference panes' chapter lock: when the lock
+    // is on, only the passage that is OPEN is searched — Revelation 1's verses,
+    // never the rest of Revelation and never another book. Both tiers honour it
+    // (a typed "John 3:16" resolves inside the scope too, so the search box
+    // cannot jump out of the passage the lock names). Empty `bookId` = the whole
+    // Bible; `chapter` 0 = every chapter of `bookId`.
     Result<std::vector<BibleSearchHit>> Search(std::string_view query,
-                                               std::string_view bibleId = "") const;
+                                               std::string_view bibleId = "",
+                                               std::string_view bookId = "",
+                                               int chapter = 0) const;
 
     // --- Parallel Bible (align the same reference across versions) ---
     Result<std::vector<ParallelVerse>> Compare(std::string_view refText,
@@ -139,7 +147,10 @@ private:
     // import/remove — a bible is ~4 MB of verse text, well within the same
     // write-per-change budget the library stores already pay.
     Result<void> SaveStoreLocked();
-    Result<size_t> LoadStoreLocked();
+    // Consumes the ALREADY-PARSED store document. The file read, the parse and
+    // the set-aside of a damaged store all happen BEFORE the engine lock is
+    // taken (see Initialize), so no PAL call runs inside the locked scope.
+    Result<size_t> LoadStoreLocked(const json::Value& root);
 
     // JSON (de)serialization of one bible (metadata + books + chapters).
     json::Value BibleToJsonLocked(const BibleVersion& bible) const;

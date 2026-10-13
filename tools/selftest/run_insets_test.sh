@@ -45,11 +45,23 @@ powershell -NoProfile -Command \
     >/dev/null 2>&1
 sleep 2
 
+# The paths are picked per shell (same rule as run_pill_test.sh): under MSYS
+# the /c/... form is what the process spawner converts for a native exe, while
+# the busybox agent shell has no /c/... at all and needs C:/... — hardcoding the
+# Windows form here left the app unable to load Qt6Quick.dll in an MSYS shell.
+if [ -d /c/msys64/ucrt64/bin ]; then
+    MINGW_BIN="${MINGW_BIN:-/c/msys64/ucrt64/bin}"
+    QT_BIN="${QT_BIN:-/c/Qt/6.11.1/mingw_64/bin}"
+else
+    MINGW_BIN="${MINGW_BIN:-C:/msys64/ucrt64/bin}"
+    QT_BIN="${QT_BIN:-C:/Qt/6.11.1/mingw_64/bin}"
+fi
+
 echo "== launching with VGR_SELFTEST=1 (stderr -> $LOG) =="
 (
     cd "$BUILD" || exit 1
     VGR_SELFTEST=1 VGR_INSETS_TEST=1 \
-        PATH="C:/msys64/ucrt64/bin:C:/Qt/6.11.1/mingw_64/bin:$PATH" \
+        PATH="$MINGW_BIN:$QT_BIN:$PATH" \
         "./$APP" > "$LOG" 2>&1
 ) &
 RUN_PID=$!

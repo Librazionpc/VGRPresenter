@@ -3,8 +3,10 @@
 #include "core/database/DatabaseManager.hpp"
 #include "core/events/EventBus.hpp"
 #include "core/logging/Logger.hpp"
+#include "core/task_scheduler/TaskScheduler.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <format>
 #include <sstream>
@@ -52,6 +54,44 @@ ProductionEngine& ProductionEngine::Instance() {
     return inst;
 }
 
+void ProductionEngine::RequestPersist() {
+    persistPending_.store(true, std::memory_order_release);
+    // ...AND get it to the disk during the session, not merely into the kernel's
+    // in-memory store. The flag above is consumed by PersistGate, which only
+    // exists inside THIS engine's own methods — but the graph is also mutated
+    // through Graph() directly (the QML roster models create and re-route buses
+    // that way, and they cannot construct a gate: it is private to this class).
+    // Those mutations therefore left the document in memory until
+    // DatabaseManager::Shutdown, i.e. only a CLEAN exit ever wrote a bus to
+    // disk: closing the app after building a bus worked, and a crash, a force
+    // quit or a killed task lost every bus the user had just built (observed as
+    // "my buses are not persisted").
+    //
+    // ONE deferred task per burst of edits — the atomic below coalesces them,
+    // so dragging a fader schedules a single write rather than one per step.
+    // The flush runs on the scheduler's thread with NO ProductionEngine lock
+    // held (see FlushPersistPending), which is what makes disk I/O here legal.
+    bool alreadyScheduled = false;
+    if (persistFlushScheduled_.compare_exchange_strong(alreadyScheduled, true,
+                                                       std::memory_order_acq_rel)) {
+        auto scheduled = TaskScheduler::Instance().ScheduleOnce(
+            [this] {
+                persistFlushScheduled_.store(false, std::memory_order_release);
+                FlushPersistPending();
+            },
+            std::chrono::milliseconds(600));
+        if (!scheduled.ok())
+            persistFlushScheduled_.store(false, std::memory_order_release);
+    }
+}
+
+void ProductionEngine::FlushPersistPending() {
+    if (!persistPending_.exchange(false, std::memory_order_acq_rel)) return;
+    // Reached from PersistGate's destructor, i.e. with NO ProductionEngine lock
+    // held: the disk write must never run under mutex_.
+    (void)DatabaseManager::Instance().Flush();
+}
+
 // --- Lifecycle ---
 
 Result<void> ProductionEngine::Initialize() {
@@ -65,7 +105,7 @@ Result<void> ProductionEngine::Initialize() {
     // graph mutation re-serializes through the saver into the kernel's
     // DatabaseManager (the DB flushes to disk at its own shutdown, and the
     // engine flushes a final save at its Shutdown).
-    auto& db = DatabaseManager::Instance();
+    auto& db = DatabaseManager::Instance();   // lock-ok: in-memory map read (no PAL)
     if (auto doc = db.Get("production", "graph"); doc.ok() && !doc.value().isNull()) {
         if (auto r = graph_.Restore(doc.value()); r.ok())
             Logger::Instance().Info("production graph restored (" +
@@ -76,36 +116,46 @@ Result<void> ProductionEngine::Initialize() {
                                            r.error().message,
                                        kModule);
     }
-    graph_.InstallSaver([](json::Value doc) {
-        auto& db2 = DatabaseManager::Instance();
+    graph_.InstallSaver([this](json::Value doc) {
+        auto& db2 = DatabaseManager::Instance();   // lock-ok: in-memory Put; disk write deferred to Flush
         (void)db2.Put("production", "graph", std::move(doc));
-        // Durable per mutation: the flush writes the DB file, so even a hard
-        // process kill only loses the mutation in flight. Graph edits are
-        // user-click paced — a small write each time is the right trade.
-        (void)db2.Flush();
+        // Durable per mutation, but the disk write is deferred until the
+        // mutating call releases mutex_ (PersistGate): the edit is already in
+        // the in-memory store, and the flush to disk must not run while this
+        // engine's lock is held. Repeated edits coalesce into one write.
+        RequestPersist();
     });
     return Ok();
 }
 
 Result<void> ProductionEngine::Start() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!initialized_.load()) return Error::Make(Err::Production_InvalidState, kModule,
-                                                 "Initialize() first");
-    if (running_.load()) return Ok();
-    running_.store(true);
+    // Scope the lock so the dispatch below runs with mutex_ RELEASED: a
+    // subscriber's body is not visible from here and can take its time (or
+    // re-enter this engine) — every other thread that needs mutex_ must not
+    // wait behind it. Same shape everywhere in this file.
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (!initialized_.load()) return Error::Make(Err::Production_InvalidState, kModule,
+                                                     "Initialize() first");
+        if (running_.load()) return Ok();
+        running_.store(true);
+    }
     (void)EventBus::Instance().Publish(events::ProductionStarted{});
     return Ok();
 }
 
 Result<void> ProductionEngine::Stop() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!running_.load()) return Ok();
-    running_.store(false);
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (!running_.load()) return Ok();
+        running_.store(false);
+    }
     (void)EventBus::Instance().Publish(events::ProductionStopped{});
     return Ok();
 }
 
 Result<void> ProductionEngine::Shutdown() {
+    PersistGate _save(*this);
     UnwireEvents();
     // Final save before the DatabaseManager flushes (kernel tears services
     // down in registration order — production before database — so this is
@@ -169,6 +219,7 @@ Metrics ProductionEngine::MetricsSnapshot() const {
 
 Result<std::string> ProductionEngine::CreateBus(std::string_view id, std::string_view name,
                                                 BusRole role, SignalType type) {
+    PersistGate _save(*this);
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto r = graph_.AddBus(id, name, role, type);
     if (r.ok()) Record("create_bus", std::string(r.value()));
@@ -177,6 +228,7 @@ Result<std::string> ProductionEngine::CreateBus(std::string_view id, std::string
 
 Result<void> ProductionEngine::SaveBusScene(std::string_view busId,
                                             std::string_view sceneName) {
+    PersistGate _save(*this);
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto r = graph_.SaveBusScene(busId, sceneName);
     if (r.ok()) Record("save_bus_scene", std::string(busId) + " " + std::string(sceneName));
@@ -185,32 +237,39 @@ Result<void> ProductionEngine::SaveBusScene(std::string_view busId,
 
 Result<void> ProductionEngine::ApplyBusScene(std::string_view busId,
                                              std::string_view sceneName) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto r = graph_.ApplyBusScene(busId, sceneName);
-    if (r.ok()) {
-        Record("apply_bus_scene", std::string(busId) + " " + std::string(sceneName));
+    PersistGate _save(*this);
+    Result<void> r = Ok();
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        r = graph_.ApplyBusScene(busId, sceneName);
+    }
+    if (r.ok()) Record("apply_bus_scene", std::string(busId) + " " + std::string(sceneName));
+    if (r.ok())
         (void)EventBus::Instance().Publish(
             events::BusSceneApplied{std::string(busId), std::string(sceneName)});
-    }
     return r;
 }
 
 Result<void> ProductionEngine::AssignOutputBuses(std::string_view outputId,
                                                  std::string_view videoBus,
                                                  std::string_view audioBus) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto r = graph_.AssignOutputBuses(outputId, videoBus, audioBus);
-    if (r.ok()) {
-        Record("assign_outputs", std::string(outputId) + " " + std::string(videoBus) +
-                                     " " + std::string(audioBus));
+    PersistGate _save(*this);
+    Result<void> r = Ok();
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        r = graph_.AssignOutputBuses(outputId, videoBus, audioBus);
+        if (r.ok()) Record("assign_outputs", std::string(outputId) + " " + std::string(videoBus) +
+                                                " " + std::string(audioBus));
+    }
+    if (r.ok())
         (void)EventBus::Instance().Publish(events::OutputChanged{
             std::string(outputId), std::string(videoBus), std::string(audioBus)});
-    }
     return r;
 }
 
 Result<void> ProductionEngine::SetOutputPriority(std::string_view outputId,
                                                  OutputPriority p) {
+    PersistGate _save(*this);
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto r = graph_.SetOutputPriority(outputId, p);
     if (r.ok()) Record("set_output_priority",
@@ -221,26 +280,32 @@ Result<void> ProductionEngine::SetOutputPriority(std::string_view outputId,
 // --- Virtual sources ---
 
 Result<std::string> ProductionEngine::CreateVirtualSource(std::string_view busId) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto bus = graph_.GetNode(busId);
-    if (!bus.ok() || bus.value().kind != NodeKind::Bus)
-        return Error::Make(Err::Production_BusNotFound, kModule,
-                           "no bus: " + std::string(busId));
-    auto vs = graph_.AddVirtualSource("", std::string(busId) + " (virtual)",
-                                      bus.value().signalType);
-    if (!vs.ok()) return vs.error();
-    // The virtual source consumes the bus output.
-    if (auto c = graph_.Connect(busId, vs.value(), bus.value().signalType); !c.ok())
-        return c.error();
-    Record("create_virtual_source", std::string(busId) + " " + vs.value());
+    PersistGate _save(*this);
+    std::string made;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto bus = graph_.GetNode(busId);
+        if (!bus.ok() || bus.value().kind != NodeKind::Bus)
+            return Error::Make(Err::Production_BusNotFound, kModule,
+                               "no bus: " + std::string(busId));
+        auto vs = graph_.AddVirtualSource("", std::string(busId) + " (virtual)",
+                                          bus.value().signalType);
+        if (!vs.ok()) return vs.error();
+        // The virtual source consumes the bus output.
+        if (auto c = graph_.Connect(busId, vs.value(), bus.value().signalType); !c.ok())
+            return c.error();
+        made = vs.value();
+        Record("create_virtual_source", std::string(busId) + " " + made);
+    }
     (void)EventBus::Instance().Publish(
-        events::VirtualSourceCreated{std::string(busId), vs.value()});
-    return vs;
+        events::VirtualSourceCreated{std::string(busId), made});
+    return made;
 }
 
 // --- Mixing ---
 
 Result<void> ProductionEngine::SetGain(std::string_view nodeId, double gainDb) {
+    PersistGate _save(*this);
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto v = graph_.Volume(nodeId);
     if (!v.ok()) return v.error();
@@ -251,6 +316,7 @@ Result<void> ProductionEngine::SetGain(std::string_view nodeId, double gainDb) {
 }
 
 Result<void> ProductionEngine::SetMute(std::string_view nodeId, bool mute) {
+    PersistGate _save(*this);
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto v = graph_.Volume(nodeId);
     if (!v.ok()) return v.error();
@@ -261,6 +327,7 @@ Result<void> ProductionEngine::SetMute(std::string_view nodeId, bool mute) {
 }
 
 Result<void> ProductionEngine::SetSolo(std::string_view nodeId, bool solo) {
+    PersistGate _save(*this);
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto v = graph_.Volume(nodeId);
     if (!v.ok()) return v.error();
@@ -271,6 +338,7 @@ Result<void> ProductionEngine::SetSolo(std::string_view nodeId, bool solo) {
 }
 
 Result<void> ProductionEngine::SetPan(std::string_view nodeId, double pan) {
+    PersistGate _save(*this);
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto v = graph_.Volume(nodeId);
     if (!v.ok()) return v.error();
@@ -282,6 +350,7 @@ Result<void> ProductionEngine::SetPan(std::string_view nodeId, double pan) {
 
 Result<void> ProductionEngine::AddProcessing(std::string_view nodeId,
                                              const ProcessingStage& stage) {
+    PersistGate _save(*this);
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto r = graph_.AddProcessing(nodeId, stage);
     if (r.ok()) Record("add_processing", std::string(nodeId));
@@ -351,6 +420,7 @@ double ProductionEngine::DuckDepth(std::string_view targetBus) const {
 
 Result<void> ProductionEngine::SetSourceFallback(std::string_view sourceId,
                                                  std::string_view fallbackId) {
+    PersistGate _save(*this);
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto r = graph_.SetFallback(sourceId, fallbackId);
     if (r.ok()) Record("set_fallback", std::string(sourceId) + " " +
@@ -360,36 +430,45 @@ Result<void> ProductionEngine::SetSourceFallback(std::string_view sourceId,
 
 Result<void> ProductionEngine::TriggerFallback(std::string_view sourceId,
                                                std::string_view reason) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto node = graph_.GetNode(sourceId);
-    if (!node.ok()) return node.error();
-    if (node.value().kind != NodeKind::Source)
-        return Error::Make(Err::Production_InvalidState, kModule,
-                           "not a source: " + std::string(sourceId));
-    // Mark the primary source failed.
-    (void)graph_.SetSourceState(sourceId, SourceState::Failed);
-    (void)graph_.SetEnabled(sourceId, false);
+    PersistGate _save(*this);
+    std::string fallbackId;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto node = graph_.GetNode(sourceId);
+        if (!node.ok()) return node.error();
+        if (node.value().kind != NodeKind::Source)
+            return Error::Make(Err::Production_InvalidState, kModule,
+                               "not a source: " + std::string(sourceId));
+        // Mark the primary source failed.
+        (void)graph_.SetSourceState(sourceId, SourceState::Failed);
+        (void)graph_.SetEnabled(sourceId, false);
+        if (!node.value().fallbackId.empty()) {
+            fallbackId = node.value().fallbackId;
+            (void)graph_.SetSourceState(fallbackId, SourceState::Stable);
+            (void)graph_.SetEnabled(fallbackId, true);
+        }
+        Record("fallback", std::string(sourceId) + " " + std::string(reason));
+    }
+    // Both dispatches now run with mutex_ released.
     (void)EventBus::Instance().Publish(
         events::SourceFailed{std::string(sourceId), std::string(reason)});
-    if (!node.value().fallbackId.empty()) {
-        const auto& fb = node.value().fallbackId;
-        (void)graph_.SetSourceState(fb, SourceState::Stable);
-        (void)graph_.SetEnabled(fb, true);
+    if (!fallbackId.empty())
         (void)EventBus::Instance().Publish(
-            events::SourceFallback{std::string(sourceId), fb});
-    }
-    Record("fallback", std::string(sourceId) + " " + std::string(reason));
+            events::SourceFallback{std::string(sourceId), fallbackId});
     return Ok();
 }
 
 Result<void> ProductionEngine::SetSceneState(std::string_view sceneId, SceneState state) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto r = graph_.SetSceneState(sceneId, state);
-    if (r.ok()) {
-        Record("set_scene_state", std::string(sceneId) + " " + ToString(state));
+    PersistGate _save(*this);
+    Result<void> r = Ok();
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        r = graph_.SetSceneState(sceneId, state);
+        if (r.ok()) Record("set_scene_state", std::string(sceneId) + " " + ToString(state));
+    }
+    if (r.ok())
         (void)EventBus::Instance().Publish(
             events::SceneStateChanged{std::string(sceneId), ToString(state)});
-    }
     return r;
 }
 
@@ -401,19 +480,24 @@ ClockSnapshot ProductionEngine::Clock() const {
 }
 
 void ProductionEngine::TickClock(int64_t advanceMs) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    clock_.masterMs += advanceMs;
-    clock_.audioMs = clock_.masterMs + audioOffsetMs_;
-    clock_.videoMs = clock_.masterMs + videoOffsetMs_;
-    clock_.networkMs = clock_.masterMs + networkOffsetMs_;
-    // Fire any cues whose time has come (frame-accurate, docs/specs/27 §Cues).
+    // Collected under the lock, EXECUTED after it: SendControl dispatches on the
+    // bus, and a cue subscriber must not run with mutex_ held (nor must the
+    // other threads waiting on this engine's lock wait for it).
     std::vector<std::string> due;
-    for (auto it = scheduledCues_.begin(); it != scheduledCues_.end();) {
-        if (std::stoll(it->first) <= clock_.masterMs) {
-            due = it->second;
-            it = scheduledCues_.erase(it);
-        } else {
-            ++it;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        clock_.masterMs += advanceMs;
+        clock_.audioMs = clock_.masterMs + audioOffsetMs_;
+        clock_.videoMs = clock_.masterMs + videoOffsetMs_;
+        clock_.networkMs = clock_.masterMs + networkOffsetMs_;
+        // Fire any cues whose time has come (frame-accurate, docs/specs/27 §Cues).
+        for (auto it = scheduledCues_.begin(); it != scheduledCues_.end();) {
+            if (std::stoll(it->first) <= clock_.masterMs) {
+                due.insert(due.end(), it->second.begin(), it->second.end());
+                it = scheduledCues_.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
     for (const auto& step : due) {
@@ -437,9 +521,11 @@ Result<void> ProductionEngine::SetClockOffset(std::string_view domain, int64_t o
 }
 
 Result<void> ProductionEngine::SetClockSync(bool synced) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (clock_.synced == synced) return Ok();
-    clock_.synced = synced;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (clock_.synced == synced) return Ok();
+        clock_.synced = synced;
+    }
     (void)EventBus::Instance().Publish(events::ClockSyncChanged{synced});
     return Ok();
 }
@@ -447,9 +533,11 @@ Result<void> ProductionEngine::SetClockSync(bool synced) {
 // --- Control signals ---
 
 Result<void> ProductionEngine::SendControl(std::string_view kind, std::string_view payload) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    controlCount_.fetch_add(1);
-    Record("send_control", std::string(kind) + " " + std::string(payload));
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        controlCount_.fetch_add(1);
+        Record("send_control", std::string(kind) + " " + std::string(payload));
+    }
     (void)EventBus::Instance().Publish(
         events::ControlSignalReceived{std::string(kind), std::string(payload)});
     return Ok();
@@ -491,50 +579,54 @@ void ProductionEngine::Record(const std::string& action, const std::string& payl
 
 // --- Planning / validation / health ---
 
-ProductionPlan ProductionEngine::PlanProduction(const ResourceCost& budget) const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    ProductionPlan plan;
-    plan.budget = budget;
-    std::vector<std::pair<std::string, ResourceCost>> perNode;
-    ResourceCost total;
-    for (const auto& id : graph_.TopologicalOrder()) {
-        auto n = graph_.GetNode(id);
-        if (!n.ok() || !n.value().enabled) continue;
-        total += n.value().cost;
-        perNode.emplace_back(id, n.value().cost);
+ProductionPlan ProductionEngine::PlanProduction(const ResourceCost& budget) const {    ProductionPlan plan;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        plan.budget = budget;
+        std::vector<std::pair<std::string, ResourceCost>> perNode;
+        ResourceCost total;
+        for (const auto& id : graph_.TopologicalOrder()) {
+            auto n = graph_.GetNode(id);
+            if (!n.ok() || !n.value().enabled) continue;
+            total += n.value().cost;
+            perNode.emplace_back(id, n.value().cost);
+        }
+        plan.total = total;
+        plan.perNode = std::move(perNode);
+        // Bottleneck = dimension furthest over (or closest to) budget.
+        auto ratio = [&](int used, int budgeted) {
+            return budgeted > 0 ? static_cast<double>(used) / static_cast<double>(budgeted) : 0.0;
+        };
+        double rg = ratio(total.gpu, budget.gpu);
+        double rc = ratio(total.cpu, budget.cpu);
+        double rv = budget.vramMb > 0 ? static_cast<double>(total.vramMb) /
+                                            static_cast<double>(budget.vramMb) : 0.0;
+        double rr = budget.ramMb > 0 ? static_cast<double>(total.ramMb) /
+                                            static_cast<double>(budget.ramMb) : 0.0;
+        double worst = std::max({rg, rc, rv, rr});
+        if (rg == worst) plan.bottleneck = "gpu";
+        else if (rc == worst) plan.bottleneck = "cpu";
+        else if (rv == worst) plan.bottleneck = "vram";
+        else plan.bottleneck = "ram";
+        plan.feasible = worst <= 1.0;
+        // Encoder selection: GPU-heavy work prefers hardware encode.
+        plan.encoder = (total.gpu > budget.gpu / 2) ? "hardware" : "software";
     }
-    plan.total = total;
-    plan.perNode = std::move(perNode);
-    // Bottleneck = dimension furthest over (or closest to) budget.
-    auto ratio = [&](int used, int budgeted) {
-        return budgeted > 0 ? static_cast<double>(used) / static_cast<double>(budgeted) : 0.0;
-    };
-    double rg = ratio(total.gpu, budget.gpu);
-    double rc = ratio(total.cpu, budget.cpu);
-    double rv = budget.vramMb > 0 ? static_cast<double>(total.vramMb) /
-                                        static_cast<double>(budget.vramMb) : 0.0;
-    double rr = budget.ramMb > 0 ? static_cast<double>(total.ramMb) /
-                                        static_cast<double>(budget.ramMb) : 0.0;
-    double worst = std::max({rg, rc, rv, rr});
-    if (rg == worst) plan.bottleneck = "gpu";
-    else if (rc == worst) plan.bottleneck = "cpu";
-    else if (rv == worst) plan.bottleneck = "vram";
-    else plan.bottleneck = "ram";
-    plan.feasible = worst <= 1.0;
-    // Encoder selection: GPU-heavy work prefers hardware encode.
-    plan.encoder = (total.gpu > budget.gpu / 2) ? "hardware" : "software";
     (void)EventBus::Instance().Publish(
         events::ProductionPlanned{plan.feasible, plan.bottleneck});
     return plan;
 }
 
 std::vector<ValidationIssue> ProductionEngine::ValidateProduction() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto issues = graph_.Validate();
+    std::vector<ValidationIssue> issues;
     size_t errs = 0, warns = 0;
-    for (const auto& i : issues) {
-        if (i.severity == ValidationIssue::Severity::Error) ++errs;
-        else ++warns;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        issues = graph_.Validate();
+        for (const auto& i : issues) {
+            if (i.severity == ValidationIssue::Severity::Error) ++errs;
+            else ++warns;
+        }
     }
     (void)EventBus::Instance().Publish(events::ProductionValidated{errs, warns});
     return issues;
@@ -606,62 +698,84 @@ Result<void> ProductionEngine::ScheduleCue(int64_t atMs, std::string_view action
 // --- Snapshots + emergency ---
 
 Result<std::string> ProductionEngine::SaveProductionSnapshot(std::string_view name) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto r = graph_.SaveSnapshot(name);
-    if (r.ok()) {
+    PersistGate _save(*this);
+    std::string saved;
+    size_t busCount = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto r = graph_.SaveSnapshot(name);
+        if (!r.ok()) return r.error();
+        saved = r.value();
         Record("save_snapshot", std::string(name));
         auto snap = graph_.GetSnapshot(name);
-        (void)EventBus::Instance().Publish(events::ProductionSnapshotSaved{
-            std::string(name), snap.ok() ? snap.value().buses.size() : 0});
+        busCount = snap.ok() ? snap.value().buses.size() : 0;
     }
-    return r;
+    (void)EventBus::Instance().Publish(
+        events::ProductionSnapshotSaved{std::string(name), busCount});
+    return saved;
 }
 
 Result<void> ProductionEngine::RestoreProductionSnapshot(std::string_view name) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto r = graph_.RestoreSnapshot(name);
-    if (r.ok()) {
+    PersistGate _save(*this);
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto r = graph_.RestoreSnapshot(name);
+        if (!r.ok()) return r.error();
         Record("restore_snapshot", std::string(name));
-        (void)EventBus::Instance().Publish(
-            events::ProductionRestored{std::string(name)});
     }
-    return r;
+    (void)EventBus::Instance().Publish(
+        events::ProductionRestored{std::string(name)});
+    return Ok();
 }
 
 Result<void> ProductionEngine::EmergencyMode(std::string_view reason) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    // One-button fallback: emergency scene state, mute non-critical sources,
-    // keep outputs (stream stays up) — user brief §50.
-    for (const auto& id : graph_.SceneIds()) {
-        auto n = graph_.GetNode(id);
-        if (n.ok() && n.value().sceneState == SceneState::Program) {
-            (void)graph_.SetSceneState(id, SceneState::Emergency);
-            (void)EventBus::Instance().Publish(
-                events::SceneStateChanged{id, ToString(SceneState::Emergency)});
+    PersistGate _save(*this);
+    std::vector<std::string> flipped;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        // One-button fallback: emergency scene state, mute non-critical sources,
+        // keep outputs (stream stays up) — user brief §50.
+        for (const auto& id : graph_.SceneIds()) {
+            auto n = graph_.GetNode(id);
+            if (n.ok() && n.value().sceneState == SceneState::Program) {
+                (void)graph_.SetSceneState(id, SceneState::Emergency);
+                flipped.push_back(id);
+            }
         }
+        for (const auto& id : graph_.SourceIds()) {
+            auto n = graph_.GetNode(id);
+            if (!n.ok()) continue;
+            // Keep critical sources; mute the rest.
+            auto v = n.value().volume;
+            if (n.value().cost.gpu < 40) v.mute = true;
+            (void)graph_.SetVolume(id, v);
+        }
+        Record("emergency", std::string(reason));
     }
-    for (const auto& id : graph_.SourceIds()) {
-        auto n = graph_.GetNode(id);
-        if (!n.ok()) continue;
-        // Keep critical sources; mute the rest.
-        auto v = n.value().volume;
-        if (n.value().cost.gpu < 40) v.mute = true;
-        (void)graph_.SetVolume(id, v);
-    }
-    Record("emergency", std::string(reason));
+    // Every dispatch below runs with mutex_ released.
+    for (const auto& id : flipped)
+        (void)EventBus::Instance().Publish(
+            events::SceneStateChanged{id, ToString(SceneState::Emergency)});
     (void)EventBus::Instance().Publish(events::ProductionEmergency{std::string(reason)});
     return Ok();
 }
 
 // --- Atomic live changes ---
 
-Result<void> ProductionEngine::BeginEdit() { return graph_.BeginEdit(); }
-Result<void> ProductionEngine::CommitEdit() { return graph_.CommitEdit(); }
+Result<void> ProductionEngine::BeginEdit() {
+    PersistGate _save(*this);
+    return graph_.BeginEdit();
+}
+Result<void> ProductionEngine::CommitEdit() {
+    PersistGate _save(*this);
+    return graph_.CommitEdit();
+}
 void ProductionEngine::RollbackEdit() { graph_.RollbackEdit(); }
 
 // --- AI-ready validated commands ---
 
 Result<void> ProductionEngine::ApplyCommand(std::string_view command) {
+    PersistGate _save(*this);
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto parts = Split(command);
     if (parts.empty()) return Error::Make(Err::Production_InvalidState, kModule,

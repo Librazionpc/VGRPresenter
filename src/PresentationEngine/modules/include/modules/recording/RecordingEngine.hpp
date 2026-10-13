@@ -158,8 +158,9 @@ private:
 
     void Journal(JournalEntry::Kind kind, std::string_view recordingId,
                  std::string_view detail = "");
-    Result<std::string> OpenSegment(std::string_view recordingId);
-    void CloseSegment(Session& s, bool finalized);
+    // Closes the current segment container and opens the next one, with NO
+    // engine lock held across the provider calls (see the .cpp).
+    void RotateSegment(const std::string& recordingId);
     void RunDiskMonitor();
     int64_t FreePercent() const;
     int64_t EstimatedBytesPerHour(const RecordingProfile& p) const;

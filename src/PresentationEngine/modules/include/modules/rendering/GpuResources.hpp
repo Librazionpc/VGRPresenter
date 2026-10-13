@@ -25,6 +25,13 @@ public:
 
     // Texture registry (dedup by name; reuse when unchanged).
     Result<TextureId> AcquireTexture(std::string_view name, const RgbaImage& image);
+    // LIVE-PIXEL VARIANT: `rev` is the source's monotonic frame version. The
+    // texture is re-uploaded (in place, same TextureId) only when `rev` moved
+    // past the version last bound to `name` — AcquireTexture above is
+    // create-once, so a VideoObject pushing a new frame every tick kept
+    // blitting the first frame's texture forever.
+    Result<TextureId> UpdateTexture(std::string_view name, const RgbaImage& image,
+                                    uint64_t rev);
     Result<void> ReleaseTexture(std::string_view name);
     Result<TextureId> GetTexture(std::string_view name) const;
     size_t TextureCount() const;
@@ -48,6 +55,7 @@ private:
         std::string name;
         int refs = 1;
         uint64_t bytes = 0;
+        uint64_t rev = 0;   // source frame version currently bound (UpdateTexture)
     };
     mutable std::mutex mutex_;
     IGraphicsBackend* backend_ = nullptr;

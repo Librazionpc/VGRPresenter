@@ -1,4 +1,6 @@
 import QtQuick
+import QtQuick.Controls
+import VGRPresenterUI
 
 // "Add Clock" configurator — pops up when "Clock" is picked from the Edit
 // screen's "+" Add Content menu, matching
@@ -42,6 +44,15 @@ Item {
         running: root.open
     }
 
+    // The dialog belongs to the WINDOW, not to the pane that declares it. A modal
+    // declared inside a settings page (every Add / Edit dialog in Settings) must dim
+    // the whole app, not just that page's content column: parented in place its scrim
+    // covered one side of the settings card, so the dialog read as half-modal (user
+    // report: "the black box doesn't cover the whole settings modal, only one side").
+    // Reparented to the window overlay, this component has no scaled ancestor to
+    // inherit a scale from, so its CARD applies the app scale itself (see AppScale.qml).
+    parent: Overlay.overlay
+
     ModalScrim {
         anchors.fill: parent
         onDismissed: root.cancelled()
@@ -49,12 +60,16 @@ Item {
 
     Rectangle {
         id: card
+        // The app's one scale, on the card (see AppScale.qml) — never on the root,
+        // whose scrim IS the dialog's black box and has to stay window-sized.
+        scale: AppScale.cardScale(card)
+        transformOrigin: Item.Center
         anchors.centerIn: parent
         width: 440
         height: content.height + 40
         radius: 14
-        color: "#13151c"
-        border.color: "#232530"
+        color: Theme.surface
+        border.color: Theme.border
         border.width: 1
 
         MouseArea { anchors.fill: parent; onClicked: {} }
@@ -78,8 +93,8 @@ Item {
                         anchors.left: parent.left
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Add Clock")
-                        color: "#f1f3f8"
-                        font.family: "Segoe UI"
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
                         font.pixelSize: 18
                         font.weight: Font.DemiBold
                     }
@@ -91,13 +106,13 @@ Item {
                         width: 28
                         height: 28
                         radius: 7
-                        color: closeArea.containsMouse ? "#20222c" : "transparent"
+                        color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
                         Behavior on color { ColorAnimation { duration: 100 } }
 
                         Text {
                             anchors.centerIn: parent
                             text: "✕"
-                            color: "#8a94a6"
+                            color: Theme.textSecondary
                             font.pixelSize: 14
                         }
 
@@ -114,13 +129,13 @@ Item {
                 Text {
                     width: parent.width
                     text: qsTr("Configure a live clock display for this slide")
-                    color: "#8a94a6"
-                    font.family: "Segoe UI"
+                    color: Theme.textSecondary
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                 }
             }
 
-            Rectangle { width: parent.width; height: 1; color: "#232530" }
+            Rectangle { width: parent.width; height: 1; color: Theme.border }
 
             // Live preview — ticks for real via previewClock above, so what
             // you see here is exactly what the canvas item will show.
@@ -129,7 +144,7 @@ Item {
                 height: 90
                 radius: 10
                 color: root.background === "none" ? "#15161d" : "#0d0f16"
-                border.color: "#262a38"
+                border.color: Theme.borderSubtle
                 border.width: 1
                 clip: true
 
@@ -151,7 +166,7 @@ Item {
                 Text {
                     anchors.centerIn: parent
                     color: root.tint
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 32
                     font.weight: Font.DemiBold
                     text: previewClock.formatClock(previewClock.now, root.format === "12", root.showSeconds)
@@ -164,8 +179,8 @@ Item {
 
                 Text {
                     text: qsTr("Format")
-                    color: "#c8cdd9"
-                    font.family: "Segoe UI"
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                     font.weight: Font.Medium
                 }
@@ -187,16 +202,16 @@ Item {
                             width: (parent.width - 8) / 2
                             height: 32
                             radius: 8
-                            color: fmtBtn.active ? Theme.accent : (fmtArea.containsMouse ? "#20222c" : "#1a1c26")
-                            border.color: fmtBtn.active ? Theme.accent : "#2a2f3a"
+                            color: fmtBtn.active ? Theme.accent : (fmtArea.containsMouse ? Theme.hoverBg : Theme.inset)
+                            border.color: fmtBtn.active ? Theme.accent : Theme.borderSubtle
                             border.width: 1
                             Behavior on color { ColorAnimation { duration: 100 } }
 
                             Text {
                                 anchors.centerIn: parent
                                 text: fmtBtn.modelData.label
-                                color: fmtBtn.active ? "#ffffff" : "#c8cdd9"
-                                font.family: "Segoe UI"
+                                color: fmtBtn.active ? "#ffffff" : Theme.textPrimary
+                                font.family: Theme.fontFamily
                                 font.pixelSize: 14
                                 font.weight: fmtBtn.active ? Font.DemiBold : Font.Medium
                             }
@@ -219,8 +234,8 @@ Item {
 
                 Text {
                     text: qsTr("Style")
-                    color: "#c8cdd9"
-                    font.family: "Segoe UI"
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                     font.weight: Font.Medium
                 }
@@ -242,16 +257,16 @@ Item {
                             width: (parent.width - 8) / 2
                             height: 32
                             radius: 8
-                            color: styleBtn.active ? Theme.accent : (styleArea.containsMouse ? "#20222c" : "#1a1c26")
-                            border.color: styleBtn.active ? Theme.accent : "#2a2f3a"
+                            color: styleBtn.active ? Theme.accent : (styleArea.containsMouse ? Theme.hoverBg : Theme.inset)
+                            border.color: styleBtn.active ? Theme.accent : Theme.borderSubtle
                             border.width: 1
                             Behavior on color { ColorAnimation { duration: 100 } }
 
                             Text {
                                 anchors.centerIn: parent
                                 text: styleBtn.modelData.label
-                                color: styleBtn.active ? "#ffffff" : "#c8cdd9"
-                                font.family: "Segoe UI"
+                                color: styleBtn.active ? "#ffffff" : Theme.textPrimary
+                                font.family: Theme.fontFamily
                                 font.pixelSize: 14
                                 font.weight: styleBtn.active ? Font.DemiBold : Font.Medium
                             }
@@ -274,8 +289,8 @@ Item {
 
                 Text {
                     text: qsTr("Colour")
-                    color: "#c8cdd9"
-                    font.family: "Segoe UI"
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                     font.weight: Font.Medium
                 }
@@ -295,7 +310,7 @@ Item {
                             radius: 14
                             color: modelData
                             border.width: tintDot.active ? 2 : 1
-                            border.color: tintDot.active ? Theme.accent : "#2a3140"
+                            border.color: tintDot.active ? Theme.accent : Theme.borderSubtle
 
                             MouseArea {
                                 anchors.fill: parent
@@ -313,8 +328,8 @@ Item {
 
                 Text {
                     text: qsTr("Background")
-                    color: "#c8cdd9"
-                    font.family: "Segoe UI"
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                     font.weight: Font.Medium
                 }
@@ -336,16 +351,16 @@ Item {
                             width: (parent.width - 8) / 2
                             height: 32
                             radius: 8
-                            color: bgBtn.active ? Theme.accent : (bgArea.containsMouse ? "#20222c" : "#1a1c26")
-                            border.color: bgBtn.active ? Theme.accent : "#2a2f3a"
+                            color: bgBtn.active ? Theme.accent : (bgArea.containsMouse ? Theme.hoverBg : Theme.inset)
+                            border.color: bgBtn.active ? Theme.accent : Theme.borderSubtle
                             border.width: 1
                             Behavior on color { ColorAnimation { duration: 100 } }
 
                             Text {
                                 anchors.centerIn: parent
                                 text: bgBtn.modelData.label
-                                color: bgBtn.active ? "#ffffff" : "#c8cdd9"
-                                font.family: "Segoe UI"
+                                color: bgBtn.active ? "#ffffff" : Theme.textPrimary
+                                font.family: Theme.fontFamily
                                 font.pixelSize: 14
                                 font.weight: bgBtn.active ? Font.DemiBold : Font.Medium
                             }
@@ -377,8 +392,8 @@ Item {
                         anchors.left: parent.left
                         anchors.verticalCenter: parent.verticalCenter
                         text: modelData.label
-                        color: "#c8cdd9"
-                        font.family: "Segoe UI"
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                     }
 
@@ -390,7 +405,7 @@ Item {
                         width: 44
                         height: 24
                         radius: 12
-                        color: toggleTrack.on ? Theme.accent : "#2a2f3a"
+                        color: toggleTrack.on ? Theme.accent : Theme.borderSubtle
                         Behavior on color { ColorAnimation { duration: 100 } }
 
                         Rectangle {
@@ -417,7 +432,7 @@ Item {
                 }
             }
 
-            Rectangle { width: parent.width; height: 1; color: "#232530" }
+            Rectangle { width: parent.width; height: 1; color: Theme.border }
 
             Row {
                 anchors.right: parent.right
@@ -427,16 +442,16 @@ Item {
                     width: 90
                     height: 32
                     radius: 9
-                    color: cancelArea.containsMouse ? "#20222c" : "#1a1c26"
-                    border.color: "#2a2f3a"
+                    color: cancelArea.containsMouse ? Theme.hoverBg : Theme.inset
+                    border.color: Theme.borderSubtle
                     border.width: 1
                     Behavior on color { ColorAnimation { duration: 100 } }
 
                     Text {
                         anchors.centerIn: parent
                         text: qsTr("Cancel")
-                        color: "#c8cdd9"
-                        font.family: "Segoe UI"
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: Font.Medium
                     }
@@ -461,7 +476,7 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Add Clock")
                         color: "#ffffff"
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: Font.DemiBold
                     }

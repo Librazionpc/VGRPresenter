@@ -51,6 +51,12 @@ Item {
 
         Rectangle {
             id: box
+            // Test hooks, the same convention ModalCard uses for its card: a field
+            // that carries an objectName exposes its clickable box (<name>_box) and
+            // its popup (<name>_menu), so the modal-fit sweep can click the field
+            // and then measure the menu that opened — the "clicked the Source field
+            // and nothing appeared" regression.
+            objectName: root.objectName === "" ? "" : root.objectName + "_box"
             width: parent.width
             height: 34
             radius: Theme.radiusMd
@@ -98,6 +104,8 @@ Item {
 
     DropdownPanel {
         id: menu
+        // Same hook as the box above (see its comment).
+        objectName: root.objectName === "" ? "" : root.objectName + "_menu"
         visible: false
         model: {
             const list = []
@@ -112,6 +120,10 @@ Item {
             return list
         }
         maxHeight: root.menuMaxHeight
+        // The list is the box's own width — the combobox convention the user asked
+        // for ("the dropdown width is too much": a fixed 480px slab opened under
+        // every field, however narrow).
+        matchAnchorWidth: true
         onItemActivated: (label) => {
             // Resolve the option's value from its label (labels are unique
             // per select — they're what's displayed).

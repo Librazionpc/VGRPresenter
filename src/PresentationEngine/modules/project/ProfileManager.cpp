@@ -119,7 +119,7 @@ Result<void> ProfileManager::Save() {
         o["settings"] = p.settings;
         arr.push_back(json::Value(std::move(o)));
     }
-    return DatabaseManager::Instance().Put("profiles", "items", json::Value(std::move(arr)));
+    return DatabaseManager::Instance().Put("profiles", "items", json::Value(std::move(arr)));  // lock-ok: in-memory map write
 }
 
 Result<void> ProfileManager::Load() {

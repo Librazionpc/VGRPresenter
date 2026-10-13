@@ -126,7 +126,7 @@ Result<void> TemplateManager::Save() {
         o["data"] = t.data;
         arr.push_back(json::Value(std::move(o)));
     }
-    return DatabaseManager::Instance().Put("templates", "items", json::Value(std::move(arr)));
+    return DatabaseManager::Instance().Put("templates", "items", json::Value(std::move(arr)));  // lock-ok: in-memory map write
 }
 
 Result<void> TemplateManager::Load() {

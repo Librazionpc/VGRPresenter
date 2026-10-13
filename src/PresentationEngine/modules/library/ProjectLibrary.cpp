@@ -1,6 +1,7 @@
 #include "modules/library/ProjectLibrary.hpp"
 
 #include "core/config/Json.hpp"
+#include "core/recovery/DocumentRecovery.hpp"
 #include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
@@ -134,16 +135,44 @@ int64_t ProjectLibrary::Now() const {
 void ProjectLibrary::Touch(Project& p) { p.modified = Now(); }
 
 Result<void> ProjectLibrary::Load() {
-    auto& fs = platform::PlatformAccessor::Get().Filesystem();
+    // Read + parse + set-aside with NO lock held (PAL I/O never runs under a
+    // module lock); the locked section below only consumes the document.
+    J document;
+    bool haveDocument = false;
+    {
+        auto& fs = platform::PlatformAccessor::Get().Filesystem();
+        if (fs.Exists(storageFile_)) {
+            auto text = fs.ReadText(storageFile_);
+            if (!text.ok()) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                projects_.clear();
+                folders_.clear();
+                return text.error();
+            }
+            auto parsed = json::Parse(text.value());
+            // A parse failure AND a document with no 'projects' section are the
+            // same loss: nothing here is loadable. Both are set aside as
+            // evidence and the library comes up empty (rebuilt on the next
+            // save), instead of failing every screen that lists projects — or
+            // silently overwriting the bytes with a save nobody was told about.
+            const std::string problem =
+                parsed.ok()
+                    ? recovery::DocumentShapeProblem(parsed.value(), "projects", J::Type::Array)
+                    : parsed.error().message;
+            if (!problem.empty()) {
+                (void)recovery::SetAsideDamagedDocument(storageFile_, kModule, problem);
+            } else {
+                document = std::move(parsed.value());
+                haveDocument = true;
+            }
+        }
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
     projects_.clear();
     folders_.clear();
-    if (!fs.Exists(storageFile_)) return {};
-    auto text = fs.ReadText(storageFile_);
-    if (!text.ok()) return text.error();
-    auto parsed = json::Parse(text.value());
-    if (!parsed.ok()) return Error::Make(Err::ParseError, kModule, std::format("the projects file is damaged: {}", parsed.error().message));
-    const J& root = parsed.value();
+    if (!haveDocument) return {};
+    const J& root = document;
 
     if (const J* list = root.Find("folders"); list && list->asArray())
         for (const J& f : *list->asArray()) {
@@ -200,11 +229,11 @@ Result<void> ProjectLibrary::SaveLocked() const {
     root["folders"] = J(std::move(folders));
     root["projects"] = J(std::move(projects));
 
+    // ATOMIC: the project library index is the map to every project the user has;
+    // a half-written one orphans all of them. WriteAtomic creates the parent dir
+    // and swaps the new document in.
     auto& fs = platform::PlatformAccessor::Get().Filesystem();
-    const size_t cut = storageFile_.find_last_of("/\\");
-    if (cut != std::string::npos && cut > 0)
-        if (auto made = fs.CreateDirectories(std::string_view(storageFile_).substr(0, cut)); !made.ok()) return made.error();
-    return fs.Write(storageFile_, J(std::move(root)).ToString());
+    return fs.WriteAtomic(storageFile_, J(std::move(root)).ToString());
 }
 
 Project* ProjectLibrary::FindProject(std::string_view id) {

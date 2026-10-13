@@ -139,12 +139,20 @@ RecordingEngine& RecordingEngine::Instance() {
 // --- Lifecycle ---
 
 Result<void> RecordingEngine::Initialize() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (initialized_.load()) return Ok();
-    if (defaultDir_.empty()) defaultDir_ = "recordings";
+    std::string dir;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (initialized_.load()) return Ok();
+        if (defaultDir_.empty()) defaultDir_ = "recordings";
+        dir = defaultDir_;
+    }
     // Ensure the recording directory exists (docs/specs/28 §18); failures are
-    // non-fatal — individual recordings report their own storage errors.
-    { std::error_code ec; (void)std::filesystem::create_directories(defaultDir_, ec); }
+    // non-fatal — individual recordings report their own storage errors. This
+    // is a PAL call, so it runs with mutex_ released.
+    { std::error_code ec; (void)std::filesystem::create_directories(dir, ec); }
+
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (initialized_.load()) return Ok();   // lost the race; other caller finished
 
     // Default providers: containers + software encoders (docs/specs/28 §11-§13).
     for (auto c : {ContainerKind::MKV, ContainerKind::MP4, ContainerKind::MOV,
@@ -195,22 +203,29 @@ Result<void> RecordingEngine::Start() {
 }
 
 Result<void> RecordingEngine::Stop() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!running_.load()) return Ok();
-    // Stop all active recordings (docs/specs/28 §Recording Lifecycle).
     std::vector<std::string> active;
-    for (const auto& [id, s] : sessions_)
-        if (s.state == RecordingState::Recording || s.state == RecordingState::Paused)
-            active.push_back(id);
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (!running_.load()) return Ok();
+        // Stop all active recordings (docs/specs/28 §Recording Lifecycle).
+        for (const auto& [id, s] : sessions_)
+            if (s.state == RecordingState::Recording || s.state == RecordingState::Paused)
+                active.push_back(id);
+        running_.store(false);
+    }
+    // Each stop finalizes a provider container — call it with NO lock held.
     for (const auto& id : active) (void)StopRecording(id, "engine stop");
-    running_.store(false);
     return Ok();
 }
 
 Result<void> RecordingEngine::Shutdown() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!initialized_.load()) return Ok();
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (!initialized_.load()) return Ok();
+    }
+    // Stop() finalizes containers; give it a lock-free window.
     (void)Stop();
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     UnwireEvents();
     sessions_.clear();
     replays_.clear();
@@ -237,9 +252,12 @@ Result<void> RecordingEngine::Reload() {
 }
 
 Result<void> RecordingEngine::Reset() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!initialized_.load()) return Ok();
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (!initialized_.load()) return Ok();
+    }
     (void)Stop();
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     sessions_.clear();
     replays_.clear();
     connectedDevices_.clear();
@@ -438,65 +456,132 @@ Result<void> RecordingEngine::RegisterAudioEncoder(std::string_view codec, Audio
 Result<std::string> RecordingEngine::StartRecording(std::string_view profileId,
                                                     std::string_view nodeId,
                                                     TapPoint tapPoint) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!initialized_.load())
-        return Error::Make(Err::Recording_InvalidState, kModule, "Initialize() first");
-    if (!running_.load()) return Error::Make(Err::Recording_InvalidState, kModule,
-                                             "Start() first");
-    auto pit = profiles_.find(profileId);
-    if (pit == profiles_.end())
-        return Error::Make(Err::Recording_ProfileNotFound, kModule, "profile not found");
-
-    // Recording taps the production graph — the node must exist there.
-    // (docs/specs/28 §Architecture: recording consumes the Phase 15 graph.)
-    auto& graph = production::ProductionEngine::Instance().Graph();
-    if (!graph.HasNode(nodeId))
-        return Error::Make(Err::Recording_NodeNotFound, kModule,
-                           "production node not found: " + std::string(nodeId));
-
-    // One active recording per node.
-    for (const auto& [id, s] : sessions_)
-        if (s.nodeId == nodeId && (s.state == RecordingState::Recording ||
-                                   s.state == RecordingState::Paused ||
-                                   s.state == RecordingState::Preparing))
-            return Error::Make(Err::Recording_AlreadyActive, kModule,
-                               "node already being recorded");
-
-    // Encoder availability before we commit to a session.
-    auto enc = SelectEncoder(pit->second);
-    if (!enc.ok()) return enc.error();
-
-    // Disk check (docs/specs/28 §17-§19).
+    // Disk check first (docs/specs/28 §17-§19): FreePercent() stats the
+    // filesystem, a PAL call that must run with no engine lock held.
     if (FreePercent() < 5)
         return Error::Make(Err::Recording_DiskFull, kModule,
                            "free disk space below emergency threshold");
 
-    const std::string rid = std::format("rec_{}", recordingCount_.fetch_add(1));
-    Session s;
-    s.profile = pit->second;
-    s.nodeId = std::string(nodeId);
-    s.tapPoint = tapPoint;
-    s.state = RecordingState::Preparing;
-    s.startedAtMs = clockMs_.load();
-    s.encoder = EncoderKindName(enc.value());
-    sessions_.emplace(rid, std::move(s));
-    auto& session = sessions_.at(rid);
+    RecordingProfile profile;
+    ContainerFactory factory;
+    std::string rid;
+    std::string encoderName;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (!initialized_.load())
+            return Error::Make(Err::Recording_InvalidState, kModule, "Initialize() first");
+        if (!running_.load()) return Error::Make(Err::Recording_InvalidState, kModule,
+                                                 "Start() first");
+        auto pit = profiles_.find(profileId);
+        if (pit == profiles_.end())
+            return Error::Make(Err::Recording_ProfileNotFound, kModule, "profile not found");
 
-    Journal(JournalEntry::Kind::Started, rid, std::string(nodeId));
-    Journal(JournalEntry::Kind::SourceAttached, rid, std::string(nodeId));
-    Journal(JournalEntry::Kind::EncoderInitialized, rid, session.encoder);
+        // Recording taps the production graph — the node must exist there.
+        // (docs/specs/28 §Architecture: recording consumes the Phase 15 graph.)
+        auto& graph = production::ProductionEngine::Instance().Graph();   // lock-ok: Graph() takes no lock; HasNode is an in-memory read
+        if (!graph.HasNode(nodeId))
+            return Error::Make(Err::Recording_NodeNotFound, kModule,
+                               "production node not found: " + std::string(nodeId));
 
-    auto seg = OpenSegment(rid);
-    if (!seg.ok()) {
-        errorCount_.fetch_add(1);
-        session.state = RecordingState::Failed;
-        Journal(JournalEntry::Kind::Failed, rid, seg.error().message);
-        (void)EventBus::Instance().Publish(
-            events::RecordingFailed{rid, seg.error().message});
-        return seg.error();
+        // One active recording per node.
+        for (const auto& [id, s] : sessions_)
+            if (s.nodeId == nodeId && (s.state == RecordingState::Recording ||
+                                       s.state == RecordingState::Paused ||
+                                       s.state == RecordingState::Preparing))
+                return Error::Make(Err::Recording_AlreadyActive, kModule,
+                                   "node already being recorded");
+
+        // Encoder availability before we commit to a session.
+        auto enc = SelectEncoder(pit->second);
+        if (!enc.ok()) return enc.error();
+
+        auto cit = containers_.find(ContainerName(pit->second.container));
+        if (cit == containers_.end())
+            return Error::Make(Err::Recording_ContainerNotFound, kModule,
+                               "container not registered: " +
+                                   std::string(ContainerName(pit->second.container)));
+        factory = cit->second;
+        profile = pit->second;
+        encoderName = EncoderKindName(enc.value());
+
+        rid = std::format("rec_{}", recordingCount_.fetch_add(1));
+        Session s;
+        s.profile = profile;
+        s.nodeId = std::string(nodeId);
+        s.tapPoint = tapPoint;
+        s.state = RecordingState::Preparing;
+        s.startedAtMs = clockMs_.load();
+        s.encoder = encoderName;
+        sessions_.emplace(rid, std::move(s));
+        Journal(JournalEntry::Kind::Started, rid, std::string(nodeId));
+        Journal(JournalEntry::Kind::SourceAttached, rid, std::string(nodeId));
+        Journal(JournalEntry::Kind::EncoderInitialized, rid, encoderName);
     }
 
-    session.state = RecordingState::Recording;
+    // The first segment's container is created and opened with NO lock held:
+    // a real encoder's Open() can block for a long time (docs/specs/28 §20).
+    auto container = factory();
+    if (!container) {
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            if (auto it = sessions_.find(rid); it != sessions_.end()) {
+                errorCount_.fetch_add(1);
+                it->second.state = RecordingState::Failed;
+                Journal(JournalEntry::Kind::Failed, rid, "container factory produced nothing");
+            }
+        }
+        // Dispatched with mutex_ released: a subscriber is arbitrary code.
+        (void)EventBus::Instance().Publish(events::RecordingFailed{
+            rid, "container factory produced nothing"});
+        return Error::Make(Err::Recording_ContainerNotFound, kModule,
+                           "container factory produced nothing");
+    }
+
+    std::string path;
+    size_t seg = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = sessions_.find(rid);
+        if (it == sessions_.end())
+            return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
+        seg = it->second.segmentIndex + 1;
+        path = MakePath(profile, defaultDir_, seg, clockMs_.load());
+    }
+
+    auto opened = container->Open(profile, path);
+    const std::string openedPath = opened.ok() ? opened.value() : std::string();
+    bool orphaned = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = sessions_.find(rid);
+        if (it == sessions_.end()) {
+            orphaned = true;   // provider finalized outside the lock, below
+        } else if (!opened.ok()) {
+            errorCount_.fetch_add(1);
+            it->second.state = RecordingState::Failed;
+            Journal(JournalEntry::Kind::Failed, rid, opened.error().message);
+        } else {
+            Session& s = it->second;
+            s.container = container;
+            s.filePath = openedPath;
+            s.segmentIndex = seg;
+            s.state = RecordingState::Recording;
+            Journal(JournalEntry::Kind::SegmentCreated, rid, openedPath);
+            segmentCount_.fetch_add(1);
+        }
+    }
+    if (orphaned) {
+        // The session vanished while the provider was opening it: finalize the
+        // container with no engine lock held.
+        (void)container->Close(false);
+        return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
+    }
+    if (!opened.ok()) {
+        (void)EventBus::Instance().Publish(
+            events::RecordingFailed{rid, opened.error().message});
+        return opened.error();
+    }
+    (void)EventBus::Instance().Publish(events::SegmentCreated{rid, seg, openedPath});
     (void)EventBus::Instance().Publish(
         events::RecordingStarted{rid, std::string(profileId), std::string(nodeId)});
     return rid;
@@ -504,47 +589,64 @@ Result<std::string> RecordingEngine::StartRecording(std::string_view profileId,
 
 Result<void> RecordingEngine::StopRecording(std::string_view recordingId,
                                             std::string_view reason) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto it = sessions_.find(recordingId);
-    if (it == sessions_.end())
-        return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
-    auto& s = it->second;
-    if (s.state != RecordingState::Recording && s.state != RecordingState::Paused)
-        return Error::Make(Err::Recording_NotActive, kModule,
-                           "recording is not active (state: " +
-                               std::string(StateName(s.state)) + ")");
-    s.state = RecordingState::Finalizing;
-    CloseSegment(s, true);
-    s.state = RecordingState::Completed;
-    Journal(JournalEntry::Kind::Finalized, std::string(recordingId),
-            std::string(reason.empty() ? "manual" : reason));
+    std::shared_ptr<IRecordingContainer> container;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = sessions_.find(recordingId);
+        if (it == sessions_.end())
+            return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
+        Session& s = it->second;
+        if (s.state != RecordingState::Recording && s.state != RecordingState::Paused)
+            return Error::Make(Err::Recording_NotActive, kModule,
+                               "recording is not active (state: " +
+                                   std::string(StateName(s.state)) + ")");
+        s.state = RecordingState::Finalizing;
+        // Detach the container so it can be finalized with no lock held.
+        container = std::move(s.container);
+        s.container.reset();
+    }
+    // Finalize the provider container with NO lock held.
+    if (container) (void)container->Close(true);
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = sessions_.find(recordingId);
+        if (it == sessions_.end())
+            return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
+        it->second.state = RecordingState::Completed;
+        Journal(JournalEntry::Kind::Finalized, std::string(recordingId),
+                std::string(reason.empty() ? "manual" : reason));
+    }
     (void)EventBus::Instance().Publish(
         events::RecordingStopped{std::string(recordingId), std::string(reason)});
     return Ok();
 }
 
 Result<void> RecordingEngine::PauseRecording(std::string_view recordingId) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto it = sessions_.find(recordingId);
-    if (it == sessions_.end())
-        return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
-    if (it->second.state != RecordingState::Recording)
-        return Error::Make(Err::Recording_InvalidState, kModule,
-                           "only a recording session can pause");
-    it->second.state = RecordingState::Paused;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = sessions_.find(recordingId);
+        if (it == sessions_.end())
+            return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
+        if (it->second.state != RecordingState::Recording)
+            return Error::Make(Err::Recording_InvalidState, kModule,
+                               "only a recording session can pause");
+        it->second.state = RecordingState::Paused;
+    }
     (void)EventBus::Instance().Publish(events::RecordingPaused{std::string(recordingId)});
     return Ok();
 }
 
 Result<void> RecordingEngine::ResumeRecording(std::string_view recordingId) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto it = sessions_.find(recordingId);
-    if (it == sessions_.end())
-        return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
-    if (it->second.state != RecordingState::Paused)
-        return Error::Make(Err::Recording_InvalidState, kModule,
-                           "only a paused session can resume");
-    it->second.state = RecordingState::Recording;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = sessions_.find(recordingId);
+        if (it == sessions_.end())
+            return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
+        if (it->second.state != RecordingState::Paused)
+            return Error::Make(Err::Recording_InvalidState, kModule,
+                               "only a paused session can resume");
+        it->second.state = RecordingState::Recording;
+    }
     (void)EventBus::Instance().Publish(events::RecordingResumed{std::string(recordingId)});
     return Ok();
 }
@@ -564,6 +666,8 @@ Result<void> RecordingEngine::AddMarker(std::string_view recordingId,
 }
 
 Result<RecordingStateView> RecordingEngine::GetStatus(std::string_view recordingId) const {
+    // Query storage BEFORE taking the lock (FreePercent may touch the PAL).
+    const bool diskHealthy = FreePercent() >= 10;
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = sessions_.find(recordingId);
     if (it == sessions_.end())
@@ -581,7 +685,7 @@ Result<RecordingStateView> RecordingEngine::GetStatus(std::string_view recording
     v.sizeBytes = s.sizeBytes;
     v.droppedFrames = s.droppedFrames;
     v.encoderLoad = s.encoderLoad;
-    v.diskHealthy = FreePercent() >= 10;
+    v.diskHealthy = diskHealthy;
     v.audioHealthy = true;
     v.filePath = s.filePath;
     v.markers = s.markers;
@@ -598,13 +702,19 @@ std::vector<std::string> RecordingEngine::RecordingIds() const {
 }
 
 std::vector<RecordingStateView> RecordingEngine::Recordings(RecordingState state) const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // Collect ids under the lock, then build each view outside it: GetStatus
+    // queries storage, which must not run while mutex_ is held.
+    std::vector<std::string> ids;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        for (const auto& [id, s] : sessions_)
+            if (s.state == state) ids.push_back(id);
+    }
     std::vector<RecordingStateView> out;
-    for (const auto& [id, s] : sessions_)
-        if (s.state == state) {
-            auto v = GetStatus(id);
-            if (v.ok()) out.push_back(v.value());
-        }
+    for (const auto& id : ids) {
+        auto v = GetStatus(id);
+        if (v.ok()) out.push_back(v.value());
+    }
     return out;
 }
 
@@ -681,33 +791,50 @@ std::vector<JournalEntry> RecordingEngine::Journal() const {
 }
 
 Result<size_t> RecordingEngine::Recover() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     // Any session still in an active state was interrupted (docs/specs/28 §21):
-    // finalize its open segment and mark recovered.
-    size_t count = 0;
-    for (auto& [id, s] : sessions_) {
-        if (s.state == RecordingState::Preparing || s.state == RecordingState::Recording ||
-            s.state == RecordingState::Paused || s.state == RecordingState::Finalizing) {
-            s.state = RecordingState::Recovering;
-            CloseSegment(s, false);
-            s.state = RecordingState::Completed;
-            ++count;
-            Journal(JournalEntry::Kind::SegmentClosed, id, "recovered");
-            Journal(JournalEntry::Kind::Finalized, id, "recovered");
-            (void)EventBus::Instance().Publish(
-                events::RecordingRecovered{id, s.segmentIndex});
+    // finalize its open segment and mark recovered. Detach the containers under
+    // the lock, then close them (a provider call) with NO lock held.
+    std::vector<std::shared_ptr<IRecordingContainer>> closing;
+    std::vector<std::string> recoveredIds;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        for (auto& [id, s] : sessions_) {
+            if (s.state == RecordingState::Preparing || s.state == RecordingState::Recording ||
+                s.state == RecordingState::Paused || s.state == RecordingState::Finalizing) {
+                s.state = RecordingState::Recovering;
+                closing.push_back(std::move(s.container));
+                s.container.reset();
+                recoveredIds.push_back(id);
+                Journal(JournalEntry::Kind::SegmentClosed, id, "recovered");
+                Journal(JournalEntry::Kind::Finalized, id, "recovered");
+            }
         }
     }
-    return count;
+    for (auto& c : closing)
+        if (c) (void)c->Close(false);
+    std::vector<std::pair<std::string, size_t>> published;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        for (const auto& id : recoveredIds) {
+            auto it = sessions_.find(id);
+            if (it == sessions_.end()) continue;
+            it->second.state = RecordingState::Completed;
+            published.emplace_back(id, it->second.segmentIndex);
+        }
+    }
+    for (const auto& [id, seg] : published)
+        (void)EventBus::Instance().Publish(events::RecordingRecovered{id, seg});
+    return recoveredIds.size();
 }
 
 // --- Replay ---
 
 Result<std::string> RecordingEngine::CreateReplayBuffer(std::string_view nodeId,
                                                         int64_t capacityMs) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (capacityMs <= 0)
         return Error::Make(Err::InvalidArgument, kModule, "capacity must be positive");
+    // Graph inspection runs with NO lock held: Graph() is unsynchronized and a
+    // mutation would persist the whole graph to disk.
     auto& graph = production::ProductionEngine::Instance().Graph();
     if (!graph.HasNode(nodeId))
         return Error::Make(Err::Recording_NodeNotFound, kModule,
@@ -717,15 +844,17 @@ Result<std::string> RecordingEngine::CreateReplayBuffer(std::string_view nodeId,
     b.replayId = id;
     b.nodeId = std::string(nodeId);
     b.capacityMs = capacityMs;
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     replays_.emplace(id, std::move(b));
     return id;
 }
 
 Result<std::string> RecordingEngine::CreateReplay(std::string_view nodeId, ReplayMode mode,
                                                   int64_t capacityMs) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (capacityMs <= 0)
         return Error::Make(Err::InvalidArgument, kModule, "capacity must be positive");
+    // Graph access — including the mutation below, which persists the graph to
+    // disk — runs with NO lock held.
     auto& graph = production::ProductionEngine::Instance().Graph();
     if (!graph.HasNode(nodeId))
         return Error::Make(Err::Recording_NodeNotFound, kModule,
@@ -745,7 +874,10 @@ Result<std::string> RecordingEngine::CreateReplay(std::string_view nodeId, Repla
                                      production::SignalType::Video);
     if (!vs.ok()) return vs.error();
     b.virtualSourceId = vs.value();
-    replays_.emplace(id, b);
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        replays_.emplace(id, std::move(b));
+    }
     (void)EventBus::Instance().Publish(events::ReplayCreated{
         id, std::string(nodeId), ToString(mode)});
     return id;
@@ -779,11 +911,13 @@ Result<ReplayBuffer> RecordingEngine::GetReplay(std::string_view replayId) const
 // --- Capture ---
 
 Result<void> RecordingEngine::RegisterCaptureSource(CaptureSourceFactory factory) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!factory) return Error::Make(Err::InvalidArgument, kModule, "null capture factory");
+    // Construct the probe device OUTSIDE the lock: a plugin factory may open a
+    // driver or enumerate devices.
     auto dev = factory();
     if (!dev) return Error::Make(Err::InvalidArgument, kModule, "capture factory produced nothing");
     const std::string id = dev->DeviceId();
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (captureFactories_.count(id))
         return Error::Make(Err::Recording_AlreadyExists, kModule,
                            "capture device already registered");
@@ -800,46 +934,77 @@ std::vector<std::string> RecordingEngine::CaptureDeviceIds() const {
 }
 
 Result<void> RecordingEngine::ConnectCaptureDevice(std::string_view deviceId) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const std::string devKey(deviceId);
-    auto it = captureFactories_.find(devKey);
-    if (it == captureFactories_.end())
+    CaptureSourceFactory factory;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = captureFactories_.find(devKey);
+        if (it == captureFactories_.end())
+            return Error::Make(Err::Recording_CaptureNotFound, kModule,
+                               "capture device not registered");
+        if (connectedDevices_.count(devKey))
+            return Error::Make(Err::Recording_AlreadyActive, kModule,
+                               "capture device already connected");
+        factory = it->second;
+        // Reserve the slot so a concurrent connect for the same device loses.
+        connectedDevices_.insert(devKey);
+    }
+    // Everything below runs with NO lock held: the capture provider start and
+    // the production-graph mutation (which persists the graph) can both block.
+    auto dev = factory();
+    if (!dev) {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        connectedDevices_.erase(devKey);
         return Error::Make(Err::Recording_CaptureNotFound, kModule,
-                           "capture device not registered");
-    if (connectedDevices_.count(devKey))
-        return Error::Make(Err::Recording_AlreadyActive, kModule,
-                           "capture device already connected");
-    auto dev = it->second();
-    if (!dev) return Error::Make(Err::Recording_CaptureNotFound, kModule,
-                                 "capture device unavailable");
-    if (auto r = dev->Start(); !r.ok()) return r;
+                           "capture device unavailable");
+    }
+    if (auto r = dev->Start(); !r.ok()) {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        connectedDevices_.erase(devKey);
+        return r;
+    }
     // Hot-plug: the device becomes a Source node in the production graph
     // (docs/specs/28 §31-§32).
     auto& graph = production::ProductionEngine::Instance().Graph();
     auto added = graph.AddSource(deviceId, dev->DisplayName(), dev->Signal());
-    if (!added.ok()) return added.error();
-    connectedDevices_.insert(std::string(deviceId));
+    if (!added.ok()) {
+        (void)dev->Stop();
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        connectedDevices_.erase(devKey);
+        return added.error();
+    }
     (void)EventBus::Instance().Publish(events::CaptureDeviceConnected{
         std::string(deviceId), dev->Kind()});
     return Ok();
 }
 
 Result<void> RecordingEngine::DisconnectCaptureDevice(std::string_view deviceId) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto it = connectedDevices_.find(std::string(deviceId));
-    if (it == connectedDevices_.end())
-        return Error::Make(Err::Recording_CaptureNotFound, kModule,
-                           "capture device not connected");
-    auto fit = captureFactories_.find(deviceId);
-    if (fit != captureFactories_.end()) {
-        auto dev = fit->second();
+    const std::string devKey(deviceId);
+    CaptureSourceFactory factory;
+    bool hadFactory = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = connectedDevices_.find(devKey);
+        if (it == connectedDevices_.end())
+            return Error::Make(Err::Recording_CaptureNotFound, kModule,
+                               "capture device not connected");
+        auto fit = captureFactories_.find(devKey);
+        if (fit != captureFactories_.end()) {
+            factory = fit->second;
+            hadFactory = true;
+        }
+        // Commit the state change before the slow provider/graph teardown.
+        connectedDevices_.erase(it);
+    }
+    // Provider stop and the graph-node removal run with NO lock held.
+    if (hadFactory) {
+        auto dev = factory();
         if (dev) (void)dev->Stop();
     }
     auto& graph = production::ProductionEngine::Instance().Graph();
-    (void)graph.RemoveNode(deviceId);
-    connectedDevices_.erase(it);
+    (void)graph.RemoveNode(devKey);
     (void)EventBus::Instance().Publish(
-        events::CaptureDeviceDisconnected{std::string(deviceId)});
+        events::CaptureDeviceDisconnected{devKey});
     return Ok();
 }
 
@@ -854,17 +1019,24 @@ std::vector<std::string> RecordingEngine::ConnectedDevices() const {
 // --- Storage ---
 
 Result<StorageInfo> RecordingEngine::GetStorageInfo(std::string_view path) const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // Snapshot the inputs under the lock; the filesystem query below runs with
+    // no lock held (see FreePercent).
+    std::string dir;
+    int64_t simulated = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        dir = path.empty() ? defaultDir_ : std::string(path);
+        simulated = simulatedFreeBytes_;
+    }
     StorageInfo info;
-    const std::string dir = path.empty() ? defaultDir_ : std::string(path);
 
-    if (simulatedFreeBytes_ >= 0) {
+    if (simulated >= 0) {
         // Test hook: deterministic disk without touching the filesystem.
         // freeBytes carries the real byte figure (for capacity estimates);
         // freePercent is simulated directly (0-100).
-        info.freeBytes = simulatedFreeBytes_;
-        info.totalBytes = simulatedFreeBytes_ * 2;
-        info.freePercent = static_cast<int>(std::clamp<int64_t>(simulatedFreeBytes_, 0, 100));
+        info.freeBytes = simulated;
+        info.totalBytes = simulated * 2;
+        info.freePercent = static_cast<int>(std::clamp<int64_t>(simulated, 0, 100));
     } else {
         std::error_code ec;
         const auto sp = std::filesystem::space(dir, ec);
@@ -913,25 +1085,30 @@ Result<void> RecordingEngine::SetStoragePolicy(int freePercentBelow, StorageActi
 }
 
 int64_t RecordingEngine::FreePercent() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (simulatedFreeBytes_ >= 0)
-        return std::clamp<int64_t>(simulatedFreeBytes_, 0, 100);
-    const std::string dir = defaultDir_.empty() ? "." : defaultDir_;
+    // Snapshot the inputs under the lock, then query the filesystem with NO
+    // lock held: std::filesystem::space is a PAL stat that can block (network
+    // or removable media) and must not stall every other engine operation.
+    std::string dir;
+    int64_t simulated = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        simulated = simulatedFreeBytes_;
+        dir = defaultDir_.empty() ? "." : defaultDir_;
+    }
+    if (simulated >= 0) return std::clamp<int64_t>(simulated, 0, 100);
     int64_t freeBytes = 0;
     int64_t totalBytes = 1;
-    {
-        std::error_code ec;
-        const auto sp = std::filesystem::space(dir, ec);
-        if (!ec) {
-            freeBytes = static_cast<int64_t>(sp.available);
-            totalBytes = static_cast<int64_t>(sp.capacity) > 0
-                             ? static_cast<int64_t>(sp.capacity)
-                             : freeBytes + 1;
-        } else {
-            // Unknowable storage is treated as healthy — never fabricate a
-            // disk-full emergency from a failed stat (docs/specs/28 §19).
-            return 100;
-        }
+    std::error_code ec;
+    const auto sp = std::filesystem::space(dir, ec);
+    if (!ec) {
+        freeBytes = static_cast<int64_t>(sp.available);
+        totalBytes = static_cast<int64_t>(sp.capacity) > 0
+                         ? static_cast<int64_t>(sp.capacity)
+                         : freeBytes + 1;
+    } else {
+        // Unknowable storage is treated as healthy — never fabricate a
+        // disk-full emergency from a failed stat (docs/specs/28 §19).
+        return 100;
     }
     return static_cast<int>((freeBytes * 100) / totalBytes);
 }
@@ -955,44 +1132,84 @@ std::string RecordingEngine::MakePath(const RecordingProfile& p, std::string_vie
 
 // --- Segments ---
 
-Result<std::string> RecordingEngine::OpenSegment(std::string_view recordingId) {
-    auto it = sessions_.find(recordingId);
-    if (it == sessions_.end())
-        return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
-    Session& s = it->second;
-
-    auto cit = containers_.find(ContainerName(s.profile.container));
-    if (cit == containers_.end())
-        return Error::Make(Err::Recording_ContainerNotFound, kModule,
-                           "container not registered: " +
-                               std::string(ContainerName(s.profile.container)));
-    auto container = cit->second();
-    if (!container) return Error::Make(Err::Recording_ContainerNotFound, kModule,
-                                       "container factory produced nothing");
-
-    const size_t seg = s.segmentIndex + 1;
-    const std::string path = MakePath(s.profile, defaultDir_, seg, clockMs_.load());
-    auto opened = container->Open(s.profile, path);
-    if (!opened.ok()) return opened.error();
-    s.container = container;
-    s.filePath = opened.value();
-    s.segmentIndex = seg;
-    Journal(JournalEntry::Kind::SegmentCreated, std::string(recordingId),
-            opened.value());
-    (void)EventBus::Instance().Publish(
-        events::SegmentCreated{std::string(recordingId), seg, opened.value()});
-    segmentCount_.fetch_add(1);
-    return opened.value();
-}
-
-void RecordingEngine::CloseSegment(Session& s, bool finalized) {
-    if (s.container) {
-        (void)s.container->Close(finalized);
+// Route a recording to its next segment: the current container is closed and
+// the next one opened with NO engine lock held (a real container's Close/Open
+// can block for a long time — docs/specs/28 §20). State changes stay under the
+// lock and re-validate the session afterwards, since it may have been stopped
+// while the provider was working.
+void RecordingEngine::RotateSegment(const std::string& recordingId) {
+    std::shared_ptr<IRecordingContainer> closing;
+    ContainerFactory factory;
+    RecordingProfile profile;
+    std::string path;
+    size_t seg = 0;
+    bool ready = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = sessions_.find(recordingId);
+        if (it == sessions_.end()) return;
+        Session& s = it->second;
+        // Re-check under the lock: the session may have been advanced/stopped.
+        if (s.state != RecordingState::Recording) return;
+        if (!(s.profile.segmentDurationMs > 0 &&
+              s.durationMs / s.profile.segmentDurationMs >=
+                  static_cast<int64_t>(s.segmentIndex)))
+            return;
+        auto cit = containers_.find(ContainerName(s.profile.container));
+        if (cit == containers_.end()) {
+            errorCount_.fetch_add(1);
+            s.state = RecordingState::Failed;
+            Journal(JournalEntry::Kind::Failed, recordingId, "container not registered");
+            return;
+        }
+        factory = cit->second;
+        profile = s.profile;
+        seg = s.segmentIndex + 1;
+        path = MakePath(profile, defaultDir_, seg, clockMs_.load());
+        closing = std::move(s.container);
         s.container.reset();
+        ready = true;
     }
-    if (finalized) {
-        // Final segment remains on disk; nothing more to do in the sink model.
+    if (!ready) return;
+
+    // --- provider calls, no lock held ---
+    if (closing) (void)closing->Close(false);
+    auto container = factory();
+    Result<std::string> opened =
+        container ? container->Open(profile, path)
+                  : Result<std::string>(Error::Make(Err::Recording_ContainerNotFound, kModule,
+                                                    "container factory produced nothing"));
+
+    std::string failure;
+    bool discard = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = sessions_.find(recordingId);
+        if (it == sessions_.end() || it->second.state != RecordingState::Recording) {
+            discard = true;   // provider finalized outside the lock, below
+        } else if (!opened.ok()) {
+            failure = opened.error().message;
+            errorCount_.fetch_add(1);
+            it->second.state = RecordingState::Failed;
+            Journal(JournalEntry::Kind::Failed, recordingId, failure);
+        } else {
+            Session& s = it->second;
+            s.container = container;
+            s.filePath = opened.value();
+            s.segmentIndex = seg;
+            Journal(JournalEntry::Kind::SegmentCreated, recordingId, opened.value());
+            segmentCount_.fetch_add(1);
+        }
     }
+    if (discard) {
+        if (container) (void)container->Close(false);
+        return;
+    }
+    if (!failure.empty())
+        (void)EventBus::Instance().Publish(events::RecordingFailed{recordingId, failure});
+    else
+        (void)EventBus::Instance().Publish(
+            events::SegmentCreated{recordingId, seg, opened.value()});
 }
 
 // --- Scheduling + time pump ---
@@ -1043,36 +1260,53 @@ Result<EncoderHealth> RecordingEngine::GetRecordingHealth(std::string_view recor
 }
 
 Result<void> RecordingEngine::UpdateEncoderLoad(std::string_view recordingId, int loadPct) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto it = sessions_.find(recordingId);
-    if (it == sessions_.end())
-        return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
-    it->second.encoderLoad = std::clamp(loadPct, 0, 100);
-    if (it->second.encoderLoad >= 90) {
-        (void)EventBus::Instance().Publish(events::EncoderOverload{
-            std::string(recordingId), it->second.encoder});
+    bool overloaded = false;
+    std::string encoder;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = sessions_.find(recordingId);
+        if (it == sessions_.end())
+            return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
+        it->second.encoderLoad = std::clamp(loadPct, 0, 100);
+        if (it->second.encoderLoad >= 90) {
+            overloaded = true;
+            encoder = it->second.encoder;
+        }
     }
+    if (overloaded)
+        (void)EventBus::Instance().Publish(events::EncoderOverload{
+            std::string(recordingId), encoder});
     return Ok();
 }
 
 Result<void> RecordingEngine::UpdateDroppedFrames(std::string_view recordingId,
                                                   size_t count) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto it = sessions_.find(recordingId);
-    if (it == sessions_.end())
-        return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
-    const size_t delta = count > static_cast<size_t>(it->second.droppedFrames)
-                             ? count - static_cast<size_t>(it->second.droppedFrames)
-                             : 0;
-    it->second.droppedFrames = static_cast<int>(count);
-    if (delta > 0) {
+    size_t delta = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = sessions_.find(recordingId);
+        if (it == sessions_.end())
+            return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
+        delta = count > static_cast<size_t>(it->second.droppedFrames)
+                    ? count - static_cast<size_t>(it->second.droppedFrames)
+                    : 0;
+        it->second.droppedFrames = static_cast<int>(count);
+    }
+    if (delta > 0)
         (void)EventBus::Instance().Publish(events::DroppedFramesDetected{
             std::string(recordingId), delta});
-    }
     return Ok();
 }
 
 Result<void> RecordingEngine::Tick(int64_t advanceMs) {
+    // The scope below holds the lock for session/replay/schedule state only.
+    // Segment rotations and the disk monitor run AFTER it closes, because both
+    // reach provider/PAL calls that must not run under the engine lock.
+    std::vector<std::string> rotate;
+    // Replay buffers that just became ready, published AFTER the lock closes.
+    struct ReadyPing { std::string rid, nodeId; int64_t capacityMs; };
+    std::vector<ReadyPing> replayReady;
+    {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!running_.load())
         return Error::Make(Err::Recording_InvalidState, kModule, "Start() first");
@@ -1087,20 +1321,12 @@ Result<void> RecordingEngine::Tick(int64_t advanceMs) {
         if (s.state == RecordingState::Recording) {
             s.durationMs += advanceMs;
             s.sizeBytes = EstimatedBytesPerHour(s.profile) * s.durationMs / 3600000;
-            // Segment boundary (docs/specs/28 §20).
+            // Segment boundary (docs/specs/28 §20). The container close/open is
+            // deferred until after the lock is released (see rotate, below).
             if (s.profile.segmentDurationMs > 0 &&
                 s.durationMs / s.profile.segmentDurationMs >=
-                    static_cast<int64_t>(s.segmentIndex)) {
-                CloseSegment(s, false);
-                auto seg = OpenSegment(id);
-                if (!seg.ok()) {
-                    errorCount_.fetch_add(1);
-                    s.state = RecordingState::Failed;
-                    Journal(JournalEntry::Kind::Failed, id, seg.error().message);
-                    (void)EventBus::Instance().Publish(
-                        events::RecordingFailed{id, seg.error().message});
-                }
-            }
+                    static_cast<int64_t>(s.segmentIndex))
+                rotate.push_back(id);
         }
     }
     // Replay buffers fill (docs/specs/28 §27).
@@ -1109,8 +1335,7 @@ Result<void> RecordingEngine::Tick(int64_t advanceMs) {
             b.bufferedMs = std::min(b.bufferedMs + advanceMs, b.capacityMs);
             if (b.bufferedMs >= b.capacityMs && !b.ready) {
                 b.ready = true;
-                (void)EventBus::Instance().Publish(
-                    events::ReplayBufferReady{rid, b.nodeId, b.capacityMs});
+                replayReady.push_back({rid, b.nodeId, b.capacityMs});
             }
         }
     }
@@ -1127,33 +1352,50 @@ Result<void> RecordingEngine::Tick(int64_t advanceMs) {
         (void)StopRecording(sop->second, "scheduled");
         sop = scheduledStops_.erase(sop);
     }
+    }   // release mutex_ — provider calls below must not run under it
 
+    // Replay-ready notices: dispatched here, with mutex_ released, like every
+    // other bus dispatch in this engine.
+    for (const auto& r : replayReady)
+        (void)EventBus::Instance().Publish(
+            events::ReplayBufferReady{r.rid, r.nodeId, r.capacityMs});
+
+    // Segment rotations: container Close/Open with NO lock held.
+    for (const auto& id : rotate) RotateSegment(id);
     RunDiskMonitor();
     return Ok();
 }
 
 void RecordingEngine::RunDiskMonitor() {
+    // FreePercent queries the filesystem; it takes only a short internal snapshot
+    // lock, so the PAL stat never runs while we hold mutex_ below.
     const int fp = FreePercent();
     // Highest-severity threshold that applies wins (docs/specs/28 §19).
     StorageAction action = StorageAction::None;
-    for (const auto& [threshold, act] : storagePolicy_)
-        if (fp < threshold && SeverityRank(act) > SeverityRank(action)) action = act;
+    std::vector<std::string> victims;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        for (const auto& [threshold, act] : storagePolicy_)
+            if (fp < threshold && SeverityRank(act) > SeverityRank(action)) action = act;
+        if (action == StorageAction::StopOptional) {
+            for (const auto& [id, s] : sessions_)
+                if (s.state == RecordingState::Recording &&
+                    s.profile.priority == RecordingPriority::Optional)
+                    victims.push_back(id);
+        } else if (action == StorageAction::StopAll) {
+            for (const auto& [id, s] : sessions_)
+                if (s.state == RecordingState::Recording || s.state == RecordingState::Paused)
+                    victims.push_back(id);
+        }
+    }
 
     if (action == StorageAction::Warn) {
         (void)EventBus::Instance().Publish(events::DiskSpaceWarning{fp, "warning"});
     } else if (action == StorageAction::StopOptional) {
         (void)EventBus::Instance().Publish(events::DiskSpaceWarning{fp, "critical"});
-        std::vector<std::string> victims;
-        for (const auto& [id, s] : sessions_)
-            if (s.state == RecordingState::Recording && s.profile.priority == RecordingPriority::Optional)
-                victims.push_back(id);
         for (const auto& id : victims) (void)StopRecording(id, "disk pressure");
     } else if (action == StorageAction::StopAll) {
         (void)EventBus::Instance().Publish(events::DiskSpaceWarning{fp, "emergency"});
-        std::vector<std::string> victims;
-        for (const auto& [id, s] : sessions_)
-            if (s.state == RecordingState::Recording || s.state == RecordingState::Paused)
-                victims.push_back(id);
         for (const auto& id : victims) (void)StopRecording(id, "disk emergency");
     }
 }

@@ -1,6 +1,7 @@
 #include "AudioInputListModel.h"
 
 #include "BusListModel.h"
+#include "ChannelTrim.h"
 #include "services/EngineBridge.h"
 #include "services/SettingsService.h"
 #include "platform/PlatformAccessor.hpp"
@@ -9,10 +10,13 @@
 
 #include <QJsonArray>
 #include <QJSEngine>
+#include <QSet>
 #include <QJsonDocument>
 #include <QJsonObject>
 
 #include <algorithm>
+#include <cstring>
+#include <string>
 
 // The one instance, for C++ AND QML — see the header for why this is eager.
 AudioInputListModel *AudioInputListModel::Instance()
@@ -28,6 +32,25 @@ AudioInputListModel *AudioInputListModel::create(QQmlEngine *engine, QJSEngine *
     AudioInputListModel *s = Instance();
     QJSEngine::setObjectOwnership(s, QJSEngine::CppOwnership);
     return s;
+}
+
+// "bus:<n>#a"/"bus:<n>#v" → the bus NUMBER, the stable identity the routing
+// matrix stores (rows shift; numbers don't). -1 for anything else, so a caller
+// can tell "not one of our planes" from "bus 0".
+static int busNumberFromPlaneNode(const std::string &nodeId)
+{
+    constexpr const char *prefix = "bus:";
+    if (!nodeId.starts_with(prefix))
+        return -1;
+    const size_t hash = nodeId.find('#');
+    const size_t from = std::strlen(prefix);
+    if (hash == std::string::npos || hash <= from)
+        return -1;
+    try {
+        return std::stoi(nodeId.substr(from, hash - from));
+    } catch (const std::exception &) {
+        return -1;
+    }
 }
 
 static QVariantList routingVariant(const QList<QList<int>> &routes)
@@ -88,8 +111,8 @@ AudioInputListModel::AudioInputListModel(QObject *parent)
     // BusListModel does CACHE routes as roster rows for QML, so a removal
     // (which shifts rows) ends with BusListModel::refreshRoutes() — see
     // removeInput. The roster (rows + settings + matrix) persists via
-    // session.audioRoster; board routing is still re-pruned at startup
-    // (BusListModel prunes every asrc:/vsrc: node — unchanged by design).
+    // session.audioRoster; stable ids are restored so the production graph's
+    // saved routes can reconnect to the same rows after launch.
     //
     // Restore must wait for the OTHER QML singletons: singleton construction
     // order follows QML import order, so SettingsService may not exist when
@@ -118,6 +141,25 @@ AudioInputListModel::~AudioInputListModel()
         s_instance = nullptr;
 }
 
+void AudioInputListModel::adoptInstance(AudioInputListModel *roster)
+{
+    if (!roster || roster == s_instance)
+        return;
+    if (s_instance)
+        s_instance->deactivate();
+    s_instance = roster;
+}
+
+void AudioInputListModel::deactivate()
+{
+    m_active = false;
+    if (saveTimer_) {
+        saveTimer_->stop();
+        delete saveTimer_;
+        saveTimer_ = nullptr;
+    }
+}
+
 QString AudioInputListModel::stableIdForRow(int row)
 {
     if (!s_instance || row < 0 || row >= s_instance->m_inputs.size())
@@ -133,6 +175,19 @@ int AudioInputListModel::rowForStableId(const QString &id)
         if (s_instance->m_inputs.at(i).id == id)
             return i;
     return -1;   // removed row — callers treat as "no such route"
+}
+
+QString AudioInputListModel::idForRow(int row)
+{
+    AudioInputListModel *self = s_instance ? s_instance : Instance();
+    if (row < 0 || row >= self->m_inputs.size())
+        return {};
+    QString &id = self->m_inputs[row].id;
+    if (id.isEmpty()) {
+        id = QStringLiteral("a%1").arg(self->m_nextId++);
+        self->scheduleSave();   // the healed id has to survive the session
+    }
+    return id;
 }
 
 int AudioInputListModel::rowCount(const QModelIndex &parent) const
@@ -218,7 +273,13 @@ void AudioInputListModel::removeInput(int index)
 
     // Cut this source's routing edges BEFORE the row disappears: routes key
     // on the row's stable id, so no OTHER row's route is touched.
-    const QString id = m_inputs.at(index).id;
+    //
+    // Read through the HEALING accessor, never the raw member: a row whose id was
+    // never assigned has NO id, and an empty id made the whole cut below a silent
+    // no-op — the row left the board while its graph edges (and the lines drawn
+    // for them) stayed, and the next row added was handed that freed id and
+    // inherited them.
+    const QString id = idForRow(index);
     BusListModel *buses = BusListModel::Instance();
     if (buses)
         buses->cutAudioSourceEdges(id);
@@ -302,7 +363,9 @@ QString AudioInputListModel::pickAudioFile() const
         return {};
     auto r = bps::platform::PlatformAccessor::Get().Dialogs().OpenFileDialog(
         "Pick an audio file",
-        { "Audio files (*.mp3 *.wav *.flac *.m4a *.aac *.ogg)", "All files (*.*)" });
+        // Audio containers only — the input is opened as audio and refuses
+        // anything else, so the picker is where that decision belongs.
+        { "Audio files (*.mp3 *.wav *.flac *.m4a *.aac *.ogg)" });
     return r.ok() && r.value() ? QString::fromStdString(*r.value()) : QString();
 }
 
@@ -346,6 +409,8 @@ void AudioInputListModel::setMuted(int index, bool muted)
 // fold into the stage's 0..1 amount, delay ms into seconds.
 void AudioInputListModel::pushEffectsToGraph(int index)
 {
+    if (!m_active)
+        return;   // never push a displaced roster's view onto the engine
     if (index < 0 || index >= m_inputs.size())
         return;
     if (!EngineBridge::instance().booted())
@@ -362,9 +427,10 @@ void AudioInputListModel::pushEffectsToGraph(int index)
     if (!graph.HasNode(node))
         return;
 
+    const bool ownsEdit = graph.BeginEdit().ok();
     const AudioInputItem &item = m_inputs.at(index);
 
-    // ---- VolumeControl: the row's fader + mute + per-channel gains ---------
+    // ---- VolumeControl: the row's fader + mute -----------------------------
     bps::production::VolumeControl vol;
     if (auto cur = graph.Volume(node); cur.ok())
         vol = cur.value();          // keep solo/pan; this model owns gain/mute
@@ -374,6 +440,17 @@ void AudioInputListModel::pushEffectsToGraph(int index)
     vol.gainDb = -60.0 + (item.level / 100.0) * 60.0;
     vol.mute = item.muted;
     (void)graph.SetVolume(node, vol);
+
+    // Store the independent channel trims on the source node so the actual
+    // AudioMixer path (and its program meter) applies the same L/R state as
+    // the Media and Settings meters. Older rosters with no saved trims use
+    // unity, matching channelGain().
+    for (int channel = 0; channel < 8; ++channel) {
+        const qreal gain = channel < item.channelGains.size()
+            ? item.channelGains.at(channel) : 1.0;
+        (void)graph.SetMeta(node, "uiChannelGain" + std::to_string(channel),
+                            std::to_string(gain));
+    }
 
     // ---- Processing chain: rebuilt from the rack on every write ------------
     (void)graph.ClearProcessing(node);
@@ -419,6 +496,8 @@ void AudioInputListModel::pushEffectsToGraph(int index)
         }
         (void)graph.AddProcessing(node, stage);
     }
+    if (ownsEdit)
+        (void)graph.CommitEdit();
 }
 
 void AudioInputListModel::setDelayMs(int index, int delayMs)
@@ -457,13 +536,67 @@ void AudioInputListModel::setChannelGain(int index, int channel, qreal gain)
     QList<qreal> &gains = m_inputs[index].channelGains;
     while (gains.size() <= channel)
         gains.append(1.0);   // absent = unity
+    // Remember the level as this side's trim on the way past (see
+    // models/ChannelTrim.h). It rides EVERY write of an open level, so a knob
+    // dragged here leaves a restorable trim behind without the caller knowing
+    // anything about it — and a close (gain 0) deliberately does not, or the
+    // next reopen would arm silence.
+    const bool remember = !qFuzzyCompare(gains[channel], clamped)
+                          && channeltrim::remembersTrim(clamped);
     if (qFuzzyCompare(gains[channel], clamped))
         return;
     gains[channel] = clamped;
+    if (remember)
+        writeChannelTrim(index, channel, clamped);
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { ChannelGainsRole });
     scheduleSave();   // debounced — a dragged knob coalesces into one write
     pushEffectsToGraph(index);   // per-channel trim rides the node volume
+}
+
+void AudioInputListModel::toggleChannelGain(int index, int channel)
+{
+    // THE reopen policy, asked of one place: ChannelTrim.h. Closing writes 0;
+    // reopening hands back the trim the side was closed with, and only unity if
+    // there never was one.
+    if (channeltrim::isOff(channelGain(index, channel)))
+        setChannelGain(index, channel, channelTrim(index, channel));
+    else
+        setChannelGain(index, channel, channeltrim::closed());
+}
+
+qreal AudioInputListModel::channelTrim(int index, int channel) const
+{
+    if (index < 0 || index >= m_inputs.size() || channel < 0)
+        return channeltrim::unity();
+    const AudioInputItem &item = m_inputs.at(index);
+    const qreal remembered = channel < item.channelTrims.size()
+        ? item.channelTrims.at(channel) : channeltrim::closed();
+    return channeltrim::reopenGain(remembered, channelGain(index, channel));
+}
+
+void AudioInputListModel::setChannelTrim(int index, int channel, qreal trim)
+{
+    if (index < 0 || index >= m_inputs.size() || channel < 0 || channel >= 8)
+        return;
+    if (!writeChannelTrim(index, channel, std::clamp(trim, 0.0, 1.0)))
+        return;
+    scheduleSave();
+}
+
+// The one write of the trim list (kept private-ish: the public faces above only
+// decide WHEN a trim is worth remembering). Returns true when it changed.
+bool AudioInputListModel::writeChannelTrim(int index, int channel, qreal trim)
+{
+    if (index < 0 || index >= m_inputs.size() || channel < 0 || channel >= 8)
+        return false;
+    QList<qreal> &trims = m_inputs[index].channelTrims;
+    while (trims.size() <= channel)
+        trims.append(channeltrim::closed());   // absent = nothing remembered
+    if (qFuzzyCompare(trims[channel], trim))
+        return false;
+    trims[channel] = trim;
+    return true;
 }
 
 qreal AudioInputListModel::channelGain(int index, int channel) const
@@ -478,6 +611,8 @@ qreal AudioInputListModel::channelGain(int index, int channel) const
 
 void AudioInputListModel::scheduleSave()
 {
+    if (!m_active)
+        return;   // a displaced instance is not the roster anyone is editing
     if (!saveTimer_) {
         saveTimer_ = new QTimer(this);
         saveTimer_->setSingleShot(true);
@@ -493,6 +628,12 @@ QString AudioInputListModel::serializeRoster() const
     for (const AudioInputItem &it : m_inputs) {
         QJsonArray gains;
         for (qreal g : it.channelGains) gains.append(g);
+        // The trims each side was closed at, beside the gains they belong to: a
+        // side closed at -6 dB comes back at -6 dB in the next session too (see
+        // models/ChannelTrim.h). Written even when empty, so the saved row
+        // always says what it knows.
+        QJsonArray trims;
+        for (qreal t : it.channelTrims) trims.append(t);
         QJsonArray routes;
         for (const QList<int> &cell : it.channelRoutes) {
             QJsonArray buses;
@@ -515,6 +656,7 @@ QString AudioInputListModel::serializeRoster() const
             { "delayMs", it.delayMs },
             { "channels", it.channels },
             { "gains", gains },
+            { "trims", trims },
             { "routingAuto", it.routingAuto },
             { "routes", routes },
             { "effects", effects },
@@ -525,6 +667,8 @@ QString AudioInputListModel::serializeRoster() const
 
 void AudioInputListModel::queueRosterWrite()
 {
+    if (!m_active)
+        return;
     SettingsService *settings = SettingsService::instancePtr();
     if (!settings || !EngineBridge::instance().booted())
         return;   // engine gone (shutdown) or settings not ready — nothing to write to
@@ -538,11 +682,21 @@ void AudioInputListModel::saveRoster()
     queueRosterWrite();
 }
 
+bool AudioInputListModel::restoreDone()
+{
+    return s_instance && s_instance->m_restoreDone;
+}
+
 int AudioInputListModel::restoreRoster()
 {
     SettingsService *settings = SettingsService::instancePtr();
     if (!settings || !EngineBridge::instance().booted())
         return 0;
+    // From here on the store has ANSWERED — empty means empty, so the graph's
+    // orphan sweep may treat these rows as the authority for which source nodes
+    // are still live (see BusListModel::pruneOrphanSourceEdges). Set before the
+    // blob checks on purpose: a roster that answers "nothing saved" is an answer.
+    m_restoreDone = true;
     const QString blob = settings->value(QStringLiteral("session.audioRoster")).toString();
     if (blob.isEmpty())
         return 0;
@@ -556,6 +710,8 @@ int AudioInputListModel::restoreRoster()
     beginResetModel();
     m_inputs.clear();
     int nextId = 1;
+    QSet<QString> assigned;
+    QList<int> migratedSilentDefaults;
     for (const QJsonValue &rv : rows) {
         const QJsonObject o = rv.toObject();
         AudioInputItem it;
@@ -563,12 +719,25 @@ int AudioInputListModel::restoreRoster()
         it.name = o.value(QStringLiteral("name")).toString();
         it.kind = o.value(QStringLiteral("kind")).toString(QStringLiteral("device"));
         it.sublabel = o.value(QStringLiteral("sublabel")).toString();
-        it.level = o.value(QStringLiteral("level")).toDouble();
+        it.level = std::clamp(o.value(QStringLiteral("level")).toDouble(75.0), 0.0, 100.0);
         it.muted = o.value(QStringLiteral("muted")).toBool();
+        // Older builds created configured, unmuted inputs with a 0 fader by
+        // default. That made a newly routed live source silent until users
+        // discovered and raised this control. Migrate that legacy default;
+        // a deliberately muted input stays untouched.
+        if (it.level <= 0.0001 && !it.muted && !it.sublabel.trimmed().isEmpty()) {
+            it.level = 75.0;
+            migratedSilentDefaults.append(m_inputs.size());
+        }
         it.delayMs = std::clamp(o.value(QStringLiteral("delayMs")).toInt(), 0, 1000);
         it.channels = std::clamp(o.value(QStringLiteral("channels")).toInt(2), 1, 8);
         for (const QJsonValue &g : o.value(QStringLiteral("gains")).toArray())
             it.channelGains.append(std::clamp(g.toDouble(1.0), 0.0, 1.0));
+        // Rows saved before the trims existed simply have none: channelTrim()
+        // then falls back to whatever level the side holds open (and unity
+        // beyond that), so an older roster cannot reopen a side at 0.
+        for (const QJsonValue &t : o.value(QStringLiteral("trims")).toArray())
+            it.channelTrims.append(std::clamp(t.toDouble(0.0), 0.0, 1.0));
         it.routingAuto = o.value(QStringLiteral("routingAuto")).toBool();
         for (const QJsonValue &cell : o.value(QStringLiteral("routes")).toArray()) {
             QList<int> buses;
@@ -587,9 +756,21 @@ int AudioInputListModel::restoreRoster()
                                      e.minValue, e.maxValue);
             }
         }
-            // Ids: keep the saved one; renumber only broken/missing entries.
-        if (it.id.isEmpty())
-            it.id = QStringLiteral("a%1").arg(m_nextId);
+        // Ids: keep the saved one; renumber only broken/missing entries.
+        //
+        // Against the ids already TAKEN in this restore, not against a counter
+        // that only moves when a row carries a parseable number: two rows with a
+        // missing id were both handed "a<m_nextId>" — the SAME id — and the
+        // second row's node was the first row's node. Routes key on that id, so
+        // the board drew one row's lines under another card and, worse, a
+        // removal cut the wrong row's edge (or none): the line stayed behind a
+        // card that was gone.
+        if (it.id.isEmpty() || assigned.contains(it.id)) {
+            while (assigned.contains(QStringLiteral("a%1").arg(nextId)))
+                ++nextId;
+            it.id = QStringLiteral("a%1").arg(nextId);
+        }
+        assigned.insert(it.id);
         bool okNum = false;
         const int num = it.id.mid(1).toInt(&okNum);
         if (okNum)
@@ -598,6 +779,17 @@ int AudioInputListModel::restoreRoster()
     }
     m_nextId = std::max(m_nextId, nextId);
     endResetModel();
+
+    for (int row = 0; row < m_inputs.size(); ++row) {
+        pushEffectsToGraph(row);
+        // A matrix saved in an earlier session must reach the graph again —
+        // otherwise a restored routing shows checked in the dialog and is dead
+        // in the engine (the "it isn't saving my connections" report).
+        pushRoutingToGraph(row);
+    }
+
+    if (!migratedSilentDefaults.isEmpty())
+        scheduleSave();
 
     // The buses' cached routes may reference restored rows by id — re-derive.
     if (BusListModel *buses = BusListModel::Instance())
@@ -643,6 +835,93 @@ void AudioInputListModel::setRoutingAuto(int index, bool auto_)
     scheduleSave();
 }
 
+// ---------------------------------------------------------------------------
+// ROUTING MATRIX → GRAPH — see the header. Called from every matrix write and
+// from the roster restore, so a matrix the user set in an earlier session lands
+// in the graph again on the next boot.
+void AudioInputListModel::pushRoutingToGraph(int index)
+{
+    if (!m_active)
+        return;   // a displaced roster must not re-add an edge the board removed
+    if (index < 0 || index >= m_inputs.size())
+        return;
+    if (!EngineBridge::instance().booted())
+        return;   // graph not up yet — the next write after boot pushes again
+
+    const QString nodeQ = BusListModel::audioSourceNodeId(index);
+    if (nodeQ.isEmpty())
+        return;
+    const std::string node = nodeQ.toStdString();
+
+    // bus number → the channels routed into it.
+    QMap<int, unsigned> masks;
+    const AudioInputItem &item = m_inputs.at(index);
+    for (int c = 0; c < item.channelRoutes.size() && c < 8; ++c) {
+        for (const int busNo : item.channelRoutes.at(c)) {
+            if (busNo < 0)
+                continue;
+            masks[busNo] = masks.value(busNo, 0u) | (1u << c);
+        }
+    }
+    auto &graph = bps::production::ProductionEngine::Instance().Graph();
+    const bool ownsEdit = graph.BeginEdit().ok();
+    // ADD half — one edge (+ its channel mask) per bus the matrix names. Skipped
+    // when the matrix names nothing; the REMOVE half below still runs, because
+    // "the matrix names no bus at all" is exactly when its old edges must go.
+    for (auto it = masks.constBegin(); it != masks.constEnd(); ++it) {
+        const std::string busNode = "bus:" + std::to_string(it.key()) + "#a";
+        if (!graph.HasNode(busNode))
+            continue;   // that bus row is gone; the matrix entry is stale
+        // The row's node is created on its FIRST route (the same lazy creation
+        // the bus dialog's toggle performs) — a matrix-only route is still a
+        // route, and without the node there is nothing to feed the bus.
+        if (!graph.HasNode(node)) {
+            if (!graph.AddSource(node, "Audio Source",
+                                 bps::production::SignalType::Audio).ok())
+                continue;
+        }
+        bool connected = false;
+        for (const auto &up : graph.Upstream(busNode))
+            if (up == node) { connected = true; break; }
+        if (!connected
+            && !graph.Connect(node, busNode, bps::production::SignalType::Audio).ok()) {
+            qWarning() << "AudioInputListModel: routing-matrix Connect failed for"
+                       << QString::fromStdString(busNode);
+            continue;
+        }
+        (void)graph.SetMeta(node, "uiRouteMask:" + busNode, std::to_string(it.value()));
+    }
+    // REMOVE half — the edges THIS ROW'S MATRIX made and no longer names. The
+    // marker is the "uiRouteMask:<busNode>" meta the add half just wrote: a route
+    // made on the board's drag or in the bus dialog's toggle carries no mask, so
+    // those surfaces keep their own edges and nothing fights over one edge. What
+    // this fixes: unticking the LAST channel of a bus left the edge and its stale
+    // channel mask in the graph, so the row stayed wired to (and audible on) a
+    // bus its matrix no longer routed to.
+    if (graph.HasNode(node)) {
+        const auto meta = graph.GetNode(node);
+        if (meta.ok()) {
+            for (const std::string &busNode : graph.Downstream(node)) {
+                const QString key = QStringLiteral("uiRouteMask:") + QString::fromStdString(busNode);
+                if (!meta.value().meta.count(key.toStdString()))
+                    continue;   // not this matrix's edge
+                const int busNo = busNumberFromPlaneNode(busNode);
+                if (busNo < 0 || masks.contains(busNo))
+                    continue;   // still routed there (or not one of ours)
+                if (graph.Disconnect(node, busNode).ok()) {
+                    qInfo() << "AudioInputListModel: routing-matrix unrouted" << nodeQ
+                            << "from" << QString::fromStdString(busNode);
+                } else {
+                    qWarning() << "AudioInputListModel: routing-matrix Disconnect failed for"
+                               << nodeQ << "->" << QString::fromStdString(busNode);
+                }
+            }
+        }
+    }
+    if (ownsEdit)
+        (void)graph.CommitEdit();
+}
+
 void AudioInputListModel::toggleChannelRoute(int index, int channel, int busIndex)
 {
     if (index < 0 || index >= m_inputs.size())
@@ -672,6 +951,7 @@ void AudioInputListModel::toggleChannelRoute(int index, int channel, int busInde
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { RoutingRole });
     scheduleSave();
+    pushRoutingToGraph(index);   // the cell IS a route into that bus
 }
 
 void AudioInputListModel::setChannelRoutes(int index, const QVariantList &perChannel)
@@ -703,6 +983,7 @@ void AudioInputListModel::setChannelRoutes(int index, const QVariantList &perCha
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { RoutingRole });
     scheduleSave();
+    pushRoutingToGraph(index);   // the whole matrix, in one push
 }
 
 static AudioEffect *findEffect(QList<AudioEffect> &effects, const QString &key)
@@ -767,6 +1048,8 @@ QVariantMap AudioInputListModel::getInput(int index) const
         effects.append(effectToVariant(effect));
     QVariantList gains;
     for (qreal g : item.channelGains) gains.append(g);
+    QVariantList trims;
+    for (qreal t : item.channelTrims) trims.append(t);
 
     return {
         { "name", item.name },
@@ -777,6 +1060,7 @@ QVariantMap AudioInputListModel::getInput(int index) const
         { "delayMs", item.delayMs },
         { "channels", item.channels },
         { "channelGains", gains },
+        { "channelTrims", trims },
         { "routingAuto", item.routingAuto },
         { "routing", routingVariant(item.channelRoutes) },
         { "effects", effects },

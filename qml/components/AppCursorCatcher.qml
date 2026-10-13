@@ -87,6 +87,19 @@ Item {
         // shadow every pointing-hand below it.
         catcherHandler.cursorShape = AppCursor.active ? AppCursor.shape
                                                       : undefined
+        // And the OS-level half: an application override cursor. The claim
+        // above is a QML item cursor, which Qt applies on the NEXT pointer
+        // event and only where its own item arbitration reaches — measured on
+        // the window's frame, where the grip is hovered, the stack holds
+        // SizeHor, and Win32 still reports ARROW (the OS paints that strip
+        // itself). The override is applied ahead of both, on the same event, so
+        // "the cursor just flashes and never shows" becomes a steady arrow.
+        // Held exactly as long as the stack is non-empty: AppCursor's entries
+        // are owner-scoped and self-healing, so this can never be left on.
+        if (AppCursor.active)
+            CursorService.apply(AppCursor.shape)
+        else
+            CursorService.clear()
     }
     Component.onCompleted: syncShape()
     Connections {

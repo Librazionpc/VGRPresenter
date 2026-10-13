@@ -49,10 +49,9 @@ struct AudioInputItem
     QString kind = QStringLiteral("device");
     // Display caption under the name ("System sounds", "120 BPM · click").
     QString sublabel;
-    // 0-100 — a settable level, not a live meter (mock backend, no real
-    // audio engine anywhere in this app). Defaults to 0: silence until the
-    // user raises it — a new source must never appear "live" on its own.
-    qreal level = 0;
+    // 0-100 source fader. New routed sources start at 75 (the same practical
+    // headroom as new buses); the live meter remains a separate device read.
+    qreal level = 75;
     bool muted = false;
     // Hardware latency compensation in milliseconds (the dialog's Delay
     // stepper). 0..1000, step 10 in the UI.
@@ -64,10 +63,16 @@ struct AudioInputItem
     int channels = 2;
     // Per-channel gain faders (0..1, index = channel row; default 1 = unity
     // for every channel the roster knows about) — the green knobs in the
-    // dialogs' channel rows. Display-side gain today (scaled into the
-    // channel meters, see ProAudioForm); the engine applies it as real DSP
-    // once per-channel gain lands in the graph.
+    // dialogs' channel rows. The gain is stored on the graph source node and
+    // applied independently to each channel by AudioMixer.
     QList<qreal> channelGains;
+    // The per-side TRIM each channel was closed with (0..1, index = channel
+    // row; absent or 0 = nothing remembered). Closing a side writes gain 0 to
+    // channelGains, which loses the level it was at — this is where that level
+    // is kept so reopening it gives back the trim instead of unity (see
+    // models/ChannelTrim.h, the one definition of that policy). Persisted with
+    // the rest of the row so it also survives a restart.
+    QList<qreal> channelTrims;
     // Routing matrix (the Routing… modal): per-input-channel lists of BUS
     // NUMBERS (BusItem::id — stable) that channel feeds, NOT row indices —
     // rows shift on removal, bus numbers don't. QML still passes/receives
@@ -107,11 +112,30 @@ public:
     // same static instance C++ reads, so existence is not a race.
     static AudioInputListModel *Instance();
     static AudioInputListModel *create(QQmlEngine *engine, QJSEngine *jsEngine);
+    // THE ONE OBJECT (see StyleListModel::create's note): the QML engine
+    // DEFAULT-CONSTRUCTS a QML_SINGLETON C++ type, so the roster the board holds
+    // is not the object Instance() returns unless it is handed over. main.cpp
+    // resolves the engine's own instance once the module is imported and adopts
+    // it here; whatever instance is displaced — the one C++ built for itself —
+    // is deactivated, so it can no longer write the roster or push state into
+    // the graph. Two live rosters is what let a row resolve to "no such source"
+    // (the reader held the list that never saw the new row) and what let a
+    // removed row's route be re-pushed from the other view's stale matrix.
+    static void adoptInstance(AudioInputListModel *roster);
 
     // Row <-> stable id. rowForStableId returns -1 when the id belongs to a
     // removed row — callers treat that as "no such route".
     static QString stableIdForRow(int row);
     static int rowForStableId(const QString &id);
+
+    // The row's stable id, HEALING a row that has none: the board addresses a
+    // row by its stable id ("asrc:<id>"), and an id-less row used to make its
+    // own routing impossible — the connect path reads an empty id as "this row
+    // has nothing to route" and refuses the drop, with no way for the user to
+    // fix it ("a new audio source refuses to connect"). A row is now given its
+    // id the moment routing asks for it, so every row on the board can be
+    // connected. Returns an empty string only for a row that does not exist.
+    Q_INVOKABLE QString idForRow(int row);
     enum Role {
         NameRole = Qt::UserRole + 1,
         KindRole,
@@ -160,9 +184,25 @@ public:
     // 1..8) — the pro-audio form's rows.
     Q_INVOKABLE void setDelayMs(int index, int delayMs);
     Q_INVOKABLE void setChannels(int index, int channels);
-    // Per-channel gain fader (0..1, clamped) — the channel row's knob.
+    // Per-channel gain fader (0..1, clamped) — the channel row's knob. Any OPEN
+    // level written here is also remembered as that side's trim, so no caller
+    // has to remember to record it before closing the side.
     Q_INVOKABLE void setChannelGain(int index, int channel, qreal gain);
     Q_INVOKABLE qreal channelGain(int index, int channel) const;
+    // The L/R pill's write, and the ONE place the reopen policy lives: a closed
+    // side reopens at the trim it was closed with (models/ChannelTrim.h), an
+    // open side closes. Callers stop hand-rolling `closed ? 1.0 : 0.0` — that
+    // expression WAS the bug, with its own copy on every surface.
+    Q_INVOKABLE void toggleChannelGain(int index, int channel);
+    // The gain this side should come back at (never the 0 that "closed" stores):
+    // the remembered trim, else the level it is holding open now, else unity.
+    // The Settings dialogs' channel rows read THIS, so their knobs and the Media
+    // pane's pills reopen a side identically.
+    Q_INVOKABLE qreal channelTrim(int index, int channel) const;
+    // Remember a trim WITHOUT changing the gain. setChannelGain already
+    // remembers every open level it writes, so this is only for an explicit
+    // "this IS the trim" (a knob moved while the side is closed).
+    Q_INVOKABLE void setChannelTrim(int index, int channel, qreal trim);
 
     // Routing matrix — the Routing… modal's data. getRouting returns
     // { auto, channels, buses, routes } in one read (buses are BusListModel
@@ -198,6 +238,12 @@ public:
     // restore re-links by the same ids).
     Q_INVOKABLE void saveRoster();
     Q_INVOKABLE int restoreRoster();
+    // Has the store ANSWERED this roster yet? It needs the engine booted and the
+    // settings store alive, so "empty" means "not loaded" until this turns true.
+    // BusListModel's ghost sweep (see pruneOrphanSourceEdges) treats a roster as
+    // the authority for which source nodes are still live, and must not sweep a
+    // kind whose rows simply have not arrived.
+    static bool restoreDone();
 
     // ---- REAL DSP PUSH (the production graph) ---------------------------
     // The effects rack / level / mute of one row, translated onto that
@@ -209,11 +255,43 @@ public:
     // from every effects/level/mute write so the board IS the graph's truth.
     void pushEffectsToGraph(int index);
 
+    // ROUTING MATRIX → GRAPH. The matrix (the Routing… modal) is per CHANNEL ×
+    // BUS, while a graph edge is per source→bus, so the two halves split: this
+    // ensures the EDGE exists for every bus the row's matrix names (a checked
+    // cell anywhere means that source feeds that bus) and writes the CHANNEL
+    // MASK the mixer reads ("uiRouteMask:<busNode>", bit c = channel c is routed
+    // there) so a row routed on one channel only sounds on that channel of that
+    // bus.
+    //
+    // WHY THIS HAD TO EXIST: the matrix's selections were STORED (the session
+    // roster) and read back into the dialog, but nothing ever told the engine —
+    // a route made there produced no edge, no audio and no meter, which is the
+    // "the engine is not saving connections in the audio and video settings"
+    // report. It also cuts the edges it made ITSELF and no longer names (the
+    // "uiRouteMask:<busNode>" meta on the row's node is that marker): unticking
+    // the last channel of a bus used to leave the edge AND the stale channel mask
+    // in the graph, so the row kept feeding — and sounding on — a bus its matrix
+    // no longer routed to. A route made on the BOARD or in the bus dialog carries
+    // no mask and is never touched here, so the surfaces still cannot fight over
+    // one edge. No-op when the engine is not booted or the bus row is gone.
+    void pushRoutingToGraph(int index);
+
 private:
     static inline AudioInputListModel *s_instance = nullptr;
 
+    // False once this instance has been displaced by an adopted one (see
+    // adoptInstance): every write path below no-ops, because this object is not
+    // the roster anyone is looking at.
+    bool m_active = true;
+    void deactivate();
+
+    // The single write of the trim list (the public faces above only decide
+    // WHEN a trim is worth remembering). true when it changed anything.
+    bool writeChannelTrim(int index, int channel, qreal trim);
+
     QList<AudioInputItem> m_inputs;
     int m_nextId = 1;   // stable-id counter ("a<n>"); seeded past the restored roster's highest id
+    bool m_restoreDone = false;     // the store has answered once (see restoreDone)
     QTimer *saveTimer_ = nullptr;   // debounce for saveRoster()
     void scheduleSave();            // bump the debounce (every mutation calls this)
     QString serializeRoster() const;

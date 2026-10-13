@@ -33,6 +33,12 @@
 #   tools/make_portable.sh --release       # Release build (build-release/), ships
 #   tools/make_portable.sh --no-build      # deploy the existing build exe
 #   tools/make_portable.sh --no-zip        # skip the archive (faster iteration)
+#   tools/make_portable.sh --no-gdb        # do not bundle gdb/analyze.bat
+#
+# Forensics shipped with the dist: the app writes a minidump on a crash (SEH)
+# AND on a detected hang, and the dist bundles gdb + analyze.bat so either dump
+# is readable on the target PC with no dev toolchain. analyze.bat prints the
+# crash log tail and all thread backtraces; run it after any failure.
 #
 # Machine paths can be overridden by env (same variables as dev_cycle.sh):
 #   CMAKE_BIN, MINGW_BIN (/c/msys64/ucrt64/bin), QT_BIN (/c/Qt/6.11.1/mingw_64/bin)
@@ -68,12 +74,16 @@ QT_MINGW_BIN="${QT_MINGW_BIN:-C:/Qt/Tools/mingw1310_64/bin}"
 DO_BUILD=1
 DO_ZIP=1
 DO_RELEASE=0
+# Ship gdb + a dump helper so a crash/hang on a CUSTOMER's PC is diagnosable
+# without a dev toolchain (see the GDB step below). ~35 MB; --no-gdb opts out.
+DO_GDB=1
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-build) DO_BUILD=0 ;;
         --no-zip)   DO_ZIP=0 ;;
         --release)  DO_RELEASE=1 ;;
+        --no-gdb)   DO_GDB=0 ;;
         *) echo "make_portable.sh: unknown argument '$1'"; exit 2 ;;
     esac
     shift
@@ -173,6 +183,80 @@ for dll in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll zlib1.dll; do
     fi
     cp "$src" "$DIST/"
 done
+
+# ---- 2b. GDB (crash/hang forensics, shipped) --------------------------------
+# The app writes a minidump on a crash (SEH) and, since this change, on a HANG
+# (CrashHandler::WriteHangDump). A minidump is unreadable without a debugger,
+# and the exe's MinGW/DWARF symbols are exactly what gdb resolves — Windows'
+# own dbghelp cannot read DWARF, which is why the offline symbolizer uses nm.
+# So ship gdb beside the app plus a one-command helper that opens the newest
+# dump. This is what makes a crash on a target PC diagnosable with no dev kit.
+#
+# --no-gdb skips this (the zip stays ~35 MB smaller; the dumps still get
+# written, they just need a gdb from elsewhere to read).
+if [ "$DO_GDB" = 1 ]; then
+    echo "== bundling gdb for post-mortem analysis =="
+    GDB_SRC="${GDB_BIN:-$MINGW_BIN/gdb.exe}"
+    if [ ! -f "$GDB_SRC" ]; then
+        echo "gdb not found at $GDB_SRC (set GDB_BIN)"
+        echo "PORTABLE: FAIL deploy"
+        exit 1
+    fi
+    GDB_DIR="$DIST/tools/gdb"
+    mkdir -p "$GDB_DIR"
+    cp "$GDB_SRC" "$GDB_DIR/"
+    # gdb's own runtime deps the app does NOT already ship beside the exe.
+    # (libgcc_s_seh-1 / libstdc++-6 / libwinpthread-1 / zlib1 are copied in the
+    # step above; these are gdb-only.)
+    for dll in libexpat-1.dll libgmp-10.dll libiconv-2.dll libintl-8.dll \
+               liblzma-5.dll libmpfr-6.dll libncursesw6.dll libpython3.12.dll \
+               libreadline8.dll libxxhash.dll libzstd.dll; do
+        if [ -f "$MINGW_BIN/$dll" ]; then
+            cp "$MINGW_BIN/$dll" "$GDB_DIR/"
+        else
+            echo "  warning: gdb dependency $dll not found in $MINGW_BIN"
+        fi
+    done
+
+    # analyze.bat — what a customer double-clicks after a failure. It reads the
+    # app's OWN artifacts: the crash log, and the gdb self-attach capture that
+    # WriteHangDump leaves on a hang (hang-<pid>-gdb.txt). It does NOT try to
+    # open the .dmp in gdb — MinGW gdb reads ELF cores, not Windows minidumps.
+    cat > "$DIST/analyze.bat" <<'BAT'
+@echo off
+setlocal enabledelayedexpansion
+set "CRASHES=%APPDATA%\VGR\VGRPresenter\crashes"
+echo === VGR crash / hang report ===
+if not exist "%CRASHES%" ( echo No crash folder yet: "%CRASHES%" & pause & exit /b 1 )
+echo
+echo --- crash log (last 60 lines) ---
+if exist "%CRASHES%\crash.log" powershell -NoProfile -Command "Get-Content -Tail 60 '%CRASHES%\crash.log'"
+echo
+set "GDBTXT="
+for /f "delims=" %%f in ('dir /b /o-d "%CRASHES%\hang-*-gdb.txt" 2^>nul') do (
+    if not defined GDBTXT set "GDBTXT=%CRASHES%\%%f"
+)
+if defined GDBTXT (
+    echo --- symbolized backtraces: !GDBTXT! ---
+    type "!GDBTXT!"
+) else (
+    echo --- no gdb capture present ---
+    echo A hang writes hang-^<pid^>-gdb.txt only when a gdb was resolvable at the
+    echo time ^(the dist ships one at tools\gdb\gdb.exe^); a crash writes raw frames
+    echo plus dbghelp symbols into crash.log instead.
+)
+echo
+set "DMP="
+for /f "delims=" %%f in ('dir /b /o-d "%CRASHES%\*.dmp" 2^>nul') do (
+    if not defined DMP set "DMP=%CRASHES%\%%f"
+)
+if defined DMP (
+    echo --- newest minidump: !DMP! ---
+    echo ^(Windows minidump: analyse with WinDbg or LLDB, not MinGW gdb.^)
+)
+pause
+BAT
+fi
 
 # ---- 3. SMOKE TEST (clean PATH — another PC's environment) -------------------
 echo "== smoke test (no Qt/MinGW on PATH) =="

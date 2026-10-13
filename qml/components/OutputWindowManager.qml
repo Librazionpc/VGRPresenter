@@ -26,16 +26,16 @@ Instantiator {
         required property string screenName
         required property string frameBuffer
         required property bool stayOnTop
-        required property bool fullscreenOutput
         required property bool onAirOnly
         required property bool active
+        required property string res
 
         outputIndex: win.index
         outputEnabled: win.isEnabled
         outputScreenName: win.screenName
         ownBuffer: win.frameBuffer
         outputStayOnTop: win.stayOnTop
-        outputFullscreen: win.fullscreenOutput
+        outputRes: win.res
         // NDI/network rows carry ONLY their own transport — no screen window,
         // ever (the receiver's monitor is the audience screen). Every window
         // below this flag stays invisible and renders nothing.

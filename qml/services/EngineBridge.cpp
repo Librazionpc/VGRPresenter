@@ -11,7 +11,10 @@
 #include "modules/adaptive/AdaptiveRuntime.hpp"
 #include "modules/display/DisplayEngine.hpp"
 #include "modules/display/Providers.hpp"
+#include "modules/presentation/SceneBuilder.hpp"
+#include "services/ShowConverter.h"
 #include "models/AudioInputListModel.h"
+#include "models/VideoSourceListModel.h"
 #include "platform/PlatformAccessor.hpp"
 #include "services/LiveOutputService.h"
 #include "services/SettingsService.h"
@@ -24,6 +27,7 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJSEngine>
 #include <QStringList>
 #include <QQmlEngine>
@@ -136,6 +140,7 @@ bool EngineBridge::boot()
 {
     if (booted())
         return true;
+    deviceEnumerationStopping_ = false;
 
     const QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     const QString logDir = base + QStringLiteral("/logs");
@@ -284,34 +289,37 @@ bool EngineBridge::boot()
         });
     }
 
+    // REPLAY the boot walk's holes, for the same reason as the state replay
+    // above: SubsystemDegraded fired during Boot(), before any relay subscriber
+    // existed. A degraded session must not LOOK clean on the way up.
+    for (const auto &d : bps::Kernel::Instance().Degraded()) {
+        ingestEngineEvent(QStringLiteral("engine.kernel.subsystem_degraded"), QVariantMap{
+            {QStringLiteral("level"), QStringLiteral("warning")},
+            {QStringLiteral("title"), QStringLiteral("Engine")},
+            {QStringLiteral("message"),
+             QStringLiteral("%1 is unavailable this session — %2")
+                 .arg(QString::fromStdString(d.system), QString::fromStdString(d.message))},
+            {QStringLiteral("system"), QString::fromStdString(d.system)},
+        });
+    }
+
     if (!bootError_.isEmpty()) {
         bootError_.clear();
         emit bootErrorChanged();   // a retried boot succeeded — clear the flag
     }
-    // Startup summary for the UI's boot toast: what booted AND what the
-    // platform layer found — real device counts, so "loaded" is a fact, not
-    // a hope. Names listed (up to a few) make it informative at a glance.
-    {
-        QStringList audioNames;
-        for (const QVariant &v : audioDevices_) {
-            audioNames << v.toMap().value("label").toString();
-            if (audioNames.size() >= 3) break;
-        }
-        QStringList screenNames;
-        for (const QVariant &v : screenDevices_) {
-            screenNames << v.toMap().value("label").toString();
-            if (screenNames.size() >= 3) break;
-        }
-        bootSummary_ = QStringLiteral("Engine booted (%1 systems) · %2 audio device(s): %3 · %4 display(s): %5")
-            .arg(bps::Kernel::Instance().BootLog().size())
-            .arg(audioDevices_.size()).arg(audioNames.join(QStringLiteral(", ")))
-            .arg(screenDevices_.size()).arg(screenNames.join(QStringLiteral(", ")));
-    }
+    // The worker updates this summary again when the real hardware roster
+    // arrives; the first toast must not wait for camera capability probing.
+    updateBootSummary();
     EventBus::instance().publish(QStringLiteral("engine.boot"), QVariantMap{
         {QStringLiteral("level"), QStringLiteral("success")},
         {QStringLiteral("title"), QStringLiteral("Engine")},
-        {QStringLiteral("message"), QStringLiteral("Presentation engine booted (%1 systems).")
-            .arg(bps::Kernel::Instance().BootLog().size())},
+        {QStringLiteral("message"),
+         bps::Kernel::Instance().Degraded().empty()
+             ? QStringLiteral("Presentation engine booted (%1 systems).")
+                   .arg(bps::Kernel::Instance().BootLog().size())
+             : QStringLiteral("Presentation engine booted (%1 systems, %2 unavailable).")
+                   .arg(bps::Kernel::Instance().BootLog().size())
+                   .arg(bps::Kernel::Instance().Degraded().size())},
     });
     return true;
 }
@@ -353,6 +361,16 @@ void EngineBridge::shutdown()
 {
     if (!booted())
         return;
+    deviceEnumerationStopping_ = true;
+    deviceEnumerationPending_ = false;
+    // BOUNDED join: the worker may be inside a platform enumeration (Media
+    // Foundation touching camera drivers) that can stall. An unbounded
+    // waitForDone() here froze the GUI thread at quit — Windows reports that
+    // as AppHangB1 and kills the process, which is what "it crashes when I
+    // close it" looked like. The normal case is milliseconds; the bound only
+    // changes the pathological one. A late worker is already harmless: its
+    // completion is a queued call that drops on deviceEnumerationStopping_.
+    (void)deviceEnumerationPool_.waitForDone(2000);
     // Detach every engine-thread producer FIRST — the relay's Logger sink and
     // EventBus subscriptions run on engine threads and must not fire into the
     // UI while (or after) Kernel::Shutdown() is dismantling those systems.
@@ -488,28 +506,114 @@ private:
 
 QString qstr(const std::string &s) { return QString::fromStdString(s); }
 
+// The used-device labels QML handed over, in the PAL's own vocabulary
+// (std::string friendly names), for the TARGETED enumerations below.
+std::vector<std::string> namesOf(const QStringList &labels)
+{
+    std::vector<std::string> out;
+    out.reserve(size_t(labels.size()));
+    for (const QString &l : labels) {
+        const std::string name = l.trimmed().toStdString();
+        if (!name.empty())
+            out.push_back(name);
+    }
+    return out;
+}
+
 } // namespace
 
-// Enumerates the REAL hardware through the engine's own platform layer —
-// the PAL's IAudio (WinMM waveIn/waveOut on Windows) for capture/output
-// devices, IMonitor for connected displays, IVideo (Media Foundation) for
-// cameras, and the BroadcastEngine's NDI provider for network sources.
-// GUI-thread-only (touches the QVariantList members QML binds to); called
-// from boot() and from the hot-plug relay handlers below. Safe when no PAL
-// backend is installed (yields empty lists — QML keeps its own fallback
-// roster then).
-void EngineBridge::enumerateDevices()
+// Device APIs can block in COM and hardware drivers, especially Media
+// Foundation's per-camera capability probe. Keep those calls off the GUI
+// thread and publish only value snapshots back on the UI thread.
+void EngineBridge::enumeratePlatformDevicesAsync()
 {
-    lastEnumerationMs_ = QDateTime::currentMSecsSinceEpoch();
-    lastAudioEnumerationMs_ = lastEnumerationMs_;
-    audioDevices_.clear();
-    screenDevices_.clear();
-    videoDevices_.clear();
-    if (bps::platform::PlatformAccessor::Installed()) {
-        auto &platform = bps::platform::PlatformAccessor::Get();
-        for (const auto &d : platform.Audio().Enumerate()) {
+    if (deviceEnumerationStopping_)
+        return;
+    if (deviceEnumerationBusy_) {
+        deviceEnumerationPending_ = true;
+        return;
+    }
+    if (!bps::platform::PlatformAccessor::Installed()) {
+        audioDevices_.clear();
+        screenDevices_.clear();
+        videoDevices_.clear();
+        emit devicesChanged();
+        return;
+    }
+
+    deviceEnumerationBusy_ = true;
+    QPointer<EngineBridge> guard(this);
+    // Snapshot the filter ON THE GUI THREAD: the worker must not read these
+    // while a dialog is opening on the other side of it (and the answer has to
+    // be the one this sweep was launched with).
+    const bool onlyUsed = usedDeviceSweepOnly_;
+    // THE SETUP'S OWN DEVICE SET — what the boot report's missing-device check is
+    // about, and never the lights' questions below: a status light asking about a
+    // source is not a device this setup was configured with, and letting its
+    // label into this list made the check count (and then report as MISSING) a
+    // device nobody configured.
+    const QStringList usedAudio = usedAudioLabels_;
+    const QStringList usedVideo = usedVideoLabels_;
+    const QStringList usedDisplay = usedDisplayNames_;
+    // WHAT THIS SWEEP WALKS: the setup's set ...
+    QStringList wantedAudio = usedAudio;
+    QStringList wantedVideo = usedVideo;
+    QStringList wantedDisplay = usedDisplay;
+    // ...PLUS WHAT A STATUS LIGHT IS ASKING ABOUT (see inputSourceAlive). A
+    // light names the source its bus routed, and that source is the one device
+    // this sweep must come back with an answer for — the used-device set cannot
+    // be trusted to carry it (a roster that hands its set over late, a source
+    // routed after boot, a row whose kind the hand-over classifies differently)
+    // and without this the light sat on "not there" no matter how long the
+    // operator waited. The label rides in EVERY list on purpose: a light knows
+    // the source's LABEL, not which roster its kind maps to, and naming a window
+    // in the audio set (or a mic in the display set) simply matches nothing —
+    // each walk only ever asks for what exists, so this can only add the device
+    // the light is about. The asks are consumed here: one sweep answers them.
+    if (!lightAsks_.isEmpty()) {
+        for (const QString &ask : lightAsks_) {
+            const QString label = ask.trimmed();
+            if (label.isEmpty())
+                continue;
+            wantedAudio << label;
+            wantedVideo << label;
+            wantedDisplay << label;
+        }
+        lightAsks_.clear();
+    }
+    // The sweep that "carries the app's own device set" is the first one taken
+    // AFTER the app has handed that set over — targeted (the normal case) or
+    // full (a picker beat it to the machine, see refreshDevices). It is never
+    // boot()'s opening enumeration, which runs before the hand-over and
+    // therefore knows nothing about this setup's hardware: that one is a layout
+    // aid (the primary display), not a device report. Read on the GUI thread at
+    // launch time, so a sweep already in flight when the hand-over arrives
+    // keeps whatever answer it was launched with. See bootSweepDone.
+    const bool bootSweep = deviceHandoverSeen_ || !onlyUsed;
+    deviceEnumerationPool_.start([guard, onlyUsed, bootSweep, usedAudio, usedVideo, usedDisplay,
+                                  wantedAudio, wantedVideo, wantedDisplay]() {
+        QVariantList audioDevices;
+        QVariantList screenDevices;
+        QVariantList videoDevices;
+        if (bps::platform::PlatformAccessor::Installed()) {
+            auto &platform = bps::platform::PlatformAccessor::Get();
+        // USED-DEVICE SWEEP (see requestUsedDevices): the boot sweep ASKS the
+        // platform for the endpoints this setup names — EnumerateFor walks to
+        // those and stops. It is NOT "enumerate the machine, then drop what is
+        // left over": activating a WASAPI endpoint + querying its mix format,
+        // and opening a camera to walk its media types, is the entire cost of
+        // an enumeration, and paying it to throw the answer away is exactly
+        // what made boot slow. A picker opening drops the filter (see
+        // refreshDevices/refreshAudioDevices, which set usedDeviceSweepOnly_ to
+        // false) and then the full Enumerate() runs — that is where a NEW
+        // device has to come from, and the only moment the whole machine is
+        // legitimate.
+        const auto audioRoster = onlyUsed
+            ? platform.Audio().EnumerateFor(namesOf(wantedAudio))
+            : platform.Audio().Enumerate();
+        for (const auto &d : audioRoster) {
             const QString name = qstr(d.name);
-            audioDevices_.append(QVariantMap{
+            audioDevices.append(QVariantMap{
                 {QStringLiteral("id"), qstr(d.id)},
                 {QStringLiteral("label"), name},
                 {QStringLiteral("value"), name},   // AV board stores the readable sublabel
@@ -521,9 +625,23 @@ void EngineBridge::enumerateDevices()
                 {QStringLiteral("sampleRateHz"), int(d.sampleRateHz)},
             });
         }
+        // Displays and open windows are the one part of the boot sweep that is
+        // still a filter rather than a targeted ask, and deliberately so: there
+        // is nothing to ask FOR. QueryDisplayConfig answers for every active
+        // path in a single call (there is no "just this monitor" query), and a
+        // window's title — the only thing a saved row can name it by — can only
+        // be learned by walking the top-level windows. The filter below
+        // therefore keeps the cost of a monitor/window roster from reaching the
+        // rest of the app (the UI lists, the layout math), not from the OS.
         for (const auto &m : platform.Monitor().Enumerate()) {
             const QString name = qstr(m.name);
-            screenDevices_.append(QVariantMap{
+            // The PRIMARY display always stays: it is what the app's own window
+            // sizes itself against (primaryDisplay). Every other monitor is kept
+            // only when an output is bound to it.
+            if (onlyUsed && !m.primary
+                && !labelWanted(wantedDisplay, name.isEmpty() ? qstr(m.id) : name))
+                continue;
+            screenDevices.append(QVariantMap{
                 {QStringLiteral("id"), qstr(m.id)},
                 {QStringLiteral("label"), name.isEmpty() ? qstr(m.id) : name},
                 {QStringLiteral("value"), name.isEmpty() ? qstr(m.id) : name},
@@ -542,7 +660,13 @@ void EngineBridge::enumerateDevices()
             const QString title = qstr(w.title);
             if (title.isEmpty())
                 continue;
-            screenDevices_.append(QVariantMap{
+            // Open windows are the most expensive half of the screen roster
+            // (every top-level window, enumerated and titled) and none of them
+            // is in use unless a row captured one — so the boot sweep only
+            // keeps the windows the roster names.
+            if (onlyUsed && !labelWanted(wantedDisplay, title))
+                continue;
+            screenDevices.append(QVariantMap{
                 {QStringLiteral("id"), qstr(w.id)},
                 {QStringLiteral("label"), title},
                 {QStringLiteral("value"), title},
@@ -555,7 +679,13 @@ void EngineBridge::enumerateDevices()
         // (Media Foundation on Windows). Mode labels are OBS-style
         // "<W>x<H>p<FPS>" (29.97 kept fractional); maxFps is the device's
         // own ceiling — the UI greys any offered mode faster than it.
-        for (const auto &d : platform.Video().Enumerate()) {
+        // Same targeted walk as audio above: only the cameras the video roster
+        // names are ever activated, so a machine with four cameras and one
+        // configured opens one.
+        const auto videoRoster = onlyUsed
+            ? platform.Video().EnumerateFor(namesOf(wantedVideo))
+            : platform.Video().Enumerate();
+        for (const auto &d : videoRoster) {
             const QString name = qstr(d.name);
             QStringList modes;
             for (const auto &m : d.modes) {
@@ -568,7 +698,7 @@ void EngineBridge::enumerateDevices()
                                               : QString::number(fps)));
                 }
             }
-            videoDevices_.append(QVariantMap{
+            videoDevices.append(QVariantMap{
                 {QStringLiteral("id"), qstr(d.id)},
                 {QStringLiteral("label"), name},
                 {QStringLiteral("value"), name},   // AV board stores the readable sublabel
@@ -576,6 +706,179 @@ void EngineBridge::enumerateDevices()
                 {QStringLiteral("maxFps"), int(d.maxFps)},
             });
         }
+        }
+
+        QMetaObject::invokeMethod(guard,
+            [guard, onlyUsed, bootSweep, usedAudio, usedVideo, usedDisplay,
+             audioDevices = std::move(audioDevices),
+             screenDevices = std::move(screenDevices),
+             videoDevices = std::move(videoDevices)]() mutable {
+                if (!guard)
+                    return;
+                EngineBridge *self = guard.data();
+                self->deviceEnumerationBusy_ = false;
+                if (!self->deviceEnumerationStopping_) {
+                    self->audioDevices_ = std::move(audioDevices);
+                    self->screenDevices_ = std::move(screenDevices);
+                    self->videoDevices_ = std::move(videoDevices);
+                    // The other half of the used-device sweep: a device the app
+                    // was set up with that is NOT there this time is said out
+                    // loud, once, right where the user can act on it — instead
+                    // of a row that silently meters nothing / previews black.
+                    //
+                    // The gate is "this sweep actually carried a used set"
+                    // (bootSweep with something wanted): boot() runs one
+                    // enumeration BEFORE QML hands the used devices over, and
+                    // letting THAT consume the one-shot turned the check into
+                    // dead code — the notice could never fire at all.
+                    //
+                    // The notice itself is NOT published here: it has to land
+                    // AFTER the engine boot toast, and that toast is published
+                    // by the UI off this very devicesChanged signal. So the
+                    // answer is left on the bridge for the UI to read once it
+                    // has said "booted" (missingUsedDevices() — see Main.qml's
+                    // reportMissingDevices, which runs right after reportBoot).
+                    const bool anythingWanted = !usedAudio.isEmpty()
+                                                || !usedVideo.isEmpty()
+                                                || !usedDisplay.isEmpty();
+                    if (onlyUsed && anythingWanted && !self->bootDeviceCheckDone_) {
+                        self->bootDeviceCheckDone_ = true;
+                        QStringList missing;
+                        const auto check = [&missing](const QStringList &wanted,
+                                                      const QVariantList &found) {
+                            for (const QString &label : wanted) {
+                                bool present = false;
+                                for (const QVariant &v : found)
+                                    if (v.toMap().value("label").toString().trimmed()
+                                            .compare(label, Qt::CaseInsensitive) == 0) {
+                                        present = true;
+                                        break;
+                                    }
+                                if (!present)
+                                    missing << label;
+                            }
+                        };
+                        check(usedAudio, self->audioDevices_);
+                        check(usedVideo, self->videoDevices_);
+                        check(usedDisplay, self->screenDevices_);
+                        self->missingUsedDevices_ = missing;
+                        self->write(QStringLiteral("info"), QStringLiteral("Devices"),
+                                    QStringLiteral("boot device check: %1 used, %2 missing%3")
+                                        .arg(usedAudio.size() + usedVideo.size() + usedDisplay.size())
+                                        .arg(missing.size())
+                                        .arg(missing.isEmpty()
+                                                 ? QString()
+                                                 : QStringLiteral(" (%1)")
+                                                       .arg(missing.mid(0, 3).join(QStringLiteral(", ")))));
+                    }
+                    // The rosters below are now the app's OWN hardware (either
+                    // the targeted walk or the nothing-configured full one), so
+                    // the startup report may finally be told what boot actually
+                    // found — BEFORE devicesChanged, which is what carries it
+                    // there (Main.qml's reportBoot reads this as its gate).
+                    // ...and only when the set it swept is still the CURRENT one.
+                    // On a cold start the rosters hydrate one after another, so
+                    // the first sweep can finish while a newer hand-over (with
+                    // the devices those rosters actually name) is already on its
+                    // way. Latching on the stale one reports a device list that
+                    // was never the app's — the same class of mistake as
+                    // reporting the pre-hand-over sweep. The newer sweep always
+                    // exists (a changed set re-launches, see requestUsedDevices),
+                    // so it does the latching.
+                    const bool stillCurrent = usedAudio == self->usedAudioLabels_
+                                              && usedVideo == self->usedVideoLabels_
+                                              && usedDisplay == self->usedDisplayNames_;
+                    if (bootSweep && stillCurrent && !self->bootSweepDone_) {
+                        self->bootSweepDone_ = true;
+                        emit self->bootSweepDoneChanged();
+                    }
+                    self->updateBootSummary();
+                    // Re-resolve every requested meter against the fresh
+                    // roster. This is what the header's "resolution re-runs
+                    // on every enumeration so a hot-plugged device re-binds
+                    // to its requested tap" actually promises, and until now
+                    // nothing did it: a hold taken BEFORE the first (async)
+                    // enumeration finished — the Media pane's auto-holds at
+                    // Component.onCompleted, a card clicked in the first
+                    // second after boot — warned "no input device named …"
+                    // and stayed silent for the rest of the session, which is
+                    // exactly what "the meters never move" looked like.
+                    for (auto it = self->requestedMeters_.constBegin();
+                         it != self->requestedMeters_.constEnd(); ++it)
+                        self->resolveAndStartMeter(it.key());
+                    emit self->devicesChanged();
+                }
+                const bool refreshAgain = self->deviceEnumerationPending_
+                                          && !self->deviceEnumerationStopping_;
+                self->deviceEnumerationPending_ = false;
+                if (refreshAgain)
+                    self->enumeratePlatformDevicesAsync();
+            }, Qt::QueuedConnection);
+    });
+}
+
+void EngineBridge::updateBootSummary()
+{
+    QStringList audioNames;
+    for (const QVariant &v : audioDevices_) {
+        audioNames << v.toMap().value("label").toString();
+        if (audioNames.size() >= 3) break;
+    }
+    // Displays carry their REAL pixel size next to the name: "did the engine
+    // see my projector at 4K or did it read the scaled size?" is a question the
+    // summary has to be able to answer (see WindowsMonitor's rcMonitor note —
+    // rcMonitor is DWM-scaled, dmPels* is the panel).
+    QStringList screenNames;
+    for (const QVariant &v : screenDevices_) {
+        const QVariantMap d = v.toMap();
+        const int w = d.value("widthPx").toInt();
+        const int h = d.value("heightPx").toInt();
+        QString label = d.value("label").toString();
+        if (w > 0 && h > 0)
+            label += QStringLiteral(" %1x%2").arg(w).arg(h);
+        screenNames << label;
+        if (screenNames.size() >= 3) break;
+    }
+    // "in use", deliberately: this roster is the app's OWN hardware (see
+    // requestUsedDevices — the sweep asks for the devices this setup names, and
+    // enumerates nothing else), so counting it as "what the engine found" would
+    // read as "your machine has 0 audio devices" on a desk with eight of them
+    // that nothing is wired to. What the summary can honestly state is what
+    // this session is using.
+    QStringList inUse = audioNames;
+    inUse += screenNames;
+    QStringList cameraNames;
+    for (const QVariant &v : videoDevices_) {
+        cameraNames << v.toMap().value("label").toString();
+        if (cameraNames.size() >= 3) break;
+    }
+    inUse += cameraNames;
+    // Kept beside the summary: the boot toast bolds these names (its crux), so
+    // the sentence reads as "… in use: 1 audio, 2 display(s) — <the names>".
+    bootInUse_ = inUse;
+    bootSummary_ = QStringLiteral("Engine booted (%1 systems) · in use: %2 audio, %3 display(s), %4 camera(s)%5")
+        .arg(bps::Kernel::Instance().BootLog().size())
+        .arg(audioDevices_.size())
+        .arg(screenDevices_.size())
+        .arg(videoDevices_.size())
+        .arg(inUse.isEmpty() ? QString()
+                             : QStringLiteral(" — %1").arg(inUse.join(QStringLiteral(", "))));
+    // A degraded boot says so out loud, right where the user reads the summary.
+    const auto degraded = bps::Kernel::Instance().Degraded();
+    if (!degraded.empty()) {
+        QStringList names;
+        for (const auto &d : degraded) names << QString::fromStdString(d.system);
+        bootSummary_ += QStringLiteral(" · %1 subsystem(s) unavailable: %2")
+                            .arg(degraded.size()).arg(names.join(QStringLiteral(", ")));
+    }
+}
+
+void EngineBridge::enumerateDevices()
+{
+    lastEnumerationMs_ = QDateTime::currentMSecsSinceEpoch();
+    lastAudioEnumerationMs_ = lastEnumerationMs_;
+    enumeratePlatformDevicesAsync();
+    if (bps::platform::PlatformAccessor::Installed()) {
 
         // NDI network sources through the ENGINE's own broadcast stack (the
         // NDI provider runtime-loads the SDK; when it's absent this yields
@@ -583,23 +886,48 @@ void EngineBridge::enumerateDevices()
         // Providers register at kernel boot — before that there is no stack
         // to ask, so the status says so instead of surfacing an internal
         // "provider not found" error.
-        ndiSources_.clear();
-        ndiAvailable_ = false;
-        ndiStatus_.clear();
+        // DO NOT reset the published verdict here. The probe below is ASYNC
+        // (probeNdiAsync), so clearing ndiAvailable_/ndiStatus_/ndiState_ upfront
+        // publishes "not usable, no reason" for the WHOLE probe window — and
+        // every reader in that window takes it as fact. That is the false
+        //   "LiveOutputService: NDI output requested but NDI is not usable ()"
+        // warning that showed up whenever a device refresh (a settings visit,
+        // a resolution/display-mode change) landed mid-live: the probe answered
+        // ~30 ms later and the feed started, but the toast was already on
+        // screen. The last ANSWERED state stays until the worker replaces it;
+        // only the feature-off branch below publishes a verdict synchronously.
         ndiVersion_.clear();
-        ndiState_ = QStringLiteral("unknown");
-        // The "ndi" feature switch first: a deliberate OFF is its own state
-        // ("disabled"), distinct from "notInstalled" (nothing to download)
-        // and "error" (nothing broken) — the notice component stays quiet
-        // for it and the Plugins row reads amber "Installed", not red.
-        if (booted()) {
-            auto ndiState = bps::adaptive::AdaptiveRuntime::Instance().GetFeatureState("ndi");
-            const bool ndiFeatureOn = ndiState.ok()
-                && ndiState.value() == bps::adaptive::FeatureState::Enabled;
+        if (!booted()) {
+            ndiSources_.clear();
+            ndiAvailable_ = false;
+            ndiStatus_.clear();
+            ndiState_ = QStringLiteral("unknown");
+        } else {
+            // The "ndi" feature switch first: a deliberate OFF is its own state
+            // ("disabled"), distinct from "notInstalled" (nothing to download)
+            // and "error" (nothing broken) — the notice component stays quiet
+            // for it and the Plugins row reads amber "Installed", not red.
+            auto ndiFeature = bps::adaptive::AdaptiveRuntime::Instance().GetFeatureState("ndi");
+            const bool ndiFeatureOn = ndiFeature.ok()
+                && ndiFeature.value() == bps::adaptive::FeatureState::Enabled;
             if (!ndiFeatureOn) {
+                ndiSources_.clear();
+                ndiAvailable_ = false;
                 ndiState_ = QStringLiteral("disabled");
                 ndiStatus_ = QStringLiteral("NDI is switched off in Settings · Plugins.");
+            } else if (ndiState_ == QStringLiteral("disabled")
+                       || ndiState_ == QStringLiteral("unknown")) {
+                // Switched ON since the last pass (or nothing has ever
+                // answered): there is no valid answer to keep, so drop the
+                // stale verdict and let the probe below publish one. This also
+                // re-arms the probe — a kept "disabled" would skip it.
+                ndiSources_.clear();
+                ndiAvailable_ = false;
+                ndiState_ = QStringLiteral("unknown");
+                ndiStatus_.clear();
             }
+            // else: keep the last known ready / notInstalled / error answer
+            // (and its source list) while the probe refreshes it in place.
         }
         // The probe itself moved OFF this thread (probeNdiAsync below): the
         // first successful check runtime-loads + NDIlib_initialize's the whole
@@ -817,8 +1145,23 @@ void EngineBridge::applyNdiFeatureState(bool enabled)
     // ways: refill on ON, empty on OFF).
     ndiRetries_ = 0;
     enumerateDevices();
-    if (enabled)
+    if (enabled) {
+        // Re-arm every card/dialog/board preview that was torn down by the
+        // last OFF — LiveOutputService resyncs the OUTPUT take on its own,
+        // but nothing else has a "my tap died, please re-fetch" signal, so
+        // without this they stayed dark forever after an off->on cycle.
+        const auto pending = ndiTapsPendingReattach_;
+        ndiTapsPendingReattach_.clear();
+        for (auto it = pending.constBegin(); it != pending.constEnd(); ++it)
+            for (const QString &owner : it.value())
+                (void)startNdiPreview(it.key(), owner);
         return;
+    }
+    // Snapshot who owned each tap before tearing it down, so a later
+    // re-enable can re-arm them (see above).
+    ndiTapsPendingReattach_.clear();
+    for (auto it = ndiTaps_.constBegin(); it != ndiTaps_.constEnd(); ++it)
+        ndiTapsPendingReattach_.insert(it.key(), previewOwners_.value(it.key()));
     // Release every NDI receiver tap (owners included — the feature gate
     // outranks any held preview; a re-enable re-takes from the UI).
     if (broadcast.NdiStatus().state
@@ -826,8 +1169,11 @@ void EngineBridge::applyNdiFeatureState(bool enabled)
         for (const QString &recvId : ndiTaps_.values())
             (void)broadcast.DisconnectReceiver(recvId.toStdString());
     }
-    for (const QString &name : ndiTaps_.keys())   // keys() copies — removal-safe
+    for (const QString &name : ndiTaps_.keys()) {   // keys() copies — removal-safe
         previewOwners_.remove(name);
+        previewDeliveredAt_.remove(name);   // the receiver is gone with its stamp
+        previewPulledAt_.remove(name);      // ...and with its "watching" clock
+    }
     ndiTaps_.clear();
     // LiveOutputService drops the OUTPUT take itself (the tiles' inputLabel
     // clears and the compositor layer comes off with it). Discovery was
@@ -975,6 +1321,31 @@ bool EngineBridge::checkNdiFirewallRule()
            == bps::platform::INetwork::FirewallAccess::Allowed;
 }
 
+// The primary display's REAL size, out of the roster enumerateDevices() just
+// refilled — so the number is the engine platform layer's own (IMonitor),
+// refreshed with every hot-plug event, not a second enumeration of its own.
+//
+// Two things the caller must know about the roster (see enumerateDevices): it
+// also carries open application WINDOWS (id "win:<hwnd>", size 0) — skipped
+// here, since only real displays have a size — and the primary flag lives on the
+// monitor entries. When nothing is flagged primary (a PAL with no primary
+// notion) the first display wins, which is the same display this window opens on.
+QVariantMap EngineBridge::primaryDisplay() const
+{
+    QVariantMap first;
+    for (const QVariant &v : screenDevices_) {
+        const QVariantMap entry = v.toMap();
+        if (entry.value(QStringLiteral("widthPx")).toInt() <= 0
+            || entry.value(QStringLiteral("heightPx")).toInt() <= 0)
+            continue;                                   // a window, not a display
+        if (entry.value(QStringLiteral("primary")).toBool())
+            return entry;
+        if (first.isEmpty())
+            first = entry;
+    }
+    return first;
+}
+
 // "I installed it — check again": bypasses refreshDevices()'s throttle so the
 // UI reacts immediately instead of making the user wait out the window.
 void EngineBridge::recheckNdi()
@@ -986,14 +1357,20 @@ void EngineBridge::recheckNdi()
 
 void EngineBridge::refreshDevices()
 {
-    // UI code calls this whenever a device-picking dialog opens. Enumeration is
-    // synchronous on the GUI thread and Media Foundation briefly activates each
-    // camera (can stall, can flash capture LEDs), so back-to-back requests
-    // reuse the last result. Hot-plug relay handlers call enumerateDevices()
-    // directly and are not throttled.
+    // UI code calls this when a picker opens. The actual platform enumeration
+    // runs on deviceEnumerationPool_; throttle repeated opens and coalesce any
+    // refresh that arrives while a scan is already in flight.
+    //
+    // A PICKER NEEDS THE WHOLE MACHINE, so this is also where the boot sweep's
+    // used-device filter (see requestUsedDevices) is dropped for the rest of the
+    // session — and the drop must defeat the throttle: a dialog opened 5 s after
+    // boot would otherwise keep offering only the used devices for the whole
+    // throttle window, i.e. exactly the devices the user already has.
+    const bool wasFiltered = usedDeviceSweepOnly_;
+    usedDeviceSweepOnly_ = false;
     constexpr qint64 kMinRefreshGapMs = 10000;
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    if (lastEnumerationMs_ > 0 && now - lastEnumerationMs_ < kMinRefreshGapMs)
+    if (!wasFiltered && lastEnumerationMs_ > 0 && now - lastEnumerationMs_ < kMinRefreshGapMs)
         return;
     ndiRetries_ = 0;
     enumerateDevices();
@@ -1001,87 +1378,174 @@ void EngineBridge::refreshDevices()
 
 void EngineBridge::refreshAudioDevices()
 {
+    // Same full-roster upgrade as refreshDevices (a device picker is opening).
+    const bool wasFiltered = usedDeviceSweepOnly_;
+    usedDeviceSweepOnly_ = false;
     constexpr qint64 kMinRefreshGapMs = 10000;
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    if (lastAudioEnumerationMs_ > 0 && now - lastAudioEnumerationMs_ < kMinRefreshGapMs)
+    if (!wasFiltered && lastAudioEnumerationMs_ > 0 && now - lastAudioEnumerationMs_ < kMinRefreshGapMs)
         return;
     lastAudioEnumerationMs_ = now;
-    if (!bps::platform::PlatformAccessor::Installed())
-        return;
+    enumerateDevices();
+}
 
-    QVariantList next;
-    for (const auto &d : bps::platform::PlatformAccessor::Get().Audio().Enumerate()) {
-        const QString name = qstr(d.name);
-        next.append(QVariantMap{
-            {QStringLiteral("id"), qstr(d.id)},
-            {QStringLiteral("label"), name},
-            {QStringLiteral("value"), name},
-            {QStringLiteral("isInput"), d.isInput},
-            {QStringLiteral("isDefault"), d.isDefault},
-            {QStringLiteral("channels"), int(d.channels)},
-            {QStringLiteral("sampleRateHz"), int(d.sampleRateHz)},
-        });
-    }
-    if (next != audioDevices_) {
-        audioDevices_ = std::move(next);
-        emit devicesChanged();
-    }
+bool EngineBridge::labelWanted(const QStringList &wanted, const QString &label)
+{
+    const QString want = label.trimmed();
+    for (const QString &w : wanted)
+        if (w.compare(want, Qt::CaseInsensitive) == 0)
+            return true;
+    return false;
+}
+
+void EngineBridge::requestUsedDevices(const QStringList &audioLabels,
+                                      const QStringList &videoLabels,
+                                      const QStringList &displayNames)
+{
+    const auto trimmed = [](const QStringList &in) {
+        QStringList out;
+        for (const QString &l : in) {
+            const QString t = l.trimmed();
+            if (!t.isEmpty() && !out.contains(t, Qt::CaseInsensitive))
+                out << t;
+        }
+        return out;
+    };
+    const QStringList newAudio = trimmed(audioLabels);
+    const QStringList newVideo = trimmed(videoLabels);
+    const QStringList newDisplays = trimmed(displayNames);
+    // Only a CHANGED set is worth a log line (and, below, a re-sweep): the
+    // hand-over is re-issued whenever a roster is restored or edited, and the
+    // steady state is "same answer as last time".
+    const bool changed = newAudio != usedAudioLabels_ || newVideo != usedVideoLabels_
+                         || newDisplays != usedDisplayNames_;
+    usedAudioLabels_ = newAudio;
+    usedVideoLabels_ = newVideo;
+    usedDisplayNames_ = newDisplays;
+    const bool firstHandover = !deviceHandoverSeen_;
+    deviceHandoverSeen_ = true;
+    // This hand-over can arrive MORE THAN ONCE, and that is the point: the
+    // rosters that own these devices hydrate at their own pace (the AV board's
+    // video roster is restored after this window has already completed), so an
+    // early call legitimately knows nothing yet. Each later call replaces the
+    // set — and re-sweeping is free when the sweep is targeted, because a
+    // device nobody named is never touched.
+    //
+    // NOTHING configured (a first run) simply means nothing is ASKED FOR: the
+    // rosters come back empty, which is the honest answer (this setup uses no
+    // devices). The old fallback to a full boot sweep here was exactly the
+    // probing this path exists to avoid — and every picker that needs the
+    // machine (Settings · Audio & Video's Add/Edit) calls refreshDevices()/
+    // refreshAudioDevices(), which do the full walk when it is actually needed.
+    //
+    // Once a picker HAS asked for the whole machine, this is no longer ours to
+    // re-run: the picker paths own their own refresh, and a roster edit must
+    // not drag a full enumeration along with it.
+    if (!usedDeviceSweepOnly_)
+        return;
+    // Nothing new to say, and a sweep already carries this answer: leave the
+    // one in flight (or the one that landed) alone. The FIRST hand-over always
+    // sweeps, even when it hands over an empty set — that sweep is what says
+    // "this setup needs no devices", and the boot report waits on it.
+    if (!changed && !firstHandover)
+        return;
+    write(QStringLiteral("info"), QStringLiteral("Devices"),
+          QStringLiteral("boot sweep limited to the devices this setup uses: ")
+              + QStringLiteral("%1 audio, %2 video, %3 display(s)")
+                    .arg(usedAudioLabels_.size())
+                    .arg(usedVideoLabels_.size())
+                    .arg(usedDisplayNames_.size()));
+    // The boot sweep. `boot()` already enumerated once (monitors only, nothing
+    // configured yet); this is the sweep that actually carries the used set, and
+    // the pool coalesces the two when they collide.
+    enumerateDevices();
 }
 
 // ============================================================================
 // Live input metering — the UI half of the PAL's WASAPI capture tap.
 //
 // Taps are a SET keyed by device (the PAL holds one tap per waveIn id):
-// the AV screen starts a meter for every device row on the board (and one
-// for the default input on the Add dialog), each consumer reads its own
-// device's snapshot from the inputLevels list, and stopInputMeter(label)
-// releases just that device when its row goes away. Resolution re-runs on
-// every enumeration so a hot-plugged device re-binds to its requested tap.
+// the AV screen starts a meter for every device row on the board that NAMES a
+// device, each consumer reads its own device's snapshot from the inputLevels
+// list, and stopInputMeter(label) releases just that device when its row goes
+// away. Resolution re-runs on every enumeration so a hot-plugged device
+// re-binds to its requested tap.
 // A 50 ms GUI-side pump republishes inputLevels_ while any tap is live.
+//
+// An EMPTY label is refused (no device chosen ⇒ no capture session), and a
+// label that is already held is never re-resolved — see both functions below.
 // ============================================================================
-void EngineBridge::resolveAndStartMeter(const QString &deviceLabel)
+// The roster label → PAL wavein number, from the CACHED roster (audioDevices_)
+// — a live IAudio::Enumerate() here re-ran the WASAPI mix-format COM queries on
+// every kind chip / device pick, and that storm stalled the dialogs exactly like
+// the video one did. Matching is TRIMMED + CASE-INSENSITIVE: a hand-stored
+// sublabel that differs by whitespace/case used to die SILENTLY (the meter card
+// showed idle forever — "no signal" with no reason logged).
+//
+// Windows ids are "wavein:<n>"; other platforms have no WASAPI tap to address
+// (their IAudio keeps the default Unsupported metering) — never guess a number
+// from an alien id scheme.
+bool EngineBridge::resolveDeviceTap(const QString &deviceLabel, uint32_t *deviceId) const
 {
-    auto &audio = bps::platform::PlatformAccessor::Get().Audio();
-
-    // Resolve the roster label → waveIn device number from the CACHED
-    // roster (audioDevices_) — a live IAudio::Enumerate() here re-ran the
-    // WASAPI mix-format COM queries on every kind chip / device pick, and
-    // that storm stalled the dialogs exactly like the video one did.
-    // Matching is TRIMMED + CASE-INSENSITIVE now: a hand-stored sublabel
-    // that differs by whitespace/case used to die SILENTLY here (the meter
-    // card showed idle forever — "no signal" with no reason logged).
     const QString want = deviceLabel.trimmed();
-    QString id;
+    if (want.isEmpty())
+        return false;
     for (const QVariant &v : audioDevices_) {
         const QVariantMap d = v.toMap();
         if (!d.value("isInput").toBool())
             continue;
-        const bool isDefault = d.value("isDefault").toBool();
-        if (want.isEmpty() ? isDefault
-                           : d.value("label").toString().trimmed().compare(want, Qt::CaseInsensitive) == 0) {
-            id = d.value("id").toString();
-            break;
-        }
+        if (d.value("label").toString().trimmed().compare(want, Qt::CaseInsensitive) != 0)
+            continue;
+        const QString id = d.value("id").toString();
+        if (!id.startsWith(QStringLiteral("wavein:")))
+            return false;
+        if (deviceId)
+            *deviceId = static_cast<uint32_t>(id.mid(7).toULong());
+        return true;
     }
-    if (id.isEmpty()) {
+    return false;
+}
+
+void EngineBridge::resolveAndStartMeter(const QString &deviceLabel)
+{
+    auto &audio = bps::platform::PlatformAccessor::Get().Audio();
+
+    const QString want = deviceLabel.trimmed();
+    // NO DEFAULT-INPUT MODE. An empty label used to resolve to the platform's
+    // default input, so a dialog opened with nothing picked (or a card whose
+    // row names no device) opened a REAL WASAPI capture session on the default
+    // microphone: every strip that reads a snapshot animated off it, the
+    // MonitorWall's audio button lit (anyInputMetering), and the mixer graph
+    // bound that device to the device-less row. A tap belongs to a device the
+    // user actually chose.
+    if (want.isEmpty()) {
+        qWarning("EngineBridge: refused an input meter for an empty device label "
+                 "(no device selected — no capture session opened)");
+        return;
+    }
+    uint32_t deviceId = 0;
+    if (!resolveDeviceTap(want, &deviceId)) {
         // LOUD now: the earlier silent return hid the exact failure class
         // the "meter doesn't get signal" report was (unresolvable label).
-        qWarning("EngineBridge: no input device named '%s' to meter (unplugged or roster drift)",
-                 qUtf8Printable(want.isEmpty() ? QStringLiteral("<default>") : want));
+        qWarning("EngineBridge: no input device named '%s' to meter (unplugged, "
+                 "roster drift, or a non-WASAPI id)", qUtf8Printable(want));
         return;
     }
-    // Windows ids are "wavein:<n>"; other platforms have no WASAPI tap to
-    // address (their IAudio keeps the default Unsupported metering) — never
-    // guess a number from an alien id scheme.
-    if (!id.startsWith(QStringLiteral("wavein:"))) {
-        qWarning("EngineBridge: input '%s' has a non-WASAPI id (%s) — no meter on this platform",
-                 qUtf8Printable(want), qUtf8Printable(id));
-        return;
-    }
-    const uint32_t deviceId = static_cast<uint32_t>(id.mid(7).toULong());
-    if (audio.StartInputMeter(deviceId).ok())
+    // Already tapped: this call is the per-enumeration / per-sync
+    // re-resolution, so there is nothing new to announce.
+    const bool alreadyLive = inputLabels_.contains(deviceId);
+    if (audio.StartInputMeter(deviceId, want.toStdString()).ok()) {
         inputLabels_[deviceId] = want;
-    else
+        // ONE line per device tap, the mirror of the video chain's "first
+        // preview frame": it is what makes "the meters don't move" answerable
+        // from engine.log alone (no tap line = nothing ever asked for a tap;
+        // a line with no signal behind it = the device itself is silent).
+        if (!alreadyLive)
+            write(QStringLiteral("info"), QStringLiteral("AudioMeters"),
+                  QStringLiteral("input meter tap live for '%1' (wavein:%2)")
+                      .arg(want)
+                      .arg(deviceId));
+    } else
         qWarning("EngineBridge: input meter tap failed to start for '%s' (wavein:%u)",
                  qUtf8Printable(want), deviceId);
 }
@@ -1090,12 +1554,36 @@ void EngineBridge::startInputMeter(const QString &deviceLabel)
 {
     if (!bps::platform::PlatformAccessor::Installed())
         return;
+    const QString want = deviceLabel.trimmed();
+    // The refused case (see resolveAndStartMeter): a hold on "no device" must
+    // not enter requestedMeters_ either — that map is what anyInputMetering
+    // (the MonitorWall's audio button) and the pump's lifetime read, so an
+    // empty hold would light the button with nothing tapped.
+    if (want.isEmpty())
+        return;
     // Refcounted: the board row and a dialog editing the same device can
     // each hold this label open independently (see the header comment).
-    ++requestedMeters_[deviceLabel.trimmed()];
-    resolveAndStartMeter(deviceLabel);
+    const auto known = requestedMeters_.find(want);
+    const bool firstHold = known == requestedMeters_.end();
+    ++requestedMeters_[want];
+    // RE-RESOLVE ONLY FOR A LABEL NOT ALREADY HELD. Every start used to call
+    // through to the PAL, and the PAL REPLACES a live tap on Start (it joins
+    // the old capture thread and spawns a new one), so the AV board's
+    // idempotent re-sync — or a second hold on one device — tore down and
+    // rebuilt a working WASAPI session on the GUI thread for nothing (a
+    // visible hitch each time a dialog opened). A device that vanished and
+    // came back is still re-bound, by the enumeration callback.
+    if (firstHold)
+        resolveAndStartMeter(want);
     emit audioMeteringChanged();   // the overlay gates on ANY audio metering
+    ensureMeterPump();
+}
 
+// The ONE place the 50 ms pump is created (it used to be created inline at
+// every entry point, which is how a new one — the mix's own source taps —
+// could easily have been forgotten and left the mixer unfed).
+void EngineBridge::ensureMeterPump()
+{
     if (!inputMeterPump_) {
         inputMeterPump_ = new QTimer(this);
         inputMeterPump_->setInterval(50);
@@ -1114,18 +1602,39 @@ void EngineBridge::pumpMeterSnapshot()
         return;   // platform torn down mid-pump (shutdown) — idle out
     auto &a = bps::platform::PlatformAccessor::Get().Audio();
     QVariantList levels;
-    for (auto it = inputLabels_.constBegin(); it != inputLabels_.constEnd(); ++it) {
-        const uint32_t id = it.key();
-        const auto snap = a.InputLevels(id);
+    // ONE snapshot shape for both carriers: a capture DEVICE tap and a STREAM
+    // tap (a video/NDI row's own audio) publish identically under their own
+    // label, so every reader — the AV board's strips, the Media pane's L/R
+    // pills, a bus's channel rows — resolves a level the same way whichever
+    // kind of source it is looking at.
+    const auto appendSnapshot = [&](uint32_t tapId, const QString &label) {
+        const auto snap = a.InputLevels(tapId);
         QVariantList peaks;
         QVariantList rms;
         for (int c = 0; c < snap.channelCount; ++c) {
             peaks.append(snap.peaks[c]);
             rms.append(snap.rms[c]);
         }
+        // The ONE line that says real audio is flowing (see the header): a tap
+        // line alone only proves a tap was requested, not that the source is
+        // producing anything. Loud on purpose — it is the difference between
+        // "the meter is broken" and "the microphone/file is silent".
+        if (!firstMeterSignal_ && snap.channelCount > 0) {
+            for (int c = 0; c < snap.channelCount; ++c) {
+                if (snap.peaks[c] <= 0.0005f)
+                    continue;
+                firstMeterSignal_ = true;
+                write(QStringLiteral("info"), QStringLiteral("AudioMeters"),
+                      QStringLiteral("first meter signal: '%1' %2 channel(s), peak=%3")
+                          .arg(label)
+                          .arg(snap.channelCount)
+                          .arg(static_cast<double>(snap.peaks[c]), 0, 'f', 3));
+                break;
+            }
+        }
         levels.append(QVariantMap{
-            {QStringLiteral("deviceId"), (int)id},
-            {QStringLiteral("label"), it.value()},
+            {QStringLiteral("deviceId"), (int)tapId},
+            {QStringLiteral("label"), label},
             {QStringLiteral("channelCount"), snap.channelCount},
             {QStringLiteral("layout"),
              QString::fromLatin1(bps::platform::IAudio::InputMeterLevels::ToString(snap.layout))},
@@ -1134,118 +1643,27 @@ void EngineBridge::pumpMeterSnapshot()
             {QStringLiteral("peaks"), peaks},
             {QStringLiteral("rms"), rms},
         });
-    }
+    };
+    for (auto it = inputLabels_.constBegin(); it != inputLabels_.constEnd(); ++it)
+        appendSnapshot(it.key(), it.value());
+    for (auto it = streamTapIds_.constBegin(); it != streamTapIds_.constEnd(); ++it)
+        appendSnapshot(it.value(), it.key());
     inputLevels_ = std::move(levels);
     emit inputLevelsChanged();
 
-    // The mixer eats what the taps see: every published snapshot becomes the
-    // corresponding graph source node's live level (the render callback's
-    // carrier). EngineBridge owns the node-id mapping (roster row → asrc:<id>).
-    feedMixerLevels();
-
-    // The OUTPUT (program-mix) tap rides the same pump: one snapshot from
-    // the loopback capture on the render endpoint.
-    if (outputMetering_) {
-        const auto osnap = a.OutputLevels(outputMeterDevice_);
-        QVariantList opeaks;
-        QVariantList orms;
-        for (int c = 0; c < osnap.channelCount; ++c) {
-            opeaks.append(osnap.peaks[c]);
-            orms.append(osnap.rms[c]);
-        }
-        QVariantMap next{
-            {QStringLiteral("channelCount"), osnap.channelCount},
-            {QStringLiteral("peaks"), opeaks},
-            {QStringLiteral("rms"), orms},
-            {QStringLiteral("layout"),
-             QString::fromLatin1(bps::platform::IAudio::InputMeterLevels::ToString(osnap.layout))},
-            {QStringLiteral("framesCaptured"), (qulonglong)osnap.framesCaptured},
-        };
-        if (next != outputLevels_) {
-            outputLevels_ = std::move(next);
-            emit outputLevelsChanged();
-        }
-    }
-}
-
-// ---- OUTPUT metering (the program mix) -------------------------------------
-// One loopback tap on the DEFAULT render endpoint (waveout:0's endpoint —
-// the roster marks it default; falling back to the first output device). The
-// pump reuses the input-meter cadence (50 ms) and publishes the same snapshot
-// shape under outputLevels_.
-void EngineBridge::startOutputMeter()
-{
-    if (!bps::platform::PlatformAccessor::Installed())
-        return;
-    // REFCOUNTED: several consumers (every visible active tile) can hold the
-    // program-mix meter; the tap dies only when the last releases via
-    // maybeStopOutputMeter().
-    ++outputMeterRefs_;
-    if (outputMetering_)
-        return;
-    auto &audio = bps::platform::PlatformAccessor::Get().Audio();
-    // The DEFAULT render endpoint's roster number.
-    uint32_t id = UINT32_MAX;
-    for (const QVariant &v : audioDevices_) {
-        const QVariantMap d = v.toMap();
-        if (!d.value("isInput").toBool() && d.value("isDefault").toBool()) {
-            const QString did = d.value("id").toString();
-            if (did.startsWith(QStringLiteral("waveout:")))
-                id = did.mid(8).toUInt();
-            break;
-        }
-    }
-    if (id == UINT32_MAX) {
-        for (const QVariant &v : audioDevices_) {
-            const QVariantMap d = v.toMap();
-            if (!d.value("isInput").toBool()) {
-                const QString did = d.value("id").toString();
-                if (did.startsWith(QStringLiteral("waveout:")))
-                    id = did.mid(8).toUInt();
-                break;
-            }
-        }
-    }
-    if (id == UINT32_MAX || !audio.StartOutputMeter(id).ok()) {
-        qWarning("EngineBridge: output meter unavailable (no render endpoint / no loopback)");
-        return;
-    }
-    outputMeterDevice_ = id;
-    outputMetering_ = true;
-    emit outputMeteringChanged();
-    emit audioMeteringChanged();
-    // The pump is SHARED with the input meters (same 50 ms cadence) —
-    // create it here directly when no input meter made it first (do NOT
-    // start a default-input tap as a side effect).
-    if (!inputMeterPump_) {
-        inputMeterPump_ = new QTimer(this);
-        inputMeterPump_->setInterval(50);
-        connect(inputMeterPump_, &QTimer::timeout, this, [this]() { pumpMeterSnapshot(); });
-    }
-    if (!inputMeterPump_->isActive())
-        inputMeterPump_->start();
-}
-
-void EngineBridge::stopOutputMeter()
-{
-    outputMeterRefs_ = 0;
-    if (!outputMetering_)
-        return;
-    if (bps::platform::PlatformAccessor::Installed())
-        (void)bps::platform::PlatformAccessor::Get().Audio().StopOutputMeter(outputMeterDevice_);
-    outputMetering_ = false;
-    outputLevels_ = QVariantMap{};
-    emit outputLevelsChanged();
-    emit outputMeteringChanged();
-    emit audioMeteringChanged();
-}
-
-void EngineBridge::maybeStopOutputMeter()
-{
-    if (outputMeterRefs_ > 0)
-        --outputMeterRefs_;
-    if (outputMeterRefs_ == 0)
-        stopOutputMeter();
+    // NOTE (2026-10, removal): this pump used to end with refreshMixSources()
+    // and a program-mix (outputLevels) block. Both went with the unreachable
+    // engine-audio path: refreshMixSources() ACQUIRED a capture tap per routed
+    // source (PAL IAudio::StartInputMeter — a real WASAPI session), and its only
+    // consumer was the render callback of setAudioRender, which nothing called.
+    // So the result was a capture session on every routed input, opened silently
+    // ~20×/s, on nothing but the strength of a METER tick — the "go live is
+    // opening WASAPI" report (GO LIVE starts this pump for every active tile's
+    // meter). The output levels it published came from AudioMixer::ProgramLevel,
+    // which only ever updated inside that same render callback — which is why
+    // they read a flat zero while the monitor tiles' bars were really driven by
+    // the input taps below. The pump is now a pure read: it publishes snapshots
+    // and touches no device.
 }
 
 void EngineBridge::stopInputMeter(const QString &deviceLabel)
@@ -1275,9 +1693,8 @@ void EngineBridge::stopInputMeter(const QString &deviceLabel)
             ++it;
     }
     // No requested meters left: stop the pump and publish the empty set —
-    // unless the OUTPUT meter still needs it (the same pump drives its
-    // loopback snapshots).
-    if (requestedMeters_.isEmpty() && !outputMetering_) {
+    // unless a stream meter is still riding it.
+    if (requestedMeters_.isEmpty() && requestedStreams_.isEmpty()) {
         if (inputMeterPump_)
             inputMeterPump_->stop();
         inputLabels_.clear();
@@ -1292,9 +1709,8 @@ void EngineBridge::stopInputMeter(const QString &deviceLabel)
 void EngineBridge::stopAllInputMeters()
 {
     requestedMeters_.clear();
-    // The output (program-mix) meter shares this pump — only stop it when
-    // nothing on the output side is metering either.
-    if (inputMeterPump_ && !outputMetering_)
+    // Stream meters share this pump — only stop it when nothing else needs it.
+    if (inputMeterPump_ && requestedStreams_.isEmpty())
         inputMeterPump_->stop();
     if (bps::platform::PlatformAccessor::Installed()) {
         auto &audio = bps::platform::PlatformAccessor::Get().Audio();
@@ -1307,11 +1723,11 @@ void EngineBridge::stopAllInputMeters()
         emit inputLevelsChanged();
     }
     // stopInputMeter() (the single-device release, above) emits this —
-    // this whole-roster release didn't, so anyAudioMetering/anyInputMetering
-    // bindings (the MonitorWall toolbar's audio button, the monitor tiles'
-    // meter-bar visibility) never re-evaluated: requestedMeters_ genuinely
-    // went empty, but nothing told QML to re-read it, so the button stayed
-    // stuck lit after a "stop all" click.
+    // this whole-roster release didn't, so anyInputMetering bindings (the
+    // MonitorWall toolbar's audio button, the monitor tiles' meter-bar
+    // visibility) never re-evaluated: requestedMeters_ genuinely went empty,
+    // but nothing told QML to re-read it, so the button stayed stuck lit after
+    // a "stop all" click.
     emit audioMeteringChanged();
 }
 
@@ -1332,6 +1748,149 @@ QImage EngineBridge::previewFrameFor(const QString &label)
     // detection reads exactly what the tiles' Image requests would read.
     const QString devId = previewIds_.value(label.trimmed());
     return devId.isEmpty() ? QImage{} : latestPreviewFrame(devId);
+}
+
+// The status light's probe (see the header): the cached answer when there is
+// one, otherwise a RATE-LIMITED ping that NAMES the source, so the sweep that
+// answers it is asked for that device instead of hoping it is in the used set.
+bool EngineBridge::inputSourceAlive(const QString &label, const QString &kind)
+{
+    if (inputSourceReachable(label, kind))
+        return true;
+    const QString want = label.trimmed();
+    if (!bps::platform::PlatformAccessor::Installed())
+        return false;
+    // A Media-kind source is a FILE: it does not appear in any device sweep, so
+    // there is nothing to ping for it (inputSourceReachable already answered
+    // from the path itself). NDI is the same: its runtime owns its own probe.
+    if (kind == QLatin1String("media"))
+        return false;
+    // NOTHING NAMED IS NOTHING TO ASK FOR: an empty label means the row names no
+    // device, which no sweep can turn into an answer — pinging for it would walk
+    // the machine every five seconds for the rest of the session and change
+    // nothing (the "no device" answer is the honest one).
+    if (want.isEmpty())
+        return false;
+    const QString &ask = want;
+    if (!lightProbeLogged_.contains(kind + QLatin1Char('|') + ask)) {
+        lightProbeLogged_.insert(kind + QLatin1Char('|') + ask);
+        // ONE line per source per session — the diagnostic that a light is not
+        // answering ("I expect to see all green" and the rosters disagree about
+        // what this source is called are otherwise indistinguishable from a
+        // device that is genuinely gone).
+        const auto names = [](const QVariantList &roster, int cap) {
+            QStringList out;
+            for (const QVariant &v : roster) {
+                out << v.toMap().value("label").toString();
+                if (out.size() >= cap)
+                    break;
+            }
+            return out.join(QStringLiteral(" | "));
+        };
+        // Through the engine LOG, not qInfo: this app's log is the single source
+        // of truth for a run's health (and the only durable record — there is no
+        // console in a normal launch), and this line is exactly the kind of
+        // one-shot diagnostic the other chains leave there.
+        write(QStringLiteral("info"), QStringLiteral("Devices"),
+              QStringLiteral("status light for '%1' (%2) is not in the device or screen ")
+                  .arg(ask, kind.isEmpty() ? QStringLiteral("no kind") : kind)
+              + QStringLiteral("rosters — pinging the device set for it. Audio [%1] Video [%2] Screen [%3]")
+                    .arg(names(audioDevices_, 8), names(videoDevices_, 8),
+                         names(screenDevices_, 8)));
+    }
+    // 5 s: long enough that a card re-evaluating at the pump's rate asks once,
+    // short enough that a device plugged in while the operator watches the card
+    // comes right within a few seconds. The refresh itself is refused outright
+    // while a scan is in flight, so this can never stack enumerations.
+    constexpr qint64 kLightPingGapMs = 5000;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (lastLightPingMs_ > 0 && now - lastLightPingMs_ < kLightPingGapMs)
+        return false;
+    if (deviceEnumerationBusy_)
+        return false;
+    lastLightPingMs_ = now;
+    // The ping is the SAME sweep boot ran, with this source's label added to
+    // what it walks (see enumeratePlatformDevicesAsync): the used-device filter
+    // STAYS ON, so a status light still never opens or activates a device it is
+    // not asking about, and the whole walk happens on the device-enumeration
+    // worker. Several lights asking between two sweeps share the next one —
+    // each ask is a label in the same targeted walk, not another enumeration.
+    if (!lightAsks_.contains(ask) && lightAsks_.size() < 16)
+        lightAsks_ << ask;
+    // ...QUEUED, never inline. This probe is called FROM a QML binding (the bus
+    // status light), and enumerateDevices() ends by emitting devicesChanged —
+    // synchronously, on its NDI half. A binding that triggers the very signal
+    // whose handler bumps the revision it reads is a binding loop, and QML says
+    // so out loud ("Binding loop detected for property busStatus"). Deferring by
+    // one event-loop turn keeps the ask and lets the binding finish first.
+    QMetaObject::invokeMethod(this, [this]() { enumerateDevices(); }, Qt::QueuedConnection);
+    return false;
+}
+
+QString EngineBridge::inputDelivery(const QString &label, const QString &kind)
+{
+    // The app's own taps, read for what they have actually DELIVERED — no device
+    // is opened, no enumeration runs, nothing is asked of the PAL (see the header).
+    const QString want = label.trimmed();
+    if (want.isEmpty())
+        return {};
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const auto verdict = [now](qint64 deliveredAt) {
+        return now - deliveredAt <= kDeliveryWindowMs ? QStringLiteral("ok")
+                                                      : QStringLiteral("starved");
+    };
+    if (kind == QLatin1String("audio")) {
+        // A meter tap: the capture session that is running for this label is the
+        // evidence. Its snapshots are level data, so "silent" is real data — a
+        // quiet room and a muted mic both read ok, and only a hold whose tap
+        // never started (or a device that went away under it) reads starved.
+        if (!requestedMeters_.contains(want))
+            return {};   // nothing is pulling from it
+        for (auto it = inputLabels_.constBegin(); it != inputLabels_.constEnd(); ++it)
+            if (it.value() == want)
+                return QStringLiteral("ok");
+        return QStringLiteral("starved");
+    }
+    // A VIDEO tap (camera, display/window, NDI receiver): the shared owner table
+    // says whether the app holds one, and the tap key — device id for a capture
+    // tap, source name for an NDI receiver — finds the stamp its frames write.
+    if (!previewOwners_.contains(want) || previewOwners_.value(want).isEmpty())
+        return {};   // nothing is pulling from it
+    const QString key = previewIds_.value(want, want);
+    // HELD IS NOT WATCHED (see kWatchWindowMs): a tap nothing asked for frames
+    // recently has no live evidence to offer — its silence is "nobody looked",
+    // not "nothing came" — so the light keeps its presence answer instead of
+    // painting a good source amber because its card scrolled out of view.
+    const qint64 pulledAt = previewPulledAt_.value(key, 0);
+    if (pulledAt == 0 || now - pulledAt > kWatchWindowMs)
+        return {};
+    return verdict(previewDeliveredAt_.value(key, 0));
+}
+
+qint64 EngineBridge::previewDeliveryAgeMs(const QString &label) const
+{
+    const QString key = previewIds_.value(label.trimmed(), label.trimmed());
+    const qint64 at = previewDeliveredAt_.value(key, 0);
+    return at == 0 ? -1 : QDateTime::currentMSecsSinceEpoch() - at;
+}
+
+qint64 EngineBridge::previewPullAgeMs(const QString &label) const
+{
+    const QString key = previewIds_.value(label.trimmed(), label.trimmed());
+    const qint64 at = previewPulledAt_.value(key, 0);
+    return at == 0 ? -1 : QDateTime::currentMSecsSinceEpoch() - at;
+}
+
+QString EngineBridge::previewFailure(const QString &deviceLabel)
+{
+    const QString label = deviceLabel.trimmed();
+    if (label.isEmpty() || !bps::platform::PlatformAccessor::Installed())
+        return {};
+    const QString devId = previewIds_.value(label);
+    if (devId.isEmpty())
+        return {};   // no tap: "not started" is the caller's business, not a failure
+    return QString::fromStdString(
+        bps::platform::PlatformAccessor::Get().Video().PreviewFailure(devId.toStdString()));
 }
 
 // The last frame each source actually delivered, by tap key (device id for
@@ -1367,11 +1926,17 @@ QImage EngineBridge::latestPreviewFrame(const QString &deviceId)
     if (!bps::platform::PlatformAccessor::Installed())
         return {};
     const std::string id = deviceId.toStdString();
+    const QString key = QString::fromStdString(id);
+    // WATCHED (see kWatchWindowMs): somebody asked the PAL for this tap's newest
+    // frame just now, whether or not one came back. Stamped BEFORE the empty
+    // test on purpose — an empty answer from a tap nothing is rendering is not
+    // evidence of anything, and only this clock can tell the two apart.
+    previewPulledAt_[key] = QDateTime::currentMSecsSinceEpoch();
     const std::vector<uint8_t> jpeg =
         bps::platform::PlatformAccessor::Get().Video().PreviewFrame(id);
     if (jpeg.empty())
         // HOLD-LAST-FRAME: a transient empty pull must not blink the pane (see heldPreviewFrame)
-        return heldPreviewFrame(QString::fromStdString(id));
+        return heldPreviewFrame(key);
     // DECODE-ONCE CACHE — the hot path that killed the UI: requestImage
     // runs on the GUI thread (synchronous QQuickImageProvider), and several
     // consumers (board thumb + dialog pane) poll the same device at 8-15 Hz
@@ -1381,7 +1946,17 @@ QImage EngineBridge::latestPreviewFrame(const QString &deviceId)
     // pane whenever consecutive frames compressed to the same length), and
     // hand every consumer a cheap COW copy.
     const QByteArray raw(reinterpret_cast<const char *>(jpeg.data()), int(jpeg.size()));
-    const QString key = id.c_str();
+    // THE DELIVERY STAMP (see inputDelivery): the PAL handed over a NON-EMPTY
+    // JPEG, so this tap delivered a frame — whether or not its bytes differ from
+    // the last one. Stamping inside the changed-bytes branch below (where it
+    // first lived) made a STILL feed read as no feed at all: a covered lens, a
+    // static desktop, or any synthetic pattern encodes to byte-identical JPEGs
+    // frame after frame, the decode-once cache then early-returns on every pull,
+    // and the light sat amber over a pane that was showing the picture (the same
+    // pull sets the service's `producing_`). The hold-last-frame path above never
+    // stamps — an empty pull is not a delivery — which is what makes a tap whose
+    // device went away read starved instead of fine.
+    previewDeliveredAt_[key] = QDateTime::currentMSecsSinceEpoch();
     quint32 hash = 2166136261u;
     for (char b : raw) {
         hash ^= static_cast<quint8>(b);
@@ -1478,11 +2053,8 @@ bool EngineBridge::startVideoPreview(const QString &deviceLabel, const QString &
     auto &video = bps::platform::PlatformAccessor::Get().Video();
 
     // Resolve the roster label → device id from the CACHED roster
-    // (videoDevices_, refreshed at boot/hot-plug/dialog-open) — calling MF
-    // Enumerate() here was the second UI freeze: it activates every camera
-    // synchronously, hundreds of ms each, and this runs on every dialog
-    // open, mode re-pick, and board row construction. A label the cache
-    // doesn't know (first hot-plug race) falls back to one live enumeration.
+    // (videoDevices_, refreshed at boot/hot-plug). Do not enumerate
+    // here: this runs during QML board construction and can block on camera drivers.
     const QString want = deviceLabel.trimmed();
     QString id;
     for (const QVariant &v : videoDevices_) {
@@ -1490,14 +2062,6 @@ bool EngineBridge::startVideoPreview(const QString &deviceLabel, const QString &
         if (d.value("label").toString() == want) {
             id = d.value("id").toString();
             break;
-        }
-    }
-    if (id.isEmpty()) {
-        for (const auto &d : video.Enumerate()) {
-            if (qstr(d.name) == want) {
-                id = qstr(d.id);
-                break;
-            }
         }
     }
     if (id.isEmpty()) {
@@ -1535,10 +2099,14 @@ bool EngineBridge::startVideoPreview(const QString &deviceLabel, const QString &
     if (!needRestart)
         return true;
     (void)video.StopPreview(id.toStdString());
-    if (!video.StartPreview(id.toStdString(), effectiveMode.toStdString()).ok()) {
+    if (!video.StartPreview(id.toStdString(), effectiveMode.toStdString(),
+                            want.toStdString()).ok()) {
         qWarning("EngineBridge: camera preview tap failed for '%s'", qUtf8Printable(want));
         return false;
     }
+    // A NEW tap starts with the warm-up grace on its clock (see inputDelivery):
+    // opening a camera takes a moment, and "no frame yet" is not "no frames".
+    previewDeliveredAt_[id] = QDateTime::currentMSecsSinceEpoch();
     return true;
 }
 
@@ -1555,6 +2123,8 @@ void EngineBridge::stopVideoPreview(const QString &deviceLabel, const QString &o
     const QString id = previewIds_.take(want);
     previewModes_.remove(want);
     previewLastFrame_.remove(id);   // tap gone — the held frame must not resurrect
+    previewDeliveredAt_.remove(id); // ...and neither may its delivery stamp
+    previewPulledAt_.remove(id);    // ...nor its "something was watching" clock
     if (id.isEmpty() || !bps::platform::PlatformAccessor::Installed())
         return;
     (void)bps::platform::PlatformAccessor::Get().Video().StopPreview(id.toStdString());
@@ -1569,41 +2139,45 @@ void EngineBridge::stopVideoPreview(const QString &deviceLabel, const QString &o
 // monitor ids can never collide with camera symlinks.
 bool EngineBridge::inputSourceReachable(const QString &label, const QString &kind)
 {
-    // QUIET probe, same chains startScreenPreview/startVideoPreview resolve
-    // through: cached roster first, then one live enumeration. NO warnings —
-    // the caller (a Media card's internal preview) draws the "unreachable"
-    // state instead of toasting.
+    // QUIET probe using the current cached roster (plus, for a Media-kind
+    // source, the filesystem). This runs in output and Media UI flows, so it
+    // must never enumerate hardware synchronously.
+    if (!bps::platform::PlatformAccessor::Installed())
+        return false;
     const QString want = label.trimmed();
-    if (want.isEmpty() || !bps::platform::PlatformAccessor::Installed())
-        return false;
-    auto &video = bps::platform::PlatformAccessor::Get().Video();
-    if (kind == QLatin1String("screen")) {
-        for (const QVariant &v : screenDevices_) {
+    // The label as a FILE — a Media-kind source names a video/audio file, not a
+    // device, so its "is it still there" question has nothing to do with any
+    // roster: it is a path, and the answer is the path's own.
+    const auto fileIsThere = [&want]() {
+        return !want.isEmpty() && QFileInfo::exists(want);
+    };
+    if (kind == QLatin1String("media"))
+        return fileIsThere();
+    // One roster lookup, shared by every kind below: `flag` names a boolean the
+    // entry must also carry (the audio roster's isInput), empty for the rest.
+    const auto inRoster = [&want](const QVariantList &roster, const char *flag) {
+        for (const QVariant &v : roster) {
             const QVariantMap d = v.toMap();
+            if (flag && !d.value(QLatin1String(flag)).toBool())
+                continue;
             if (d.value("label").toString().trimmed().compare(want, Qt::CaseInsensitive) == 0)
                 return true;
         }
-        for (const auto &w : video.EnumerateWindows())
-            if (qstr(w.title).trimmed().compare(want, Qt::CaseInsensitive) == 0)
-                return true;
-        for (const auto &m : bps::platform::PlatformAccessor::Get().Monitor().Enumerate()) {
-            const QString name = qstr(m.name);
-            if (name == want || (name.isEmpty() && qstr(m.id) == want))
-                return true;
-        }
         return false;
-    }
-    if (kind == QLatin1String("camera")) {
-        for (const QVariant &v : videoDevices_) {
-            const QVariantMap d = v.toMap();
-            if (d.value("label").toString().trimmed().compare(want, Qt::CaseInsensitive) == 0)
-                return true;
-        }
-        for (const auto &d : video.Enumerate())
-            if (qstr(d.name).trimmed().compare(want, Qt::CaseInsensitive) == 0)
-                return true;
+    };
+    // NO LABEL, NOTHING TO CHECK. Every caller in the app means "a row with no
+    // device chosen" by an empty label (the meter tap refuses one, the boot
+    // hand-over skips one), so this is not-available — asking "does this machine
+    // have any input at all" instead would answer for a row that names nothing,
+    // and would flip that row's slash state from "can't reach" to "fine".
+    if (want.isEmpty())
         return false;
-    }
+    if (kind == QLatin1String("audio"))
+        return inRoster(audioDevices_, "isInput");
+    if (kind == QLatin1String("screen"))
+        return inRoster(screenDevices_, nullptr);
+    if (kind == QLatin1String("camera"))
+        return inRoster(videoDevices_, nullptr);
     if (kind == QLatin1String("ndi")) {
         // A source is reachable while the engine's discovery roster knows
         // it (the same full-name string the roster stores). An NDI runtime
@@ -1612,32 +2186,17 @@ bool EngineBridge::inputSourceReachable(const QString &label, const QString &kin
         // that could never produce frames.
         if (!booted() || !ndiAvailable_)
             return false;
-        for (const QVariant &v : ndiSources_) {
-            const QVariantMap d = v.toMap();
-            if (d.value("label").toString().trimmed().compare(want, Qt::CaseInsensitive) == 0)
-                return true;
-        }
-        return false;
+        return inRoster(ndiSources_, nullptr);
     }
-    if (kind == QLatin1String("audio")) {
-        // The WASAPI roster (enumerateDevices fills it; hot-plug refreshes
-        // it). An empty label means the DEFAULT input — reachable while any
-        // input device exists.
-        if (want.isEmpty()) {
-            for (const QVariant &v : audioDevices_)
-                if (v.toMap().value("isInput").toBool())
-                    return true;
-            return false;
-        }
-        for (const QVariant &v : audioDevices_) {
-            const QVariantMap d = v.toMap();
-            if (d.value("isInput").toBool()
-                && d.value("label").toString().trimmed().compare(want, Qt::CaseInsensitive) == 0)
-                return true;
-        }
-        return false;
-    }
-    return false;
+    // NO KIND, OR ONE THIS DOES NOT SPELL: not a reason to answer "gone". Ask
+    // every roster, and the filesystem last. The card knows what it routed; a
+    // kind string that failed to travel (an empty role, a value from a newer
+    // row) must not be the thing that pins that card's light amber forever.
+    return inRoster(screenDevices_, nullptr)
+        || inRoster(videoDevices_, nullptr)
+        || inRoster(audioDevices_, nullptr)
+        || inRoster(ndiSources_, nullptr)
+        || fileIsThere();
 }
 
 bool EngineBridge::startScreenPreview(const QString &monitorLabel, const QString &owner)
@@ -1652,8 +2211,7 @@ bool EngineBridge::startScreenPreview(const QString &monitorLabel, const QString
     if (diag) {
         QStringList roster;
         for (const QVariant &v : screenDevices_)
-            roster << v.toMap().value("label").toString();
-        qInfo("EngineBridge[diag] startScreenPreview want='%s' owner=%s roster=%s",
+            roster << v.toMap().value("label").toString();            qInfo("EngineBridge[diag] startScreenPreview want='%s' owner=%s roster=%s",
               qUtf8Printable(want), qUtf8Printable(owner), qUtf8Printable(roster.join(" | ")));
     }
     QString id;
@@ -1667,43 +2225,14 @@ bool EngineBridge::startScreenPreview(const QString &monitorLabel, const QString
             break;
         }
     }
-    // STALE LABEL SELF-HEAL (the sibling of the dead-id heal below): the
-    // boot-time roster may not hold the label AT ALL — a window opened or
-    // retitled after the last enumerateDevices (the output-preview take
-    // passes the row's stored sublabel straight here, possibly hours after
-    // boot). Resolve fresh before refusing: windows re-enumerate live,
-    // monitors are stable but cheap to re-ask.
     if (id.isEmpty()) {
-        auto &platform = bps::platform::PlatformAccessor::Get();
-        for (const auto &w : platform.Video().EnumerateWindows()) {
-            if (qstr(w.title).trimmed().compare(want, Qt::CaseInsensitive) == 0) {
-                id = qstr(w.id);
-                break;
-            }
-        }
-        if (id.isEmpty()) {
-            for (const auto &m : platform.Monitor().Enumerate()) {
-                const QString name = qstr(m.name);
-                if (name == want || (name.isEmpty() && qstr(m.id) == want)) {
-                    id = qstr(m.id);
-                    break;
-                }
-            }
-        }
-        if (id.isEmpty()) {
-            // DIAG: with VGR_PREVIEW_DIAG=1 a miss prints the titles live
-            // enumeration DID see — the difference is the diagnosis (title
-            // drift vs an OS filter hiding the window).
-            if (diag) {
-                QStringList live;
-                for (const auto &w : platform.Video().EnumerateWindows())
-                    live << qstr(w.title);
-                qInfo("EngineBridge[diag] label miss: live windows=%s",
-                      qUtf8Printable(live.join(" | ")));
-            }
-            qWarning("EngineBridge: no display named '%s' to preview", qUtf8Printable(want));
-            return false;
-        }
+        // A window may have opened since the last roster snapshot. Queue a
+        // refresh and let the caller retry once devicesChanged is emitted;
+        // never run EnumWindows/monitor enumeration inside a take or render UI.
+        if (!deviceEnumerationBusy_)
+            enumerateDevices();
+        qWarning("EngineBridge: no cached display named '%s' to preview yet", qUtf8Printable(want));
+        return false;
     }
     previewOwners_[want].insert(owner);
     if (previewIds_.contains(want)) {
@@ -1716,54 +2245,13 @@ bool EngineBridge::startScreenPreview(const QString &monitorLabel, const QString
         return bps::platform::PlatformAccessor::Get().Video()
                    .StartScreenPreview(tapId.toStdString()).ok();
     };
-    // CACHED-DEAD-ID PRE-CHECK: a cached "win:<hwnd>" can be a DEAD window —
-    // the user closes the app and reopens it, enumeration re-runs under the
-    // SAME title with a NEW hwnd, but previewIds_ still serves the old id and
-    // the tap below would fail and unwind the whole take. Validate a cached
-    // window id by title right now: if the live window with this title has a
-    // different hwnd, retarget the tap to the fresh id before starting.
-    if (id.startsWith(QStringLiteral("win:"))) {
-        QString fresh = id;
-        for (const auto &w : bps::platform::PlatformAccessor::Get().Video().EnumerateWindows()) {
-            if (qstr(w.title).trimmed().compare(want, Qt::CaseInsensitive) == 0) {
-                fresh = qstr(w.id);
-                break;
-            }
-        }
-        if (fresh != id) {
-            if (diag)
-                qInfo("EngineBridge[diag] cached id '%s' stale -> live '%s'",
-                      qUtf8Printable(id), qUtf8Printable(fresh));
-            id = fresh;
-        }
-    }
     const bool ok = startTap(id);
-    // STALE WINDOW IDS SELF-HEAL HERE: a "win:<hwnd>" id captured at
-    // enumeration time dies with the window; the app re-opening re-enumerates
-    // under the SAME title with a NEW hwnd. Monitor ids ("\\.\DISPLAY1") are
-    // stable, so this only ever bites window rows — and without the retry the
-    // failed id would stay cached in previewIds_ and POISON the label: every
-    // later pick of that window title silently reused the dead hwnd and the
-    // pane stayed dark forever (the "shows in the dropdown, never previews"
-    // report). One fresh enumeration + one title match retries the tap.
-    QString usedId = id;
-    if (!ok && id.startsWith(QStringLiteral("win:"))) {
-        for (const auto &w : bps::platform::PlatformAccessor::Get().Video().EnumerateWindows()) {
-            if (qstr(w.title).trimmed().compare(want, Qt::CaseInsensitive) == 0) {
-                usedId = qstr(w.id);
-                break;
-            }
-        }
-        if (usedId != id && startTap(usedId))
-            qInfo("EngineBridge: screen tap '%s' re-resolved to fresh id '%s'",
-                  qUtf8Printable(want), qUtf8Printable(usedId));
-        else
-            usedId = id;   // still dead — roll back below so a later pick retries
-    }
-    if (ok || usedId != id) {
-        previewIds_[want] = usedId;
+    if (ok) {
+        previewIds_[want] = id;
+        // Warm-up grace on this tap's clock (see inputDelivery).
+        previewDeliveredAt_[id] = QDateTime::currentMSecsSinceEpoch();
         qInfo("EngineBridge: screen tap '%s' -> id '%s' started", qUtf8Printable(want),
-              qUtf8Printable(usedId));
+              qUtf8Printable(id));
         return true;
     }
     // Start FAILED: release this owner's claim too — a claim with no tap means
@@ -1793,6 +2281,8 @@ void EngineBridge::stopScreenPreview(const QString &monitorLabel, const QString 
     previewOwners_.erase(it);
     const QString id = previewIds_.take(want);
     previewLastFrame_.remove(id);   // tap gone — the held frame must not resurrect
+    previewDeliveredAt_.remove(id); // ...and neither may its delivery stamp
+    previewPulledAt_.remove(id);    // ...nor its "something was watching" clock
     if (id.isEmpty() || !bps::platform::PlatformAccessor::Installed())
         return;
     (void)bps::platform::PlatformAccessor::Get().Video().StopScreenPreview(id.toStdString());
@@ -1809,11 +2299,18 @@ void EngineBridge::stopAllVideoPreviews()
     previewModes_.clear();
     previewOwners_.clear();
     previewLastFrame_.clear();   // every tap died with this call — held frames must not resurrect
+    previewDeliveredAt_.clear();  // ...and no tap may keep its delivery stamp either
     // The NDI receivers are ENGINE objects, not PAL taps — the AV screen's
     // teardown releases them here too, so a settings-screen close can never
     // leak a live network receiver.
-    if (bps::broadcast::BroadcastEngine::Instance().NdiStatus().state
-        == bps::broadcast::BroadcastEngine::NdiRuntimeStatus::State::Ready) {
+    // Gated on the ATOMIC feature switch, NOT NdiStatus(). NdiStatus() takes
+    // the BroadcastEngine mutex and runs a live vendor-SDK probe, and this runs
+    // on the GUI thread from a QML handler (AudioVideoScreen's teardown) — the
+    // captured hang showed the GUI thread blocked exactly here, waiting for the
+    // provider mutex behind NDI SDK work. NdiEnabled() is a lock-free atomic;
+    // when it is on, the receiver set is exactly what we are tearing down, and
+    // DisconnectReceiver on an absent id is a no-op.
+    if (bps::broadcast::BroadcastEngine::Instance().NdiEnabled()) {
         for (const QString &recvId : ndiTaps_.values())
             (void)bps::broadcast::BroadcastEngine::Instance().DisconnectReceiver(
                 recvId.toStdString());
@@ -1867,6 +2364,9 @@ bool EngineBridge::startNdiPreview(const QString &sourceName, const QString &own
     }
     const QString recvId = qstr(recv.value());   // engine id (std::string) → QString
     ndiTaps_.insert(want, recvId);
+    // Warm-up grace on the receiver's clock (see inputDelivery): an NDI feed has
+    // a network between it and its first frame.
+    previewDeliveredAt_[want] = QDateTime::currentMSecsSinceEpoch();
     qInfo("EngineBridge: NDI receiver '%s' -> %s started", qUtf8Printable(want),
           qUtf8Printable(recvId));
     return true;
@@ -1884,6 +2384,8 @@ void EngineBridge::stopNdiPreview(const QString &sourceName, const QString &owne
     previewOwners_.erase(it);
     const QString recvId = ndiTaps_.take(want);
     previewLastFrame_.remove(want);   // receiver gone — the held frame must not resurrect
+    previewDeliveredAt_.remove(want); // ...and neither may its delivery stamp
+    previewPulledAt_.remove(want);    // ...nor its "something was watching" clock
     if (!recvId.isEmpty() && booted())
         (void)bps::broadcast::BroadcastEngine::Instance().DisconnectReceiver(recvId.toStdString());
 }
@@ -1894,6 +2396,9 @@ QImage EngineBridge::previewNdiFrameFor(const QString &sourceName)
     const QString recvId = ndiTaps_.value(want);
     if (recvId.isEmpty() || !booted())
         return {};   // no receiver / engine gone — the caller keeps its placeholder
+    // WATCHED (see kWatchWindowMs), same as the capture taps: the receiver was
+    // asked for its newest frame just now.
+    previewPulledAt_[want] = QDateTime::currentMSecsSinceEpoch();
     auto &broadcast = bps::broadcast::BroadcastEngine::Instance();
     bps::broadcast::VideoFrameInfo info;
     std::vector<uint8_t> payload;
@@ -1902,8 +2407,13 @@ QImage EngineBridge::previewNdiFrameFor(const QString &sourceName)
         // Nothing new this tick (non-blocking capture) — warm-up, or the
         // network feed hiccuped. HOLD-LAST-FRAME (see heldPreviewFrame): the
         // pane keeps showing the newest frame it ever received instead of
-        // blinking to its glyph art for the tick.
+        // blinking to its glyph art for the tick. NO DELIVERY STAMP here: this
+        // tick carried nothing, and that is exactly the distinction the status
+        // light's live half is made of.
         return heldPreviewFrame(want);
+    // A real payload arrived: stamp it (see inputDelivery).
+
+    previewDeliveredAt_[want] = QDateTime::currentMSecsSinceEpoch();
 
     // UYVY (2 bytes/px, Y0 U Y1 V) or BGRA/RGBA (4 bytes/px) → RGBA8 for
     // the QML image pipeline (Format_RGBA8888, the SAME layout the live
@@ -2001,6 +2511,17 @@ void EngineBridge::startRelay()
             relay("engine.kernel.panic", QStringLiteral("error"), QStringLiteral("Engine panic"),
                   qstr(e.error.message));
         }));
+    // A subsystem that could not initialize: the engine is UP and this part of
+    // it is not. Warning, not error — and named, so the user learns WHICH
+    // feature is unavailable instead of watching every screen answer "the
+    // engine is not running yet". (Boot-time ones are replayed in boot().)
+    relaySubs_.push_back(bus.Subscribe<bps::events::SubsystemDegraded>(
+        [relay](const bps::events::SubsystemDegraded &e) {
+            relay("engine.kernel.subsystem_degraded", QStringLiteral("warning"),
+                  QStringLiteral("Engine"),
+                  QStringLiteral("%1 is unavailable this session — %2")
+                      .arg(qstr(e.system), qstr(e.message)));
+        }));
     relaySubs_.push_back(bus.Subscribe<bps::events::SystemHealthChanged>(
         [relay](const bps::events::SystemHealthChanged &e) {
             if (e.report.IsHealthy())
@@ -2023,10 +2544,10 @@ void EngineBridge::startRelay()
             QString text = QStringLiteral("%1 load is %2.").arg(res, level.toLower());
             if (e.resource == "memory") {
                 title = QStringLiteral("Low memory");
-                text = QStringLiteral("Memory use is %1 â close other apps if playback stutters.").arg(level.toLower());
+                text = QStringLiteral("Memory use is %1 — close other apps if playback stutters.").arg(level.toLower());
             } else if (e.resource == "cpu") {
                 title = QStringLiteral("High CPU usage");
-                text = QStringLiteral("The CPU has stayed at %1 load for a while â heavy work in other apps may slow the presentation.").arg(level.toLower());
+                text = QStringLiteral("The CPU has stayed at %1 load for a while — heavy work in other apps may slow the presentation.").arg(level.toLower());
             } else if (e.resource == "disk") {
                 title = QStringLiteral("Low disk space");
                 text = QStringLiteral("Disk usage is %1.").arg(level.toLower());
@@ -2035,7 +2556,7 @@ void EngineBridge::startRelay()
         }));
 
     // ---- Content / project notices (formerly reached the UI only as formatted engine
-    // log lines â "Engine Â· Core [Warning]..." â via the Notification Service's console
+    // log lines — "Engine · Core [Warning]..." — via the Notification Service's console
     // channel; the log sink now skips those, so each event gets ONE properly worded toast).
     relaySubs_.push_back(bus.Subscribe<bps::events::ContentAssetImported>(
         [relay](const bps::events::ContentAssetImported &e) {
@@ -2366,90 +2887,164 @@ QVariantList EngineBridge::recentEngineEvents(int max) const
 }
 
 // ============================================================================
-// THE ENGINE'S AUDIO OUT — the missing half of the sound path. AudioMixer
-// (engine) consumes the production graph's buses; WindowsAudio's WASAPI
-// render client plays the mix. The meter pump feeds the mixer the taps'
-// published levels; the render thread pulls the mix to the speaker.
+// (REMOVED 2026-10) THE ENGINE'S AUDIO OUT.
+//
+// There used to be audioRenderActive()/setAudioRender() here: a WASAPI render
+// client plus the AudioMixer summing the graph's buses into it, with the meter
+// pump's refreshMixSources() acquiring a capture tap per routed source to feed
+// it. Nothing in the app ever called setAudioRender (the Audio & Video screen's
+// manual toggle was removed by request), so the whole path was unreachable —
+// and it was the only consumer of those mix-source captures. What was left was
+// the cost with none of the function: the pump kept acquiring WASAPI capture
+// sessions on every routed input, for a meter tick, silently (the PAL logs no
+// line when a capture starts) — the "go live is opening WASAPI" report. Gone,
+// and with it the only code in the bridge that could open a capture device for
+// a reason other than a user-held meter. The engine's AudioMixer class and its
+// unit tests stay: they are the design record for a real playout path, which
+// now has to be built on purpose instead of half-existing.
 // ============================================================================
-bool EngineBridge::audioRenderActive() const
-{
-    return bps::platform::PlatformAccessor::Installed()
-           && bps::platform::PlatformAccessor::Get().Audio().Rendering();
-}
 
-void EngineBridge::setAudioRender(bool on)
+// ============================================================================
+// STREAM meters — a video/NDI row's OWN audio.
+//
+// A media file and an NDI stream carry audio that no capture device can reach,
+// so the PAL's stream tap (IAudio::StartStreamTap) is the one carrier for it.
+// The tap publishes through the SAME two entry points a device tap does
+// (InputLevels + ReadTapAudio), which is why a video row needs no second meter
+// path in the UI: it lands in inputLevels under its own label and the mixer
+// drains it like any other source.
+// ============================================================================
+bool EngineBridge::ensureStreamTap(const QString &label, const QString &kind,
+                                   const QString &source)
 {
-    if (!bps::platform::PlatformAccessor::Installed())
-        return;
+    if (label.isEmpty() || !bps::platform::PlatformAccessor::Installed())
+        return false;
+    if (streamTapIds_.contains(label))
+        return true;   // already open — a decoder is never restarted under its own meters
     auto &audio = bps::platform::PlatformAccessor::Get().Audio();
-
-    if (!on) {
-        (void)audio.StopRender();
-        emit audioRenderChanged();
-        EventBus::instance().notify(tr("Engine audio stopped"), QStringLiteral("info"),
-                                    tr("Audio"), QStringLiteral("audio.render.stop"));
-        return;
+    const QString src = source.trimmed().isEmpty() ? label : source.trimmed();
+    // A REFUSED open is retried on a slow beat, not on every call: the mix's
+    // source refresh runs ~20×/s while rendering, so a row whose media file is
+    // gone (or an NDI kind nothing feeds yet) would otherwise re-attempt the
+    // decode and write a warning line 20 times a second.
+    const QString refusedKey = label + QLatin1Char('\n') + kind;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const auto refused = streamRefusedAt_.constFind(refusedKey);
+    if (refused != streamRefusedAt_.constEnd() && nowMs - refused.value() < 10000)
+        return false;
+    const uint32_t tapId = bps::platform::IAudio::kStreamTapBase + nextStreamTap_++;
+    const auto started = audio.StartStreamTap(tapId, src.toStdString(), kind.toStdString());
+    if (!started.ok()) {
+        streamRefusedAt_[refusedKey] = nowMs;
+        // The HONEST refusal — a file that is not there (or an NDI runtime that
+        // is not loaded) gets no tap at all: the row meters silence rather than
+        // a level nothing produced. Logged loudly, because from the UI a refused
+        // tap and a genuinely silent source look identical.
+        write(QStringLiteral("warning"), QStringLiteral("AudioMeters"),
+              QStringLiteral("stream meter refused for '%1' (%2, opens '%3'): %4 "
+                             "(retried every 10 s while the row stays routed)")
+                  .arg(label, kind, src)
+                  .arg(QString::fromStdString(started.error().message)));
+        return false;
     }
-
-    if (!audioMixer_) {
-        audioMixer_ = new bps::production::AudioMixer();
-    }
-    auto *mixer = static_cast<bps::production::AudioMixer *>(audioMixer_);
-    mixer->Attach(&bps::production::ProductionEngine::Instance().Graph());
-    // The sample source: the same PAL taps the meters read. Real captured
-    // frames flow tap FIFO → mixer → render client from here on.
-    mixer->AttachTaps(&bps::platform::PlatformAccessor::Get().Audio());
-
-    auto r = audio.StartRender(
-        [mixer](float *frames, uint32_t framesCount, uint32_t channels, uint32_t rate) {
-            return mixer->Render(frames, framesCount, channels, rate);
-        });
-    if (!r.ok()) {
-        qWarning("EngineBridge: audio render start failed: %s", r.error().message.c_str());
-        return;
-    }
-    // The meter pump already runs while any input meter is open; the render
-    // path needs it even when none does (it is what feeds the mixer).
-    if (!inputMeterPump_) {
-        inputMeterPump_ = new QTimer(this);
-        inputMeterPump_->setInterval(50);
-        connect(inputMeterPump_, &QTimer::timeout, this, [this]() { pumpMeterSnapshot(); });
-    }
-    if (!inputMeterPump_->isActive())
-        inputMeterPump_->start();
-    emit audioRenderChanged();
-    EventBus::instance().notify(tr("Engine audio ON — mixing the routing graph to the default output"),
-                                QStringLiteral("success"), tr("Audio"),
-                                QStringLiteral("audio.render.start"));
+    streamRefusedAt_.remove(refusedKey);
+    streamTapIds_[label] = tapId;
+    streamKinds_[label] = kind;
+    streamSources_[label] = src;
+    write(QStringLiteral("info"), QStringLiteral("AudioMeters"),
+          QStringLiteral("stream meter tap live for '%1' (%2, id %3, opens '%4')")
+              .arg(label, kind)
+              .arg(tapId)
+              .arg(src));
+    return true;
 }
 
-// One pump tick's mixer publish: bind each LIVE TAP's capture device to the
-// matching graph source node. Roster row → stable id → "asrc:<id>" (the same
-// node id the routing edges key on); the mixer then drains REAL frames from
-// that device's FIFO every render chunk. Row↔tap matching mirrors the meter
-// overlay's: the roster row's sublabel (trimmed, case-insensitive; empty =
-// the default input) names the tap.
-void EngineBridge::feedMixerLevels()
+void EngineBridge::releaseStreamTap(const QString &label)
 {
-    auto *mixer = static_cast<bps::production::AudioMixer *>(audioMixer_);
-    if (!mixer)
+    const auto known = streamTapIds_.find(label);
+    if (known == streamTapIds_.end())
         return;
-    auto *roster = AudioInputListModel::Instance();
-    if (!roster)
-        return;   // QML not up yet — nothing to map
-    for (auto it = inputLabels_.constBegin(); it != inputLabels_.constEnd(); ++it) {
-        const uint32_t deviceId = it.key();
-        const QString tapLabel = it.value().trimmed();
-        for (int row = 0; row < roster->rowCount(); ++row) {
-            const QString rowLabel = roster->index(row).data(
-                static_cast<int>(AudioInputListModel::SublabelRole)).toString().trimmed();
-            const bool matches = tapLabel.isEmpty() ? rowLabel.isEmpty()
-                                : rowLabel.compare(tapLabel, Qt::CaseInsensitive) == 0;
-            if (!matches)
-                continue;
-            const QString id = AudioInputListModel::stableIdForRow(row);
-            if (!id.isEmpty())
-                mixer->BindSourceDevice("asrc:" + id.toStdString(), deviceId);
+    // STILL HELD? A UI consumer (requestedStreams_) or the playout mix (a claim
+    // naming this same tap) keeps it open — one decoder, one row.
+    if (requestedStreams_.contains(label))
+        return;
+    if (bps::platform::PlatformAccessor::Installed())
+        (void)bps::platform::PlatformAccessor::Get().Audio().StopStreamTap(known.value());
+    write(QStringLiteral("info"), QStringLiteral("AudioMeters"),
+          QStringLiteral("stream meter tap closed for '%1'").arg(label));
+    streamTapIds_.erase(known);
+    streamKinds_.remove(label);
+    streamSources_.remove(label);
+}
+
+void EngineBridge::startStreamMeter(const QString &label, const QString &kind,
+                                    const QString &source)
+{
+    const QString want = label.trimmed();
+    // An EMPTY label is refused for the same reason a device label is (see
+    // startInputMeter): a tap belongs to a source the user actually chose, and
+    // a row with nothing picked must read "no signal", not open a decoder.
+    if (want.isEmpty() || !bps::platform::PlatformAccessor::Installed())
+        return;
+    const bool firstHold = !requestedStreams_.contains(want);
+    ++requestedStreams_[want];
+    if (firstHold) {
+        streamKinds_[want] = kind;
+        streamSources_[want] = source;
+        ensureStreamTap(want, kind, source);
+    } else {
+        // A re-hold with a DIFFERENT source (the row was re-picked) must move
+        // the decoder: the old tap goes, a new one opens on the new file.
+        const QString src = source.trimmed().isEmpty() ? want : source.trimmed();
+        if (streamSources_.value(want) != src || streamKinds_.value(want) != kind) {
+            const auto old = streamTapIds_.take(want);
+            if (old != 0)
+                (void)bps::platform::PlatformAccessor::Get().Audio().StopStreamTap(old);
+            ensureStreamTap(want, kind, source);
         }
     }
+    ensureMeterPump();
+    emit audioMeteringChanged();
+}
+
+void EngineBridge::stopStreamMeter(const QString &label)
+{
+    const QString want = label.trimmed();
+    const auto it = requestedStreams_.find(want);
+    if (it == requestedStreams_.end())
+        return;   // not held here — nothing to release
+    if (--it.value() > 0)
+        return;   // another card or dialog still holds this row open
+    requestedStreams_.erase(it);
+    releaseStreamTap(want);
+    if (requestedMeters_.isEmpty() && requestedStreams_.isEmpty()) {
+        if (inputMeterPump_)
+            inputMeterPump_->stop();
+        if (!inputLevels_.isEmpty()) {
+            inputLevels_.clear();
+            emit inputLevelsChanged();
+        }
+    }
+    emit audioMeteringChanged();
+}
+
+// Which of these blocks the ENGINE will paint under the compositor's video
+// layer. Asked of the rule's ONE home (SceneBuilder::PlanBlockLayers) rather
+// than re-derived here: the monitor tile needs the same answer every real
+// output gets, or the tile and the outputs disagree about what covers a feed.
+// The blocks arrive as the QML maps ShowConverter is the single mapping for, so
+// they go back through the same conversion the rest of this bridge uses.
+QVariantList EngineBridge::backdropBlockIndexes(const QVariantList &blocks) const
+{
+    std::vector<bps::presentation::ContentBlock> converted;
+    converted.reserve(static_cast<size_t>(blocks.size()));
+    for (const QVariant &b : blocks)
+        converted.push_back(ShowConverter::blockFromVariant(b.toMap()));
+    const bps::presentation::SceneBuilder::BlockLayerPlan plan =
+        bps::presentation::SceneBuilder::PlanBlockLayers(converted);
+    QVariantList out;
+    for (size_t i = 0; i < plan.underVideo.size(); ++i)
+        if (plan.underVideo[i])
+            out.append(static_cast<int>(i));
+    return out;
 }

@@ -52,6 +52,29 @@ public:
     // be empty on hosts without a capture stack).
     virtual std::vector<VideoDeviceInfo> Enumerate() const = 0;
 
+    // TARGETED device lookup — the capture equivalent of IAudio::EnumerateFor:
+    // only the friendly names the caller needs (the app's saved video roster),
+    // and no capability walk for the rest (activating a camera and walking its
+    // media types is the expensive half of an enumeration). Empty `names` means
+    // "none wanted". The default filters the bulk roster; backends that can walk
+    // cheaply override it and never activate a device they weren't asked for.
+    virtual std::vector<VideoDeviceInfo> EnumerateFor(
+        const std::vector<std::string> &names) const
+    {
+        std::vector<VideoDeviceInfo> out;
+        if (names.empty())
+            return out;
+        for (const VideoDeviceInfo &d : Enumerate()) {
+            for (const std::string &want : names) {
+                if (d.name == want) {
+                    out.push_back(d);
+                    break;
+                }
+            }
+        }
+        return out;
+    }
+
     // Open, visible, capturable top-level windows (best effort; empty on
     // platforms without window capture). Ids stay valid while the window
     // lives — the UI re-enumerates on dialog open, so stale ids self-heal.
@@ -65,18 +88,21 @@ public:
     // deviceId is the device's own id (VideoDeviceInfo::id — the symbolic
     // link string on Windows, NOT a positional index: cameras hot-plug).
 
-    // Begin previewing the named capture device. mode is the UI's capture
+    // Begin previewing the named capture device. deviceName is a cached
+    // friendly name used by platform workers for device recovery. mode is the UI's capture
     // pick ("1920x1080p60" — width×height are honored; fps only breaks
     // ties between native types of the same size); an empty mode keeps the
     // device's default. Real MF Source Reader on Windows: native type at
     // the requested frame size, ~15 fps drain, frames converted to JPEG.
-    // Idempotent: a second Start on a running tap is a no-op. NotFound
-    // when the device doesn't exist, Unsupported on platforms without
-    // capture support.
-    virtual Result<void> StartPreview(const std::string &deviceId, const std::string &mode)
+    // Idempotent: a second Start on a running tap is a no-op. The result
+    // reports whether the preview request was accepted; device open errors
+    // are reported asynchronously by the platform preview path.
+    virtual Result<void> StartPreview(const std::string &deviceId, const std::string &mode,
+                                      const std::string &deviceName = {})
     {
         (void)deviceId;
         (void)mode;
+        (void)deviceName;
         return Error::Make(Err::Unsupported, "Video",
                            "video preview is not implemented on this platform");
     }
@@ -92,6 +118,22 @@ public:
     // dialog pane, ~480px wide). Empty vector = no tap or no frame yet (the
     // UI keeps showing the placeholder glyph).
     virtual std::vector<uint8_t> PreviewFrame(const std::string &deviceId)
+    {
+        (void)deviceId;
+        return {};
+    }
+    // WHY a started preview will never produce a frame, if that is the case.
+    //
+    // StartPreview only ACCEPTS the request: the device is opened on the tap's
+    // own worker (opening a camera can take seconds, so it must not run on the UI
+    // thread), and the open can fail — unplugged, busy, driver error, a stream
+    // with no decodable type. Until now such a tap kept `running` set and said
+    // nothing: PreviewFrame stayed empty forever, the UI could not tell "failing"
+    // from "warming up" and showed its connecting ring for as long as the card
+    // was on screen, and a later StartPreview was answered "already running" so
+    // the device was never retried. Empty = the tap is fine (or unknown); the
+    // returned text is the platform's own reason, for the log and the card.
+    virtual std::string PreviewFailure(const std::string &deviceId) const
     {
         (void)deviceId;
         return {};
@@ -139,6 +181,12 @@ public:
     // The SAME taps also serve WINDOW capture: StartScreenPreview with a
     // "win:<hwnd>" id BitBlts that window instead of a monitor; the
     // per-grab IsWindow check ends the tap cleanly when the window closes.
+    //
+    // Every tap — camera, monitor, window — is CANCELLABLE, because Stop/pre-empt
+    // must be able to shut a captured source down even while it misbehaves (a
+    // camera that stops answering, a window whose UI thread is wedged). A stop
+    // is therefore honored inside one worker iteration, and no capture worker
+    // can be left parked in an unbounded driver call.
 };
 
 } // namespace bps::platform

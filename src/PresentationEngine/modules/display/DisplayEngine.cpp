@@ -17,6 +17,7 @@ DisplayEngine& DisplayEngine::Instance() {
 // Lifecycle
 // ---------------------------------------------------------------------------
 Result<void> DisplayEngine::Initialize() {
+    std::vector<std::shared_ptr<IDisplayProvider>> providers;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (initialized_.load()) return Ok();
@@ -28,9 +29,17 @@ Result<void> DisplayEngine::Initialize() {
         providers_.push_back(std::make_shared<VirtualDisplayProvider>());
         providers_.push_back(std::make_shared<NullDisplayProvider>());
         providers_.push_back(std::make_shared<NdiDisplayProvider>());
-        // Initial device snapshot.
-        for (const auto& provider : providers_)
-            for (const auto& d : provider->Enumerate()) devices_[d.id] = d;
+        providers = providers_;   // enumerating them happens below, unlocked
+    }
+    // Initial device snapshot: provider enumeration is a PAL/vendor-SDK call
+    // (monitor enumeration, NDI runtime probe) that can block for seconds, so
+    // it runs with mutex_ RELEASED and only the merge takes the lock.
+    std::vector<DisplayDevice> found;
+    for (const auto& provider : providers)
+        for (const auto& d : provider->Enumerate()) found.push_back(d);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& d : found) devices_[d.id] = d;
     }
     (void)profiles_.Initialize();
     WireEvents();
@@ -110,16 +119,20 @@ Metrics DisplayEngine::MetricsSnapshot() const {
 // ---------------------------------------------------------------------------
 Result<void> DisplayEngine::RegisterProvider(std::shared_ptr<IDisplayProvider> provider) {
     if (!provider) return Error::Make(Err::InvalidArgument, "DisplayEngine", "null provider");
+    // Enumerate FIRST, with no lock held: a provider's Enumerate() is a PAL or
+    // vendor-SDK call (monitors, NDI) that can block for seconds, and the old
+    // shape held mutex_ across it — which made every Devices()/Provider() call
+    // queue behind a hot-plug probe. Providers never call back into the engine,
+    // so enumerating before registration cannot deadlock.
+    std::vector<DisplayDevice> found;
+    for (const auto& d : provider->Enumerate()) found.push_back(d);
     std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& p : providers_)
         if (std::string_view(p->Name()) == provider->Name())
             return Error::Make(Err::Display_ProviderExists, "DisplayEngine",
                                "provider '" + std::string(provider->Name()) + "' already registered");
     providers_.push_back(std::move(provider));
-    // Enumerate runs under the lock by design (registration is the one place a
-    // provider may touch the engine registry synchronously; providers never call
-    // back into the engine, so this cannot deadlock).
-    for (const auto& d : providers_.back()->Enumerate()) devices_[d.id] = d;
+    for (const auto& d : found) devices_[d.id] = d;
     return Ok();
 }
 

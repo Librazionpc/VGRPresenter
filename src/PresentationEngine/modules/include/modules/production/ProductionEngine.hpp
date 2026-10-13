@@ -138,6 +138,33 @@ private:
 
     void Record(const std::string& action, const std::string& payload);
 
+    // --- Auto-save coalescing (see Initialize's InstallSaver) ---
+    // The graph saver records the change in the in-memory store and marks a
+    // pending disk flush; the outermost mutating call flushes it AFTER mutex_
+    // is released. PersistGate must be declared BEFORE the lock_guard in a
+    // method, so it destructs last (i.e. with the lock gone).
+    void RequestPersist();
+    void FlushPersistPending();
+    struct PersistGate {
+        ProductionEngine& engine;
+        explicit PersistGate(ProductionEngine& e) : engine(e) {
+            engine.persistGateDepth_.fetch_add(1, std::memory_order_relaxed);
+        }
+        ~PersistGate() {
+            if (engine.persistGateDepth_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                engine.FlushPersistPending();
+        }
+        PersistGate(const PersistGate&) = delete;
+        PersistGate& operator=(const PersistGate&) = delete;
+    };
+    std::atomic<int> persistGateDepth_{0};
+    std::atomic<bool> persistPending_{false};
+    // One deferred flush is queued at a time (see RequestPersist): a burst of
+    // edits — a fader drag, a bus creation's six mutators — becomes a single
+    // write, and a graph mutated through Graph() directly is still saved even
+    // when the app never shuts down cleanly.
+    std::atomic<bool> persistFlushScheduled_{false};
+
     ProductionGraph graph_;
     std::map<std::string, MeterLevels, std::less<>> meters_;
     // duck targetBus+triggerSource -> depthDb

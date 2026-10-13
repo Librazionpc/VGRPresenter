@@ -11,7 +11,7 @@
 //       "contentType": "shows", "templateKey": "lowerThird",
 //       "backgroundColor": "transparent", "backgroundImage": "",
 //       "clearBackgroundOnText": false,
-//       "showTemplates": {"shows":true,"media":false,"scripture":true,"table":false},
+//       "showTemplates": {"shows":true,"media":false,"scripture":true,"table":false,"overlay":true},
 //       "category": "Worship" } ]
 // The UI's StyleListModel hydrates from Get() at construction and calls Save()
 // after every mutation. A missing/corrupt document simply reads as an empty
@@ -38,19 +38,24 @@ struct StoredStyle {
     // Scripture, Table each with its own template). A tab whose toggle is OFF
     // greys out — its content is NOT meant to show on the output wearing this
     // style, and go-live refuses it with a clear message.
-    // The four content gates (shows | media | scripture | table). DEFAULT
-    // FALSE for a freshly built struct (a new style starts with everything
-    // inactive — an explicit user choice, not four pre-ticked boxes); the
-    // JSON read still defaults MISSING keys to true, so older saved rosters
-    // keep their all-allowed behaviour.
-    bool showTemplates[4] = {false, false, false, false};
+    // The content gates (shows | media | scripture | table | overlay).
+    // DEFAULT FALSE for a freshly built struct (a new style starts with
+    // everything inactive — an explicit user choice, not five pre-ticked
+    // boxes); the JSON read still defaults MISSING keys to true, so older
+    // saved rosters keep their all-allowed behaviour. "overlay" is a plain
+    // on/off like the other four, but it gates the Overlays pane's
+    // compositor layer, not a slide content family — it has no template of
+    // its own (see templateKeys below, still sized 4).
+    bool showTemplates[5] = {false, false, false, false, false};
     // PER-CONTENT-TYPE TEMPLATE KEYS (FreeShow: one style carries a template
     // PER content type — the Shows tab renders with the style's Shows
     // template, Scripture with its Scripture template, ...). Index order =
-    // showTemplates' (shows | media | scripture | table). EMPTY string = the
-    // family has no template of its own and inherits the style's whole-style
-    // templateKey (the pre-family behaviour — every older saved roster reads
-    // back as empty and keeps rendering exactly as before).
+    // showTemplates' first four (shows | media | scripture | table) —
+    // overlay (showTemplates[4]) has no template slot here, see its comment
+    // above. EMPTY string = the family has no template of its own and
+    // inherits the style's whole-style templateKey (the pre-family
+    // behaviour — every older saved roster reads back as empty and keeps
+    // rendering exactly as before).
     std::string templateKeys[4];                        // shows | media | scripture | table
     // Shows-only category label (free text; FreeShow styles name a category).
     std::string category;

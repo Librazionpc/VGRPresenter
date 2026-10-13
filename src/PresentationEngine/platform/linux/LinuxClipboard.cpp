@@ -108,6 +108,22 @@ Result<void> LinuxClipboard::WriteText(std::string_view text) {
     return Ok();
 }
 
+// Bitmaps: the clipboard tools carry image/png, but DECODING PNG belongs to
+// the rendering module (modules/rendering/PngCodec) and the platform layer sits
+// below it. Reporting Unsupported is honest — a half-written codec here would
+// be a second, subtly different source of pixels. The screenshot case this
+// exists for is Windows (Win+Shift+S posts a DIB).
+Result<ClipboardImage> LinuxClipboard::ReadImage() const {
+    return Error::Make(Err::Unsupported, "Clipboard",
+                       "image clipboard is not supported on this platform");
+}
+
+Result<void> LinuxClipboard::WriteImage(const ClipboardImage& image) {
+    (void)image;
+    return Error::Make(Err::Unsupported, "Clipboard",
+                       "image clipboard is not supported on this platform");
+}
+
 Result<std::vector<std::string>> LinuxClipboard::GetFiles() const {
     const char* cmd = ReadFilesCommand();
     if (!cmd)

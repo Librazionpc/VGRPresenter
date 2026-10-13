@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -65,6 +66,15 @@ public:
     virtual void SetTargetSize(Size s) = 0;
     virtual bool Enabled() const = 0;
     virtual void SetEnabled(bool enabled) = 0;
+
+    // May the main pass's distribute step write this output? A PER-OUTPUT-PASS
+    // output (one the live loop rasterizes its own styled scene into — see
+    // LiveOutputController::RenderPerOutputPasses) says NO: two writers on one
+    // buffer means the NDI/HDMI consumer samples whichever of the two landed
+    // last, i.e. the feed visibly alternating between the program scene and
+    // the output's own scene. Every other output (preview, screenshot, real
+    // display) keeps the default.
+    virtual bool AcceptsDistributedFrames() const { return true; }
 };
 
 // --- Concrete outputs --------------------------------------------------------
@@ -78,20 +88,29 @@ public:
 
     Result<void> Present(const Frame& frame) override;
     Frame LastFrame() const override;
+    // Retain the immutable current frame without copying its pixel vector.
+    // Live consumers use this to hand frames to worker threads cheaply.
+    std::shared_ptr<const Frame> LastFrameSnapshot() const;
     uint64_t FramesReceived() const override { return received_.load(); }
     Size TargetSize() const override { return target_; }
     void SetTargetSize(Size s) override { target_ = s; }
     bool Enabled() const override { return enabled_.load(); }
     void SetEnabled(bool enabled) override { enabled_.store(enabled); }
+    // See IRenderOutput::AcceptsDistributedFrames — a per-output pass turns
+    // this OFF for its own buffer (and back ON if it cannot build its scene,
+    // so the output falls back to the program feed instead of going stale).
+    bool AcceptsDistributedFrames() const override { return acceptsDistributed_.load(); }
+    void SetAcceptsDistributedFrames(bool accepts) { acceptsDistributed_.store(accepts); }
 
 protected:
     mutable std::mutex mutex_;
     OutputKind kind_;
     std::string name_;
     Size target_;
-    Frame lastFrame_;
+    std::shared_ptr<const Frame> lastFrame_;
     std::atomic<uint64_t> received_{0};
     std::atomic<bool> enabled_{true};
+    std::atomic<bool> acceptsDistributed_{true};
 };
 
 // Screenshot output: captures a frame and exposes it for saving (PAL file I/O).

@@ -87,24 +87,18 @@ Item {
     // Whether this output's real destination window (OutputWindow.qml)
     // stays above other windows — off by default.
     property bool addStayOnTop: false
-    // Whether that window fills its whole bound screen — on by default
-    // (a real projector/HDMI output's actual job); off starts it at
-    // half-size, centered and movable (a safe test mode for one monitor).
-    property bool addFullscreen: true
     // "smpte" | "gradient" | "checker" | "solidred"
     property string addPattern: "smpte"
 
     function submitAdd() {
         OutputListModel.addScreen(root.addName, root.addType, root.addRes, root.addRefresh, root.addPattern)
-        // Placement/lock/stayOnTop/fullscreen are post-insert setters — the
-        // row must exist first. fullscreenOutput defaults true on a new
-        // row already, so only an explicit UNCHECK needs a push here.
-        if (root.addScreenName !== "" || root.addLocked || root.addStayOnTop || !root.addFullscreen) {
+        // Placement/lock/stayOnTop are post-insert setters — the row must
+        // exist first.
+        if (root.addScreenName !== "" || root.addLocked || root.addStayOnTop) {
             const row = OutputListModel.rowCount() - 1
             OutputListModel.setScreenName(row, root.addScreenName)
             OutputListModel.setBoundsLocked(row, root.addLocked)
             OutputListModel.setStayOnTop(row, root.addStayOnTop)
-            OutputListModel.setFullscreenOutput(row, root.addFullscreen)
         }
         // Reset for next time, close.
         root.addName = ""
@@ -112,7 +106,6 @@ Item {
         root.addScreenName = ""
         root.addLocked = false
         root.addStayOnTop = false
-        root.addFullscreen = true
         root.addPattern = "smpte"
         root.addShown = false
     }
@@ -129,8 +122,6 @@ Item {
     // Whether this output's real destination window (OutputWindow.qml)
     // stays above other windows — off by default.
     property bool editStayOnTop: false
-    // Whether that window fills its whole bound screen — on by default.
-    property bool editFullscreen: true
     // Style assignment by the style's STABLE id ("" = None). Outputs
     // reference styles by id — surviving restarts and roster edits — never
     // by row index (deleting a style would re-point every later output at
@@ -148,13 +139,44 @@ Item {
         root.editScreenName = data.screenName
         root.editLocked = data.boundsLocked
         root.editStayOnTop = data.stayOnTop
-        root.editFullscreen = data.fullscreenOutput
         root.editStyleId = data.styleId
+        root.editOriginalName = data.name
+    }
+
+    // The Edit dialog saves the row it was OPENED for, by identity, not by the
+    // row index captured then: the roster is re-hydrated from the engine store
+    // on boot completion (and on any other reload), which renumbers rows, and a
+    // stale index then wrote the dialog's values onto a different output (or
+    // nothing at all) — the reported "Save does nothing, the dialog stays open".
+    property string editOriginalName: ""
+    function editRow() {
+        if (root.editIndex >= 0) {
+            const here = OutputListModel.getOutput(root.editIndex)
+            if (here.name === root.editOriginalName)
+                return root.editIndex
+        }
+        for (let i = 0; i < OutputListModel.rowCount(); ++i) {
+            if (OutputListModel.getOutput(i).name === root.editOriginalName)
+                return i
+        }
+        return -1
     }
 
     function saveEdit() {
         if (root.editIndex < 0)
             return
+        const row = root.editRow()
+        if (row < 0) {
+            // The output this dialog was opened for is gone (deleted in another
+            // view): say so and close — an open dialog with a dead Save button
+            // is the bug being fixed here.
+            EventBus.notify(qsTr("That output no longer exists, so nothing was saved."),
+                            "error", qsTr("Output not saved"), "outputs.save.missing")
+            root.editIndex = -1
+            return
+        }
+        root.editIndex = row
+        const requestedStyleId = root.editStyleId
         OutputListModel.renameOutput(root.editIndex, root.editName)
         OutputListModel.setKind(root.editIndex, root.editType)
         // The screen assignment must go back FIRST so a kind change's
@@ -173,8 +195,17 @@ Item {
         OutputListModel.setTestPattern(root.editIndex, root.editPattern)
         OutputListModel.setBoundsLocked(root.editIndex, root.editLocked)
         OutputListModel.setStayOnTop(root.editIndex, root.editStayOnTop)
-        OutputListModel.setFullscreenOutput(root.editIndex, root.editFullscreen)
-        OutputListModel.setStyle(root.editIndex, root.editStyleId)
+        OutputListModel.setStyle(row, requestedStyleId)
+        const savedOutput = OutputListModel.getOutput(row)
+        if (!savedOutput || savedOutput.styleId !== requestedStyleId) {
+            // The style did not stick. Everything else in the form DID save, so
+            // the honest thing is to say so and CLOSE: leaving the dialog open
+            // made the Save button look dead, which is what the operator
+            // reported. (setStyle refuses an id the style roster no longer
+            // knows — e.g. the style was deleted in another view meanwhile.)
+            EventBus.notify(qsTr("The selected style could not be saved — the style list changed. Your other changes were saved; pick a style again to restyle this output."),
+                            "error", qsTr("Style not saved"), "outputs.style.saveFailed")
+        }
         root.editIndex = -1
     }
 
@@ -239,6 +270,8 @@ Item {
                     required property bool active
                     required property bool isEnabled
                     required property string styleName
+                    required property string screenName
+                    required property bool onAirOnly
 
                     // This NDI row is the one actually being fed: only the
                     // FIRST enabled NDI output sends (see
@@ -255,13 +288,20 @@ Item {
                         && LiveOutputService.ndiWarming
                         && LiveOutputService.ndiWarmingOutputName === card.name
                     // LIVE only while a GO LIVE session is actually running:
-                    // an NDI row whose frames verifiably flow right now, or
-                    // the on-air row DURING a live session. The active
-                    // (selected) output alone must not light the pill —
-                    // "selected" is a setting, not a broadcast state (the
-                    // pill used to read LIVE before GO LIVE was ever pressed).
-                    readonly property bool live: (card.active && LiveOutputService.live)
-                                                 || ndiFeedIsThisRow
+                    // an NDI row whose frames verifiably flow right now, an
+                    // HDMI row that OutputWindowManager/OutputWindow actually
+                    // puts a window on (OutputWindow.qml's own `visible` is
+                    // the ground truth: enabled + bound to a screen + live —
+                    // ALL such rows go live simultaneously per
+                    // OutputWindowManager.qml's documented behavior, not just
+                    // the one selected in this screen), or — for kinds with
+                    // no screen window of their own (SDI) — the selected row
+                    // during a live session, same as before.
+                    readonly property bool live: ndiFeedIsThisRow
+                        || (card.kind === "HDMI" && card.isEnabled && !card.onAirOnly
+                            && card.screenName !== "" && LiveOutputService.live)
+                        || (card.kind !== "HDMI" && card.kind !== "NDI"
+                            && card.active && LiveOutputService.live)
 
                     width: layout.width
                     height: cardCol.height + Theme.space5 * 2
@@ -397,8 +437,9 @@ Item {
                     }
 
                     // Status pill + on/off toggle, anchored top-right.
-                    // Live = Theme.danger red (#ff4d3d) wash + light-red
-                    // text; Inactive = flat neutral chip. Pill's `tint` flag
+                    // Live = the live red wash (Theme.liveBg, the GO LIVE
+                    // pill's own red — a live output is a state, not a fault)
+                    // + light-red text; Inactive = flat neutral chip. Pill's `tint` flag
                     // picks which colors apply: tint=true uses
                     // baseColor/lightColor (washed bg + colored text),
                     // tint=false renders the flat neutral chip and IGNORES
@@ -424,7 +465,7 @@ Item {
                         Pill {
                             anchors.verticalCenter: parent.verticalCenter
                             text: card.live ? "LIVE" : "Inactive"
-                            baseColor: Theme.danger
+                            baseColor: Theme.liveBg
                             lightColor: Theme.dangerLight
                             tint: card.live
                             tintAlpha: card.live ? 0.22 : 0.14
@@ -469,6 +510,7 @@ Item {
     // section's one primary call-to-action, not a row-level action.
     Rectangle {
         id: addOutputBtn
+        objectName: "selfTestAddOutput"
         anchors.top: parent.top
         anchors.right: parent.right
         anchors.topMargin: Theme.space6
@@ -574,6 +616,7 @@ Item {
     // ---- Edit dialog ----
     ModalCard {
         id: editDialog
+        objectName: "selfTestEditOutputDialog"
         shown: root.editIndex >= 0
         title: "Edit output"
         subtitle: "Rename, restyle, or reposition this output."
@@ -638,29 +681,6 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 checked: root.editStayOnTop
                 onToggled: root.editStayOnTop = !root.editStayOnTop
-            }
-        }
-
-        // Whether that window fills its whole bound screen — on by
-        // default (a real projector/HDMI output's actual job); off starts
-        // it at half-size, centered and movable (a safe test mode for a
-        // single monitor with no second display to point it at).
-        Item {
-            width: parent.width
-            height: 34
-            Text {
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                text: "Fill the whole screen"
-                color: Theme.textSecondary
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textSm
-            }
-            SettingsToggle {
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                checked: root.editFullscreen
-                onToggled: root.editFullscreen = !root.editFullscreen
             }
         }
 
@@ -757,6 +777,7 @@ Item {
     // ---- Add dialog (VGRPresenter · Settings · Outputs · Add) ----
     ModalCard {
         id: addDialog
+        objectName: "selfTestAddOutputDialog"
         shown: root.addShown
         title: "Add Output"
         subtitle: "Create an output window, position it on a display, or send it to NDI, SDI, recording or streaming"
@@ -813,26 +834,6 @@ Item {
             }
         }
 
-        // Same "Fill the whole screen" toggle as the Edit dialog — on by
-        // default.
-        Item {
-            width: parent.width
-            height: 34
-            Text {
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                text: "Fill the whole screen"
-                color: Theme.textSecondary
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textSm
-            }
-            SettingsToggle {
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                checked: root.addFullscreen
-                onToggled: root.addFullscreen = !root.addFullscreen
-            }
-        }
     }
 
 }

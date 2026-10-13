@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import VGRPresenterUI
 
 // Reusable "type a name" dialog: dim scrim + centered card with one text field, in the same style as
@@ -33,6 +34,18 @@ Item {
     }
     function close() { shown = false }
 
+    // The dialog belongs to the WINDOW, not to whatever pane declares it (the
+    // library dock is only ~250px tall on a small window, and a card centered in
+    // it then hangs below the window's own bottom edge — measured at 820x560, the
+    // name dialog sat 31px outside the window; see
+    // tools/selftest/run_modal_fit_test.sh). TemplatePickerModal reparents itself
+    // the same way, for the same reason.
+    parent: Overlay.overlay
+    // The scrim below is NOT scaled (see AppScale.qml): it IS the dialog's black
+    // box, and a scale on this root shrinks it away from the window's own edges.
+    // The app scale goes on the CARD instead, read from the window — the
+    // reparenting above leaves this component no scaled ancestor to inherit it
+    // from.
     anchors.fill: parent
     visible: opacity > 0
     enabled: opacity > 0
@@ -59,6 +72,13 @@ Item {
     }
 
     Rectangle {
+        id: card
+        // Hook for the modal-fit scenario — same convention as ModalCard's card.
+        objectName: root.objectName === "" ? "" : root.objectName + "_card"
+        // The app's one scale, on the card (see AppScale.qml) — never on the root,
+        // whose scrim has to stay window-sized.
+        scale: AppScale.cardScale(card)
+        transformOrigin: Item.Center
         width: 380
         height: dialogCol.implicitHeight + 2 * Theme.space6
         anchors.centerIn: parent

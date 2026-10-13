@@ -20,7 +20,9 @@ Item {
     id: root
     // Shared top-level modal layer: keep the scrim and card above the page
     // so clicks and hover never reach the controls behind the dialog.
-    z: 30000
+    // This picker opens over another settings modal (Edit Style). Keep it
+    // above that parent dialog on the shared window overlay.
+    z: 31000
 
     property bool open: false
     // "shows" | "media" | "scripture" — which category this picker is
@@ -137,6 +139,10 @@ Item {
     // layer instead, so `anchors.fill: parent` truly fills the whole window and the card centers on the whole app, not just
     // whatever smaller area its caller happens to occupy.
     parent: Overlay.overlay
+    // The scrim below is NOT scaled (see AppScale.qml): it IS the picker's black
+    // box, and a scale on this root shrinks it away from the window's own edges.
+    // The app scale goes on the CARD instead — read from the window, because the
+    // reparenting above leaves no scaled ancestor to inherit it from.
     anchors.fill: parent
     visible: root.open
 
@@ -161,22 +167,31 @@ Item {
     // A soft drop shadow behind the card - stacked, growing, fading rectangles (this app's own stand-in for a real blur effect,
     // the same trick its other floating panels already use), so the card visibly lifts off the dimmed backdrop instead of just
     // sitting flush with it.
+    // The app's one scale, on the card and its two shadows (see AppScale.qml) —
+    // never on the root, whose scrim has to stay window-sized. The shadows are
+    // sized from the card, so scaling them too keeps them proportional to it.
     Rectangle {
         anchors.centerIn: card
         anchors.verticalCenterOffset: 10
         width: card.width + 24; height: card.height + 24; radius: card.radius + 6
         color: "#20000000"
+        scale: AppScale.cardScale(card)
+        transformOrigin: Item.Center
     }
     Rectangle {
         anchors.centerIn: card
         anchors.verticalCenterOffset: 5
         width: card.width + 10; height: card.height + 10; radius: card.radius + 3
         color: "#30000000"
+        scale: AppScale.cardScale(card)
+        transformOrigin: Item.Center
     }
 
     Rectangle {
         id: card
         anchors.centerIn: parent
+        scale: AppScale.cardScale(card)
+        transformOrigin: Item.Center
         width: 700
         // At least the header + a couple of rows + the footer, however little room a cramped parent (a tab's own content area, not
         // the full window Settings gets) leaves - short of that, the body below scrolls instead of the footer buttons being clipped

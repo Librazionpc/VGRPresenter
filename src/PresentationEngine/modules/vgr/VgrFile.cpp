@@ -9,23 +9,10 @@ namespace bps::vgr {
 
 namespace {
 constexpr const char* kModule = "VgrFile";
-
-// A rename onto/within a live-synced folder (OneDrive, Dropbox) can transiently
-// fail with EIO/EBUSY while the sync filter holds the file — the batch import
-// of 680 shows into a OneDrive library hit it on ~8% of writes. The lock
-// clears within a fraction of a second, so a few bounded retries rescue the
-// save without ever spinning long enough to matter.
-Result<void> MoveWithRetry(platform::IFilesystem& fs, const std::string& from, const std::string& to) {
-    constexpr int kAttempts = 5;
-    constexpr auto kDelay = std::chrono::milliseconds(150);
-    Result<void> last = Error::Make(Err::IoError, kModule, "rename not attempted");
-    for (int attempt = 0; attempt < kAttempts; ++attempt) {
-        last = fs.Move(from, to);
-        if (last.ok()) return last;
-        std::this_thread::sleep_for(kDelay);
-    }
-    return last;
-}
+// The synced-folder rename retry that used to live here (the ~8% failure rate
+// when importing 680 shows into a OneDrive library) is now the PAL's
+// IFilesystem::RenameRetry, shared with the plain atomic writers via
+// WriteAtomic — one retry policy instead of one per saver.
 } // namespace
 
 Result<VgrDocument> VgrFile::Read(const std::string& path) {
@@ -65,13 +52,13 @@ Result<void> VgrFile::Write(const std::string& path, const VgrDocument& doc) {
     const bool hadOld = fs.Exists(path);
     if (hadOld) {
         (void)fs.Remove(bak);
-        if (auto m = MoveWithRetry(fs, path, bak); !m.ok()) {
+        if (auto m = fs.RenameRetry(path, bak); !m.ok()) {
             (void)fs.Remove(tmp);
             return m.error();
         }
     }
-    if (auto m = MoveWithRetry(fs, tmp, path); !m.ok()) {
-        if (hadOld) (void)fs.Move(bak, path);   // put the previous file back
+    if (auto m = fs.RenameRetry(tmp, path); !m.ok()) {
+        if (hadOld) (void)fs.RenameRetry(bak, path);   // put the previous file back
         (void)fs.Remove(tmp);
         return m.error();
     }

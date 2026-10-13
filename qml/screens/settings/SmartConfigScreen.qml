@@ -26,6 +26,13 @@ Item {
     readonly property var values: SettingsService.values
     readonly property var modeChoices: SettingsService.definitions["smart.mode"].choices
     readonly property bool manual: root.values["smart.mode"] === "manual"
+    // Lock In Mode (Settings · General) OUTRANKS the mode below: the engine's own
+    // applier puts the runtime in Presentation mode whenever it is on, whatever
+    // this page says (see bps::settings::ApplyToEngine). The mode cards cannot
+    // say that on their own, so the card states it — a choice that is stored but
+    // overridden is exactly what "the General toggle isn't connected to Smart
+    // Config" looks like from the outside.
+    readonly property bool lockedIn: root.values["appearance.lockInMode"] === true
 
     function profileLabel(value) {
         const choices = SettingsService.definitions["resources.profile"].choices
@@ -134,6 +141,10 @@ Item {
                             delegate: Rectangle {
                                 id: modeCell
                                 required property var modelData
+                                // The CHOICE is still the highlighted one with Lock
+                                // In Mode on (so the row keeps showing what a click
+                                // would set); the card's locked-in note below says
+                                // that the engine is not running it.
                                 readonly property bool active: root.values["smart.mode"] === modeCell.modelData.value
 
                                 width: (parent.width - 32) / 3
@@ -155,13 +166,14 @@ Item {
                                         font.family: Theme.fontFamily
                                         font.pixelSize: Theme.textSm
                                         font.weight: modeCell.active ? Font.DemiBold : Font.Medium
+                                        opacity: root.lockedIn ? 0.6 : 1
                                     }
                                     Text {
                                         width: modeCell.width - 28
                                         text: modeCell.modelData.description
                                         color: Theme.textMuted
                                         font.family: Theme.fontFamily
-                                        font.pixelSize: Theme.textXs
+                                        font.pixelSize: Theme.textSub
                                         elide: Text.ElideRight
                                     }
                                 }
@@ -174,6 +186,29 @@ Item {
                                     onClicked: SettingsService.setValue("smart.mode", modeCell.modelData.value)
                                 }
                             }
+                        }
+                    }
+
+                    // The precedence, said out loud on the page it applies to:
+                    // with Lock In Mode on, the mode above is remembered but not
+                    // what the engine runs — and the click that turns it off is
+                    // one row away in General, named so nobody has to hunt for it.
+                    Row {
+                        visible: root.lockedIn
+                        spacing: 6
+
+                        Rectangle {
+                            width: 8; height: 8; radius: 4
+                            color: Theme.warning
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        Text {
+                            width: modeCol.width - 14
+                            text: qsTr("Lock In Mode is on (Settings \u00b7 General): the engine is running in Presentation mode, whichever mode is picked here.")
+                            color: Theme.warning
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.textSub
+                            wrapMode: Text.WordWrap
                         }
                     }
                 }
@@ -356,7 +391,7 @@ Item {
                         text: SettingsService.hardwareAdviceSummary
                         color: Theme.textSecondary
                         font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textXs
+                        font.pixelSize: Theme.textSub
                         bottomPadding: 10
                         wrapMode: Text.Wrap
                     }
@@ -482,7 +517,7 @@ Item {
                               : qsTr("Set by the %1 profile. The bright bar is what the engine is using right now; the pale band is the share this profile allows.").arg(root.profileLabel(root.values["resources.profile"]))
                         color: Theme.textMuted
                         font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textXs
+                        font.pixelSize: Theme.textSub
                         wrapMode: Text.Wrap
                     }
 
@@ -543,7 +578,7 @@ Item {
                                                   : qsTr("Using %1% now · cap %2%").arg(budget.used).arg(budget.capNow)
                             color: Theme.textMuted
                             font.family: Theme.fontFamily
-                            font.pixelSize: Theme.textXs
+                            font.pixelSize: Theme.textSub
                         }
                     }
 
@@ -629,7 +664,11 @@ Item {
                             measured: TelemetryService.health.batteryPct === undefined || TelemetryService.health.batteryPct >= 0
                             value: measured ? TelemetryService.health.batteryPct : 0
                             unit: "%"
-                            caption: TelemetryService.health.onBattery === true ? qsTr("Battery \u00B7 on battery") : qsTr("Battery")
+                            // Three states, like the engine's battery row: on battery,
+                            // charging (plugged in and topping up), and on AC holding.
+                            caption: TelemetryService.health.onBattery === true ? qsTr("Battery \u00B7 on battery")
+                                   : TelemetryService.health.charging === true ? qsTr("Battery \u00B7 charging")
+                                   : qsTr("Battery")
                             dialColor: root.batteryColor(TelemetryService.health.batteryPct)
                         }
                     }

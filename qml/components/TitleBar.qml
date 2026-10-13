@@ -244,7 +244,7 @@ Rectangle {
                             width: chipLabel.width + 14
                             height: 18
                             radius: 9
-                            color: resultRow.selected ? "#3d6C5CE7" : Theme.chip
+                            color: resultRow.selected ? Qt.alpha(Theme.accent, 0.24) : Theme.chip
 
                             Text {
                                 id: chipLabel

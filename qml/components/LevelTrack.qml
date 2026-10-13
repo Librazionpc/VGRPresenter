@@ -35,10 +35,10 @@ Item {
 
     readonly property Gradient barGradient: Gradient {
         orientation: Gradient.Horizontal
-        GradientStop { position: 0.0; color: "#00c8c8" }
-        GradientStop { position: 0.55; color: "#00ff32" }
-        GradientStop { position: 0.84; color: "#ffc800" }
-        GradientStop { position: 1.0; color: "#c80000" }
+        GradientStop { position: 0.0; color: Theme.meterQuiet }
+        GradientStop { position: 0.55; color: Theme.meterLoud }
+        GradientStop { position: 0.84; color: Theme.meterHot }
+        GradientStop { position: 1.0; color: Theme.meterClip }
     }
 
     Row {
@@ -50,7 +50,7 @@ Item {
             id: dot
             anchors.verticalCenter: parent.verticalCenter
             width: 4; height: 4; radius: 2
-            color: root.fixedColor ? root.fillColor : "#00c8c8"
+            color: root.fixedColor ? root.fillColor : Theme.meterQuiet
             opacity: root.active ? 1 : 0.2
             Behavior on opacity { NumberAnimation { duration: 100 } }
         }

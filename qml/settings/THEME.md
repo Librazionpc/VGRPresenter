@@ -79,6 +79,39 @@ Outside those, smaller counts of raw hex remain in a handful of components
 modals) — the same chrome-vs-content rule applies, and they need no nesting
 workaround. (`NavRail.qml` is already fully tokenised.)
 
+## Danger vs live: two reds, not one
+
+The semantic reds are split on purpose, and the split is the whole reason
+there are two tokens:
+
+- A **fault** — an error line, a destructive action, a failed step, low disk —
+  is `Theme.danger` as a fill, dot or border, and `Theme.dangerLight` as ink
+  drawn on a dark ground.
+- A **live state** — recording, a running flow, an on-air output or media, the
+  GO LIVE pill — is not a fault. Its surface is `Theme.liveBg`, turning
+  `Theme.liveBgOnAir` once it is actually on air, and the ink on that surface is
+  `Theme.dangerLight` — exactly how `AppHeader`'s GO LIVE pill is built.
+
+Ten files used to carry their own hand-picked version of those reds: six
+distinct near-copies of `danger`/`dangerLight` (`#ff8d7f` ×7, `#ff9a90`,
+`#ff8a7e` ×2, `#ff8a80`, `#ffb4ab`, `#ff5d5d`) plus three copying the live pair
+(`#c8321e` ×4, `#85261f` ×4, `#e05a4e` ×5), which is how the same "recording"
+state came to read red three different ways on three screens. They read the
+tokens now; the family is the check:
+
+```bash
+grep -rn '#c8321e\|#85261f\|#e05a4e\|#ff8d7f\|#ff9a90\|#ff8a7e\|#ff8a80\|#ffb4ab\|#ff5d5d' qml/ --include=*.qml
+```
+
+What legitimately keeps a literal red, by the chrome-vs-content rule above:
+the test-pattern paint set ([TestPatternChip.qml](../components/TestPatternChip.qml)'s
+`#c00000` bars and its `#ff4d3d` solid patch), the user-facing colour swatch
+palettes ([ClockSourceModal.qml](../components/ClockSourceModal.qml),
+[BackgroundColorModal.qml](../components/BackgroundColorModal.qml),
+[StylePickerModal.qml](../components/StylePickerModal.qml)), and the near-black
+"armed" surface washes (`#241a19`, `#2a1210`, `#3a1410`) some cards use as a dim
+state ground — those are surface tints, not the live red, and have no token.
+
 ## The other catch: the raw Figma-export screen
 
 `VGRPresenterMainScreen.qml` (~340 raw `"#hex"` colors) predates

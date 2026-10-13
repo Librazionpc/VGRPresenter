@@ -11,12 +11,20 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <functiondiscoverykeys_devpkey.h>
+// Media Foundation: the audio decoder behind a media file's stream tap.
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
 
 #include <atomic>
+#include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <functional>
 #include <map>
+#include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -34,6 +42,23 @@ namespace {
 // initialized COM under a different model (RPC_E_CHANGED_MODE) or already has
 // our model (S_FALSE), we leave the existing init untouched and only balance
 // the reference WE successfully took.
+// Minimal COM smart pointer (no ATL/WRL in this build): the Media Foundation
+// audio reader below hands out IMFSourceReader/IMFSample/IMFMediaBuffer.
+template <class T>
+class ComPtr {
+public:
+    ComPtr() = default;
+    ComPtr(const ComPtr &) = delete;
+    ComPtr &operator=(const ComPtr &) = delete;
+    ~ComPtr() { if (p_) p_->Release(); }
+    T **put() { return &p_; }
+    T *get() const { return p_; }
+    T *operator->() const { return p_; }
+    explicit operator bool() const { return p_ != nullptr; }
+private:
+    T *p_ = nullptr;
+};
+
 class ScopedComInit {
 public:
     ScopedComInit() { ok_ = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)); }
@@ -55,7 +80,16 @@ private:
 // captured prefix match (WinMM name ⊆ endpoint name, case-insensitive).
 // If two endpoints share a prefix, the first claims it and later duplicates
 // fall back to caps defaults (rare; virtual device farms).
-std::map<std::string, AudioDeviceInfo> QueryWasapiMixFormats(bool input)
+// Defined below (and used by the name check in the filtered walk above it).
+bool NameMatches(const std::string &winmmName, const std::string &endpointName);
+
+// `only` (optional) limits the mix-format queries to these friendly names —
+// the activation + GetMixFormat below is the expensive half of an enumeration,
+// and a caller that named its devices (IAudio::EnumerateFor) has no use for
+// the rest of them. Names are matched the way the roster matches them
+// (NameMatches), with a trimmed compare as the fallback.
+std::map<std::string, AudioDeviceInfo> QueryWasapiMixFormats(
+    bool input, const std::set<std::string> *only = nullptr)
 {
     std::map<std::string, AudioDeviceInfo> byName;
     ScopedComInit com;
@@ -87,7 +121,12 @@ std::map<std::string, AudioDeviceInfo> QueryWasapiMixFormats(bool input)
                 props->Release();
 
                 // The mix format — the actual answer.
-                if (!name.empty()) {
+                if (!name.empty() && (!only || only->count(name) > 0 ||
+                                      [&] {
+                                          for (const std::string &w : *only)
+                                              if (NameMatches(name, w)) return true;
+                                          return false;
+                                      }())) {
                     IAudioClient *client = nullptr;
                     if (SUCCEEDED(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL,
                                                    nullptr, reinterpret_cast<void **>(&client)))
@@ -112,6 +151,36 @@ std::map<std::string, AudioDeviceInfo> QueryWasapiMixFormats(bool input)
     if (collection) collection->Release();
     enumerator->Release();
     return byName;
+}
+
+// Is this device one of the names a targeted walk was asked for? Exact first
+// (the common case: the roster was built from this very walk, so the strings
+// are identical), then case-insensitive with surrounding whitespace ignored.
+// The fallback exists because the wanted set is a SAVED roster: a label that
+// differs by case or a stray space would otherwise read as "device not
+// connected" and produce a false missing-device notice for a device that is
+// sitting right there.
+bool NamedBy(const std::set<std::string> *only, const std::string &name)
+{
+    if (!only) return true;
+    if (only->count(name)) return true;
+    const auto trim = [](const std::string &s) {
+        size_t b = 0, e = s.size();
+        while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+        while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+        return s.substr(b, e - b);
+    };
+    const std::string wanted = trim(name);
+    for (const std::string &w : *only) {
+        const std::string candidate = trim(w);
+        if (candidate.size() != wanted.size()) continue;
+        bool same = true;
+        for (size_t i = 0; i < wanted.size() && same; ++i)
+            same = std::tolower(static_cast<unsigned char>(wanted[i]))
+                   == std::tolower(static_cast<unsigned char>(candidate[i]));
+        if (same) return true;
+    }
+    return false;
 }
 
 // Case-insensitive prefix compare for the WinMM↔WASAPI name match.
@@ -163,6 +232,20 @@ struct WindowsAudio::MeterTap {
     uint32_t deviceId = 0;
     std::string deviceName;   // roster name — the reliable endpoint match key
     bool loopback = false;    // false = input capture, true = render loopback
+    // STREAM taps (a media file's audio track, an NDI stream's embedded audio)
+    // live in the stream table and carry their source instead of a device: the
+    // capture thread below is replaced by either the Media Foundation decode
+    // thread or nothing at all (an NDI receiver pushes the samples).
+    bool isStream = false;
+    std::string streamSource;
+    std::string streamKind;
+    // Analysis state for PUSHED samples (PushStreamTapAudio): the same 50 ms
+    // window the capture loop runs, kept per tap so a producer feeding blocks
+    // of any size still publishes whole windows.
+    float streamPeaks[IAudio::kMaxInputMeterChannels] = {};
+    double streamSumSq[IAudio::kMaxInputMeterChannels] = {};
+    uint64_t streamFrames = 0;
+    uint32_t streamWindow = 0;
     IAudio::InputMeterLevels latest;   // written by the capture thread under the table's mutex
 
     // ---- Sample-through FIFO (the mixer's REAL carrier) ----------------
@@ -472,25 +555,8 @@ void WindowsAudio::MeterThread(MeterTap &tap, std::mutex &publishMutex, bool loo
     enumerator->Release();
 }
 
-Result<void> WindowsAudio::StartInputMeter(uint32_t deviceId)
+Result<void> WindowsAudio::StartInputMeter(uint32_t deviceId, const std::string &deviceName)
 {
-    // One roster pass validates the id AND captures the device's friendly
-    // name: a bogus id must fail with NotFound (not spawn a thread that
-    // immediately dies of a missing endpoint), and the name is what the tap
-    // thread matches the WASAPI endpoint by (see MeterThread).
-    bool known = false;
-    std::string rosterName;
-    for (const auto &d : Enumerate()) {
-        if (d.isInput && d.id == "wavein:" + std::to_string(deviceId)) {
-            known = true;
-            rosterName = d.name;
-            break;
-        }
-    }
-    if (!known)
-        return Error::Make(Err::NotFound, "Audio",
-                           "no input device wavein:" + std::to_string(deviceId));
-
     if (!meters_)
         meters_ = std::make_unique<MeterTable>();
 
@@ -508,7 +574,7 @@ Result<void> WindowsAudio::StartInputMeter(uint32_t deviceId)
         }
         auto tap = std::make_unique<MeterTap>();
         tap->deviceId = deviceId;
-        tap->deviceName = rosterName;
+        tap->deviceName = deviceName;
         tap->running.store(true);
         // The worker references this tap's storage and the table's mutex;
         // both outlive it because every removal path joins via ~MeterTap.
@@ -529,6 +595,16 @@ Result<void> WindowsAudio::StopInputMeter(uint32_t deviceId)
 
 IAudio::InputMeterLevels WindowsAudio::InputLevels(uint32_t deviceId)
 {
+    // A stream tap answers here too (disjoint id ranges): the UI's per-label
+    // level lookup is then the SAME call for a device and for a media file or
+    // NDI stream, which is what lets one card kind meter either.
+    if (IAudio::IsStreamTap(deviceId)) {
+        if (!streams_)
+            return IAudio::InputMeterLevels{};
+        const std::lock_guard<std::mutex> lock(streams_->mutex);
+        auto it = streams_->taps.find(deviceId);
+        return it == streams_->taps.end() ? IAudio::InputMeterLevels{} : it->second->latest;
+    }
     if (!meters_)
         return IAudio::InputMeterLevels{};
     const std::lock_guard<std::mutex> lock(meters_->mutex);
@@ -552,6 +628,18 @@ std::vector<uint32_t> WindowsAudio::ActiveInputMeters() const
 // ---- Tap sample-through (the mixer's real carrier) -------------------------
 IAudio::TapAudio WindowsAudio::TapFormat(uint32_t deviceId)
 {
+    if (IAudio::IsStreamTap(deviceId)) {
+        if (!streams_)
+            return {};
+        const std::lock_guard<std::mutex> lock(streams_->mutex);
+        auto it = streams_->taps.find(deviceId);
+        if (it == streams_->taps.end() || it->second->ringChannels == 0)
+            return {};
+        IAudio::TapAudio out;
+        out.channels = static_cast<uint32_t>(it->second->ringChannels);
+        out.sampleRateHz = it->second->ringRate;
+        return out;
+    }
     if (!meters_)
         return {};
     const std::lock_guard<std::mutex> lock(meters_->mutex);
@@ -566,7 +654,31 @@ IAudio::TapAudio WindowsAudio::TapFormat(uint32_t deviceId)
 
 size_t WindowsAudio::ReadTapAudio(uint32_t deviceId, float *dst, size_t frames)
 {
-    if (!meters_ || !dst || frames == 0)
+    if (!dst || frames == 0)
+        return 0;
+    // A stream tap's ring is drained exactly like a device tap's — the mixer
+    // does not know (or care) which it is bound to.
+    if (IAudio::IsStreamTap(deviceId)) {
+        if (!streams_)
+            return 0;
+        const std::lock_guard<std::mutex> lock(streams_->mutex);
+        auto it = streams_->taps.find(deviceId);
+        if (it == streams_->taps.end() || it->second->ringChannels == 0)
+            return 0;
+        MeterTap &stream = *it->second;
+        const size_t streamRingFrames = stream.ring.size() / stream.ringChannels;
+        const size_t streamChans = stream.ringChannels;
+        size_t streamGot = 0;
+        while (streamGot < frames && stream.ringRead != stream.ringWrite) {
+            const size_t r = stream.ringRead % streamRingFrames;
+            std::memcpy(dst + streamGot * streamChans,
+                        &stream.ring[r * streamChans], streamChans * sizeof(float));
+            stream.ringRead = (stream.ringRead + 1) % streamRingFrames;
+            ++streamGot;
+        }
+        return streamGot;
+    }
+    if (!meters_)
         return 0;
     const std::lock_guard<std::mutex> lock(meters_->mutex);
     auto it = meters_->taps.find(deviceId);
@@ -583,6 +695,321 @@ size_t WindowsAudio::ReadTapAudio(uint32_t deviceId, float *dst, size_t frames)
         ++got;
     }
     return got;
+}
+
+// ============================================================================
+// STREAM taps — audio that is not a capture device.
+//
+// A video source carries its own audio (a media file's track, an NDI stream's
+// embedded audio) that no endpoint tap can reach. A stream tap is the SAME
+// MeterTap the device taps use, with two possible producers:
+//   * kind "media": StreamThread below decodes the file's audio with Media
+//     Foundation and hands each block to PushStreamTapAudio.
+//   * kind "ndi": nobody local decodes it — the NDI receiver that owns the
+//     stream calls PushStreamTapAudio as frames arrive.
+// Both producers land in ONE place, so the levels, the layout snapshot and the
+// sample ring the mixer drains are the code the device taps already run: a
+// stream is metered, and can be mixed, exactly like a device.
+// ============================================================================
+
+Result<void> WindowsAudio::StartStreamTap(uint32_t tapId, const std::string &source,
+                                          const std::string &kind)
+{
+    if (!IAudio::IsStreamTap(tapId))
+        return Error::Make(Err::InvalidArgument, "Audio",
+                           "a stream tap id must be in the stream range");
+    if (source.empty())
+        return Error::Make(Err::InvalidArgument, "Audio", "a stream tap needs a source");
+    const bool media = kind == "media";
+    const bool ndi = kind == "ndi";
+    if (!media && !ndi)
+        return Error::Make(Err::Unsupported, "Audio",
+                           "no stream tap producer for kind '" + kind + "'");
+    // A media tap decodes the file itself, so a file that is not there is
+    // refused here (NotFound) rather than living on as a tap that never sounds.
+    if (media && GetFileAttributesW(win::Wide(source).c_str()) == INVALID_FILE_ATTRIBUTES)
+        return Error::Make(Err::NotFound, "Audio", "no media file at '" + source + "'");
+
+    if (!streams_)
+        streams_ = std::make_unique<MeterTable>();
+
+    std::unique_ptr<MeterTap> stale;
+    {
+        const std::lock_guard<std::mutex> lock(streams_->mutex);
+        auto &slot = streams_->taps[tapId];
+        if (slot && slot->running.load()
+            && slot->streamSource == source && slot->streamKind == kind)
+            return Ok();   // idempotent — this source is already live on this tap
+        if (slot) {
+            // A tap on a DIFFERENT source (or a dead one): replace it, joining
+            // the old worker OUTSIDE the lock below (it publishes under that lock).
+            slot->running.store(false);
+            stale = std::move(slot);
+        }
+        auto tap = std::make_unique<MeterTap>();
+        tap->deviceId = tapId;
+        tap->isStream = true;
+        tap->streamSource = source;
+        tap->streamKind = kind;
+        tap->running.store(true);
+        // "ndi" gets no worker: its samples are pushed by the receiver. The tap
+        // still exists from here on, so a push that arrives first is accepted.
+        if (media)
+            tap->worker = std::thread(&WindowsAudio::StreamThread, std::ref(*tap),
+                                      std::ref(*streams_), source);
+        slot = std::move(tap);
+    }
+    stale.reset();   // join the replaced tap with the mutex free
+    return Ok();
+}
+
+Result<void> WindowsAudio::StopStreamTap(uint32_t tapId)
+{
+    if (streams_)
+        streams_->Erase(tapId);
+    return Ok();
+}
+
+std::vector<uint32_t> WindowsAudio::ActiveStreamTaps() const
+{
+    std::vector<uint32_t> ids;
+    if (!streams_)
+        return ids;
+    const std::lock_guard<std::mutex> lock(streams_->mutex);
+    for (const auto &[id, tap] : streams_->taps)
+        if (tap->running.load()) ids.push_back(id);
+    return ids;
+}
+
+Result<void> WindowsAudio::PushStreamTapAudio(uint32_t tapId, const float *interleaved,
+                                              uint32_t channels, uint32_t frames,
+                                              uint32_t rate)
+{
+    if (!streams_)
+        return Ok();   // nobody holds this tap any more: the reader went away
+    return PushToTapTable(*streams_, tapId, interleaved, channels, frames, rate);
+}
+
+// The one implementation of "samples arrived": both producers (the decode
+// thread and an NDI receiver) and the public push call land here, so a stream
+// tap's levels/ring/windowing cannot drift between them.
+Result<void> WindowsAudio::PushToTapTable(MeterTable &table, uint32_t tapId,
+                                          const float *interleaved, uint32_t channels,
+                                          uint32_t frames, uint32_t rate)
+{
+    if (!IAudio::IsStreamTap(tapId))
+        return Error::Make(Err::InvalidArgument, "Audio", "not a stream tap id");
+    if (!interleaved || frames == 0 || rate == 0 || channels == 0
+        || channels > IAudio::kMaxInputMeterChannels)
+        return Error::Make(Err::InvalidArgument, "Audio", "malformed stream tap block");
+
+    const std::lock_guard<std::mutex> lock(table.mutex);
+    auto it = table.taps.find(tapId);
+    if (it == table.taps.end())
+        return Ok();
+    MeterTap &tap = *it->second;
+
+    // First block (or a format change): size the ring and publish the layout,
+    // exactly as a capture tap does when it learns its mix format — the UI's
+    // channel rows appear while the first window is still filling.
+    if (tap.ringChannels != channels || tap.ringRate != rate) {
+        tap.ringChannels = channels;
+        tap.ringRate = rate;
+        tap.ring.assign(static_cast<size_t>(MeterTap::kRingFrames) * channels, 0.0f);
+        tap.ringRead = tap.ringWrite = 0;
+    }
+    IAudio::InputMeterLevels base = tap.latest;
+    base.deviceId = tapId;
+    base.channelCount = static_cast<uint8_t>(channels);
+    base.sampleRateHz = rate;
+    base.layout = IAudio::InputMeterLevels::LayoutFor(static_cast<int>(channels));
+    tap.latest = base;
+
+    const size_t ringFrames = tap.ring.size() / channels;
+    const uint32_t windowFrames = rate / 20;   // the device taps' ~50 ms window
+    for (uint32_t f = 0; f < frames; ++f) {
+        const float *frame = interleaved + static_cast<size_t>(f) * channels;
+        for (uint32_t c = 0; c < channels; ++c) {
+            const float a = frame[c] < 0.f ? -frame[c] : frame[c];
+            if (a > tap.streamPeaks[c]) tap.streamPeaks[c] = a;
+            tap.streamSumSq[c] += static_cast<double>(frame[c]) * frame[c];
+        }
+        const size_t w = tap.ringWrite % ringFrames;
+        std::memcpy(&tap.ring[w * channels], frame, channels * sizeof(float));
+        tap.ringWrite = (tap.ringWrite + 1) % ringFrames;
+        if (tap.ringWrite == tap.ringRead)
+            tap.ringRead = (tap.ringRead + 1) % ringFrames;   // drop oldest
+
+        ++tap.streamFrames;
+        if (++tap.streamWindow >= windowFrames) {
+            IAudio::InputMeterLevels snap = base;
+            snap.framesCaptured = tap.streamFrames;
+            for (int c = 0; c < snap.channelCount; ++c) {
+                snap.peaks[c] = tap.streamPeaks[c];
+                snap.rms[c] = static_cast<float>(
+                    std::sqrt(tap.streamSumSq[c] / static_cast<double>(tap.streamWindow)));
+                tap.streamPeaks[c] = 0.f;
+                tap.streamSumSq[c] = 0.0;
+            }
+            tap.latest = snap;
+            tap.streamWindow = 0;
+        }
+    }
+    return Ok();
+}
+
+// The kind="media" producer: a Media Foundation audio-stream reader pumping the
+// file's own track into the tap, paced by the samples' timestamps so the meter
+// and the mixer see the file play in real time rather than as fast as the disk
+// allows.
+void WindowsAudio::StreamThread(MeterTap &tap, MeterTable &table, std::string source)
+{
+    std::mutex &publishMutex = table.mutex;   // where a snapshot must be published
+    // COM for this thread (MF hands out apartment-bound objects). Media
+    // Foundation is started ONCE for the process and deliberately not shut
+    // down here: MFShutdown is process-wide, and a stream tap ending must never
+    // tear the platform out from under the video path still decoding.
+    ScopedComInit com;
+    static std::once_flag mfOnce;
+    std::call_once(mfOnce, []() { (void)MFStartup(MF_VERSION, MFSTARTUP_LITE); });
+
+    ComPtr<IMFSourceReader> reader;
+    if (FAILED(MFCreateSourceReaderFromURL(win::Wide(source).c_str(), nullptr, reader.put())))
+        return;   // unreadable file: the tap stays silent (no level, no fake)
+    // Audio only: the video stream is the frame tap's business, not this one's.
+    reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
+    if (FAILED(reader->SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE)))
+        return;   // no audio track at all
+    ComPtr<IMFMediaType> want;
+    if (FAILED(MFCreateMediaType(want.put())))
+        return;
+    want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+    want->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_Float);   // float32 PCM, whatever the codec was
+    if (FAILED(reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr,
+                                           want.get())))
+        return;
+    ComPtr<IMFMediaType> got;
+    if (FAILED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, got.put())))
+        return;
+    UINT32 channels = 0, rate = 0;
+    got->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &channels);
+    got->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &rate);
+    if (channels == 0 || rate == 0 || channels > IAudio::kMaxInputMeterChannels)
+        return;
+    {
+        // Layout is truth too: publish it before the first window so the UI's
+        // channel rows are up while the first block is still decoding.
+        const std::lock_guard<std::mutex> lock(publishMutex);
+        IAudio::InputMeterLevels base = tap.latest;
+        base.deviceId = tap.deviceId;
+        base.channelCount = static_cast<uint8_t>(channels);
+        base.sampleRateHz = rate;
+        base.layout = IAudio::InputMeterLevels::LayoutFor(static_cast<int>(channels));
+        tap.latest = base;
+    }
+
+    LONGLONG firstTs = 0;
+    bool haveFirst = false;
+    auto wall0 = std::chrono::steady_clock::now();
+    while (tap.running.load(std::memory_order_relaxed)) {
+        DWORD flags = 0;
+        LONGLONG ts = 0;
+        ComPtr<IMFSample> sample;
+        if (FAILED(reader->ReadSample(MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, nullptr,
+                                      &flags, &ts, sample.put())))
+            break;
+        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
+            // The file ended (or the tap is on a stale position): publish a
+            // zeroed window so the meters read silence instead of freezing on
+            // the last thing they caught, then park until stopped.
+            //
+            // THE PUBLISH IS ONE SHORT LOCKED SCOPE, AND THE PARK IS OUTSIDE
+            // IT. The park used to sit inside this lock_guard, so a media tap
+            // whose file had simply PLAYED OUT held the table's mutex for as
+            // long as the row stayed open — and the UI's meter pump calls
+            // InputLevels(tapId) on the GUI THREAD every 50 ms, which takes
+            // that same mutex: the moment a media row's audio reached its end
+            // the whole interface froze (the lock was never released because
+            // the tap is parked, not stopped), which read as "the app hung".
+            // A wait — sleeping included — must never happen under the lock
+            // the readers of the thing being waited on need (the same rule the
+            // modules' lock-scope guard enforces, one layer down).
+            {
+                const std::lock_guard<std::mutex> lock(publishMutex);
+                IAudio::InputMeterLevels quiet = tap.latest;
+                for (int c = 0; c < quiet.channelCount; ++c) {
+                    quiet.peaks[c] = 0.0f;
+                    quiet.rms[c] = 0.0f;
+                }
+                tap.latest = quiet;
+            }
+            while (tap.running.load(std::memory_order_relaxed))
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            return;
+        }
+        if (!sample)
+            continue;
+        if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
+            // The track changed format mid-file (concatenated transports do
+            // this): re-read the negotiated type and keep decoding — the tap
+            // re-sizes its ring on the next block when the shape differs.
+            ComPtr<IMFMediaType> now;
+            if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+                                                      now.put()))) {
+                UINT32 chans = 0, hz = 0;
+                now->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &chans);
+                now->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &hz);
+                if (chans > 0 && chans <= IAudio::kMaxInputMeterChannels)
+                    channels = chans;
+                if (hz > 0)
+                    rate = hz;
+            }
+            continue;
+        }
+        ComPtr<IMFMediaBuffer> buffer;
+        if (FAILED(sample->ConvertToContiguousBuffer(buffer.put())) || !buffer)
+            continue;
+        BYTE *data = nullptr;
+        DWORD length = 0;
+        if (FAILED(buffer->Lock(&data, nullptr, &length)) || !data) {
+            if (data) buffer->Unlock();
+            continue;
+        }
+        const uint32_t frames = static_cast<uint32_t>(
+            length / (static_cast<DWORD>(channels) * sizeof(float)));
+        if (frames > 0)
+            (void)PushToTapTable(table, tap.deviceId, reinterpret_cast<const float *>(data),
+                                 channels, frames, rate);
+        buffer->Unlock();
+
+        // Pace to the stream's own clock: without this the whole file is
+        // drained in milliseconds and the meter is a single spike.
+        if (!haveFirst) {
+            firstTs = ts;
+            wall0 = std::chrono::steady_clock::now();
+            haveFirst = true;
+        }
+        const double target = static_cast<double>(ts - firstTs) / 10000000.0;
+        double ahead = target
+            - std::chrono::duration<double>(std::chrono::steady_clock::now() - wall0).count();
+        if (ahead > 0.5) {
+            // A long silence in the file: never hold the tap for the whole gap.
+            firstTs = ts;
+            wall0 = std::chrono::steady_clock::now();
+            ahead = 0.0;
+        }
+        while (ahead > 0.0 && tap.running.load(std::memory_order_relaxed)) {
+            const double slice = ahead > 0.005 ? 0.005 : ahead;
+            std::this_thread::sleep_for(std::chrono::duration<double>(slice));
+            ahead -= slice;
+        }
+        if (ahead < -0.5) {
+            // Fell far behind (a stalled decode): re-anchor rather than
+            // accumulating a debt that would make every later block late.
+            firstTs = ts;
+            wall0 = std::chrono::steady_clock::now();
+        }
+    }
 }
 
 // ---- OUTPUT metering (the program mix, via WASAPI loopback) ----------------
@@ -660,14 +1087,32 @@ IAudio::InputMeterLevels WindowsAudio::OutputLevels(uint32_t deviceId)
 }
 
 std::vector<AudioDeviceInfo> WindowsAudio::Enumerate() const {
+    return EnumerateFiltered(nullptr);
+}
+
+std::vector<AudioDeviceInfo> WindowsAudio::EnumerateFor(
+    const std::vector<std::string> &names) const {
+    // Nothing named ⇒ nothing wanted: this is the "no audio in this setup"
+    // answer, and it costs no COM at all.
+    if (names.empty())
+        return {};
+    const std::set<std::string> only(names.begin(), names.end());
+    return EnumerateFiltered(&only);
+}
+
+// The one walk both entry points share (see the header): `only` narrows the
+// WASAPI truth query AND the WinMM caps loops to the named endpoints, so a
+// caller that wants two devices never activates the other six.
+std::vector<AudioDeviceInfo> WindowsAudio::EnumerateFiltered(
+    const std::set<std::string> *only) const {
     ScopedComInit com;
     std::vector<AudioDeviceInfo> out;
 
     // WASAPI mix-format truth per endpoint, name-matched against the WinMM
     // roster below (see QueryWasapiMixFormats — mono mics report 1, stereo
     // 2, 7.1 outputs 8; caps alone can't tell).
-    const std::map<std::string, AudioDeviceInfo> inTruth = QueryWasapiMixFormats(true);
-    const std::map<std::string, AudioDeviceInfo> outTruth = QueryWasapiMixFormats(false);
+    const std::map<std::string, AudioDeviceInfo> inTruth = QueryWasapiMixFormats(true, only);
+    const std::map<std::string, AudioDeviceInfo> outTruth = QueryWasapiMixFormats(false, only);
 
     // Output devices (winmm). dwFormats is a bitmask; 44.1k/48k are near
     // universal, so those are reported as the nominal rate.
@@ -682,6 +1127,7 @@ std::vector<AudioDeviceInfo> WindowsAudio::Enumerate() const {
         AudioDeviceInfo d;
         d.id = "waveout:" + std::to_string(i);
         d.name = win::Utf8(caps.szPname);
+        if (!NamedBy(only, d.name)) continue;
         d.isInput = false;
         d.isDefault = (i == 0);
         d.sampleRateHz = 48000;   // nominal; caps are a bitmask of supported rates
@@ -706,6 +1152,7 @@ std::vector<AudioDeviceInfo> WindowsAudio::Enumerate() const {
         AudioDeviceInfo d;
         d.id = "wavein:" + std::to_string(i);
         d.name = win::Utf8(caps.szPname);
+        if (only && !only->count(d.name)) continue;
         d.isInput = true;
         d.isDefault = (i == 0);
         d.sampleRateHz = 48000;

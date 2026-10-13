@@ -302,7 +302,7 @@ Item {
                                 readonly property real indent: 8 * modelData.depth
                                 x: indent; width: card.width - indent
                                 height: isFolder ? 34 : 28
-                                color: root.dropFolder === modelData.id ? "#306C5CE7" : (active ? root.cDarkest : (treeHover.hovered ? "#0dffffff" : Qt.rgba(1, 1, 1, 0.01 * modelData.depth)))
+                                color: root.dropFolder === modelData.id ? Qt.alpha(Theme.accent, 0.19) : (active ? root.cDarkest : (treeHover.hovered ? "#0dffffff" : Qt.rgba(1, 1, 1, 0.01 * modelData.depth)))
                                 opacity: modelData.archived ? 0.55 : 1
 
                                 // an indented row keeps a line down its left, like FreeShow's
@@ -628,7 +628,7 @@ Item {
                         visible: entry.modelData.divider !== true
                         x: 12; anchors.verticalCenter: parent.verticalCenter
                         text: entry.modelData.label ?? ""
-                        color: entry.modelData.danger === true ? "#ff6b61" : root.cText
+                        color: entry.modelData.danger === true ? Theme.dangerLight : root.cText
                         font.family: root.mono; font.pixelSize: 15
                     }
                     HoverHandler { id: entryHover; cursorShape: Qt.PointingHandCursor }

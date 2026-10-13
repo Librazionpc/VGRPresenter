@@ -109,60 +109,108 @@ void ResourceManager::SampleLocked() {
 }
 
 void ResourceManager::Sample() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    try {
-        SampleLocked();
-    } catch (const std::exception& ex) {
-        sampleErrors_.fetch_add(1);
+    // What this sample has to PUBLISH is collected under the lock and put on the
+    // bus only after it is dropped. The bus dispatches SYNCHRONOUSLY, and the
+    // pressure subscribers re-enter this very manager (AdaptiveRuntime::OnPressure
+    // -> ApplyOptimization -> MemoryPressure() -> Telemetry() -> mutex_), so
+    // publishing under mutex_ deadlocks the sampling worker on a non-recursive
+    // lock WHILE it holds AdaptiveRuntime's applyMutex_ — and the GUI thread's
+    // next settings write (SettingsService -> ApplyToEngine -> SetPreference ->
+    // ApplyOptimization) waits on that applyMutex_ forever. One settings toggle
+    // then freezes the whole UI (killed by the hang watchdog: it reads as a
+    // crash).
+    struct Pending {
+        bool publishHigh = false;                  // ResourcePressureHigh for this sample
+        bool sticky = false;                       // ...and remember it for late subscribers
+        events::ResourcePressureHigh high;
+        bool publishChange = false;                // ResourcePressureChanged for this sample
+        events::ResourcePressureChanged change;
+    };
+    std::vector<Pending> pending;
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        try {
+            SampleLocked();
+        } catch (const std::exception& ex) {
+            sampleErrors_.fetch_add(1);
+        }
+
+        // --- Auto-decisions (10 §7 Smart rules) ---
+        const MachineTelemetry& t = telemetry_;
+        PressureLevel mem = t.totalRamBytes > 0
+                                ? LevelFor(static_cast<double>(t.usedRamBytes) / static_cast<double>(t.totalRamBytes))
+                                : PressureLevel::None;
+        PressureLevel cpu = LevelFor(t.cpuUsagePct / 100.0);
+
+        const EngineTime now = EngineClock::now();
+
+        // Memory: alert once per sustained episode (see PressureLatch).
+        switch (memLatch_.Update(mem, now)) {
+            case PressureLatch::Transition::Raised: {
+                decisions_.push_back(AutoDecision{now, "throttle-background",
+                                                  "memory pressure " + std::string(ToString(mem))});
+                Pending p;
+                p.publishHigh = true;
+                p.sticky = true;                  // memory pressure is the sticky one
+                p.high = events::ResourcePressureHigh{"memory", mem};
+                p.publishChange = true;
+                p.change = events::ResourcePressureChanged{"memory", lastMemPressure_, mem};
+                pending.push_back(std::move(p));
+                break;
+            }
+            case PressureLatch::Transition::Cleared: {
+                Pending p;
+                p.publishChange = true;
+                p.change = events::ResourcePressureChanged{"memory", lastMemPressure_, mem};
+                pending.push_back(std::move(p));
+                break;
+            }
+            case PressureLatch::Transition::None:
+                break;
+        }
+        // CPU: same, with a longer hold — a CPU spike is normal, sustained saturation is not.
+        switch (cpuLatch_.Update(cpu, now)) {
+            case PressureLatch::Transition::Raised: {
+                decisions_.push_back(AutoDecision{now, "reduce-polling",
+                                                  "cpu pressure " + std::string(ToString(cpu))});
+                Pending p;
+                p.publishHigh = true;
+                p.high = events::ResourcePressureHigh{"cpu", cpu};
+                p.publishChange = true;
+                p.change = events::ResourcePressureChanged{"cpu", lastCpuPressure_, cpu};
+                pending.push_back(std::move(p));
+                break;
+            }
+            case PressureLatch::Transition::Cleared: {
+                Pending p;
+                p.publishChange = true;
+                p.change = events::ResourcePressureChanged{"cpu", lastCpuPressure_, cpu};
+                pending.push_back(std::move(p));
+                break;
+            }
+            case PressureLatch::Transition::None:
+                break;
+        }
+        lastMemPressure_ = mem;
+        lastCpuPressure_ = cpu;
+        while (decisions_.size() > kMaxDecisions) decisions_.pop_front();
     }
 
-    // --- Auto-decisions (10 §7 Smart rules) ---
-    const MachineTelemetry& t = telemetry_;
-    PressureLevel mem = t.totalRamBytes > 0
-                            ? LevelFor(static_cast<double>(t.usedRamBytes) / static_cast<double>(t.totalRamBytes))
-                            : PressureLevel::None;
-    PressureLevel cpu = LevelFor(t.cpuUsagePct / 100.0);
-
-    const EngineTime now = EngineClock::now();
-
-    // Memory: alert once per sustained episode (see PressureLatch).
-    switch (memLatch_.Update(mem, now)) {
-        case PressureLatch::Transition::Raised: {
-            decisions_.push_back(AutoDecision{now, "throttle-background",
-                                              "memory pressure " + std::string(ToString(mem))});
-            auto sticky = std::make_shared<events::ResourcePressureHigh>("memory", mem);
+    // The lock is DROPPED before anything is dispatched: a subscriber of these
+    // events re-enters this manager (see the comment at the top), so the sample
+    // must not own mutex_ while the bus runs. Same rule as
+    // ProductionEngine/RecordingEngine's dispatch-scope tests.
+    for (const Pending& p : pending) {
+        if (p.sticky) {
+            auto sticky = std::make_shared<events::ResourcePressureHigh>(p.high);
             EventBus::Instance().SetSticky(events::ResourcePressureHigh::kTopic, sticky);
             (void)EventBus::Instance().Publish(*sticky);
-            (void)EventBus::Instance().Publish(
-                events::ResourcePressureChanged{"memory", lastMemPressure_, mem});
-            break;
+        } else if (p.publishHigh) {
+            (void)EventBus::Instance().Publish(p.high);
         }
-        case PressureLatch::Transition::Cleared:
-            (void)EventBus::Instance().Publish(
-                events::ResourcePressureChanged{"memory", lastMemPressure_, mem});
-            break;
-        case PressureLatch::Transition::None:
-            break;
+        if (p.publishChange) (void)EventBus::Instance().Publish(p.change);
     }
-    // CPU: same, with a longer hold â a CPU spike is normal, sustained saturation is not.
-    switch (cpuLatch_.Update(cpu, now)) {
-        case PressureLatch::Transition::Raised:
-            decisions_.push_back(AutoDecision{now, "reduce-polling",
-                                              "cpu pressure " + std::string(ToString(cpu))});
-            (void)EventBus::Instance().Publish(events::ResourcePressureHigh{"cpu", cpu});
-            (void)EventBus::Instance().Publish(
-                events::ResourcePressureChanged{"cpu", lastCpuPressure_, cpu});
-            break;
-        case PressureLatch::Transition::Cleared:
-            (void)EventBus::Instance().Publish(
-                events::ResourcePressureChanged{"cpu", lastCpuPressure_, cpu});
-            break;
-        case PressureLatch::Transition::None:
-            break;
-    }
-    lastMemPressure_ = mem;
-    lastCpuPressure_ = cpu;
-    while (decisions_.size() > kMaxDecisions) decisions_.pop_front();
 }
 
 std::vector<ResourceManager::AutoDecision> ResourceManager::LastAutoActions(size_t max) const {

@@ -38,6 +38,8 @@ struct HardwareInfo {
 
     bool hasBattery = false;
     bool onBattery = false;
+    // Plugged in and topping up (see platform::Snapshot::batteryCharging).
+    bool batteryCharging = false;
     int batteryPercent = -1;
 
     uint64_t diskTotalBytes = 0;

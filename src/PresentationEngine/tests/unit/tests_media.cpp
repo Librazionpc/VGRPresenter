@@ -3,6 +3,7 @@
 //   ./bps_unit_tests media
 #include "TestHarness.hpp"
 
+#include "core/config/Json.hpp"
 #include "modules/media/MediaLibrary.hpp"
 #include "modules/media/ThumbnailCache.hpp"
 #include "modules/rendering/PngCodec.hpp"
@@ -234,11 +235,29 @@ void TestMediaLibraryFolders() {
         mm::MediaLibrary third(storage);
         CHECK(third.Load().ok() && third.Folders().size() == 1);
         CHECK(third.Count() == 2 && third.Items().size() == 2);           // the removed folder's items are gone
-        // A damaged index is ignored, not fatal: the folder list still loads, scanning fills it again.
-        CHECK(fs.Write(root + "/state/media-index.json", "{ not json").ok());
+        // A DAMAGED index is set aside as evidence and the read goes on: the
+        // folder list still loads, scanning fills the grid again, and the bytes
+        // that were there are kept under `.corrupt-<stamp>` rather than being
+        // overwritten by the next save.
+        const std::string index = root + "/state/media-index.json";
+        CHECK(fs.Write(index, "{ not json").ok());
         mm::MediaLibrary fourth(storage);
         CHECK(fourth.Load().ok() && fourth.Folders().size() == 1 && fourth.Count() == 0);
+        std::vector<std::string> quarantined;
+        auto entries = fs.Enumerate(root + "/state");
+        CHECK(entries.ok());
+        if (entries.ok())
+            for (const auto& e : entries.value())
+                if (e.find("media-index.json.corrupt-") != std::string::npos) quarantined.push_back(e);
+        CHECK(quarantined.size() == 1);
+        if (quarantined.size() == 1) {
+            auto kept = fs.ReadText(quarantined.front());
+            CHECK(kept.ok() && kept.value() == "{ not json");
+        }
+        // …and the next scan rebuilds a healthy index at the same path.
         CHECK(fourth.Scan(root + "/clips").ok() && fourth.Count() == 2);
+        auto rebuilt = fs.ReadText(index);
+        CHECK(rebuilt.ok() && bps::json::Parse(rebuilt.value()).ok());
     }
 }
 

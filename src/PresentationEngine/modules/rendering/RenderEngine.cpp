@@ -275,6 +275,33 @@ void RenderEngine::SubmitAsyncUpload(std::string name, std::vector<uint8_t> byte
 // Drawing (pipeline pass callback)
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// ONE-SHOT per object id: a draw that silently does nothing is how a fully
+// composed scene reaches an output as black. Every failure below used to be a
+// bare `break` — an image whose texture could not be uploaded (a texture budget
+// already spent elsewhere in the app, say) left the frame showing only the
+// background fill, which is exactly "the preview is right and NDI/HDMI is
+// black". Logged once per id so a live feed cannot spam the log.
+void LogDrawFailureOnce(const std::string& objId, const std::string& why) {
+    static std::mutex m;
+    static std::map<std::string, std::string> seen;
+    bool first = false;
+    {
+        std::lock_guard<std::mutex> lock(m);
+        auto [it, inserted] = seen.emplace(objId, why);
+        if (inserted || it->second != why) {
+            it->second = why;
+            first = true;
+        }
+    }
+    if (first)
+        Logger::Instance().Warning(std::format("draw skip: object '{}' — {}", objId, why),
+                                   "RenderEngine");
+}
+
+} // namespace
+
 void RenderEngine::DrawObject(RenderObject* obj, std::vector<DrawCommand>& cmds) {
     if (!obj || !obj->Visible() || obj->EffectiveAlpha() <= 0.0f) return;
 
@@ -314,7 +341,10 @@ void RenderEngine::DrawObject(RenderObject* obj, std::vector<DrawCommand>& cmds)
         case ObjectKind::Image: {
             auto* img = static_cast<ImageObject*>(obj);
             const auto* src = img->Source();
-            if (!src || !src->source.loaded || src->source.image.empty()) break;
+            if (!src || !src->source.loaded || src->source.image.empty()) {
+                LogDrawFailureOnce(img->Id(), "no image pixels loaded (and 0 visible in the frame)");
+                break;
+            }
             auto tex = gpu_.GetTexture(src->source.assetId.empty()
                                            ? img->Id()
                                            : src->source.assetId);
@@ -325,7 +355,14 @@ void RenderEngine::DrawObject(RenderObject* obj, std::vector<DrawCommand>& cmds)
                                                   ? img->Id()
                                                   : src->source.assetId,
                                               src->source.image);
-                if (!up.ok()) break;
+                if (!up.ok()) {
+                    LogDrawFailureOnce(img->Id(), std::format(
+                        "texture upload failed: {} (image {}x{} {} bytes, budget {} bytes, {} uploaded)",
+                        up.error().message, src->source.image.width, src->source.image.height,
+                        src->source.image.ByteSize(), gpu_.TextureBudget(),
+                        gpu_.TextureMemoryBytes()));
+                    break;
+                }
                 tid = up.value();
             }
             DrawCommand c = base;
@@ -341,13 +378,23 @@ void RenderEngine::DrawObject(RenderObject* obj, std::vector<DrawCommand>& cmds)
         case ObjectKind::Video: {
             auto* v = static_cast<VideoObject*>(obj);
             if (!v->HasFrame()) break;
-            auto tex = gpu_.GetTexture(v->Id());
-            TextureId tid = tex.ok() ? tex.value() : TextureId{};
-            if (!tid.valid()) {
-                auto up = gpu_.AcquireTexture(v->Id(), v->Frame());
-                if (!up.ok()) break;
-                tid = up.value();
+            // VERSIONED upload, not AcquireTexture's create-once lookup: a live
+            // frame source (media on air, a camera tap) pushes new pixels every
+            // tick through this same object id, and texture names dedup — so a
+            // plain GetTexture/AcquireTexture pair bound the FIRST frame forever
+            // and the real output froze on it (typically the decoder's black
+            // opening frame) while the QML preview, reading the live QImage
+            // directly, kept moving. UpdateTexture re-uploads in place only when
+            // FrameRevision moved.
+            auto up = gpu_.UpdateTexture(v->Id(), v->Frame(), v->FrameRevision());
+            if (!up.ok()) {
+                LogDrawFailureOnce(v->Id(), std::format(
+                    "video texture upload failed: {} (frame {}x{} {} bytes, budget {} bytes, {} uploaded)",
+                    up.error().message, v->Frame().width, v->Frame().height,
+                    v->Frame().ByteSize(), gpu_.TextureBudget(), gpu_.TextureMemoryBytes()));
+                break;
             }
+            const TextureId tid = up.value();
             DrawCommand c = base;
             c.type = DrawCommand::Type::BlitImage;
             c.rect = obj->Bounds();
@@ -367,6 +414,12 @@ void RenderEngine::DrawObject(RenderObject* obj, std::vector<DrawCommand>& cmds)
             c.rect = obj->Bounds();
             c.color = shp->fill;
             c.color.a *= obj->Opacity();
+            // Rounded corners travel WITH the command (destination pixels,
+            // clamped by the rasterizer) — without this a shape's radius never
+            // left ShapeComponent, so a template's rounded bands/panels drew
+            // square on every engine output while the canvas and previews
+            // rounded them (Qt's Rectangle { radius }).
+            c.cornerRadius = shp->radius;
             cmds.push_back(c);
             break;
         }
@@ -437,9 +490,25 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
     // (not just size) — otherwise switching fonts/weights at the same
     // pixel size would keep reading whichever atlas uploaded FIRST under
     // this name, showing the wrong glyphs for every style after the first.
-    const std::string atlasName = std::format("__font_atlas_{}_{}_{}_{}",
-                                              style.fontId, static_cast<int>(style.size),
-                                              style.bold, style.italic);
+    //
+    // The name MUST be built from the SAME size rounding the cache keys on:
+    // RenderCache::GlyphAtlas buckets by int(size + 0.5) (round), while this
+    // name used to truncate int(size). Two auto-fitted sizes straddling a .5
+    // boundary (e.g. 90.4 and 90.6) then landed in DIFFERENT cache entries —
+    // each with its own cell geometry (cellPx/cellPy are integerised) — yet
+    // produced the SAME texture name, so the second style sampled the first
+    // style's atlas with ITS OWN per-glyph source rectangles. The mismatch
+    // grows with the cell's column/row (source x = col*(cellPx+gap)), which is
+    // exactly why right-hand-column glyphs — a round vowel like 'o' (cell 79,
+    // column 15) first among them — came out narrowed/shifted with a foreign
+    // tick beside them while early-column letters looked fine. The atlas
+    // dimensions are folded in as well so a rebuilt atlas of different
+    // geometry can never be read through a stale texture.
+    const std::string atlasName = std::format("__font_atlas_{}_{}_{}_{}_{}x{}",
+                                              style.fontId,
+                                              static_cast<int>(style.size + 0.5f),
+                                              style.bold, style.italic,
+                                              entry.atlas.width, entry.atlas.height);
     auto tex = gpu_.GetTexture(atlasName);
     TextureId tid = tex.ok() ? tex.value() : TextureId{};
     if (!tid.valid()) {
@@ -517,8 +586,16 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
             DrawCommand c;
             c.type = DrawCommand::Type::DrawGlyph;
             c.texture = tid;
-            c.rect = Rect(cx, ly, static_cast<float>(g.width),
-                          static_cast<float>(g.height));
+            // The glyph's cell is NOT anchored on the pen: a system-font cell
+            // is the advance box plus the atlas's own ink pad (see
+            // FontManager::BuildSystemAtlas), and its bearing says where the
+            // cell's top-left sits relative to the advance origin. Adding it
+            // puts the origin back on the pen, so the painted position is
+            // unchanged and only the cell's extra margin (ink that overshoots
+            // the advance) comes along. The builtin atlas carries bearing 0.
+            c.rect = Rect(cx + static_cast<float>(g.bearingX),
+                          ly + static_cast<float>(g.bearingY),
+                          static_cast<float>(g.width), static_cast<float>(g.height));
             c.srcRect = Rect(static_cast<float>(g.x), static_cast<float>(g.y),
                              static_cast<float>(g.width), static_cast<float>(g.height));
             c.color = style.color;
@@ -529,6 +606,35 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
         ly += lineHeight;
     }
 }
+
+namespace {
+
+// Alpha inspection (RenderEngine::SetAlphaInspect): source-over the frame onto
+// a checkerboard so a keyed feed's transparent pixels are VISIBLE downstream —
+// the real bound output window, the NDI feed and HDMI all read the pixels this
+// produced. Fully opaque pixels are skipped, so an opaque scene is unchanged.
+// Color::Pack is 0xAABBGGRR (R in the low byte).
+void CompositeOverCheckerboard(RgbaImage& img) {
+    constexpr int kTile = 16;
+    constexpr uint32_t kLight = 0xFFCCCCCCu;
+    constexpr uint32_t kDark = 0xFF808080u;
+    for (int y = 0; y < img.height; ++y) {
+        for (int x = 0; x < img.width; ++x) {
+            uint32_t& px = img.pixels[static_cast<size_t>(y) * static_cast<size_t>(img.width) + static_cast<size_t>(x)];
+            const uint32_t a = (px >> 24) & 0xFFu;
+            if (a == 0xFFu)
+                continue;   // opaque: nothing to prove
+            const uint32_t bg = ((((x / kTile) + (y / kTile)) & 1) == 0) ? kLight : kDark;
+            const uint32_t inv = 255u - a;
+            const uint32_t r = ((px & 0xFFu) * a + (bg & 0xFFu) * inv + 127u) / 255u;
+            const uint32_t g = (((px >> 8) & 0xFFu) * a + ((bg >> 8) & 0xFFu) * inv + 127u) / 255u;
+            const uint32_t b = (((px >> 16) & 0xFFu) * a + ((bg >> 16) & 0xFFu) * inv + 127u) / 255u;
+            px = 0xFF000000u | (b << 16) | (g << 8) | r;
+        }
+    }
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Render
@@ -558,6 +664,16 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
         DrawCommand clear;
         clear.type = DrawCommand::Type::Clear;
         clear.color = opts.clearColor;
+        // A scene that declares NO opaque background of its own (a style that
+        // paints nothing — an explicitly "transparent" template, or one that
+        // names no colour at all) clears to alpha 0: the clear is the pixels the
+        // scene never paints, and for a keyable overlay those must stay
+        // transparent — the monitor tile shows it as transparent and the output
+        // window / NDI feed carry the alpha. Scenes that DO paint a full-frame
+        // background are untouched: the clear sits under them, so its alpha only
+        // ever decides the areas nothing was drawn in.
+        if (scene.value()->TransparentBackground())
+            clear.color.a = 0.0f;
         cmds.push_back(clear);
     }
 
@@ -572,6 +688,53 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
         for (auto* obj : objs) DrawObject(obj, cmds);
     });
 
+    // ONE-SHOT PER SCENE PER STATE: what this render actually had to draw. A
+    // frame that comes out black is either "the pipeline drew nothing" (no
+    // objects collected, or every object dropped for a missing layer — see
+    // RenderPipeline::Distribute's layerOk gate) or "objects drew but landed
+    // under/over something"; this line separates those two without a debugger,
+    // and cmdCount==1 means only the clear command was submitted.
+    {
+        static std::mutex logMutex;
+        static std::map<std::string, std::string> lastState;
+        // Command breakdown, and the first few commands' geometry: what the
+        // rasterizer was actually asked to draw. "BlitImage count 0" means the
+        // draw never got as far as a picture; "BlitImage 1 with a rect that is
+        // off the canvas" is a different bug from "the texture was black".
+        int nClear = 0, nFill = 0, nBlit = 0, nGlyph = 0, nShape = 0;
+        std::string firstCmds;
+        for (const DrawCommand& c : cmds) {
+            switch (c.type) {
+                case DrawCommand::Type::Clear: ++nClear; break;
+                case DrawCommand::Type::FillRect: ++nFill; break;
+                case DrawCommand::Type::BlitImage: ++nBlit; break;
+                case DrawCommand::Type::DrawGlyph: ++nGlyph; break;
+                case DrawCommand::Type::DrawShape: ++nShape; break;
+            }
+            if (firstCmds.size() < 220)
+                firstCmds += std::format(" [{}({:.0f},{:.0f},{:.0f}x{:.0f})]",
+                                         static_cast<int>(c.type), c.rect.x, c.rect.y,
+                                         c.rect.width, c.rect.height);
+        }
+        const std::string state = std::format(
+            "objects={} layers={} cmds={} size={}x{} backend={} clear={} fill={} blit={} glyph={} shape={} |{}",
+            objects.size(), layers.size(), cmds.size(), w, h,
+            backend_ == nullBackend_.get() ? "null" : "software",
+            nClear, nFill, nBlit, nGlyph, nShape, firstCmds);
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(logMutex);
+            std::string& last = lastState[std::string(sceneId)];
+            if (last != state) {
+                last = state;
+                changed = true;
+            }
+        }
+        if (changed)
+            Logger::Instance().Info(
+                std::format("render dispatch: [{}] {}", sceneId, state), "RenderEngine");
+    }
+
     // Custom graph passes run after the fixed pipeline (extensible effects).
     graph_.ExecutePasses();
 
@@ -584,6 +747,9 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
         auto rb = backend_->Readback();
         if (!rb.ok()) return rb.error();
         frame = rb.value();
+        // Transparency inspection (opt-in): make the alpha VISIBLE downstream.
+        if (alphaInspect_.load(std::memory_order_relaxed) && !frame.empty())
+            CompositeOverCheckerboard(frame);
     }
     if (opts.distribute) {
         Frame out;

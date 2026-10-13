@@ -86,6 +86,17 @@ public:
     struct ResolvedQueryTerm {
         std::string term;      // the word to search for (the input when unresolved)
         double weight = 1.0;   // its BM25 contribution weight
+        // THE CANDIDATE LADDER of a half-typed word (only filled for the tail a
+        // caller marked as still being typed): the words the typed prefix can
+        // become, MOST CONFIDENT FIRST — confidence being how often the corpus
+        // uses the word, the one honest signal the index has for "what the user
+        // most likely meant" ("rec" -> receive, received, record, ...). Empty
+        // for every other term. Callers that run their own text scan walk it in
+        // order, so their results start with the likeliest reading and then, as
+        // every earlier candidate runs out, reach the merely possible ones
+        // (user call: "start from the ones it confident about then come as far
+        // as possible options exist").
+        std::vector<std::string> candidates;
     };
     Result<std::vector<ResolvedQueryTerm>> ResolveTerms(
         const std::vector<std::string>& terms) const;
@@ -96,8 +107,26 @@ public:
     // wins. A split arrives as ONE entry containing a space ("holy spirit") so
     // the 1:1 term mapping holds; callers split on the space if they need the
     // words separately.
+    //
+    // `typingTail` = the user is STILL TYPING the last word (every live search
+    // box: the sermon pane's, the Scripture pane's, the app-wide search). Then a
+    // half-typed word is never rewritten into one guessed word — "compelling
+    // that you rec" must not become "... received" and so lose the paragraph
+    // that says "receive" (user report, with the pane screenshot). The typed
+    // prefix is kept and MATCHES EVERY WORD THAT STARTS WITH IT, while the words
+    // before it still have to be there; a fully-typed MISSPELLING ("recieve") is
+    // still corrected, because that is not a prefix of anything the user meant.
+    // Leave it false for a hint/autocomplete answer ("rec -> receive" reads
+    // better as the completion than as the raw prefix).
     Result<std::vector<ResolvedQueryTerm>> ResolveTermsWithSplits(
-        const std::vector<std::string>& terms) const;
+        const std::vector<std::string>& terms, bool typingTail = false) const;
+
+    // The candidate ladder itself (see ResolvedQueryTerm::candidates): every
+    // vocabulary word that STARTS WITH `prefix`, most used first, capped at
+    // `limit`. Public so EVERY search surface can rank by the same order — the
+    // sermon pane, the Scripture pane, the app-wide dialog and the index path
+    // all reach the same list through this one call.
+    std::vector<std::string> PrefixCandidates(std::string_view prefix, size_t limit = 12) const;
 
     // --- Sessions (restorable query state) ---------------------------------------
     struct SessionState {

@@ -1,10 +1,12 @@
 #include "OutputListModel.h"
+#include "FamilySlots.h"
 #include "StyleListModel.h"
 #include "services/DesignLibraryService.h"
 #include "services/EngineBridge.h"
 #include "services/EventBus.h"
 #include "services/SettingsService.h"
 #include "services/ShowConverter.h"
+#include "services/StyleSpecBuilder.h"
 #include "modules/presentation/PresentationTypes.hpp"
 #include "modules/project/OutputStore.hpp"
 
@@ -15,6 +17,8 @@
 #include <QFile>
 #include <QTimerEvent>
 #include <algorithm>
+#include <cstdio>
+#include <utility>
 
 namespace {
 // The one output every show needs — deleting it would leave the app with no
@@ -24,6 +28,23 @@ constexpr auto kMainOutputName = "Main Output";
 // The Edit dialog's item-kind keys, in OutputContentToggle display order —
 // the same order the engine's OutputStore persists the toggles in.
 constexpr const char *kContentKeys[] = { "text", "camera", "media", "clock", "timer", "shape" };
+
+// Parses the "res" role's "1920×1080" / "1920 × 1080" display string into a
+// (width, height) pair, or {0,0} when absent/unparseable — the pushed-spec
+// side's signal for "fall back to the engine's own default" (SetLiveOutputStyles'
+// own contract). A screen-bound row keeps this snapped to the display's real
+// mode (setScreenName/screensChangedNow); any OTHER row (NDI included) only
+// ever gets a value here from the Edit dialog's own Resolution picker.
+std::pair<int, int> parseResolution(const QString &res)
+{
+    const QStringList parts = res.split(QChar(0x00D7));   // '×'
+    if (parts.size() != 2)
+        return { 0, 0 };
+    bool okW = false, okH = false;
+    const int w = parts.at(0).trimmed().toInt(&okW);
+    const int h = parts.at(1).trimmed().toInt(&okH);
+    return (okW && okH && w > 0 && h > 0) ? std::make_pair(w, h) : std::make_pair(0, 0);
+}
 }
 
 namespace {
@@ -41,18 +62,20 @@ bool isScreenTransport(const OutputItem &o)
 }
 
 QPointer<OutputListModel> OutputListModel::s_instance = nullptr;
+QPointer<StyleListModel> OutputListModel::s_adoptedStyleRoster = nullptr;
 
 // The one instance, for C++ AND QML — see the header for why this is eager.
 OutputListModel *OutputListModel::instance()
 {
-    static OutputListModel s;
-    return &s;
+    static OutputListModel s;    return &s;
 }
 
 OutputListModel *OutputListModel::create(QQmlEngine *engine, QJSEngine *jsEngine)
 {
     Q_UNUSED(engine)
     Q_UNUSED(jsEngine)
+    // CppOwnership: this object outlives the QML engine and must never be
+    // deleted by it (same contract every service singleton follows).
     OutputListModel *s = instance();
     QJSEngine::setObjectOwnership(s, QJSEngine::CppOwnership);
     return s;
@@ -62,6 +85,10 @@ OutputListModel *OutputListModel::create(QQmlEngine *engine, QJSEngine *jsEngine
 OutputListModel::OutputListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
+    // TEMPORARY, env-gated — the StyleListModel twin of this line.
+    if (qEnvironmentVariableIsSet("VGR_STYLEBG_TEST"))
+        fprintf(stderr, "[SELFTEST-STYLEBG-ID] OutputListModel ctor this=%p s_instance=%p\n",
+                static_cast<void *>(this), static_cast<void *>(s_instance.data()));
     Q_ASSERT_X(!s_instance || s_instance == this, "OutputListModel",
                "a second OutputListModel was constructed — instance() would "
                "silently rebind and every C++ reader would hold the wrong one");
@@ -282,7 +309,7 @@ void OutputListModel::connectToEngineBoot()
     // booted() itself — so this retries on bootedChanged and pushes once.
     //
     // A THIRD trap (found live: a family template picked in Settings never
-    // rendered until the style was reassigned): bakeFamilyTemplateBlocks
+    // rendered until the style was reassigned): the per-family template bake
     // needs TemplateLibraryService's catalog loaded, but that library ALSO
     // only adopts on this same bootedChanged signal (DesignLibraryService::
     // open), via a connection whose relative ORDER against this one is
@@ -319,10 +346,11 @@ void OutputListModel::connectToStyleRoster()
     // constructed a SECOND OutputListModel (the Q_ASSERT in the constructor
     // catches that in debug builds). The guard stays because a null
     // dereference here would be a silent style-less render, not a crash.
-    StyleListModel *styles = StyleListModel::instance();
+    // styleRoster(): the roster Main.qml handed over when it already ran
+    // (adoptStyleRoster re-aims this relay itself), else the C++ singleton.
+    StyleListModel *styles = styleRoster();
     if (!styles)
         return;
-    styleRosterConnected_ = true;
     styleRosterConnected_ = true;
     connect(styles, &StyleListModel::rosterChanged, this, [this]() {
         if (m_outputs.isEmpty())
@@ -919,9 +947,75 @@ void OutputListModel::notifyFrameRateChanged(int row, const QString &oldRate, co
 // Style plumbing
 // ---------------------------------------------------------------------------
 
+StyleListModel *OutputListModel::styleRoster() const
+{
+    // The roster the UI edits — read through the STATIC hand-over first, not
+    // just this object's own copy: QML builds its own OutputListModel too (the
+    // engine default-constructs the registered singleton instead of calling
+    // create()), so instance() and the object Main.qml hands the roster to are
+    // two different objects. A reader addressing the wrong one would fall back
+    // to StyleListModel::instance() — a second roster holding styles as they
+    // were at boot, which is how a monitor tile came to compose a preview from
+    // a stale template/background while the real output rendered the edit.
+    if (StyleListModel *adopted = adoptedStyleRoster())
+        return adopted;
+    // The C++ singleton is only the fallback for a run where QML never handed
+    // one over (a headless test, or a read before the hand-over).
+    return styleRoster_ ? styleRoster_.data() : StyleListModel::instance();
+}
+
+StyleListModel *OutputListModel::adoptedStyleRoster()
+{
+    return s_adoptedStyleRoster.data();
+}
+
+void OutputListModel::styleRosterChanged()
+{
+    if (m_outputs.isEmpty())
+        return;
+    // StyleBackgroundRole rides along: a Save Changes on a style any output
+    // wears (colour or background image) must repaint that output's monitor
+    // tile the moment the dialog closes.
+    emit dataChanged(index(0), index(m_outputs.size() - 1),
+                     { StyleIdRole, StyleNameRole, StyleBackgroundRole, FrameBufferRole });
+    // An edit to a style that is ON AIR must reach the engine NOW: the live
+    // render loop picks the new spec up on its next frame.
+    pushActiveEngineStyle();
+    emit activeStyleChanged();
+}
+
+void OutputListModel::adoptStyleRoster(StyleListModel *styles)
+{
+    // TEMPORARY, env-gated: which object QML actually hands over, next to the
+    // C++ singleton, so a mismatch (or a null hand-over) is visible instead of
+    // guessed at.
+    if (qEnvironmentVariableIsSet("VGR_STYLEBG_TEST"))
+        fprintf(stderr, "[SELFTEST-STYLEBG-ID] adopt(%p) cpp=%p same=%d\n",
+                static_cast<void *>(styles),
+                static_cast<void *>(StyleListModel::instance()),
+                styles == StyleListModel::instance() ? 1 : 0);
+    // FIRST, before the early return below: every OTHER OutputListModel object
+    // (the C++ static instance() among them) resolves styles through this, so
+    // the hand-over has to be visible beyond the object QML happened to call.
+    s_adoptedStyleRoster = styles;
+    if (styles && styleRoster_ == styles)
+        return;
+    if (styleRosterConn_)
+        QObject::disconnect(styleRosterConn_);
+    styleRoster_ = styles;
+    if (styles) {
+        styleRosterConn_ = connect(styles, &StyleListModel::rosterChanged, this,
+                                   [this]() { styleRosterChanged(); });
+    }
+    // Re-resolve everything the roster feeds — the tiles' style roles and the
+    // engine's spec — against the roster that is now authoritative. This is the
+    // half that makes an in-session style edit visible without a restart.
+    styleRosterChanged();
+}
+
 int OutputListModel::styleRowForId(const QString &styleId) const
 {
-    const StyleListModel *styles = StyleListModel::instance();
+    const StyleListModel *styles = styleRoster();
     if (!styles || styleId.isEmpty())
         return -1;
     return styles->rowForId(styleId);
@@ -932,12 +1026,39 @@ bool OutputListModel::activeStyleAllows(const QString &contentType) const
     const int row = styleRowForId(activeStyleId());
     if (row < 0)
         return true;   // no style on the active output: everything is allowed
-    const QVariantMap style = StyleListModel::instance()->getStyle(row);
-    const QString key = QStringLiteral("show") + contentType.left(1).toUpper()
-                        + contentType.mid(1);
+    // The gate's NAME comes from the one family table (FamilySlots.h). It used to
+    // be BUILT by capitalising the content type ("scripture" -> "showScripture"),
+    // so a tag that did not follow that convention asked for a property that does
+    // not exist and was read as "not gated" — a style that meant to switch a
+    // family off let it through in silence.
+    const FamilySlots::Family *fam = FamilySlots::RowFor(contentType);
+    if (!fam)
+        return true;   // names no family: not gated
+    const QVariantMap style = styleRoster()->getStyle(row);
+    const QString key = QString::fromLatin1(fam->showProperty);
     if (!style.contains(key))
-        return true;   // unknown content type: not gated
+        return true;   // a style from before the key existed: not gated
     return style.value(key).toBool();
+}
+
+QString OutputListModel::activeStyleTemplateId(const QString &contentType) const
+{
+    if (contentType.isEmpty())
+        return {};
+    const int row = styleRowForId(activeStyleId());
+    if (row < 0)
+        return {};   // no style on the active output: the slides' own template governs
+    // The same family table activeStyleAllows reads (FamilySlots.h): the pick's
+    // property name is the table's, so this and the style editor cannot disagree
+    // about what a family's pick is called.
+    const FamilySlots::Family *fam = FamilySlots::RowFor(contentType);
+    if (!fam)
+        return {};   // names no family, so it names no template
+    const QVariantMap style = styleRoster()->getStyle(row);
+    const QString key = QString::fromLatin1(fam->templateProperty);
+    if (!style.contains(key))
+        return {};
+    return style.value(key).toString();
 }
 
 QVariantMap OutputListModel::styleBackground(int index) const
@@ -948,16 +1069,16 @@ QVariantMap OutputListModel::styleBackground(int index) const
         return { { "color", QStringLiteral("transparent") },
                  { "image", QString() }, { "hasImage", false },
                  { "clearOnText", false } };
-    const QVariantMap style = StyleListModel::instance()->getStyle(row);
+    const QVariantMap style = styleRoster()->getStyle(row);
     const QString image = style.value(QStringLiteral("backgroundImage")).toString();
-    // clearBackgroundOnText (FreeShow's clearStyleBackgroundOnText) already
-    // reaches the ENGINE's own render spec (see pushEngineStyle), which
-    // presumably honors it for the real distributed frame — but this role
-    // feeds the monitor tile's OWN QML-side background Rectangle, drawn
-    // behind a locally-rendered DesignPreview slide (a text/scripture slide
-    // doesn't go through the distributed-frame path — see OutputMonitorTile's
-    // framePriority gate). Without this, a style's own baked-in background
-    // image collided visually with live text on top of it, unconditionally.
+    // `clearOnText` (freeShow's clearStyleBackgroundOnText) is reported here as
+    // the MODEL reads it, beside the colour and the image. WHAT A SURFACE PAINTS
+    // is no longer this role: the tile and the output window take the style's
+    // facts — colour, image, and the step-aside the engine actually applies for
+    // the slide on air — from the composition (LiveOutputService.
+    // previewWithStyle -> SceneBuilder::ComposeSlide), so the image can no
+    // longer be stepped aside on one surface and baked on the other. This role
+    // is the baseline the self-test logs against the composed picture.
     return { { "color", style.value(QStringLiteral("backgroundColor")).toString() },
              { "image", image },
              { "hasImage", !image.isEmpty() && QFile::exists(image) },
@@ -966,7 +1087,7 @@ QVariantMap OutputListModel::styleBackground(int index) const
 
 QString OutputListModel::styleIdAt(int row) const
 {
-    const StyleListModel *styles = StyleListModel::instance();
+    const StyleListModel *styles = styleRoster();
     if (!styles || row < 0 || row >= styles->rowCount())
         return QString();
     return styles->data(styles->index(row, 0), StyleListModel::IdRole).toString();
@@ -974,7 +1095,7 @@ QString OutputListModel::styleIdAt(int row) const
 
 QString OutputListModel::styleNameAt(int row) const
 {
-    const StyleListModel *styles = StyleListModel::instance();
+    const StyleListModel *styles = styleRoster();
     if (!styles || row < 0 || row >= styles->rowCount())
         return QStringLiteral("None");
     return styles->data(styles->index(row, 0), StyleListModel::NameRole).toString();
@@ -999,34 +1120,14 @@ int OutputListModel::activeIndex() const
 void OutputListModel::pushEngineStyle(const QString &styleId)
 {
     // Compose the engine's view of the style (PresentationTypes.hpp's
-    // OutputStyleSpec): background + layout preset + the clear-on-text flag.
-    // An empty styleId pushes an empty spec — the engine renders unstyled.
-    bps::presentation::OutputStyleSpec spec;
-    const int row = styleRowForId(styleId);
-    if (row >= 0) {
-        const StyleListModel *styles = StyleListModel::instance();
-        const QVariantMap style = styles->getStyle(row);
-        spec.name = style.value(QStringLiteral("name")).toString().toStdString();
-        spec.contentType = style.value(QStringLiteral("contentType")).toString().toStdString();
-        spec.templateKey = style.value(QStringLiteral("templateKey")).toString().toStdString();
-        spec.backgroundColor = style.value(QStringLiteral("backgroundColor")).toString().toStdString();
-        spec.backgroundImage = style.value(QStringLiteral("backgroundImage")).toString().toStdString();
-        spec.clearBackgroundOnText =
-            style.value(QStringLiteral("clearBackgroundOnText")).toBool();
-        spec.showShows = style.value(QStringLiteral("showShows")).toBool();
-        spec.showMedia = style.value(QStringLiteral("showMedia")).toBool();
-        spec.showScripture = style.value(QStringLiteral("showScripture")).toBool();
-        spec.showTable = style.value(QStringLiteral("showTable")).toBool();
-        // PER-FAMILY template picks — the family keys ride the spec; the
-        // bake below fills each family's blocks when the key names a design.
-        spec.familyTemplateKeys[0] = style.value(QStringLiteral("familyTemplateShows")).toString().toStdString();
-        spec.familyTemplateKeys[1] = style.value(QStringLiteral("familyTemplateMedia")).toString().toStdString();
-        spec.familyTemplateKeys[2] = style.value(QStringLiteral("familyTemplateScripture")).toString().toStdString();
-        spec.familyTemplateKeys[3] = style.value(QStringLiteral("familyTemplateTable")).toString().toStdString();
-        spec.category = style.value(QStringLiteral("category")).toString().toStdString();
-        bakeTemplateBlocks(spec);
-        bakeFamilyTemplateBlocks(spec);
-    }
+    // OutputStyleSpec): background + layout preset + the clear-on-text flag +
+    // the per-family template blocks the engine's family branch gates on.
+    // An empty/unknown styleId pushes an empty spec — the engine renders
+    // unstyled. THE COMPOSITION IS NOT HERE (StyleSpecBuilder): the preview
+    // composes the same spec from the same function, so a style cannot render
+    // one way on an output and another way on a monitor tile.
+    bps::presentation::OutputStyleSpec spec =
+        StyleSpecBuilder::specForStyleRow(styleRowForId(styleId), styleRoster());
     if (SettingsService *settings = SettingsService::instancePtr())
         settings->setActiveOutputStyle(spec);
     // THE OTHER LIVE OUTPUTS: push the per-output style set so the engine's
@@ -1036,6 +1137,7 @@ void OutputListModel::pushEngineStyle(const QString &styleId)
     // without a style push nothing (their tile mirrors the main pass).
     std::vector<bps::presentation::OutputStyleSpec> specs;
     std::vector<std::string> buffers;
+    std::vector<std::pair<int, int>> sizes;
     for (int i = 0; i < m_outputs.size(); ++i) {
         const OutputItem &item = m_outputs.at(i);
         // ENABLED + styled only (the comment below is the contract): the old
@@ -1046,136 +1148,18 @@ void OutputListModel::pushEngineStyle(const QString &styleId)
         if (item.isEnabled && !item.styleId.isEmpty()) {
             const int styleRow = styleRowForId(item.styleId);
             if (styleRow >= 0) {
-                bps::presentation::OutputStyleSpec outSpec;
-                const QVariantMap outStyle = StyleListModel::instance()->getStyle(styleRow);
-                outSpec.name = outStyle.value(QStringLiteral("name")).toString().toStdString();
-                outSpec.contentType = outStyle.value(QStringLiteral("contentType")).toString().toStdString();
-                outSpec.templateKey = outStyle.value(QStringLiteral("templateKey")).toString().toStdString();
-                outSpec.backgroundColor = outStyle.value(QStringLiteral("backgroundColor")).toString().toStdString();
-                outSpec.backgroundImage = outStyle.value(QStringLiteral("backgroundImage")).toString().toStdString();
-                outSpec.clearBackgroundOnText = outStyle.value(QStringLiteral("clearBackgroundOnText")).toBool();
-                outSpec.showShows = outStyle.value(QStringLiteral("showShows")).toBool();
-                outSpec.showMedia = outStyle.value(QStringLiteral("showMedia")).toBool();
-                outSpec.showScripture = outStyle.value(QStringLiteral("showScripture")).toBool();
-                outSpec.showTable = outStyle.value(QStringLiteral("showTable")).toBool();
-                outSpec.familyTemplateKeys[0] = outStyle.value(QStringLiteral("familyTemplateShows")).toString().toStdString();
-                outSpec.familyTemplateKeys[1] = outStyle.value(QStringLiteral("familyTemplateMedia")).toString().toStdString();
-                outSpec.familyTemplateKeys[2] = outStyle.value(QStringLiteral("familyTemplateScripture")).toString().toStdString();
-                outSpec.familyTemplateKeys[3] = outStyle.value(QStringLiteral("familyTemplateTable")).toString().toStdString();
-                bakeTemplateBlocks(outSpec);
-                bakeFamilyTemplateBlocks(outSpec);
+                bps::presentation::OutputStyleSpec outSpec =
+                    StyleSpecBuilder::specForStyleRow(styleRow, styleRoster());
                 // Buffer name keyed by output identity (qHash(name) — the same
                 // keying saveRoster uses for StoredOutput ids).
                 specs.push_back(std::move(outSpec));
                 buffers.push_back(QStringLiteral("__out_%1__").arg(qHash(item.name)).toStdString());
+                sizes.push_back(parseResolution(item.res));
             }
         }
     }
     if (SettingsService *settings2 = SettingsService::instancePtr())
-        settings2->setLiveOutputStyles(specs, buffers);
-}
-
-void OutputListModel::bakeTemplateBlocks(bps::presentation::OutputStyleSpec &spec)
-{
-    // A legacy preset key ("lowerThird"...) rides StyleBuilder::LayoutFor —
-    // nothing to bake. Anything else is an ENGINE TEMPLATE DESIGN id
-    // ("tpl-…", picked from the Template library): copy that design's blocks
-    // into the spec so the engine renders the template as the style's layout.
-    // The engine never reads the library itself — the pushed spec is the
-    // whole truth — so this is also what makes a template edit reach the
-    // on-air output (this model re-pushes on TemplateLibraryService::changed).
-    const QString key = QString::fromStdString(spec.templateKey);
-    if (key.isEmpty() || key.startsWith(QLatin1String("tpl-")) == false)
-        return;
-    const QVariantMap design = TemplateLibraryService::instance().design(key);
-    const QVariantList blocks = design.value(QStringLiteral("blocks")).toList();
-    if (blocks.isEmpty())
-        return;   // unknown/deleted id: keep the plain-layout fallback
-    // THE TEMPLATE'S OWN BACKGROUND WINS when the style's colour is empty or
-    // transparent: the template design IS the look the user picked (Big Bold
-    // carries #000000) — a transparent style colour must not steamroll it.
-    // The style's colour still wins when the style actually SETS one (and the
-    // slide's own background beats both, in the engine's precedence).
-    const QString templateBg = design.value(QStringLiteral("background")).toString();
-    if (!templateBg.isEmpty() && templateBg != QLatin1String("transparent")
-        && (spec.backgroundColor.empty() || spec.backgroundColor == "transparent"))
-        spec.backgroundColor = templateBg.toStdString();
-    spec.templateBlocks.reserve(blocks.size());
-    for (const QVariant &b : blocks)
-        spec.templateBlocks.push_back(ShowConverter::blockFromVariant(b.toMap()));
-}
-
-// NOTE: bakeTemplateBlocks bakes ONLY the whole-style template. The
-// per-family slots bake here (their keys are already in spec.familyTemplateKeys).
-// INHERIT: a family slot left on "None" rides the style's WHOLE-STYLE design
-// (its documented contract — StyleStore.hpp: an empty key "inherits the
-// style's whole-style templateKey"). The old no-inherit behaviour stranded
-// exactly the families a style didn't name: with the style's contentType on
-// "shows", SceneBuilder's family gate excluded the whole-style template from
-// scripture/table slides, so the slide's own tab template (default font,
-// default autoSize) rendered instead and the style's font rules never
-// reached the output — the live "NDI doesn't see the font rules I set" and
-// "scripture always shrinks" reports. Binding is family-agnostic ("text" =
-// the content, "ref" = the reference — BindTemplateBlocks), so any design
-// carries any family's content. SHOWS additionally keeps a Bible fallback
-// (the Scripture design) for when even the whole-style template is unset or
-// a legacy preset: show content (imported shows, Quick Lyrics — slides
-// carry no family tag) must never silently fall back to the old plain
-// layout. An explicit pick always wins over both.
-void OutputListModel::bakeFamilyTemplateBlocks(bps::presentation::OutputStyleSpec &spec)
-{
-    for (size_t i = 0; i < 4; ++i) {
-        const QString famKey = QString::fromStdString(spec.familyTemplateKeys[i]);
-        if (famKey.isEmpty() || famKey.startsWith(QLatin1String("tpl-")) == false)
-            continue;   // "" = none for this family; a preset key rides LayoutFor — no bake
-        const QVariantMap design = TemplateLibraryService::instance().design(famKey);
-        const QVariantList blocks = design.value(QStringLiteral("blocks")).toList();
-        if (blocks.isEmpty())
-            continue;   // unknown/deleted id: the family falls back per SceneBuilder
-        // Same template-bg-wins rule as bakeTemplateBlocks: a family template
-        // with its own background (the Table design's #000000) adopts into the
-        // style when the style's colour is unset/transparent. This is what
-        // made Table render black while Shows/Scripture (transparent-bg
-        // designs) showed the engine's old tinted fallback instead.
-        const QString famBg = design.value(QStringLiteral("background")).toString();
-        if (!famBg.isEmpty() && famBg != QLatin1String("transparent")
-            && (spec.backgroundColor.empty() || spec.backgroundColor == "transparent"))
-            spec.backgroundColor = famBg.toStdString();
-        spec.familyTemplateBlocks[i].reserve(blocks.size());
-        for (const QVariant &b : blocks)
-            spec.familyTemplateBlocks[i].push_back(ShowConverter::blockFromVariant(b.toMap()));
-    }
-    // The inherit pass: only when the whole-style template is an ENGINE
-    // DESIGN (a legacy preset key can't be baked — the engine renders those
-    // via LayoutFor with the family key, which is empty here by definition).
-    const QString wholeKey = QString::fromStdString(spec.templateKey);
-    if (wholeKey.startsWith(QLatin1String("tpl-"))) {
-        const QVariantMap whole = TemplateLibraryService::instance().design(wholeKey);
-        const QVariantList wholeBlocks = whole.value(QStringLiteral("blocks")).toList();
-        if (!wholeBlocks.isEmpty()) {
-            for (size_t i = 0; i < 4; ++i) {
-                if (!spec.familyTemplateKeys[i].empty() || !spec.familyTemplateBlocks[i].empty())
-                    continue;   // explicit pick (baked above) always wins
-                spec.familyTemplateBlocks[i].reserve(wholeBlocks.size());
-                for (const QVariant &b : wholeBlocks)
-                    spec.familyTemplateBlocks[i].push_back(ShowConverter::blockFromVariant(b.toMap()));
-            }
-        }
-    }
-    // The Bible fallback for show content (see the function comment): the
-    // baked blocks alone gate the engine's family branch — the shows key
-    // stays "" so the roster still reads "None".
-    if (spec.familyTemplateBlocks[0].empty()
-        && QString::fromStdString(spec.familyTemplateKeys[0]).isEmpty()
-        && !wholeKey.startsWith(QLatin1String("tpl-"))) {
-        const QVariantMap design = TemplateLibraryService::instance().design(QStringLiteral("tpl-scripture"));
-        const QVariantList blocks = design.value(QStringLiteral("blocks")).toList();
-        if (!blocks.isEmpty()) {
-            spec.familyTemplateBlocks[0].reserve(blocks.size());
-            for (const QVariant &b : blocks)
-                spec.familyTemplateBlocks[0].push_back(ShowConverter::blockFromVariant(b.toMap()));
-        }
-    }
+        settings2->setLiveOutputStyles(specs, buffers, sizes);
 }
 
 // One push for the CURRENT active output's style — the single entry point
@@ -1205,6 +1189,9 @@ void OutputListModel::connectToTemplateLibrary()
     // rebuilds the scenes (fingerprint hash moves).
     connect(templates, &DesignLibraryService::changed, this, [this]() {
         pushActiveEngineStyle();
+        // Local monitor previews re-compose staged content from the selected
+        // output's style template when this revision changes too.
+        emit activeStyleChanged();
     });
 }
 

@@ -132,10 +132,51 @@ std::pair<std::string, std::string> SplitJam(const std::string& term,
 // common typo shape) and a ±maxDist length band, which holds the scan of a
 // ~100k-term vocabulary to the low milliseconds.
 struct ResolvedTerm { std::string word; double weight = 1.0; };
+// A word the corpus knows but only RARELY (a misspelling that made it into the
+// source text - "recieve" sits in exactly one sermon of the user's 1,206) must
+// not be treated as "spelled right": the user typing it wants the established
+// word, and a search hunting the misspelling misses every correct paragraph.
+// So a term with a document frequency in [1, kRareTermMaxDf] is corrected too -
+// but only to a much better established word of nearly the same length
+// (>= 20x its own df, at least 20 documents, length within +-1): "recieve" ->
+// "receive", while a rare but real word ("sheep") is never flattened into a
+// shorter common neighbour ("she"). Established words (df above the gate)
+// never pay for the scan.
+// A typo may occur repeatedly in imported material, so a tiny df ceiling
+// misses real cases. Keep the correction scan off established words, but let
+// low-frequency terms through and require a much more common candidate.
+constexpr size_t kRareTermMaxDf = 100;
 ResolvedTerm ResolveTermInVocabulary(const std::string& term,
                                      const IndexStorage& storage) {
     ResolvedTerm out;
-    if (storage.DfOf(term) > 0) return out;   // spelled right: as typed (size only — no postings copy)
+    const size_t ownDf = storage.DfOf(term);
+    if (ownDf > kRareTermMaxDf) return out;   // an established word: as typed
+    // A rare known spelling can itself be a source typo. Check for a strong
+    // correction before prefix completion: "recieve" can prefix "recieved",
+    // even though the intended spelling is the much more common "receive".
+    // The large df ratio protects legitimate rare words from being rewritten.
+    const size_t maxDist = term.size() <= 4 ? 1 : 2;
+    const size_t minCorrDf = ownDf > 0 ? std::max<size_t>(20, ownDf * 20) : 0;
+    if (ownDf > 0) {
+        std::string best;
+        size_t bestDist = maxDist + 1, bestDf = 0;
+        storage.ForEachTermWithDf([&](const std::string& w, size_t wdf) {
+            if (w.size() < 3 || w[0] != term[0]) return true;
+            if (w.size() + 1 < term.size() || w.size() > term.size() + 1) return true;
+            if (wdf < minCorrDf) return true;
+            // A swapped pair counts as ONE slip (see IsAdjacentTransposition):
+            // "recieve" -> "receive" ties with "recieve" -> "relieve" and the
+            // more established word wins below, instead of the substitution
+            // winning on distance and the search then hunting "relieve".
+            const size_t d = textmatch::IsAdjacentTransposition(term, w)
+                                 ? 1 : EditDistanceBounded(term, w, bestDist);
+            if (d <= maxDist && (d < bestDist || (d == bestDist && wdf > bestDf))) {
+                best = w; bestDist = d; bestDf = wdf;
+            }
+            return true;
+        });
+        if (!best.empty()) { out.word = best; out.weight = 0.7; return out; }
+    }
     // 1) Completion: the most frequent vocabulary word this term prefixes
     //    ("friend" -> "friends"). Frequency picks between friends/friend's/...
     size_t bestDf = 0;
@@ -145,13 +186,17 @@ ResolvedTerm ResolveTermInVocabulary(const std::string& term,
     }
     if (bestDf > 0) return out;   // a stem, not a typo: full weight
     // 2) Typo: closest vocabulary word by bounded edit distance.
-    const size_t maxDist = term.size() <= 4 ? 1 : 2;
+    // A RARE-but-present term only accepts a much better established word
+    // (see kRareTermMaxDf above); an unknown term accepts anything close.
     std::string best;
     size_t bestDist = maxDist + 1, bestDf2 = 0;
     storage.ForEachTermWithDf([&](const std::string& w, size_t wdf) {
         if (w.size() < 3 || w[0] != term[0]) return true;
         if (w.size() + maxDist < term.size() || w.size() > term.size() + maxDist) return true;
-        const size_t d = EditDistanceBounded(term, w, bestDist);
+        if (wdf < minCorrDf) return true;
+        if (ownDf > 0 && (w.size() + 1 < term.size() || w.size() > term.size() + 1)) return true;
+        const size_t d = textmatch::IsAdjacentTransposition(term, w)
+                             ? 1 : EditDistanceBounded(term, w, bestDist);
         if (d <= maxDist && (d < bestDist || (d == bestDist && wdf > bestDf2))) {
             best = w; bestDist = d; bestDf2 = wdf;
         }
@@ -458,13 +503,52 @@ Result<std::vector<SearchEngine::ResolvedQueryTerm>> SearchEngine::ResolveTerms(
 //      inside the word; only when spell-check found nothing and the vocabulary
 //      does not know the word, so "sandwhich"->"sandwich" keeps beating the
 //      tempting but wrong "sand"+"which")
-ResolvedTerm ResolveOne(const std::string& raw, const IndexStorage& storage) {
-    ResolvedTerm r = ResolveTermInVocabulary(Lower(raw), storage);
-    if (r.word.empty()) r.word = Lower(raw);
+//
+// `typingTail` (see ResolveTermsWithSplits): this word may still be HALF TYPED.
+// A half-typed word is not a word the vocabulary can complete for the user —
+// "rec" prefixes receive, received, record, recognize, and picking whichever of
+// them is commonest is a guess that can be plainly wrong: the user, typing
+// "compelling that you rec", got the one sermon whose paragraph happened to
+// hold the guessed word and LOST the sermon that says "receive" (the report
+// this rule answers). So a completion is NOT applied to the tail — the typed
+// prefix stays and matches every word that starts with it (the index path
+// already scores prefix-only documents as the PARTIAL class). A typo is still
+// corrected: "recieve" is not a prefix of anything the user meant, and
+// "recieve" -> "receive" is the fix that report asked for.
+ResolvedTerm ResolveOne(const std::string& raw, const IndexStorage& storage,
+                        bool typingTail = false) {
+    const std::string typed = Lower(raw);
+    ResolvedTerm r = ResolveTermInVocabulary(typed, storage);
+    if (r.word.empty()) r.word = typed;
     if (r.weight == 1.0 && r.word.size() >= 6 && storage.DfOf(r.word) == 0) {
         if (auto [a, b] = SplitJam(r.word, storage); !a.empty()) r.word = a + ' ' + b;
     }
+    // A COMPLETION (weight 1.0, the resolve only made the word longer): the tail
+    // keeps what was typed. "friend" -> "friends" stays "friend" too — which is
+    // not a loss: a prefix match covers the completion anyway.
+    if (typingTail && r.weight == 1.0 && r.word.size() > typed.size()
+        && r.word.compare(0, typed.size(), typed) == 0)
+        r.word = typed;
     return r;
+}
+
+// The candidate ladder: every vocabulary word starting with `prefix`, MOST USED
+// FIRST. Confidence is document frequency — with nothing else to go on, the
+// word the corpus says most often is the word the user most likely meant.
+std::vector<std::string> SearchEngine::PrefixCandidates(std::string_view prefix,
+                                                        size_t limit) const {
+    std::vector<std::string> words;
+    if (prefix.empty()) return words;
+    for (const auto& w : storage_.TermsWithPrefix(std::string(prefix), limit * 4)) {
+        if (w.size() < prefix.size() || w.compare(0, prefix.size(), prefix) != 0) continue;
+        if (w == prefix) continue;   // the typed word itself is not a candidate
+        words.push_back(w);
+    }
+    std::stable_sort(words.begin(), words.end(), [&](const std::string& a, const std::string& b) {
+        return storage_.DfOf(a) > storage_.DfOf(b);
+    });
+    if (words.size() > limit) words.resize(limit);
+    return words;
 }
 
 // Two-word jams ("holyspirit") split at their best vocabulary seam — the pair
@@ -472,13 +556,24 @@ ResolvedTerm ResolveOne(const std::string& raw, const IndexStorage& storage) {
 // changes: callers get one output term per input, in order, and a split
 // arrives as "holy spirit" (a space inside one entry) to keep the 1:1 shape.
 Result<std::vector<SearchEngine::ResolvedQueryTerm>> SearchEngine::ResolveTermsWithSplits(
-    const std::vector<std::string>& terms) const {
+    const std::vector<std::string>& terms, bool typingTail) const {
     std::vector<ResolvedQueryTerm> out;
     out.reserve(terms.size());
-    for (const std::string& t : terms) {
+    // Only the LAST given word can still be under the caret (see the header).
+    size_t last = 0;
+    for (size_t i = 0; i < terms.size(); ++i)
+        if (!terms[i].empty()) last = i;
+    for (size_t i = 0; i < terms.size(); ++i) {
+        const std::string& t = terms[i];
         if (t.empty()) continue;
-        const ResolvedTerm r = ResolveOne(t, storage_);
-        out.push_back({r.word, r.weight});
+        const bool tail = typingTail && i == last;
+        const ResolvedTerm r = ResolveOne(t, storage_, tail);
+        ResolvedQueryTerm entry{r.word, r.weight, {}};
+        // A half-typed word whose TYPO reading was not applied is a prefix: hand
+        // the caller the ladder of what it can become, most likely first.
+        if (tail && r.weight == 1.0 && !r.word.empty() && r.word == Lower(t))
+            entry.candidates = PrefixCandidates(r.word);
+        out.push_back(std::move(entry));
     }
     return out;
 }
@@ -505,19 +600,42 @@ Result<std::vector<SearchResult>> SearchEngine::RawSearch(const SearchQuery& que
     // spellings always outrank fuzzy ones (see ResolveTermInVocabulary).
     std::vector<std::string> terms;
     std::vector<double> termWeight;
+    // Which resolved term CAME FROM the half-typed last word (see ResolveOne) —
+    // the scoring pass treats that one differently: for a word the user has not
+    // finished, "how often the corpus says it" is the confidence signal, while
+    // idf (rarity) points the other way and would promote the reading the corpus
+    // barely uses. terms.size() = no tail term (a duplicate, or nothing typed).
+    size_t tailTerm = static_cast<size_t>(-1);
+    // …and whether that word is really UNFINISHED: the corpus does not know it as
+    // a word of its own, so what the user has typed so far can only be the start
+    // of one. Only then does the READING of the word decide the order (below) — a
+    // word the corpus does know is a word the user finished, and it ranks the way
+    // it always did.
+    bool tailIsPartial = false;
     {
         // One helper owns resolution (spell-check -> completion -> jam-split,
         // see ResolveOne); this loop only dedupes on the RESOLVED word ("frend
         // friend" collapses to one "friend") and splits spaced entries (a jam
         // split arrives as "holy spirit") into real terms for the bitmasks.
-        for (const auto& raw : query.exactTerms) {
+        // The LAST term is treated as possibly half-typed (see ResolveOne): every
+        // caller of Search is a live search box, so the word under the caret is
+        // matched as a PREFIX — the same rule the sermon panes' paragraph scan
+        // applies, so the two surfaces cannot disagree about what the tail means.
+        size_t tailIndex = 0;
+        for (size_t i = 0; i < query.exactTerms.size(); ++i)
+            if (!query.exactTerms[i].empty()) tailIndex = i;
+        for (size_t i = 0; i < query.exactTerms.size(); ++i) {
+            const auto& raw = query.exactTerms[i];
             if (raw.empty()) continue;
-            const ResolvedTerm r = CandidateWorthy(raw) ? ResolveOne(raw, storage_)
+            const ResolvedTerm r = CandidateWorthy(raw) ? ResolveOne(raw, storage_, i == tailIndex)
                                                         : ResolvedTerm{Lower(raw), 1.0};
+            if (i == tailIndex)
+                tailIsPartial = storage_.DfOf(Lower(raw)) == 0;
             std::istringstream in(r.word);
             std::string part;
             while (in >> part) {
                 if (std::find(terms.begin(), terms.end(), part) != terms.end()) continue;
+                if (i == tailIndex) tailTerm = terms.size();   // the half-typed word's term
                 terms.push_back(part);
                 termWeight.push_back(r.weight);
             }
@@ -634,6 +752,28 @@ Result<std::vector<SearchResult>> SearchEngine::RawSearch(const SearchQuery& que
         }
     }
 
+    // EVERY TYPED WORD MUST LAND — the contract every other search surface
+    // already keeps (the sermon scan needs all its terms in one paragraph, the
+    // local matchers need every word in a field). The index path used to answer
+    // any document that carried just ONE of the query's words, which is why
+    // "compelling that you recieve" came back with verses saying only "you that"
+    // (user report, with the screenshot: "the result it was showing doesnt even
+    // have the first phrase compelling in it"). The LAST word may still be HALF
+    // TYPED: it counts when it landed as a whole token or through one of its
+    // PREFIX SIBLINGS (the candidate ladder, scored by confidence above) — every
+    // word BEFORE it is meant as typed. Terms the index holds no postings for
+    // ("a", "I" — below the index floor) are exempt by design.
+    const auto landedAll = [&](const std::string& id) {
+        const auto mIt = masks.find(id);
+        for (size_t k = 0; k < terms.size() && k < 64; ++k) {
+            if (!CandidateWorthy(terms[k])) continue;
+            if (mIt == masks.end()) return false;
+            if ((mIt->second.whole | mIt->second.partial) & (1ull << k)) continue;
+            return false;
+        }
+        return true;
+    };
+
     // THE LAG FIX: candidates are pre-scored from the INDEX ALONE (postings tf
     // + term weights, no text touched), and only the top slice gets full
     // DocRecords — each carries TWO full text copies (content + precomputed
@@ -655,6 +795,10 @@ Result<std::vector<SearchResult>> SearchEngine::RawSearch(const SearchQuery& que
             std::vector<std::pair<double, const std::string*>> prescored;
             prescored.reserve(ids.size());
             for (const auto& id : ids) {
+                // A doc missing one of the typed words is not an answer at all:
+                // dropped BEFORE the slice is cut, so the 48 fetched records are
+                // spent on documents that really carry the query.
+                if (!landedAll(id)) continue;
                 // Type pre-filter BEFORE the truncation: the pre-score picks the
                 // top-48 candidates to fetch, and the display filter (below) runs
                 // only on those. Without the early drop, a common query word's
@@ -667,6 +811,12 @@ Result<std::vector<SearchResult>> SearchEngine::RawSearch(const SearchQuery& que
                     const auto mIt = metas.find(id);
                     if (mIt != metas.end() && mIt->second.type != filter.type) continue;
                 }
+                // Same early drop for the id-prefix scope (the panes' chapter
+                // lock): the pre-score's slice must be filled from documents
+                // INSIDE the scope, or a scoped query returns whatever the
+                // global top-48 happened to be.
+                if (!filter.idPrefix.empty() && id.compare(0, filter.idPrefix.size(), filter.idPrefix) != 0)
+                    continue;
                 const TermClass& mc = masks[id];
                 double p = 0.0;
                 for (size_t k = 0; k < terms.size() && k < 64; ++k) {
@@ -718,6 +868,15 @@ Result<std::vector<SearchResult>> SearchEngine::RawSearch(const SearchQuery& que
         if (CandidateWorthy(term)) ++countable;
     const bool fastRank = !ranking_ || ranking_->IsDefault();
 
+    // The half-typed last word's CANDIDATE LADDER, most confident first (see
+    // PrefixCandidates). Read against each doc's own text in the scoring loop
+    // below: a word the user has not finished has no postings of its own to score
+    // against (nothing in the corpus says "rec"), so its readings can only be
+    // recognised once the text is in hand.
+    const std::vector<std::string> tailLadder =
+        (tailIsPartial && tailTerm < terms.size()) ? PrefixCandidates(terms[tailTerm])
+                                                  : std::vector<std::string>{};
+
     // Snippet anchors found CHEAPLY during scoring (verbatim phrase / proximity,
     // one bounded find each). The expensive densest-cluster scan moved BELOW the
     // sort — computed for the SHOWN rows only. It used to run for every
@@ -748,6 +907,7 @@ Result<std::vector<SearchResult>> SearchEngine::RawSearch(const SearchQuery& que
 
     for (const auto& rec : docs) {
         const SearchDocument& doc = rec.doc;
+        if (!landedAll(doc.id)) continue;   // every typed word must be here (see above)
         size_t snippetPos = std::string::npos;
         double& score = candidates[doc.id];
         if (fastRank) {
@@ -759,6 +919,15 @@ Result<std::vector<SearchResult>> SearchEngine::RawSearch(const SearchQuery& que
             const double dlNorm = kB * (static_cast<double>(rec.tokenCount) / avgdl - 1.0);
             double s = 0.0;
             size_t wholeWords = 0;
+            // THE TAIL'S TIER — the reading the doc carries for the half-typed
+            // last word, as an ORDER OF MAGNITUDE rather than a nudge: the typed
+            // word itself (or the ladder's most confident candidate) puts a doc in
+            // the first tier, each later candidate a tier below, and no relevance
+            // bonus (phrase, proximity) can jump a tier. That is what "start from
+            // the ones it confident about, then come as far as the options exist"
+            // means: the likeliest reading's rows come first, the merely possible
+            // ones after them.
+            double tailTier = 0.0;
             const TermClass tc = masks.count(doc.id) ? masks.at(doc.id) : TermClass{};
             for (size_t k = 0; k < terms.size() && k < 64; ++k) {
                 const std::string& term = terms[k];
@@ -774,26 +943,10 @@ Result<std::vector<SearchResult>> SearchEngine::RawSearch(const SearchQuery& que
                 if (ts == termStats.end()) continue;
                 const auto tfIt = ts->second.tf.find(doc.id);
                 if (tfIt == ts->second.tf.end()) {
-                    // Whole-token miss but the word may exist as a PREFIX sibling
-                    // ("friend" inside "friends" — para 7 says "Then, friends,").
-                    // Zero credit here is why such docs fell off the candidate
-                    // list before the paragraph scan ever saw them. Prefix hits
-                    // score at 40% (real evidence, below a true whole word).
-                    if (tc.partial & (1ull << k)) {
-                        for (const auto& pt : prefixAlts[k]) {
-                            const auto pts = termStats.find(pt);
-                            if (pts == termStats.end()) continue;
-                            const auto ptf = pts->second.tf.find(doc.id);
-                            if (ptf == pts->second.tf.end()) continue;
-                            const double pidf = std::log(1.0 +
-                                (static_cast<double>(N) - static_cast<double>(pts->second.df) + 0.5)
-                                / (static_cast<double>(pts->second.df) + 0.5));
-                            const double ptfd = static_cast<double>(ptf->second);
-                            s += 0.4 * termWeight[k] * pidf * (ptfd * (kK1 + 1.0))
-                               / (ptfd + kK1 * (1.0 - kB + kB * static_cast<double>(rec.tokenCount) / avgdl));
-                            break;   // the highest-df sibling carries the credit
-                        }
-                    }
+                    // The token is not in this doc as-is: the tail's PREFIX
+                    // readings live in the tier below (computed from the text),
+                    // and for any other term the doc simply did not land it — the
+                    // gate above is what keeps such docs out of the answer.
                     continue;
                 }
                 const double idf = std::log(1.0 + (static_cast<double>(N) - static_cast<double>(ts->second.df) + 0.5)
@@ -820,6 +973,22 @@ Result<std::vector<SearchResult>> SearchEngine::RawSearch(const SearchQuery& que
             // Every word present as a whole word: the query really is here,
             // above any doc that merely contains some words somewhere.
             if (countable > 0 && wholeWords == countable) s += 6.0;
+            // … and the half-typed word's READING orders the rest, as a tier above
+            // every relevance bonus (see tailTier). Which reading a doc carries is
+            // read from the doc's own text: the ladder is most-confident first, so
+            // the first entry present decides, and a doc that really says the
+            // typed word itself is tier 0.
+            if (!tailLadder.empty()) {
+                if (ContainsWord(rec.lowerContent, terms[tailTerm]))
+                    tailTier = 100.0;
+                else
+                    for (size_t rank = 0; rank < tailLadder.size(); ++rank)
+                        if (ContainsWord(rec.lowerContent, tailLadder[rank])) {
+                            tailTier = 100.0 / (1.0 + static_cast<double>(rank));
+                            break;
+                        }
+                s += tailTier;
+            }
             // Verbatim phrase (a pasted paragraph): beats everything except
             // a longer phrase — longer pastes are more specific. Single-word
             // queries skip it (the word bonus already covers it). The shared
@@ -876,6 +1045,8 @@ Result<std::vector<SearchResult>> SearchEngine::RawSearch(const SearchQuery& que
         }
         if (!filter.language.empty() && doc.language != filter.language) continue;
         if (!filter.author.empty() && doc.author != filter.author) continue;
+        if (!filter.idPrefix.empty() && doc.id.compare(0, filter.idPrefix.size(), filter.idPrefix) != 0)
+            continue;
         if (filter.modifiedAfterMs > 0 && doc.modifiedMs < filter.modifiedAfterMs) continue;
         if (filter.modifiedBeforeMs > 0 && doc.modifiedMs > filter.modifiedBeforeMs) continue;
 
@@ -1102,6 +1273,7 @@ std::string SearchEngine::FilterSignature(const SearchFilter& f) const {
     sig += "|tag=" + f.tag;
     sig += "|lang=" + f.language;
     sig += "|author=" + f.author;
+    sig += "|id=" + f.idPrefix;
     sig += std::format("|after={}", f.modifiedAfterMs);
     sig += std::format("|before={}", f.modifiedBeforeMs);
     return sig;

@@ -48,10 +48,13 @@ public:
     Result<void> Disconnect(std::string_view from, std::string_view to);
     // THE one validity answer, for optimistic UI (drag-connect affordances)
     // and callers that must not attempt: the same checks Connect() enforces
-    // (type compatibility, cycle), plus the VIDEO 1:1 policy — a video bus
-    // renders exactly one source, so it is already full unless the edge
-    // being tested is the route that exists. Everything Connect() would
-    // reject answers false here; one rule, one home.
+    // (type compatibility, cycle, an audio-only bus refusing video). Every
+    // other edge is valid: a source may feed multiple buses AND a bus may take
+    // several sources — a video bus used to accept a single provider, which
+    // made a second video source's drag refuse with nothing on screen to
+    // explain why ("two video sources can't be connected to one bus").
+    // Everything Connect() would reject answers false here; one rule, one
+    // home.
     bool CanConnect(std::string_view from, std::string_view to, SignalType type) const;
     bool WouldCreateCycle(std::string_view from, std::string_view to) const;
     // Deterministic dependency order (Kahn) used by planner + inspector.

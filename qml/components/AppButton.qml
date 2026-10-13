@@ -47,7 +47,7 @@ Rectangle {
         font.family: Theme.fontFamily
         font.pixelSize: Theme.textSm
         font.weight: Font.Medium
-        color: (root.variant === "primary" || root.variant === "danger") ? "#ffffff"
+        color: (root.variant === "primary" || root.variant === "danger") ? Theme.controlInk
              : (root.variant === "ghost") ? Theme.textSecondary
              : Theme.textPrimary
     }

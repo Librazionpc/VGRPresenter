@@ -44,7 +44,14 @@ Item {
             EventBus.notify(format.tutorial, "info", format.name, "import.tutorial")
         root.pendingFormat = format.id
         root.pendingFilter = format.filter
-        picker.nameFilters = [format.filter, qsTr("All files (*)")]
+        // The format's OWN patterns only - "All files" is not offered beside
+        // them. A file of another type could only be refused later by the
+        // importer (that is what the format's extension list encodes), so the
+        // second entry turned a wrong choice into a failed import instead of
+        // letting the picker stop it. Formats that declare no extensions
+        // (OpenSong, SongBeamer) arrive with the all-files filter AS their
+        // filter, so they are unaffected.
+        picker.nameFilters = [format.filter]
         picker.open()
     }
 
@@ -87,20 +94,23 @@ Item {
         width: 200
         height: 60
         radius: 8
-        color: hover.hovered && card.format.available ? "#1b1d27" : "#161821"
-        border.color: card.format.primary ? "#3a3f55" : "#262a38"
+        color: hover.hovered && card.format.available ? Theme.hoverBg : Theme.rowBg
+        // The "primary" format card reads as the brighter one (its border was a
+        // lighter shade than a plain card's); Theme has no strong-border token, so
+        // the brighter outline is derived from the divider token.
+        border.color: card.format.primary ? Qt.lighter(Theme.borderSubtle, 1.3) : Theme.borderSubtle
         border.width: 1
         opacity: card.format.available ? 1 : 0.5
 
         Rectangle {
             x: 8; anchors.verticalCenter: parent.verticalCenter
             width: 44; height: 44; radius: 8
-            color: "#1f2130"
+            color: Theme.inset
             IconGlyph {
                 anchors.centerIn: parent
                 name: card.format.icon
                 fit: true
-                color: card.format.available ? "#9b8ff5" : "#5c6475"
+                color: card.format.available ? Theme.accentLight : Theme.textMuted
                 width: 20; height: 20
             }
         }
@@ -111,21 +121,21 @@ Item {
             Text {
                 width: parent.width
                 text: card.format.name
-                color: "#e2e8f0"; elide: Text.ElideRight
-                font.family: "Segoe UI"; font.pixelSize: 15; font.weight: Font.Medium
+                color: Theme.textPrimary; elide: Text.ElideRight
+                font.family: Theme.fontFamily; font.pixelSize: 15; font.weight: Font.Medium
             }
             Text {
                 visible: !card.format.available
                 text: qsTr("Coming soon")
-                color: "#f5c26b"
-                font.family: "Segoe UI"; font.pixelSize: 12
+                color: Theme.warning
+                font.family: Theme.fontFamily; font.pixelSize: 12
             }
             Text {
                 visible: card.format.available && card.format.description !== ""
                 width: parent.width
                 text: card.format.description
-                color: "#5c6475"; elide: Text.ElideRight
-                font.family: "Segoe UI"; font.pixelSize: 12
+                color: Theme.textMuted; elide: Text.ElideRight
+                font.family: Theme.fontFamily; font.pixelSize: 12
             }
         }
         HoverHandler { id: hover; cursorShape: card.format.available ? Qt.PointingHandCursor : Qt.ArrowCursor }
@@ -136,12 +146,12 @@ Item {
     component Rule: Item {
         property string title: ""
         width: parent.width; height: 26
-        Rectangle { anchors.verticalCenter: parent.verticalCenter; width: parent.width; height: 1; color: "#232530" }
+        Rectangle { anchors.verticalCenter: parent.verticalCenter; width: parent.width; height: 1; color: Theme.border }
         Rectangle {
             anchors.centerIn: parent
             width: label.width + 16; height: parent.height
-            color: "#13151c"
-            Text { id: label; anchors.centerIn: parent; text: parent.parent.title; color: "#8a94a6"; font.family: "Segoe UI"; font.pixelSize: 13; font.weight: Font.DemiBold }
+            color: Theme.surface
+            Text { id: label; anchors.centerIn: parent; text: parent.parent.title; color: Theme.textSecondary; font.family: Theme.fontFamily; font.pixelSize: 13; font.weight: Font.DemiBold }
         }
     }
 
@@ -151,21 +161,31 @@ Item {
         property string text: ""
         signal clicked()
         width: parent.width; height: 40; radius: 8
-        color: btnHover.hovered ? "#1b1d27" : "#161821"
-        border.color: "#262a38"
-        Text { anchors.centerIn: parent; text: btn.text; color: "#e2e8f0"; font.family: "Segoe UI"; font.pixelSize: 15 }
+        color: btnHover.hovered ? Theme.hoverBg : Theme.rowBg
+        border.color: Theme.borderSubtle
+        Text { anchors.centerIn: parent; text: btn.text; color: Theme.textPrimary; font.family: Theme.fontFamily; font.pixelSize: 15 }
         HoverHandler { id: btnHover; cursorShape: Qt.PointingHandCursor }
         TapHandler { onTapped: btn.clicked() }
     }
 
     Rectangle {
         id: dialogCard
+        // Hook for the modal-fit scenario — same convention as ModalCard's card:
+        // the modal ROOT always fills the window, so only the card can show the
+        // scale it is drawn at.
+        objectName: root.objectName === "" ? "" : root.objectName + "_card"
         anchors.centerIn: parent
+        // The app's one scale, on the card (see AppScale.qml) — never on the root
+        // above, whose scrim IS the dialog's black box and has to stay
+        // window-sized. Centred, so scaling about the centre leaves it where it
+        // was, in proportion with the screens behind it.
+        scale: AppScale.cardScale(dialogCard)
+        transformOrigin: Item.Center
         width: Math.min(parent.width - 48, 900)
         height: Math.min(parent.height - 48, 720)
         radius: 14
-        color: "#13151c"
-        border.color: "#232530"
+        color: Theme.surface
+        border.color: Theme.border
         border.width: 1
         clip: true
 
@@ -181,8 +201,8 @@ Item {
                 visible: root.page !== ""
                 anchors.verticalCenter: parent.verticalCenter
                 width: 28; height: 28; radius: 7
-                color: backHover.hovered ? "#20222c" : "transparent"
-                IconGlyph { anchors.centerIn: parent; name: "chevronRight"; rotation: 180; color: "#8a94a6"; width: 12; height: 12 }
+                color: backHover.hovered ? Theme.hoverBg : "transparent"
+                IconGlyph { anchors.centerIn: parent; name: "chevronRight"; rotation: 180; color: Theme.textSecondary; width: 12; height: 12 }
                 HoverHandler { id: backHover; cursorShape: Qt.PointingHandCursor }
                 TapHandler { onTapped: root.page = "" }
             }
@@ -190,19 +210,19 @@ Item {
                 x: root.page !== "" ? 36 : 0
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.page === "freeshow_more" ? qsTr("More FreeShow formats") : qsTr("Import")
-                color: "#f1f3f8"
-                font.family: "Segoe UI"; font.pixelSize: 20; font.weight: Font.DemiBold
+                color: Theme.textPrimary
+                font.family: Theme.fontFamily; font.pixelSize: 20; font.weight: Font.DemiBold
             }
             Rectangle {
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                 width: 28; height: 28; radius: 7
-                color: closeHover.hovered ? "#20222c" : "transparent"
-                IconGlyph { anchors.centerIn: parent; name: "close"; color: "#8a94a6"; width: 10; height: 10 }
+                color: closeHover.hovered ? Theme.hoverBg : "transparent"
+                IconGlyph { anchors.centerIn: parent; name: "close"; color: Theme.textSecondary; width: 10; height: 10 }
                 HoverHandler { id: closeHover; cursorShape: Qt.PointingHandCursor }
                 TapHandler { onTapped: root.closed() }
             }
         }
-        Rectangle { x: 0; y: header.y + header.height + 12; width: parent.width; height: 1; color: "#232530" }
+        Rectangle { x: 0; y: header.y + header.height + 12; width: parent.width; height: 1; color: Theme.border }
 
         Flickable {
             id: importFlick
@@ -243,9 +263,9 @@ Item {
                         }
                         Rectangle {
                             width: (body.width - 16) / 3; height: 60; radius: 8
-                            color: moreHover.hovered ? "#1b1d27" : "#161821"; border.color: "#262a38"
-                            Text { x: 16; anchors.verticalCenter: parent.verticalCenter; text: qsTr("More options"); color: "#c9cedd"; font.family: "Segoe UI"; font.pixelSize: 15 }
-                            IconGlyph { anchors.right: parent.right; anchors.rightMargin: 16; anchors.verticalCenter: parent.verticalCenter; name: "chevronRight"; color: "#8a94a6"; width: 12; height: 12 }
+                            color: moreHover.hovered ? Theme.hoverBg : Theme.rowBg; border.color: Theme.borderSubtle
+                            Text { x: 16; anchors.verticalCenter: parent.verticalCenter; text: qsTr("More options"); color: Theme.textPrimary; font.family: Theme.fontFamily; font.pixelSize: 15 }
+                            IconGlyph { anchors.right: parent.right; anchors.rightMargin: 16; anchors.verticalCenter: parent.verticalCenter; name: "chevronRight"; color: Theme.textSecondary; width: 12; height: 12 }
                             HoverHandler { id: moreHover; cursorShape: Qt.PointingHandCursor }
                             TapHandler { onTapped: root.page = "freeshow_more" }
                         }
@@ -314,7 +334,7 @@ Item {
     Rectangle {
         anchors.fill: parent
         visible: ImportService.busy
-        color: "#e60d0f18"
+        color: Qt.alpha(Theme.windowBg, 0.9)
 
         MouseArea { anchors.fill: parent }   // block interaction while importing
 
@@ -322,8 +342,8 @@ Item {
             width: 320; height: 108
             anchors.centerIn: parent
             radius: 10
-            color: "#161821"
-            border.color: "#3a3f55"
+            color: Theme.rowBg
+            border.color: Theme.borderSubtle
             border.width: 1
 
             Column {
@@ -333,24 +353,24 @@ Item {
                 Text {
                     width: parent.width
                     text: qsTr("Importing…")
-                    color: "#e2e8f0"
-                    font.family: "Segoe UI"; font.pixelSize: 15; font.weight: Font.DemiBold
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily; font.pixelSize: 15; font.weight: Font.DemiBold
                 }
                 Text {
                     width: parent.width
                     text: ImportService.status
-                    color: "#5c6475"
+                    color: Theme.textMuted
                     elide: Text.ElideRight
-                    font.family: "Segoe UI"; font.pixelSize: 13
+                    font.family: Theme.fontFamily; font.pixelSize: 13
                 }
                 Rectangle {
                     width: parent.width; height: 6; radius: 3
-                    color: "#232633"
+                    color: Theme.chip
                     Rectangle {
                         width: Math.max(parent.width * ImportService.progress, 6)
                         height: parent.height
                         radius: 3
-                        color: "#9b8ff5"
+                        color: Theme.accentLight
                         Behavior on width { NumberAnimation { duration: 120 } }
                     }
                 }

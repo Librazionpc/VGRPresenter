@@ -61,10 +61,48 @@ Item {
     property int bookIndex: 0
     property int chapterNumber: 1
     property var chapterVerses: []       // [{ number, text }]
+    property int chapterToken: 0
+    property bool chapterLoading: false
+    property bool chapterSelectFirst: false
+    property double chapterStartedAt: 0
+    property var pendingGoTo: null
     property var selected: []            // verse numbers, ascending
     property int anchorVerse: 0
     property bool optionsOpen: false
     property bool searching: false
+    // EXACT WORDS (the padlock at the far end of the pill's search field — user
+    // call: "add a pad lock icon at the extreme end of the search so once it lock
+    // it means i want exact word search"). Locked, the typed words must appear
+    // VERBATIM as whole words: no completion ("friend" no longer finds
+    // "friends"), no inner substring, no typo correction. The spelling hint
+    // (which exists to offer those corrections) stays quiet while locked.
+    property bool exact: false
+    // CHAPTER LOCK (user call: "add a chapter lock search ... if i turn the lock
+    // for the book all my search goes against that book alone and not all the
+    // books"): on, the search covers only the passage this tab has OPEN — the
+    // chapter being read in a Bible, the sermon being read in The Table — so a
+    // word is looked for where the user is actually reading instead of across the
+    // whole library. Scripture and The Table are the only tabs with books, so
+    // they are the only ones that show the pill (adapter.supportsChapterLock).
+    property bool scopeLock: false
+    // The scope the lock currently names, resolved from what is open: "" / 0
+    // mean "not locked", which is what every adapter without the feature reads.
+    readonly property bool supportsChapterLock: !!(root.adapter && root.adapter.supportsChapterLock)
+    readonly property string lockedBookId: (root.scopeLock && root.book) ? String(root.book.id) : ""
+    readonly property int lockedChapter: root.scopeLock ? root.chapterNumber : 0
+    // What the lock names, for the field's own hint ("Search in Revelation 1"):
+    // the pane's own two column labels — a Bible book plus its chapter number,
+    // or The Table's sermon citation (its year books carry chapterTitles).
+    readonly property string scopeName: {
+        const b = root.book
+        if (!b)
+            return ""
+        const titles = b.chapterTitles || []
+        const idx = (b.chapters || []).indexOf(root.chapterNumber)
+        if (idx >= 0 && titles[idx] !== undefined && String(titles[idx]) !== "")
+            return String(titles[idx])
+        return b.name + " " + root.chapterNumber
+    }
     property var searchResults: []
     // The books / chapters / preview columns' widths - each one dragged with its own SplitHandle (double-click puts it back). The verses
     // column takes whatever is left, so it's the one that gives way as the others grow. Remembered across restarts (shared between
@@ -128,7 +166,7 @@ Item {
     function refOfVerse(v) { return root.book ? root.adapter.reference(root.book.name, root.chapterNumber, [v]) : "" }
 
     function refreshNotesRows() {
-        root.notesRows = root.hasUserData ? root.userApi.notes() : []
+        root.notesRows = root.hasUserData ? root.userApi.notes(root.sourceId) : []
     }
 
     function toggleHighlight(v) {
@@ -136,7 +174,7 @@ Item {
             return
         // The engine's SetHighlight is idempotent — write the inverted state
         // straight from the batched map, no read-then-write race window.
-        root.userApi.setHighlighted(root.refOfVerse(v), !root.markFor(v).highlight)
+        root.userApi.setHighlighted(root.sourceId, root.refOfVerse(v), !root.markFor(v).highlight)
     }
 
     function openNoteEditor(v) {
@@ -157,7 +195,7 @@ Item {
             root.noteVerse = 0
             return
         }
-        root.userApi.setNote(root.refOfVerse(root.noteVerse), draft)
+        root.userApi.setNote(root.sourceId, root.refOfVerse(root.noteVerse), draft)
         if (root.notesOpen)
             root.refreshNotesRows()
         root.noteVerse = 0
@@ -267,6 +305,39 @@ Item {
     // adapter/service change, including the library finishing its load.
     readonly property string templateName: { root.engineRevision; return root.adapter.templateName(root.templateId) }
     readonly property bool usingDefaultTemplate: root.templateId === root.adapter.defaultTemplateId()
+
+    // ---- which template the OUTPUT really renders --------------------------------------------
+    // "Edit template" has to open the template the on-air picture is made of. When
+    // the active output's STYLE names a template for this tab's content family
+    // (Settings · Styles), SceneBuilder renders that family template INSTEAD of the
+    // blocks these slides carry (style > slide) — so the style's pick is what the user
+    // sees on the output and on go-live, and this tab's own pick only governs when the
+    // style names none. styleRevision is the change signal: activeStyleTemplateId() is
+    // a plain function, so a binding that calls it reads no notifyable property and
+    // would never re-evaluate (the same trap `templateName` above documents).
+    property int styleRevision: 0
+    Connections {
+        target: OutputListModel
+        // Fires when the active output's style changes, when a style is saved, and
+        // when a template the style wears is edited.
+        function onActiveStyleChanged() { root.styleRevision++ }
+    }
+    readonly property string outputStyleTemplateId: {
+        root.styleRevision
+        return (root.adapter && root.adapter.contentType)
+            ? OutputListModel.activeStyleTemplateId(root.adapter.contentType) : ""
+    }
+    readonly property bool templateFromOutputStyle: root.outputStyleTemplateId !== ""
+    // The template the pencil edits and the row names: the style's when it names
+    // one, else this tab's own pick (which is what reaches the output then).
+    readonly property string effectiveTemplateId: root.templateFromOutputStyle ? root.outputStyleTemplateId : root.templateId
+    readonly property string effectiveTemplateName: root.templateFromOutputStyle
+        ? root.adapter.templateName(root.outputStyleTemplateId)
+        : root.templateName
+    readonly property string templateRowText: root.effectiveTemplateId === ""
+        ? qsTr("Default — no template")
+        : ((root.effectiveTemplateName !== "" ? root.effectiveTemplateName : qsTr("Missing template"))
+           + (root.templateFromOutputStyle ? qsTr(" (from style)") : ""))
     readonly property var options: SettingsService.values
 
     // The adapter object is a plain QtObject with `changed` emitted by its
@@ -339,13 +410,17 @@ Item {
     }
 
     function openBook(index, chapter) {
+        const __b0 = Date.now()
         root.bookIndex = Math.max(0, Math.min(index, root.books.length - 1))
         const b = root.book
         if (!b)
             return
         revealBook(root.bookIndex)
         const wanted = chapter > 0 && b.chapters.indexOf(chapter) >= 0 ? chapter : b.chapters[0]
+        const __b1 = Date.now()
         root.openChapter(wanted, true)
+        EngineBridge.log("info", "OpenTrace",
+                         "openBook reveal=" + (__b1 - __b0) + "ms chapter=" + (Date.now() - __b1) + "ms")
     }
 
     // Scrolls the books / chapters columns so the active row is in view — a resolved
@@ -370,20 +445,78 @@ Item {
     }
 
     function openChapter(number, selectFirst) {
+        const __c0 = Date.now()
         root.peekIndex = -1                   // (a real open ends any hover peek)
         root.peekVerses = []
         root.previewSlideIndex = 0
         root.chapterNumber = number
-        root.chapterVerses = root.book ? root.adapter.chapter(root.sourceId, root.book.id, number) : []
         root.searching = false
+        root.chapterSelectFirst = selectFirst
+        root.chapterVerses = []
         revealChapter(number)
-        if (selectFirst && root.chapterVerses.length > 0) {
-            root.selected = [root.chapterVerses[0].number]
-            root.anchorVerse = root.chapterVerses[0].number
-        } else {
-            root.selected = []
+        root.selected = []
+        root.chapterToken++
+        const token = root.chapterToken
+        const bookId = root.book ? root.book.id : ""
+        root.chapterStartedAt = Date.now()
+        if (root.pendingGoTo && (root.pendingGoTo.bookId !== bookId || root.pendingGoTo.chapter !== number))
+            root.pendingGoTo = null
+        if (!bookId) {
+            root.chapterVerses = []
+            root.chapterLoading = false
+            return
         }
+        root.chapterLoading = true
         versesFlick.contentY = 0
+        if (root.adapter && root.adapter.chapterAsync) {
+            root.adapter.chapterAsync(root.sourceId, bookId, number, token)
+        } else {
+            root.applyChapter(token, root.sourceId, bookId, number,
+                              root.adapter ? root.adapter.chapter(root.sourceId, bookId, number) : [])
+        }
+    }
+
+    function applyChapter(token, sourceId, bookId, number, rows) {
+        if (token !== root.chapterToken || sourceId !== root.sourceId
+                || !root.book || bookId !== root.book.id || number !== root.chapterNumber)
+            return
+        const startedAt = root.chapterStartedAt
+        root.chapterVerses = rows
+        root.chapterLoading = false
+        const pending = root.pendingGoTo
+        if (pending && pending.bookId === bookId && pending.chapter === number) {
+            const end = pending.verseEnd > 0 ? pending.verseEnd : pending.verseStart
+            const picked = rows.map((v) => v.number).filter((n) => n >= pending.verseStart && n <= end)
+            root.pendingGoTo = null
+            if (picked.length > 0) {
+                root.selected = picked
+                root.anchorVerse = picked[0]
+                root.previewSlideIndex = 0
+                versesFlick.contentY = Math.max(0, (picked[0] - 1) * 38 - 40)
+                if (root.adapter && root.adapter.contentType === "table" && pending.matchText)
+                    root.selectMatchingSubpart(picked[0], pending.matchText)
+            }
+        } else if (root.chapterSelectFirst && rows.length > 0) {
+            root.selected = [rows[0].number]
+            root.anchorVerse = rows[0].number
+        }
+        EngineBridge.log("info", "OpenTrace", "openChapter n=" + number
+                         + " async=" + (Date.now() - startedAt) + "ms rows=" + rows.length)
+    }
+
+    Connections {
+        target: TheTableService
+        function onChapterReady(token, bookId, number, rows) {
+            if (root.adapter && root.adapter.contentType === "table")
+                root.applyChapter(token, root.sourceId, bookId, number, rows)
+        }
+    }
+    Connections {
+        target: ScriptureService
+        function onChapterReady(token, bibleId, bookId, number, rows) {
+            if (root.adapter && root.adapter.contentType !== "table")
+                root.applyChapter(token, bibleId, bookId, number, rows)
+        }
     }
 
     // A verse was clicked: alone, with Ctrl added or removed, with Shift as a range from the last one.
@@ -423,6 +556,46 @@ Item {
                 return
             }
         }
+    }
+
+    // Search hits identify the stored paragraph, while The Table can split that
+    // paragraph into continuation rows (for example 150 and 150-3). Select the
+    // continuation that actually contains the query so a hit opens at its text.
+    function selectMatchingSubpart(number, query) {
+        if (!root.book || !root.adapter || root.adapter.contentType !== "table")
+            return
+        const words = String(query || "").toLowerCase().match(/[a-z0-9]+/g) || []
+        if (words.length === 0)
+            return
+        // `words` contains only alphanumerics, so it is safe to insert directly
+        // into the regex. Reuse the pane's already-built preview slides.
+        const ordered = new RegExp("\\b" + words.join("\\b\\W+(?:\\w+\\W+){0,2}") + "\\b", "i")
+        const slides = root.previewSlides
+        let best = null
+        for (let slideIndex = 0; slideIndex < slides.length; ++slideIndex) {
+            for (const part of slides[slideIndex].parts || []) {
+                if (Number(part.number) !== number)
+                    continue
+                const text = String(part.text || "")
+                const lower = text.toLowerCase()
+                let count = 0
+                for (const word of words)
+                    if (new RegExp("\\b" + word + "\\b", "i").test(text))
+                        ++count
+                const phrase = ordered.test(lower)
+                if (!best || (phrase && !best.phrase) || (phrase === best.phrase && count > best.count))
+                    best = { slideIndex: slideIndex, partIndex: Number(part.partIndex), count: count, phrase: phrase }
+            }
+        }
+        if (!best || best.count === 0)
+            return
+        root.selected = [number]
+        root.anchorVerse = number
+        root.previewSlideIndex = best.slideIndex
+        const rowIndex = root.mainRows.findIndex((row) => Number(row.number) === number
+                                                     && Number(row.slideIndex) === best.slideIndex)
+        if (rowIndex >= 0)
+            versesFlick.contentY = Math.max(0, rowIndex * 38 - 40)
     }
 
     // The previous / next verse (crossing into the next chapter or book).
@@ -466,10 +639,20 @@ Item {
         // Re-opening the chapter resets the selection and scroll, and the search box fires a
         // resolve on EVERY keystroke — so only reload when the spot actually changed (typing
         // "genesis 1:1" then "genesis 1:16" must move the highlight, not blank the chapter).
-        const chapters = root.book ? root.book.chapters : []
-        const target = ref.chapter > 0 && chapters.indexOf(ref.chapter) >= 0 ? ref.chapter : (chapters.length > 0 ? chapters[0] : 0)
-        if (root.bookIndex !== index || root.chapterNumber !== target)
-            root.openBook(index, ref.chapter > 0 ? ref.chapter : 0)
+        const targetBook = root.books[index]
+        const chapters = targetBook ? targetBook.chapters : []
+        const target = ref.chapter > 0 && chapters.indexOf(ref.chapter) >= 0
+                     ? ref.chapter : (chapters.length > 0 ? chapters[0] : 0)
+        const locationChanged = root.bookIndex !== index || root.chapterNumber !== target
+        if (locationChanged || root.chapterLoading) {
+            root.pendingGoTo = ref.verseStart > 0
+                ? { bookId: ref.bookId, chapter: target, verseStart: ref.verseStart, verseEnd: ref.verseEnd,
+                    matchText: ref.matchText || "" }
+                : null
+            if (locationChanged)
+                root.openBook(index, target)
+            return
+        }
         if (ref.verseStart > 0) {
             const to = ref.verseEnd > 0 ? ref.verseEnd : ref.verseStart
             const picked = root.chapterVerses.map((v) => v.number).filter((n) => n >= ref.verseStart && n <= to)
@@ -479,6 +662,8 @@ Item {
                 root.previewSlideIndex = 0
                 // Bring the first picked verse into view (rows are a fixed 38, as in the list).
                 versesFlick.contentY = Math.max(0, (picked[0] - 1) * 38 - 40)
+                if (root.adapter && root.adapter.contentType === "table" && ref.matchText)
+                    root.selectMatchingSubpart(picked[0], ref.matchText)
             }
         }
     }
@@ -537,7 +722,10 @@ Item {
     // Two stored shapes (spaces around dashes tolerated, code space-stripped):
     //   "47-0412 - Faith Is The Substance"  code - title (the separator dash)
     //   "47 - 1100X Fellowship"             code title  (no separator dash)
-    function citeRow(book, index, cite) {
+    // `paragraph` (optional, 1-based): a citation query that NAMES one paragraph
+    // ("64-0617 54") lands its row on that paragraph — the ref carries the verse
+    // so opening the row goes straight there, and the label says so ("· ¶54").
+    function citeRow(book, index, cite, paragraph) {
         let code = "", title = cite
         let m = /^(\d{2}\s*-\s*\d{4}[A-Za-z]?)\s*-\s*(.+)$/.exec(cite)
         if (!m)
@@ -546,13 +734,58 @@ Item {
             code = m[1].replace(/\s+/g, "")
             title = m[2].trim()
         }
-        return { label: title,
+        const para = Number(paragraph) > 0 ? Number(paragraph) : 0
+        return { label: para > 0 ? title + " \u00b7 \u00b6" + para : title,
                  trailing: code,
                  cite: cite,
-                 ref: { bookId: book.id, chapter: book.chapters[index], verseStart: 0, verseEnd: 0 } }
+                 para: para,
+                 ref: { bookId: book.id, chapter: book.chapters[index], verseStart: para, verseEnd: para } }
+    }
+
+    // The typed "<citation code> <paragraph>" tail ("64-0617 54", "47 - 0410 3"):
+    // { code, para } when the text really is a citation code followed by a bare
+    // paragraph number, else null. The code part must itself be code-shaped (a
+    // dash or 3+ digits) so "genesis 1 12" (a Bible reference with a number
+    // beside it) is never read as citation "genesis 1" + paragraph 12.
+    function paragraphPick(text) {
+        const needle = String(text == undefined ? "" : text).trim().toLowerCase()
+        const toks = needle.split(/\s+/)
+        if (toks.length < 2 || !/^\d{1,4}$/.test(toks[toks.length - 1]))
+            return null
+        const code = toks.slice(0, -1).join("").replace(/\s+/g, "")
+        if (code === "" || !/^[0-9][0-9a-z\-]*$/.test(code))
+            return null
+        const digits = code.replace(/[^0-9]/g, "").length
+        if (code.indexOf("-") < 0 && digits < 3)
+            return null
+        return { code: code, para: parseInt(toks[toks.length - 1], 10) }
     }
 
     // Live autocomplete for the tab search box: what the typed text still means, as plain data
+    // What is left of a citation line after the handle the user typed, so the box can
+    // complete "47-1020" -> " - The Angel Of God" — and "47 - 1020" -> the same,
+    // because the handle is walked in the service's form (spaces beside a dash
+    // skipped, and only those: a space anywhere else must match the cite literally).
+    // "" means the handle does not address this citation's code (nothing to complete).
+    function citationRest(text, cite) {
+        const needle = TheTableService.citationNeedle(text)
+        let i = 0
+        let j = 0
+        while (j < cite.length && i < needle.length) {
+            const c = cite[j]
+            // The run of spaces beside a dash is the part the two forms differ on.
+            if (c === " " && (cite[j + 1] === "-" || (j > 0 && cite[j - 1] === "-"))) {
+                ++j
+                continue
+            }
+            if (c.toLowerCase() !== needle[i])
+                return ""
+            ++i
+            ++j
+        }
+        return i === needle.length ? cite.slice(j) : ""
+    }
+
     // rows for TabSearchBox's popup. Books whose name contains the text, then — when the text
     // IS a book ("genesis", "genesis 1") — that book's chapters with their sizes (verse counts
     // for a Bible, sermon titles for The Table). Each row carries a full `ref` so picking one
@@ -601,7 +834,37 @@ Item {
                     return { rows: yearMatches.slice(0, 150), complete: "-" }
                 }
             }
+            // A CITATION + PARAGRAPH query ("64-0617 54") names one sermon AND one
+            // paragraph, so the paragraph gets its OWN row. The number is in no
+            // citation line, so the plain indexOf match below could never see it
+            // and the query listed nothing at all (user call: "let the quick
+            // accept verse for the table"). The paragraph is dropped back to the
+            // sermon-level row when the sermon does not have that paragraph.
+            const paraPick = root.paragraphPick(needle)
+            if (paraPick) {
+                for (const b of root.books) {
+                    const titles = b.chapterTitles || []
+                    for (let i = 0; i < b.chapters.length; i++) {
+                        const cite = String(titles[i] || "")
+                        if (cite === "")
+                            continue
+                        const row = root.citeRow(b, i, cite)
+                        if (row.trailing.toLowerCase() !== paraPick.code)
+                            continue
+                        const have = b.verseCounts && b.verseCounts.length === b.chapters.length
+                                     ? Number(b.verseCounts[i]) : 0
+                        const para = (have === 0 || paraPick.para <= have) ? paraPick.para : 0
+                        return { rows: [root.citeRow(b, i, cite, para)], complete: "" }
+                    }
+                }
+            }
             if (needle.length >= 2) {
+                // The handle is compared in the service's OWN form (spaces beside
+                // a dash dropped), so "47 - 1020" filters and completes exactly
+                // like "47-1020" — the box and the engine must agree on what the
+                // user typed, and TheTableService.citationNeedle is the one place
+                // that decides.
+                const citeNeedle = TheTableService.citationNeedle(text)
                 const matches = []
                 for (const b of root.books) {
                     const titles = b.chapterTitles || []
@@ -609,15 +872,15 @@ Item {
                         const cite = String(titles[i] || "")
                         if (cite === "")
                             continue
-                        if (cite.toLowerCase().indexOf(needle) >= 0)
+                        if (cite.toLowerCase().indexOf(needle) >= 0
+                                || TheTableService.citationNeedle(cite).indexOf(citeNeedle) >= 0)
                             matches.push({ book: b, index: i, cite: cite })
                     }
                 }
                 // Unique at 5+ chars: complete inline, no list (the resolve jumps).
                 // Unique below 5: one-row list — click it, the fill must not fire.
                 if (matches.length === 1 && needle.length >= 5) {
-                    const at = matches[0].cite.toLowerCase().indexOf(needle)
-                    return { rows: [], complete: matches[0].cite.slice(at + needle.length) }
+                    return { rows: [], complete: root.citationRest(text, matches[0].cite) }
                 }
                 if (matches.length > 0)
                     // The list scrolls (matchesList sits in the pane's Flickable);
@@ -710,6 +973,10 @@ Item {
         }
         const tableSearch = root.adapter && root.adapter.contentType === "table"
         if (tableSearch) {
+            // (The Table's own search resolves the terms while it scans; the
+            // spelling hint comes back only when it found nothing — see
+            // applySearchResults, which runs it for a LOCKED empty answer too,
+            // so the user can Tab the correction in and find the passage.)
             root.resolveToken++
             root.resolvedWords = []
         } else if (SearchService.resolveWordsAsync) {
@@ -718,12 +985,40 @@ Item {
         } else {
             root.resolvedWords = SearchService.resolveWords(text)
         }
+        // The chapter lock rides along as the scope (empty = the whole tab, as
+        // it always was); adapters without the feature ignore the extra pair.
         if (root.adapter && root.adapter.searchAsync) {
             root.searchToken++
-            root.adapter.searchAsync(text, root.sourceId, root.searchToken)
+            root.adapter.searchAsync(text, root.sourceId, root.searchToken, root.exact,
+                                     root.lockedBookId, root.lockedChapter)
         } else {
-            root.searchResults = root.adapter.search(text, root.sourceId)
+            root.searchResults = root.adapter.search(text, root.sourceId, root.exact,
+                                                     root.lockedBookId, root.lockedChapter)
         }
+    }
+    // The chapter lock's click: flip it, and the SCOPE's own change re-runs what
+    // is already typed (rescopeSearch below), so the list changes under the
+    // user's eyes exactly like the padlock's does.
+    function toggleScopeLock() {
+        if (!root.book) return   // nothing open to lock to
+        root.scopeLock = !root.scopeLock
+    }
+    // While the lock is on, the scope IS what is open: moving to another chapter
+    // (or another book) re-runs the typed query against the passage now on
+    // screen, so the rows always describe the page the user is looking at.
+    function rescopeSearch() {
+        if (!root.searching || searchInput.text.trim() === "")
+            return
+        root.runSearch(searchInput.text)
+    }
+    onLockedBookIdChanged: root.rescopeSearch()
+    onLockedChapterChanged: root.rescopeSearch()
+    // The padlock's click: flip the mode and re-run what is already typed, so the
+    // list changes under the user's eyes instead of waiting for the next keystroke.
+    function toggleExact() {
+        root.exact = !root.exact
+        if (root.searching && searchInput.text.trim() !== "")
+            root.runSearch(searchInput.text)
     }
     // The worker's answer — stale tokens dropped (a fast typist's older
     // keystrokes resolve into the void, same as the search's).
@@ -734,14 +1029,18 @@ Item {
     function applySearchResults(token, rows) {
         if (token !== root.searchToken) return   // a stale keystroke's answer
         root.searchResults = rows
-        // The Table search already resolves terms while searching. Only run
-        // the separate spelling hint when that search found no results.
+        // The spelling hint and the half-typed word's candidate ladder show in
+        // THIS pane too — the same words the app-wide dialog offers (user call:
+        // "the typo fixer should be there" in this box as well). It used to run
+        // only when the search found nothing, so with results on screen the
+        // corrections and the readings were never shown. Resolved off the GUI
+        // thread; the newest request's token wins.
         if (root.adapter && root.adapter.contentType === "table") {
             root.resolveToken++
-            if (rows.length === 0 && searchInput.text.trim() !== "")
-                SearchService.resolveWordsAsync(searchInput.text, root.resolveToken)
-            else
+            if (searchInput.text.trim() === "")
                 root.resolvedWords = []
+            else
+                SearchService.resolveWordsAsync(searchInput.text, root.resolveToken)
         }
     }
     // Word-resolution worker answers (applyResolvedWords above).
@@ -750,14 +1049,105 @@ Item {
         function onWordsResolved(token, rows) { root.applyResolvedWords(token, rows) }
     }
 
-    // Words to highlight: what the engine actually searched for (resolved),
-    // falling back to the raw typed words when nothing needed fixing.
+    // Words to highlight: EVERY word the user typed, plus whatever the engine
+    // searched for instead of it (a corrected spelling). The typed words cannot be
+    // missing from this list — the rows were matched on them, and a row showing
+    // "compelling" plain beside a highlighted "that" reads as a broken highlighter
+    // (user report: "the highlighter is not highlighting compelling").
     readonly property string highlightQuery: {
+        const typed = root.activeQuery.trim().toLowerCase().match(/[a-z0-9]+/g) || []
+        // Locked: the rows were matched on the TYPED words — highlight those, not
+        // the engine's corrections (the correction is offered as the gold hint,
+        // and taking it re-runs the locked search on the fixed word).
+        if (root.exact)
+            return typed.join(" ")
         // (No Array.flat in the QML JS engine — plain loops keep it portable.)
-        const words = []
-        for (const w of root.resolvedWords)
-            for (const p of String(w.resolved).split(/\s+/)) words.push(p)
-        return words.length > 0 ? words.join(" ") : root.activeQuery
+        for (const w of root.resolvedWords) {
+            const parts = String(w.resolved).toLowerCase().match(/[a-z0-9]+/g) || []
+            for (const p of parts)
+                if (typed.indexOf(p) < 0) typed.push(p)
+        }
+        return typed.join(" ")
+    }
+
+    // The row's snippet, WINDOWED so the match reads in the middle of the row
+    // rather than at its edge. The engine anchors its 220-character snippet near
+    // the match, but a pane row shows ONE line (~90 characters), so a hit anywhere
+    // past that was simply not on screen (user call: "i expect the highlighted text
+    // to show well like in the centre not at the extreme so user can see the hits
+    // well"). The width is measured with the row's own font, and the window opens
+    // a third of the way before the hit CLUSTER.
+    //
+    // This one is measured IMPERATIVELY (no binding reads it), so it is safe to
+    // assign here: the delegate passes its own bound measurement instead — see
+    // the row's hitMetrics. Measuring inside the row's binding (writing a shared
+    // TextMetrics that the same binding then read back) was a binding loop, and
+    // Qt re-evaluated it for every row on every frame ("Binding loop detected
+    // for property \"shown\"").
+    TextMetrics {
+        id: probeMetrics
+        font.family: Theme.fontFamily
+        font.pixelSize: 15
+    }
+    function collapseSnippet(text) {
+        return String(text ?? "").replace(/\s*\n+\s*/g, " ").replace(/\s+/g, " ").trim()
+    }
+    // `measuredAdvance` (optional) = the advance width the CALLER measured for
+    // `snippet` with the row's own font. The delegate always passes its own (a
+    // bound TextMetrics, so this stays a pure function of its arguments); a
+    // caller that does not — the pane-highlight scenario — makes this measure
+    // with probeMetrics above, which is only ever written imperatively.
+    function centeredSnippet(snippet, availableWidth, measuredAdvance) {
+        const text = root.collapseSnippet(snippet)
+        if (text === "" || availableWidth <= 0)
+            return text
+        // How much text fits the row: measure the whole snippet once and scale.
+        let advance = Number(measuredAdvance)
+        if (!(advance > 0)) {
+            probeMetrics.text = text
+            advance = probeMetrics.advanceWidth
+        }
+        const perChar = advance / Math.max(1, text.length)
+        const fit = perChar > 0 ? Math.max(24, Math.floor(availableWidth / perChar)) : 90
+        const span = Math.ceil(fit * 1.25)
+        const words = root.highlightQuery.split(/\s+/).filter((w) => w.length >= 2)
+        // WHERE to open the window: the opening that carries the MOST of the
+        // typed words, not simply the first one of them. Anchoring on the first
+        // occurrence let an incidental early "that" hold the window at the
+        // snippet's start while the words the user actually typed sat past the
+        // visible edge — the row showed "compelling, that" with compelling half
+        // off the end (user screenshot). The cluster goes in the middle instead.
+        const low = text.toLowerCase()
+        let hit = -1
+        let bestCovered = 0
+        for (const w of words) {
+            let at = low.indexOf(w)
+            let tried = 0
+            while (at >= 0 && tried < 24) {   // a 220-char snippet cannot hold many
+                let covered = 0
+                const until = at + span
+                for (const other of words) {
+                    const o = low.indexOf(other, at)
+                    if (o >= 0 && o < until) ++covered
+                }
+                if (covered > bestCovered || (covered === bestCovered && hit < 0)) {
+                    bestCovered = covered
+                    hit = at
+                }
+                at = low.indexOf(w, at + 1)
+                ++tried
+            }
+        }
+        if (hit < 0)
+            return text
+        let start = Math.max(0, Math.round(hit - fit * 0.35))
+        // Never begin mid-word: step back to the space before the window.
+        if (start > 0) {
+            const before = text.lastIndexOf(" ", start)
+            start = before > 0 ? before + 1 : 0
+        }
+        const window = text.substring(start, start + span)
+        return start > 0 ? "… " + window : window
     }
 
     // ---- tab-search autocomplete ------------------------------------------------
@@ -1219,6 +1609,9 @@ Item {
                     model: root.mainRows
                     delegate: Item {
                         id: verseRow
+                        // Self-test handle: the verse double-click scenario
+                        // (double-click goes on air) addresses rows by name.
+                        objectName: "selfTestVerseRow_" + Number(modelData.number)
                         required property var modelData
                         readonly property bool continuation: modelData.continuation === true
                         readonly property int verseNumber: Number(modelData.number)
@@ -1288,22 +1681,73 @@ Item {
                             id: verseSource
                             anchors.fill: parent
                             owner: root
-                            payload: root.dragPayload(verseRow.active ? root.selected : [verseRow.verseNumber])
-                            label: payload ? payload.items[0].name : ""
-                            onActivated: {
+                            // LAZY (not `payload:`): dragPayload asks the engine for the
+                            // reference, and this delegate is created for EVERY paragraph of
+                            // the sermon at once — ~200 engine calls at open cost ~2s of the
+                            // click-to-open delay (measured). Evaluated once, at drag start.
+                            payloadProvider: () => {
+                                const p = root.dragPayload(verseRow.active ? root.selected : [verseRow.verseNumber])
+                                return p ? { payload: p, label: p.items[0].name } : null
+                            }
+                            // `owner` is this pane. A click or double-click already
+                            // in flight when the pane is rebuilt (a tab switch, a
+                            // settings toggle the tab renders — table.splitLongVerses
+                            // was the reported one) arrives with a DESTROYED pane,
+                            // and a property read off a destroyed object is
+                            // `undefined` rather than an error: that is the reported
+                            // "Cannot read property 'playPicked' of undefined". The
+                            // `typeof` half mirrors DropdownPanel's stale-row
+                            // guards. A vanished pane simply has nothing to select
+                            // into, so selection work is skipped, not attempted.
+                            //
+                            // The guard is INLINED — a property read on the
+                            // DragSource, never a helper FUNCTION declared on it.
+                            // selectVerse can rebuild the verse list synchronously,
+                            // destroying this DragSource while its own handler is
+                            // still running; calling a function member of a
+                            // destroyed object throws "Property 'ownerPane' ... is
+                            // not a function" and "attempted to evaluate a function
+                            // in an invalid context" (the reported crash), whereas
+                            // re-reading the plain `verseSource.owner` property is
+                            // exactly the read that safely yields undefined.
+                            // The modifiers come FROM THE CLICK (`activated`
+                            // carries them). This used to read
+                            // `Qt.application.keyboardModifiers`, which is
+                            // `undefined` on Qt 6 — so the Ctrl/Shift halves of
+                            // "Click selects (Ctrl / Shift add)" above were
+                            // inert and every click was a plain single select.
+                            onActivated: (mods) => {
+                                if (typeof verseSource === "undefined" || !verseSource)
+                                    return
+                                const pane = verseSource.owner
+                                if (!pane)
+                                    return
                                 if (verseRow.isSplit) {
-                                    verseSource.owner.selectSubpart(verseRow.verseNumber, verseRow.partIndex)
+                                    pane.selectSubpart(verseRow.verseNumber, verseRow.partIndex)
                                 } else {
-                                    const mods = Qt.application.keyboardModifiers
-                                    verseSource.owner.selectVerse(verseRow.verseNumber, (mods & Qt.ControlModifier) !== 0, (mods & Qt.ShiftModifier) !== 0)
+                                    pane.selectVerse(verseRow.verseNumber, (mods & Qt.ControlModifier) !== 0, (mods & Qt.ShiftModifier) !== 0)
                                 }
                             }
                             onOpened: {
+                                if (typeof verseSource === "undefined" || !verseSource)
+                                    return
+                                const pane = verseSource.owner
+                                if (!pane)
+                                    return
                                 if (verseRow.isSplit)
-                                    verseSource.owner.selectSubpart(verseRow.verseNumber, verseRow.partIndex)
+                                    pane.selectSubpart(verseRow.verseNumber, verseRow.partIndex)
                                 else
-                                    verseSource.owner.selectVerse(verseRow.verseNumber, false, false)
-                                verseSource.owner.playPicked()
+                                    pane.selectVerse(verseRow.verseNumber, false, false)
+                                // RE-RESOLVED, deliberately not the `pane` above: the
+                                // selection just made can rebuild the pane
+                                // synchronously, and the second fresh read of
+                                // `verseSource.owner` is precisely the one that came
+                                // back undefined (the first call had succeeded).
+                                if (typeof verseSource === "undefined" || !verseSource)
+                                    return
+                                const live = verseSource.owner
+                                if (live)
+                                    live.playPicked()
                             }
                         }
                         // The note affordance: a pencil on hover, persistent while a note
@@ -1369,14 +1813,26 @@ Item {
                 // friend"), gold like the match highlight. Tab in the pill box
                 // accepts it — the same behavior Quick search has.
                 Text {
-                    visible: root.resolvedWords.some((w) => w.changed === true)
+                    // Named for the pane-highlight scenario, which asserts this line
+                    // is really ON SCREEN for a misspelled query (the user's ask:
+                    // "the typo fixer should be there" in this box as well).
+                    objectName: "selfTestPaneSearchHint"
+                    visible: root.resolvedWords.some((w) => w.changed === true
+                                                     || (w.candidates && w.candidates.length > 0))
                     width: parent.width
                     leftPadding: 10
                     color: "#ffd54a"
                     font.family: Theme.fontFamily; font.pixelSize: 13
                     elide: Text.ElideRight
-                    text: root.resolvedWords.filter((w) => w.changed === true)
-                              .map((w) => w.typed + " \u2192 " + w.resolved).join("   ")
+                    // Corrections ("thn → then") AND the half-typed last word's
+                    // candidate ladder, likeliest first ("rec → receive · received
+                    // · record") — the pane and the app-wide dialog read the same
+                    // list from the same engine call.
+                    text: root.resolvedWords.filter((w) => w.changed === true
+                                                        || (w.candidates && w.candidates.length > 0))
+                              .map((w) => (w.candidates && w.candidates.length > 0)
+                                       ? w.typed + " \u2192 " + w.candidates.slice(0, 3).join(" \u00b7 ")
+                                       : w.typed + " \u2192 " + w.resolved).join("   ")
                               + "   (Tab to accept)"
                 }
                 Repeater {
@@ -1393,10 +1849,27 @@ Item {
                             elide: Text.ElideRight
                             font.family: Theme.fontFamily; font.pixelSize: 15
                         }
+                        // The row's own measurement of its snippet — BOUND, so the
+                        // windowing below stays a pure function of its arguments.
+                        // (Measuring inside `shown` instead made that binding write
+                        // the shared TextMetrics it was reading: a binding loop Qt
+                        // re-evaluated for every row, every frame.)
+                        TextMetrics {
+                            id: hitMetrics
+                            font.family: Theme.fontFamily; font.pixelSize: 15
+                            text: hitSnippet.collapsed
+                        }
                         Text {
+                            id: hitSnippet
+                            objectName: "selfTestPaneHitSnippet"   // (the pane-highlight scenario reads the rendered row by name)
                             x: 190; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 198
-                            text: root.canHighlight ? root.highlight(hitRow.modelData.snippet.replace(/\s*\n+\s*/g, " "))
-                                                    : hitRow.modelData.snippet.replace(/\s*\n+\s*/g, " ")
+                            readonly property string collapsed: root.collapseSnippet(hitRow.modelData.snippet)
+                            // The hit is centred in the row (see centeredSnippet) so the
+                            // words that matched are actually on screen, and the highlight
+                            // wraps every typed word (see highlightQuery).
+                            readonly property string shown: root.centeredSnippet(
+                                hitSnippet.collapsed, width, hitMetrics.advanceWidth)
+                            text: root.canHighlight ? root.highlight(shown) : shown
                             color: root.textDim
                             elide: Text.ElideRight
                             textFormat: root.canHighlight ? Text.StyledText : Text.PlainText
@@ -1405,7 +1878,9 @@ Item {
                         HoverHandler { id: hitHover; cursorShape: Qt.PointingHandCursor }
                         TapHandler {
                             onTapped: {
-                                root.goTo({ bookId: hitRow.modelData.bookId, chapter: hitRow.modelData.chapter, verseStart: hitRow.modelData.verse, verseEnd: hitRow.modelData.verse })
+                                root.goTo({ bookId: hitRow.modelData.bookId, chapter: hitRow.modelData.chapter,
+                                            verseStart: hitRow.modelData.verse, verseEnd: hitRow.modelData.verse,
+                                            matchText: searchInput.text })
                                 root.searching = false
                             }
                         }
@@ -1414,7 +1889,14 @@ Item {
                 Text {
                     visible: root.searchResults.length === 0
                     x: 12; y: 12
-                    text: (root.adapter ? root.adapter.searchHint : qsTr("Type words to find, then press Enter."))
+                    width: parent.width - 24
+                    wrapMode: Text.WordWrap
+                    // Locked with nothing found: say WHY the list is empty (an
+                    // unnoticed padlock looks like a broken search), and how to get
+                    // the loose results back.
+                    text: root.exact && searchInput.text.trim() !== ""
+                          ? qsTr("No exact match for “%1” — with the padlock on, the words must appear together, exactly as typed. Click the padlock to search loosely.").arg(searchInput.text.trim())
+                          : (root.adapter ? root.adapter.searchHint : qsTr("Type words to find, then press Enter."))
                     color: Theme.textMuted
                     font.family: Theme.fontFamily; font.pixelSize: 14
                 }
@@ -1617,7 +2099,17 @@ Item {
                     Rectangle { anchors.fill: parent; radius: 13; color: "#181a22"; border.color: Theme.border }
                     TextInput {
                         id: searchInput
-                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
+                        // Named per content type, like the locks beside it: BOTH
+                        // reference panes own one of these, and the pane-highlight
+                        // scenario types into the box on the tab it means (the
+                        // search itself runs from the box's own debounce, so the
+                        // scenario exercises the real path — typing — instead of
+                        // calling runSearch() behind the field's back).
+                        objectName: "selfTestSearchBox-" + (root.adapter && root.adapter.contentType
+                                                            ? root.adapter.contentType : "")
+                        // Wider right margin: the chapter lock and the padlock sit
+                        // at the field's far end.
+                        anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 54
                         verticalAlignment: TextInput.AlignVCenter
                         color: Theme.textPrimary
                         font.family: Theme.fontFamily; font.pixelSize: 14
@@ -1647,15 +2139,90 @@ Item {
                     }
                     Timer {
                         id: pillDebounce
-                        interval: 80
+                        // LIVE filtering (user call: no Enter press first). The engine
+                        // scan behind this is a real search over the whole library —
+                        // hundreds of milliseconds, seconds when several words are
+                        // typed — so the debounce waits for a typing pause instead of
+                        // launching one scan per keystroke: at 80 ms, typing a
+                        // four-word query queued four full scans, and the results the
+                        // user watched arrive belonged to word one. Enter still commits
+                        // instantly (onAccepted stops the timer).
+                        interval: 300
                         onTriggered: root.runSearch(searchInput.text)
                     }
                     Text {
                         visible: searchInput.text === ""
                         anchors.verticalCenter: parent.verticalCenter; x: 12
-                        text: (root.adapter ? root.adapter.searchPlaceholder : qsTr("Search"))
-                        color: Theme.textMuted
+                        // Locked, the hint names the scope — the field itself is
+                        // where the user finds out what the search now covers.
+                        text: (root.scopeLock && root.scopeName !== "")
+                              ? qsTr("Search in %1").arg(root.scopeName)
+                              : (root.adapter ? root.adapter.searchPlaceholder : qsTr("Search"))
+                        color: root.scopeLock ? Theme.accent : Theme.textMuted
                         font.family: Theme.fontFamily; font.pixelSize: 14
+                    }
+                    // The CHAPTER LOCK (Scripture and The Table only — see
+                    // supportsChapterLock): a book pill beside the padlock. Open
+                    // (dim) = the tab's normal search over everything; lit = only
+                    // the passage on screen is searched. Clicking re-runs what is
+                    // already typed.
+                    Item {
+                        id: pillScope
+                        // Named per tab: BOTH reference tabs show this pill, and a
+                        // scenario (or a test) that names it must reach the one on
+                        // the tab it means.
+                        objectName: "selfTestChapterLock"
+                                    + (root.adapter && root.adapter.contentType
+                                       ? "-" + root.adapter.contentType : "")
+                        visible: root.supportsChapterLock
+                        anchors.right: parent.right; anchors.rightMargin: 30
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 20; height: 20
+                        Rectangle {
+                            anchors.fill: parent; radius: 10
+                            color: scopeHover.hovered ? "#22242e" : (root.scopeLock ? "#1d2a2f" : "transparent")
+                        }
+                        IconGlyph {
+                            anchors.centerIn: parent
+                            name: root.scopeLock ? "book" : "bookOpen"
+                            color: root.scopeLock ? Theme.accent : Theme.textMuted
+                            width: 12; height: 12
+                            fit: true
+                        }
+                        PositionHoverArea {
+                            id: scopeHover
+                            anchors.fill: parent
+                            checkAncestors: false
+                            onClicked: root.toggleScopeLock()
+                        }
+                    }
+                    // The exact-words padlock, at the extreme end of the field (user
+                    // call). Open (dim) = the search's normal fuzzy matching; closed
+                    // (accent) = every typed word must appear verbatim, as a whole
+                    // word. Clicking re-runs what is already typed.
+                    Item {
+                        id: pillLock
+                        objectName: "selfTestExactLock"
+                        anchors.right: parent.right; anchors.rightMargin: 4
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 20; height: 20
+                        Rectangle {
+                            anchors.fill: parent; radius: 10
+                            color: lockHover.hovered ? "#22242e" : (root.exact ? "#241f36" : "transparent")
+                        }
+                        IconGlyph {
+                            anchors.centerIn: parent
+                            name: root.exact ? "locked" : "unlocked"
+                            color: root.exact ? Theme.accent : Theme.textMuted
+                            width: 12; height: 12
+                            fit: true
+                        }
+                        PositionHoverArea {
+                            id: lockHover
+                            anchors.fill: parent
+                            checkAncestors: false
+                            onClicked: root.toggleExact()
+                        }
                     }
                 }
 
@@ -1885,7 +2452,14 @@ Item {
             id: previewFlick
             anchors.top: parent.top; anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right
             anchors.leftMargin: 1
-            anchors.rightMargin: previewScrollBar.visible ? 9 : 0
+            // Reserving the strip only WHILE the bar shows was a polish loop:
+            // the bar's visibility changed this Flickable's width, the column
+            // inside re-laid out (its preview tile is sized from width), its
+            // contentHeight moved, and the bar's own visible binding —
+            // contentHeight > height — flipped straight back. The strip is part
+            // of the layout, so it is always reserved (see the identical fix in
+            // VGRPresenterMainScreen's shows sidebar).
+            anchors.rightMargin: 9
             contentWidth: width
             contentHeight: previewFlickContent.height
             clip: true
@@ -1925,7 +2499,7 @@ Item {
                         y: 20
                         width: parent.width - 32
                         // the 16:9-ish design ratio, purely from width - never clamped by leftover height
-                        height: Math.round(width * 428 / 754)
+                        height: StageGrid.heightForWidth(width)
                         color: "#000000"
                         clip: true
                         DesignPreview {
@@ -1962,10 +2536,10 @@ Item {
                                 width: 150
                                 // Same three states the Show screen's template row uses: nothing chosen,
                                 // a real name, or an id whose design is gone. Never a silently blank line.
-                                text: root.templateId === ""
-                                      ? qsTr("Default — no template")
-                                      : (root.templateName !== "" ? root.templateName : qsTr("Missing template"))
-                                color: root.templateId === "" ? Theme.textMuted : Theme.textPrimary
+                                // The name is the template that will actually render (the output style's own
+                                // family template when it names one — see templateRowText).
+                                text: root.templateRowText
+                                color: root.effectiveTemplateId === "" ? Theme.textMuted : Theme.textPrimary
                                 elide: Text.ElideRight
                                 font.family: Theme.fontFamily; font.pixelSize: 16; font.weight: Font.DemiBold
                             }
@@ -1995,8 +2569,10 @@ Item {
                             Rectangle {
                                 width: 46; height: 56; color: editHover.hovered ? "#1a1b23" : "#0b0c11"
                                 IconGlyph { anchors.centerIn: parent; name: "penTool"; color: Theme.textPrimary; width: 14; height: 14 }
-                                HoverHandler { id: editHover; cursorShape: Qt.PointingHandCursor }
-                                TapHandler { onTapped: root.templateEditRequested(root.templateId) }
+                            HoverHandler { id: editHover; cursorShape: Qt.PointingHandCursor }
+                            // Edits the template the OUTPUT is rendering this tab's content with —
+                            // the style's family template when it has one, else this tab's own pick.
+                            TapHandler { onTapped: root.templateEditRequested(root.effectiveTemplateId) }
                             }
                         }
                     }
@@ -2099,22 +2675,25 @@ Item {
                             }
                         }
 
+                        // No "... on individual lines", "Smart split" or "Tolerance"
+                        // row: the first two were layout toggles (the fill does what
+                        // their shipped defaults did), and Tolerance was a second,
+                        // invisible rule on top of the words-per-slide number — where
+                        // a long item is cut now follows from that number alone (see
+                        // AppSettings::AddFillOptions).
                         OptionToggle { settingKey: root.adapter.optionsPrefix + ".verseNumbers" }
-                        OptionToggle { settingKey: root.adapter.optionsPrefix + ".versesOnIndividualLines" }
                         OptionToggle { settingKey: root.adapter.optionsPrefix + ".splitLongVerses" }
                         Column {
                             visible: root.options[root.adapter.optionsPrefix + ".splitLongVerses"] === true
                             width: parent.width
-                            OptionToggle { settingKey: root.adapter.optionsPrefix + ".splitLongVersesSuffix" }
-                            OptionNumber { settingKey: root.adapter.optionsPrefix + ".longVersesChars"; step: 10 }
-                            OptionNumber { settingKey: root.adapter.optionsPrefix + ".longVersesTolerance"; step: 5 }
+                            // NO "Number the parts (1a, 1b)" row (user call: "you can
+                            // remove this") — see AppSettings::AddFillOptions: the
+                            // fill's shipped behaviour is what happens now.
+                            // The slide's budget, in WORDS (was "Size", in characters).
+                            // It is the whole rule: a longer item is divided over the
+                            // next slide at exactly this many words.
+                            OptionNumber { settingKey: root.adapter.optionsPrefix + ".wordsPerSlide"; step: 5 }
                         }
-                        OptionToggle { settingKey: root.adapter.optionsPrefix + ".smartSplit" }
-                        // The max caps BOTH modes now — smart split packs by the
-                        // template box's capacity but never past this many — so
-                        // it stays visible with smart split on (it used to hide,
-                        // and was then silently ignored: the "max does nothing" gap).
-                        OptionNumber { settingKey: root.adapter.optionsPrefix + ".versesPerSlide" }
                     }
                 }
             }
@@ -2149,7 +2728,7 @@ Item {
                             GradientStop { position: 1.0; color: root.optionsOpen ? "#5a50d6" : "#181a24" }
                         }
                         border.width: 1
-                        border.color: root.optionsOpen ? "#ff8a7e" : "#34384a"
+                        border.color: root.optionsOpen ? Theme.dangerLight : "#34384a"
                         IconGlyph { anchors.centerIn: parent; name: "sliders"; color: "#ffffff"; fit: true; width: 22; height: 22 }
                     }
                     HoverHandler { id: optionsHover; cursorShape: Qt.PointingHandCursor }

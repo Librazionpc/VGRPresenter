@@ -1,4 +1,6 @@
 import QtQuick
+import QtQuick.Controls
+import VGRPresenterUI
 
 // "Add Timer" configurator — pops up when "Timer" is picked from the Edit
 // screen's "+" Add Content menu, matching
@@ -41,6 +43,15 @@ Item {
     anchors.fill: parent
     visible: root.open
 
+    // The dialog belongs to the WINDOW, not to the pane that declares it. A modal
+    // declared inside a settings page (every Add / Edit dialog in Settings) must dim
+    // the whole app, not just that page's content column: parented in place its scrim
+    // covered one side of the settings card, so the dialog read as half-modal (user
+    // report: "the black box doesn't cover the whole settings modal, only one side").
+    // Reparented to the window overlay, this component has no scaled ancestor to
+    // inherit a scale from, so its CARD applies the app scale itself (see AppScale.qml).
+    parent: Overlay.overlay
+
     ModalScrim {
         anchors.fill: parent
         onDismissed: root.cancelled()
@@ -48,12 +59,16 @@ Item {
 
     Rectangle {
         id: card
+        // The app's one scale, on the card (see AppScale.qml) — never on the root,
+        // whose scrim IS the dialog's black box and has to stay window-sized.
+        scale: AppScale.cardScale(card)
+        transformOrigin: Item.Center
         anchors.centerIn: parent
         width: 480
         height: content.height + 40
         radius: 14
-        color: "#13151c"
-        border.color: "#232530"
+        color: Theme.surface
+        border.color: Theme.border
         border.width: 1
 
         MouseArea { anchors.fill: parent; onClicked: {} }
@@ -77,8 +92,8 @@ Item {
                         anchors.left: parent.left
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Add Timer")
-                        color: "#f1f3f8"
-                        font.family: "Segoe UI"
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
                         font.pixelSize: 18
                         font.weight: Font.DemiBold
                     }
@@ -90,13 +105,13 @@ Item {
                         width: 28
                         height: 28
                         radius: 7
-                        color: closeArea.containsMouse ? "#20222c" : "transparent"
+                        color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
                         Behavior on color { ColorAnimation { duration: 100 } }
 
                         Text {
                             anchors.centerIn: parent
                             text: "✕"
-                            color: "#8a94a6"
+                            color: Theme.textSecondary
                             font.pixelSize: 14
                         }
 
@@ -113,13 +128,13 @@ Item {
                 Text {
                     width: parent.width
                     text: qsTr("Configure a countdown for this slide")
-                    color: "#8a94a6"
-                    font.family: "Segoe UI"
+                    color: Theme.textSecondary
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                 }
             }
 
-            Rectangle { width: parent.width; height: 1; color: "#232530" }
+            Rectangle { width: parent.width; height: 1; color: Theme.border }
 
             Column {
                 width: parent.width
@@ -127,8 +142,8 @@ Item {
 
                 Text {
                     text: qsTr("Mode")
-                    color: "#c8cdd9"
-                    font.family: "Segoe UI"
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                     font.weight: Font.Medium
                 }
@@ -151,16 +166,16 @@ Item {
                             width: (parent.width - 16) / 3
                             height: 32
                             radius: 8
-                            color: modeBtn.active ? Theme.accent : (modeArea.containsMouse ? "#20222c" : "#1a1c26")
-                            border.color: modeBtn.active ? Theme.accent : "#2a2f3a"
+                            color: modeBtn.active ? Theme.accent : (modeArea.containsMouse ? Theme.hoverBg : Theme.inset)
+                            border.color: modeBtn.active ? Theme.accent : Theme.borderSubtle
                             border.width: 1
                             Behavior on color { ColorAnimation { duration: 100 } }
 
                             Text {
                                 anchors.centerIn: parent
                                 text: modeBtn.modelData.label
-                                color: modeBtn.active ? "#ffffff" : "#c8cdd9"
-                                font.family: "Segoe UI"
+                                color: modeBtn.active ? "#ffffff" : Theme.textPrimary
+                                font.family: Theme.fontFamily
                                 font.pixelSize: 14
                                 font.weight: modeBtn.active ? Font.DemiBold : Font.Medium
                             }
@@ -183,8 +198,8 @@ Item {
 
                 Text {
                     text: root.mode === "timeofday" ? qsTr("Time of Day") : qsTr("Duration")
-                    color: "#c8cdd9"
-                    font.family: "Segoe UI"
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                     font.weight: Font.Medium
                 }
@@ -206,8 +221,8 @@ Item {
                             width: 64
                             height: 48
                             radius: 8
-                            color: fieldBox.focused ? "#1f6c5ce7" : "#1a1c26"
-                            border.color: fieldBox.focused ? Theme.accent : "#2a2f3a"
+                            color: fieldBox.focused ? Qt.alpha(Theme.accent, 0.12) : Theme.inset
+                            border.color: fieldBox.focused ? Theme.accent : Theme.borderSubtle
                             border.width: fieldBox.focused ? 1.5 : 1
                             Behavior on color { ColorAnimation { duration: 100 } }
 
@@ -219,8 +234,8 @@ Item {
                                     id: numInput
                                     anchors.horizontalCenter: parent.horizontalCenter
                                     text: fieldBox.modelData.value < 10 ? "0" + fieldBox.modelData.value : String(fieldBox.modelData.value)
-                                    color: fieldBox.focused ? "#9b8ff5" : "#f1f3f8"
-                                    font.family: "Segoe UI"
+                                    color: fieldBox.focused ? Theme.accentLight : Theme.textPrimary
+                                    font.family: Theme.fontFamily
                                     font.pixelSize: 23
                                     font.weight: Font.DemiBold
                                     horizontalAlignment: Text.AlignHCenter
@@ -237,8 +252,8 @@ Item {
                                 Text {
                                     anchors.horizontalCenter: parent.horizontalCenter
                                     text: fieldBox.modelData.label
-                                    color: fieldBox.focused ? "#9b8ff5" : "#5c6475"
-                                    font.family: "Segoe UI"
+                                    color: fieldBox.focused ? Theme.accentLight : Theme.textMuted
+                                    font.family: Theme.fontFamily
                                     font.pixelSize: 10
                                 }
                             }
@@ -264,8 +279,8 @@ Item {
                         anchors.rightMargin: 12
                         anchors.verticalCenter: parent.verticalCenter
                         text: modelData.label
-                        color: "#c8cdd9"
-                        font.family: "Segoe UI"
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                     }
 
@@ -277,7 +292,7 @@ Item {
                         width: 44
                         height: 24
                         radius: 12
-                        color: toggleTrack.on ? Theme.accent : "#2a2f3a"
+                        color: toggleTrack.on ? Theme.accent : Theme.borderSubtle
                         Behavior on color { ColorAnimation { duration: 100 } }
 
                         Rectangle {
@@ -304,7 +319,7 @@ Item {
                 }
             }
 
-            Rectangle { width: parent.width; height: 1; color: "#232530" }
+            Rectangle { width: parent.width; height: 1; color: Theme.border }
 
             Row {
                 anchors.right: parent.right
@@ -314,16 +329,16 @@ Item {
                     width: 90
                     height: 32
                     radius: 9
-                    color: cancelArea.containsMouse ? "#20222c" : "#1a1c26"
-                    border.color: "#2a2f3a"
+                    color: cancelArea.containsMouse ? Theme.hoverBg : Theme.inset
+                    border.color: Theme.borderSubtle
                     border.width: 1
                     Behavior on color { ColorAnimation { duration: 100 } }
 
                     Text {
                         anchors.centerIn: parent
                         text: qsTr("Cancel")
-                        color: "#c8cdd9"
-                        font.family: "Segoe UI"
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: Font.Medium
                     }
@@ -348,7 +363,7 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Add Timer")
                         color: "#ffffff"
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: Font.DemiBold
                     }

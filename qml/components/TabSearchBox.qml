@@ -138,6 +138,43 @@ Item {
         if (sugPanel)
             sugPanel.visible = false
     }
+
+    // ---- pointer-out deactivation --------------------------------------------
+    // User call: "this should deactivate and stop search the moment out of its
+    // area." Hover-EXIT never arrives in this build (see PositionHoverArea's
+    // note: containsMouse latches true), so "is the pointer still over me" is
+    // answered from POSITION TRUTH instead — AppCursor maps the live pointer
+    // into this item on every move. An OPEN suggestion popup counts as part of
+    // the area, so moving down into the rows does not dismiss them. Leaving
+    // BOTH deactivates the field: focus drops (no more typing into an abandoned
+    // box) and the popup closes, so the search stops running. The typed query
+    // and the pane's own results deliberately STAY (the user's pick) — a match
+    // can still be clicked after the pointer has moved away — and clicking or
+    // typing in the box resumes the search.
+    property bool pointerInArea: false
+    function updatePointerInArea() {
+        if (!visible || !AppCursor.windowHovered) {
+            root.pointerInArea = false
+            return
+        }
+        root.pointerInArea = AppCursor.hovered(root)
+            || (sugPanel !== null && sugPanel.visible && AppCursor.hovered(sugPanel))
+    }
+    function deactivate() {
+        if (input.activeFocus)
+            input.focus = false
+        root.closeSuggestions()
+    }
+    // Transition-only: a box focused by KEYBOARD with the pointer elsewhere must
+    // not blur on the next unrelated pointer move (nothing actually changed).
+    onPointerInAreaChanged: if (!pointerInArea) root.deactivate()
+    Connections {
+        target: AppCursor
+        function onPointerMoved() { root.updatePointerInArea() }
+    }
+    // Freshly shown under a stationary pointer (a tab switch back) must recompute
+    // at once rather than wait for a move.
+    onVisibleChanged: visible ? root.updatePointerInArea() : root.pointerInArea = false
     property Item sugPanel: null
     // The live popup carries the self-test name so the UI harness can grab it.
     onSugPanelChanged: if (sugPanel) sugPanel.objectName = "selfTestSuggestPopup"

@@ -1,5 +1,6 @@
 #include "StyleListModel.h"
 
+#include "FamilySlots.h"
 #include "OutputListModel.h"
 #include "services/EngineBridge.h"
 #include "modules/project/StyleStore.hpp"
@@ -10,6 +11,7 @@
 #include <QScreen>
 #include <QDir>
 #include <algorithm>
+#include <cstdio>
 
 QPointer<StyleListModel> StyleListModel::s_instance = nullptr;
 
@@ -22,8 +24,13 @@ QPointer<StyleListModel> StyleListModel::s_instance = nullptr;
 // null for the whole session, and every style-resolving read returned "no
 // style" (the monitor tile fell back to the transparency checkerboard and
 // the engine rendered unstyled). A warm-up property in Main.qml papered over
-// it; this removes the class of bug instead. create() hands QML the SAME
-// static object, so existence is no longer a question of who asked first.
+// it; this removes the class of bug instead. create() below was meant to hand
+// QML the SAME static object, but the engine does not call it (measured
+// 2026-10-11: the generated module registration is
+// qmlRegisterTypesAndRevisions<...>(), so QML default-constructs its own
+// instance) — the Styles screen and every C++ reader therefore ended up on two
+// different rosters. Main.qml now hands QML's instance to OutputListModel at
+// startup (OutputListModel::adoptStyleRoster), which is the roster C++ uses.
 StyleListModel *StyleListModel::instance()
 {
     static StyleListModel s;
@@ -58,6 +65,16 @@ QString defaultRes()
 StyleListModel::StyleListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
+    // TEMPORARY, env-gated (VGR_STYLEBG_TEST): one line per construction and
+    // one per create() call, so a run can tell how many rosters exist and
+    // whether QML reaches this class through its own factory. Qt's Q_ASSERT
+    // is compiled out of this build (QT_NO_DEBUG), so a duplicate instance is
+    // otherwise silent — the style-background scenario found the UI and the
+    // output model resolving styles through different rosters, and this is
+    // what names the mechanism. Remove once the duplicate is gone.
+    if (qEnvironmentVariableIsSet("VGR_STYLEBG_TEST"))
+        fprintf(stderr, "[SELFTEST-STYLEBG-ID] ctor this=%p s_instance=%p\n",
+                static_cast<void *>(this), static_cast<void *>(s_instance.data()));
     Q_ASSERT_X(!s_instance || s_instance == this, "StyleListModel",
                "a second StyleListModel was constructed — instance() would "
                "silently rebind and every C++ reader would hold the wrong one");
@@ -97,14 +114,15 @@ void StyleListModel::reloadFromStore()
         item.backgroundColor = QString::fromStdString(s.backgroundColor);
         item.backgroundImage = QString::fromStdString(s.backgroundImage);
         item.clearBackgroundOnText = s.clearBackgroundOnText;
-        item.showShows = s.showTemplates[0];
-        item.showMedia = s.showTemplates[1];
-        item.showScripture = s.showTemplates[2];
-        item.showTable = s.showTemplates[3];
-        item.familyTemplateKeys[0] = QString::fromStdString(s.templateKeys[0]);
-        item.familyTemplateKeys[1] = QString::fromStdString(s.templateKeys[1]);
-        item.familyTemplateKeys[2] = QString::fromStdString(s.templateKeys[2]);
-        item.familyTemplateKeys[3] = QString::fromStdString(s.templateKeys[3]);
+        // Walked through the ONE family table (FamilySlots.h): the engine's slot
+        // order is the storage order, so the families do not need spelling out
+        // here — and the overlay gate, which is a different axis, is named once
+        // in StyleItem instead of at index 4.
+        for (int slot = 0; slot < FamilySlots::kCount; ++slot) {
+            item.setShowForSlot(slot, s.showTemplates[static_cast<std::size_t>(slot)]);
+            item.familyTemplateKeys[slot] = QString::fromStdString(s.templateKeys[static_cast<std::size_t>(slot)]);
+        }
+        item.showOverlay = s.showTemplates[StyleItem::kOverlaySlot];
         item.category = QString::fromStdString(s.category);
         m_styles.append(item);
     }
@@ -144,6 +162,7 @@ QVariant StyleListModel::data(const QModelIndex &index, int role) const
     case ShowMediaRole: return item.showMedia;
     case ShowScriptureRole: return item.showScripture;
     case ShowTableRole: return item.showTable;
+    case ShowOverlayRole: return item.showOverlay;
     case CategoryRole: return item.category;
     default: return {};
     }
@@ -164,6 +183,7 @@ QHash<int, QByteArray> StyleListModel::roleNames() const
         { ShowMediaRole, "showMedia" },
         { ShowScriptureRole, "showScripture" },
         { ShowTableRole, "showTable" },
+        { ShowOverlayRole, "showOverlay" },
         { CategoryRole, "category" },
     };
 }
@@ -199,14 +219,11 @@ void StyleListModel::save()
         s.backgroundColor = item.backgroundColor.toStdString();
         s.backgroundImage = item.backgroundImage.toStdString();
         s.clearBackgroundOnText = item.clearBackgroundOnText;
-        s.showTemplates[0] = item.showShows;
-        s.showTemplates[1] = item.showMedia;
-        s.showTemplates[2] = item.showScripture;
-        s.showTemplates[3] = item.showTable;
-        s.templateKeys[0] = item.familyTemplateKeys[0].toStdString();
-        s.templateKeys[1] = item.familyTemplateKeys[1].toStdString();
-        s.templateKeys[2] = item.familyTemplateKeys[2].toStdString();
-        s.templateKeys[3] = item.familyTemplateKeys[3].toStdString();
+        for (int slot = 0; slot < FamilySlots::kCount; ++slot) {
+            s.showTemplates[static_cast<std::size_t>(slot)] = item.showForSlot(slot);
+            s.templateKeys[static_cast<std::size_t>(slot)] = item.familyTemplateKeys[slot].toStdString();
+        }
+        s.showTemplates[StyleItem::kOverlaySlot] = item.showOverlay;   // its own axis (see StyleItem)
         s.category = item.category.toStdString();
         stored.append(s);
     }
@@ -363,17 +380,23 @@ void StyleListModel::setShowTemplate(int index, const QString &contentType, bool
 {
     if (index < 0 || index >= m_styles.size())
         return;
-    bool *field = contentType == QLatin1String("shows") ? &m_styles[index].showShows
-                : contentType == QLatin1String("media") ? &m_styles[index].showMedia
-                : contentType == QLatin1String("scripture") ? &m_styles[index].showScripture
-                : contentType == QLatin1String("table") ? &m_styles[index].showTable
-                : nullptr;
-    if (!field || *field == on)
-        return;
-
-    *field = on;
+    // The four slide families go through the shared table; "overlay" is not one
+    // of them (it gates the Overlays pane's layer, not a content family), so it is
+    // the one tag this function still names.
+    StyleItem &style = m_styles[index];
+    if (contentType == QLatin1String("overlay")) {
+        if (style.showOverlay == on)
+            return;
+        style.showOverlay = on;
+    } else {
+        const int slot = FamilySlots::SlotFor(contentType);
+        if (slot < 0 || style.showForSlot(slot) == on)
+            return;
+        style.setShowForSlot(slot, on);
+    }
     const QModelIndex changed = this->index(index);
-    emit dataChanged(changed, changed, { ShowShowsRole, ShowMediaRole, ShowScriptureRole, ShowTableRole });
+    emit dataChanged(changed, changed,
+                      { ShowShowsRole, ShowMediaRole, ShowScriptureRole, ShowTableRole, ShowOverlayRole });
     save();
 }
 
@@ -382,15 +405,17 @@ void StyleListModel::setFamilyTemplateKey(int index, const QString &contentType,
 {
     if (index < 0 || index >= m_styles.size())
         return;
-    QString *key = contentType == QLatin1String("shows")     ? &m_styles[index].familyTemplateKeys[0]
-                 : contentType == QLatin1String("media")     ? &m_styles[index].familyTemplateKeys[1]
-                 : contentType == QLatin1String("scripture") ? &m_styles[index].familyTemplateKeys[2]
-                 : contentType == QLatin1String("table")     ? &m_styles[index].familyTemplateKeys[3]
-                 : nullptr;
-    if (!key || *key == templateKey.trimmed())
+    // A content type that names no family has no slot to pick into (an unknown
+    // tag, or "overlay" — an overlay has no template; it always renders from its
+    // own design's blocks).
+    const int slot = FamilySlots::SlotFor(contentType);
+    if (slot < 0)
+        return;
+    QString &key = m_styles[index].familyTemplateKeys[slot];
+    if (key == templateKey.trimmed())
         return;
 
-    *key = templateKey.trimmed();
+    key = templateKey.trimmed();
     save();
 }
 
@@ -414,7 +439,7 @@ QVariantMap StyleListModel::getStyle(int index) const
         return {};
 
     const StyleItem &item = m_styles.at(index);
-    return {
+    QVariantMap out{
         { "id", item.id },
         { "name", item.name },
         { "res", item.res },
@@ -423,16 +448,20 @@ QVariantMap StyleListModel::getStyle(int index) const
         { "backgroundColor", item.backgroundColor },
         { "backgroundImage", item.backgroundImage },
         { "clearBackgroundOnText", item.clearBackgroundOnText },
-        { "showShows", item.showShows },
-        { "showMedia", item.showMedia },
-        { "showScripture", item.showScripture },
-        { "showTable", item.showTable },
-        { "familyTemplateShows", item.familyTemplateKeys[0] },
-        { "familyTemplateMedia", item.familyTemplateKeys[1] },
-        { "familyTemplateScripture", item.familyTemplateKeys[2] },
-        { "familyTemplateTable", item.familyTemplateKeys[3] },
+        { "showOverlay", item.showOverlay },   // its own axis, not a family slot
         { "category", item.category },
     };
+    // The four families' gates and template picks, named from the ONE table
+    // (FamilySlots.h) instead of by hand: these are the property names the QML
+    // style editor and the output model read, so they are built here and nowhere
+    // else. An output model used to build its own key by capitalising a content
+    // type, which named nothing for a tag that did not follow the convention.
+    for (int slot = 0; slot < FamilySlots::kCount; ++slot) {
+        const FamilySlots::Family &fam = FamilySlots::Rows()[static_cast<std::size_t>(slot)];
+        out.insert(QString::fromLatin1(fam.showProperty), item.showForSlot(slot));
+        out.insert(QString::fromLatin1(fam.templateProperty), item.familyTemplateKeys[slot]);
+    }
+    return out;
 }
 
 int StyleListModel::rowForId(const QString &id) const
@@ -449,6 +478,9 @@ QString StyleListModel::pickImageFile() const
         return {};
     auto r = bps::platform::PlatformAccessor::Get().Dialogs().OpenFileDialog(
         "Pick a background image",
-        { "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)", "All files (*.*)" });
+        // Decodable images only: the background picker below rejects anything
+        // else, so letting the picker offer every file just relocated the
+        // rejection.
+        { "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)" });
     return r.ok() && r.value() ? QString::fromStdString(*r.value()) : QString();
 }

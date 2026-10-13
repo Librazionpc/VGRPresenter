@@ -3,17 +3,23 @@
 #include "modules/import/ImportEngine.hpp"
 #include "modules/presentation/PresentationDocument.hpp"
 #include "services/DesignLibraryService.h"
+#include "platform/PlatformAccessor.hpp"
 #include "services/EngineBridge.h"
 #include "services/EventBus.h"
+#include "services/MediaLibraryService.h"
 #include "services/SearchService.h"
 #include "services/ShowConverter.h"
 #include "services/ShowService.h"
 #include "services/SlideBuilder.h"
 
 #include <QClipboard>
+#include <QDateTime>
+#include <QMimeData>
 #include <QDir>
 #include <QFile>
 #include <QGuiApplication>
+#include <QImage>
+#include <QStandardPaths>
 #include <QFileInfo>
 #include <QJSEngine>
 #include <QMetaObject>
@@ -129,6 +135,36 @@ QVariantMap finish(const bi::ImportResult &result, const QString &formatName, bo
     return { { QStringLiteral("ok"), saved > 0 || bibles > 0 }, { QStringLiteral("error"), QString() }, { QStringLiteral("shows"), saved },
              { QStringLiteral("bibles"), bibles }, { QStringLiteral("files"), static_cast<int>(result.files) },
              { QStringLiteral("warnings"), warnings }, { QStringLiteral("firstShow"), firstPath } };
+}
+
+// A screenshot on the clipboard becomes a still image MEDIA SOURCE. Media comes
+// into this app as FOLDERS ("adding a folder is how media is brought in" —
+// MediaLibraryService's contract), so the bitmap is written as a PNG into an
+// app-owned clipboard folder that is then added to the library exactly like a
+// folder the user picked: the picture stays a real file the operator can put on
+// air, and nothing has to learn a second way of holding media.
+// `folder` receives the folder to add; "" means the picture could not be saved.
+QString saveClipboardImage(const bps::platform::ClipboardImage &image, QString *folder)
+{
+    const QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (base.isEmpty())
+        return {};
+    const QString dir = base + QStringLiteral("/media/clipboard");
+    if (!QDir().mkpath(dir))
+        return {};
+    // One file per pickup, named for when it was taken — pasting three
+    // screenshots in a row must not overwrite the first two.
+    const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss-zzz"));
+    const QString path = dir + QStringLiteral("/screenshot-") + stamp + QStringLiteral(".png");
+    // The PAL hands back tightly packed RGBA8, which QImage wraps IN PLACE (no
+    // conversion, no copy) — the buffer outlives the save below.
+    const QImage picture(image.rgba.data(), image.width, image.height,
+                         image.width * 4, QImage::Format_RGBA8888);
+    if (picture.isNull() || !picture.save(path, "PNG"))
+        return {};
+    if (folder)
+        *folder = dir;
+    return path;
 }
 
 } // namespace
@@ -343,5 +379,60 @@ QVariantMap ImportService::importText(const QString &text, const QString &name, 
 
 QVariantMap ImportService::importClipboard()
 {
-    return importText(QGuiApplication::clipboard()->text());
+    // READ THROUGH THE PLATFORM LAYER, not QClipboard. Two reasons, one of them
+    // the notice this path used to produce:
+    //   * the PAL's clipboard open WAITS OUT another process's write — a
+    //     screenshot posts a full-screen bitmap, which takes a moment, so a
+    //     first-attempt read fails on a machine doing nothing wrong; and
+    //   * Qt's own clipboard probing is what emits "Retrying to obtain
+    //     clipboard." when that happens, the amber "Application — ..." notice
+    //     the notification area had to learn to suppress. Qt is consulted only
+    //     when there is no platform layer at all (headless/test).
+    if (bps::platform::PlatformAccessor::Installed()) {
+        auto &clipboard = bps::platform::PlatformAccessor::Get().Clipboard();
+        // Text first: after copying a verse the clipboard holds words, and words
+        // are what this dialog's text import is for.
+        if (auto text = clipboard.ReadText(); text.ok() && !text.value().empty())
+            return importText(qstr(text.value()));
+        // A SCREENSHOT is the ordinary clipboard content on Windows — Win+Shift+S
+        // posts a bitmap and no text at all — so an image is not an error, it is
+        // the thing to import: it lands in the media library as a still source
+        // the operator can put on air.
+        auto image = clipboard.ReadImage();
+        if (image.ok() && !image.value().empty()) {
+            QString folder;
+            const QString path = saveClipboardImage(image.value(), &folder);
+            if (path.isEmpty())
+                return failure(tr("The screenshot on the clipboard could not be saved."));
+            // Already-added folders answer false; the rescan is what picks the
+            // new file up either way.
+            MediaLibraryService::instance().addFolderPath(folder);
+            MediaLibraryService::instance().rescan(folder);
+            const QString summary = tr("Screenshot added to your media library.");
+            EngineBridge::write(QStringLiteral("info"), QStringLiteral("Import"),
+                                summary + QLatin1Char(' ') + path);
+            EventBus::instance().notify(summary, QStringLiteral("success"), tr("Import"),
+                                        QStringLiteral("import.done"));
+            emit imported(0, 0);
+            return { { QStringLiteral("ok"), true }, { QStringLiteral("error"), QString() },
+                     { QStringLiteral("shows"), 0 }, { QStringLiteral("bibles"), 0 },
+                     { QStringLiteral("files"), 1 }, { QStringLiteral("warnings"), QStringList() },
+                     { QStringLiteral("firstShow"), QString() } };
+        }
+        if (image.error().code == bps::Err::Unsupported)
+            return failure(tr("The clipboard holds no text, and this platform cannot read "
+                              "clipboard images."));
+        return failure(tr("There is nothing on the clipboard to import."));
+    }
+
+    // No platform layer (headless): Qt's own clipboard, best effort.
+    QClipboard *clipboard = QGuiApplication::clipboard();
+    const QString text = clipboard->text();
+    if (text.trimmed().isEmpty()) {
+        const QMimeData *data = clipboard->mimeData();
+        if (data != nullptr && data->hasImage())
+            return failure(tr("The clipboard holds an image (a screenshot), which needs the "
+                              "platform clipboard to be readable here."));
+    }
+    return importText(text);
 }

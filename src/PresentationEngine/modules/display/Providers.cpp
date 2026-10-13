@@ -214,7 +214,7 @@ NdiDisplayProvider::NdiDisplayProvider() {
     ndi.name = "NDI Program";
     ndi.width = 1920;
     ndi.height = 1080;
-    ndi.refreshRateHz = 30;   // mirrors frameRate_'s default; SetFrameRate keeps it in sync
+    ndi.refreshRateHz = static_cast<int>(kDefaultOutputFrameRateHz);   // mirrors frameRate_'s default; SetFrameRate keeps it in sync
     ndi.dpi = 96;
     ndi.connected = true;
     ndi.provider = "Ndi";
@@ -252,20 +252,43 @@ Result<void> NdiDisplayProvider::SendFrame(const RenderFrameView& frame) {
     if (!frame.pixels || frame.width <= 0 || frame.height <= 0)
         return Error::Make(Err::InvalidArgument, "NdiDisplayProvider", "empty frame");
 
-    // One lock for the WHOLE send — the buffer lifetime contract below makes
-    // the copy and the send one atomic operation per frame (see the
-    // sendBuffer_ comment in the header for the crash this prevents).
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Frame serialization lives on its OWN lock (see sendMutex_ in the
+    // header): the state mutex_ is NOT held across the BroadcastEngine/SDK
+    // send below. Holding it was how a hot-plug Probe() came to sit behind an
+    // in-flight 30 fps send (the captured DisplayEngine pile-up), and it
+    // inverted the lock order against BroadcastEngine's own mutex. sendLock
+    // still makes the copy+send below one atomic operation per frame — the
+    // sendBuffer_ lifetime contract (header).
+    // Resolved BEFORE the send lock: the singleton accessor is a plain static
+    // getter, and a cross-engine call under a held lock is exactly what the
+    // lock-scope guard forbids (see tools/check_lock_scope.mjs).
+    auto& bc = broadcast::BroadcastEngine::Instance();
 
-    // Lazy sender creation on first use (idempotent).
-    if (senderId_.empty()) {
-        auto& bc = broadcast::BroadcastEngine::Instance();
+    std::lock_guard<std::mutex> sendLock(sendMutex_);
+
+    std::string senderName;
+    float frameRate = 30.0f;
+    std::string senderId;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        senderName = senderName_;
+        frameRate = frameRate_;
+        senderId = senderId_;
+    }
+
+    // Lazy sender creation on first use (idempotent). The SDK call runs with
+    // no state lock held.
+    if (senderId.empty()) {
         auto r = bc.Initialize();   // no-op if already initialized
         if (!r.ok()) return r;
         broadcast::NdiSenderConfig cfg;
-        auto id = bc.CreateNdiSender(senderName_, cfg);
+        auto id = bc.CreateNdiSender(senderName, cfg);
         if (!id.ok()) return id.error();
-        senderId_ = id.value();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (senderId_.empty()) senderId_ = id.value();
+            senderId = senderId_;
+        }
     }
 
     // NO conversion: the engine's pixels ARE a valid NDI wire format. Color::Pack
@@ -279,11 +302,10 @@ Result<void> NdiDisplayProvider::SendFrame(const RenderFrameView& frame) {
     info.width = static_cast<uint32_t>(frame.width);
     info.height = static_cast<uint32_t>(frame.height);
     info.fourCC = 0x41424752;   // 'RGBA' — the engine's native layout, byte for byte
-    info.fps = frameRate_;      // the caller's real cadence (SetFrameRate)
-    // NDI's RGBA honors per-pixel alpha (UYVY dropped it implicitly): the
-    // compositor's scenes can carry <255 alpha in transparent regions and a
-    // receiver would composite those over black. The program feed is a
-    // flattened picture — force full opacity.
+    info.fps = frameRate;       // the caller's real cadence (SetFrameRate)
+    // (A note that used to sit here said "the program feed is a flattened
+    // picture — force full opacity": it is kept only as history. Alpha is part
+    // of the picture now — see the block below.)
     //
     // ALWAYS copy into sendBuffer_ and send FROM IT. NDI's contract: a sent
     // frame's buffer must remain valid from its send call until the NEXT one
@@ -296,12 +318,22 @@ Result<void> NdiDisplayProvider::SendFrame(const RenderFrameView& frame) {
     // turn. A 1080p copy is ~8 MB — trivial next to the corruption it buys off.
     const size_t count = static_cast<size_t>(frame.width) * static_cast<size_t>(frame.height);
     sendBuffer_.assign(frame.pixels, frame.pixels + count);
-    for (auto& p : sendBuffer_)
-        p |= 0xFF000000u;
+    // ALPHA IS PART OF THE PICTURE NOW — no forced opacity.
+    //
+    // This used to OR every pixel to alpha 255 on the grounds that "the program
+    // feed is a flattened picture". That was true while every scene painted an
+    // opaque background; an EXPLICITLY transparent template (Settings · Styles
+    // background "transparent") now leaves its unwritten areas at alpha 0 by
+    // design, and forcing opacity here flattened exactly those pixels to black —
+    // the "a transparent template does not show as transparent in the output
+    // either" report. The engine's compositing is STRAIGHT (non-premultiplied)
+    // alpha, which is what NDI's 'RGBA' fourCC carries, so the pixels go out as
+    // composed: an opaque scene is bit-identical to before (its alpha is
+    // already 255) and a keyable one arrives keyable for OBS/vMix to key over
+    // live video.
 
-    auto& bc = broadcast::BroadcastEngine::Instance();
     const size_t bytes = count * 4u;
-    auto r = bc.SendVideoFrame(senderId_, info, sendBuffer_.data(), bytes);
+    auto r = bc.SendVideoFrame(senderId, info, sendBuffer_.data(), bytes);   // SDK send, no state lock
     if (r.ok()) framesSent_.fetch_add(1);
     return r;
 }
@@ -313,7 +345,7 @@ void NdiDisplayProvider::SetSenderName(std::string name) {
 
 void NdiDisplayProvider::SetFrameRate(float fps) {
     std::lock_guard<std::mutex> lock(mutex_);
-    frameRate_ = (fps > 0.0f && fps <= 240.0f) ? fps : 30.0f;
+    frameRate_ = AcceptedOutputFrameRate(fps);
     // The ndi-program device's listed refresh mirrors the advertised rate —
     // the engine's display enumeration should tell the same story as the
     // wire metadata does.
@@ -327,11 +359,18 @@ float NdiDisplayProvider::FrameRate() const {
 }
 
 void NdiDisplayProvider::ResetSender() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (senderId_.empty())
-        return;   // nothing live to reset
-    (void)broadcast::BroadcastEngine::Instance().StopSender(senderId_);
-    senderId_.clear();   // the next SendFrame recreates it under senderName_
+    std::string senderId;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (senderId_.empty())
+            return;   // nothing live to reset
+        senderId = senderId_;
+        senderId_.clear();   // the next SendFrame recreates it under senderName_
+    }
+    // The SDK teardown runs with NO provider lock held: StopSender enters the
+    // BroadcastEngine (and its SDK), which must never be called from under this
+    // provider's mutex — the same inversion SendFrame used to have.
+    (void)broadcast::BroadcastEngine::Instance().StopSender(senderId);
 }
 
 std::string NdiDisplayProvider::SenderName() const {

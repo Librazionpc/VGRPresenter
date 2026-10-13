@@ -1,6 +1,7 @@
 #include "modules/library/DesignLibrary.hpp"
 
 #include "core/config/Json.hpp"
+#include "core/recovery/DocumentRecovery.hpp"
 #include "modules/presentation/BlockValidator.hpp"
 #include "modules/presentation/PresentationSerializer.hpp"
 #include "modules/presentation/ShowEditor.hpp"
@@ -203,25 +204,47 @@ void DesignLibrary::EnsureDefaultsLocked() {
 }
 
 Result<void> DesignLibrary::Load() {
-    auto& fs = platform::PlatformAccessor::Get().Filesystem();
+    // Read + parse + set-aside with NO lock held (PAL I/O never runs under a
+    // module lock); the locked section below only consumes the document.
+    J document;
+    bool haveDocument = false;
+    std::string readFailure;
+    {
+        auto& fs = platform::PlatformAccessor::Get().Filesystem();
+        if (fs.Exists(storageFile_)) {
+            auto text = fs.ReadText(storageFile_);
+            if (!text.ok()) {
+                readFailure = text.error().message;
+            } else {
+                auto parsed = json::Parse(text.value());
+                // A parse failure AND a document with no 'designs' section are
+                // the same loss: nothing loadable is in there.
+                const std::string problem = parsed.ok()
+                    ? recovery::DocumentShapeProblem(parsed.value(), "designs", J::Type::Array)
+                    : parsed.error().message;
+                if (!problem.empty()) {
+                    // SELF-HEALING: set the damaged library aside as evidence and
+                    // come up on the defaults, which is a usable state — the old
+                    // shape returned an error AND left the file to be
+                    // overwritten by the next save.
+                    (void)recovery::SetAsideDamagedDocument(
+                        storageFile_, kModule,
+                        std::format("{} library: {}", config_.noun, problem));
+                } else {
+                    document = std::move(parsed.value());
+                    haveDocument = true;
+                }
+            }
+        }
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
     categories_.clear();
     designs_.clear();
     deletedDefaults_.clear();
 
-    if (fs.Exists(storageFile_)) {
-        auto text = fs.ReadText(storageFile_);
-        if (!text.ok()) {
-            EnsureDefaultsLocked();
-            return text.error();
-        }
-        auto parsed = json::Parse(text.value());
-        if (!parsed.ok()) {
-            EnsureDefaultsLocked();
-            return Error::Make(Err::ParseError, kModule,
-                               std::format("the {} library is damaged: {}", config_.noun, parsed.error().message));
-        }
-        const J& root = parsed.value();
+    if (haveDocument) {
+        const J& root = document;
         if (const J* cats = root.Find("categories"); cats && cats->asArray())
             for (const J& c : *cats->asArray()) {
                 DesignCategory cat{ Str(c, "id"), Str(c, "name"), Str(c, "icon", "folder"), Flag(c, "default") };
@@ -240,6 +263,9 @@ Result<void> DesignLibrary::Load() {
     // A design filed in a category that no longer exists is just unlabeled.
     for (Design& d : designs_)
         if (!d.category.empty() && !CategoryLocked(d.category)) d.category.clear();
+    if (!readFailure.empty())
+        return Error::Make(Err::IoError, kModule,
+                           std::format("cannot read the {} library: {}", config_.noun, readFailure));
     return {};
 }
 
@@ -257,13 +283,9 @@ Result<void> DesignLibrary::SaveLocked() const {
     root["deletedDefaults"] = J(std::move(gone));
     const std::string text = J(std::move(root)).ToString();
 
-    auto& fs = platform::PlatformAccessor::Get().Filesystem();
-    const size_t cut = storageFile_.find_last_of("/\\");
-    if (cut != std::string::npos && cut > 0) {
-        auto made = fs.CreateDirectories(std::string_view(storageFile_).substr(0, cut));
-        if (!made.ok()) return made.error();
-    }
-    return fs.Write(storageFile_, text);
+    // ATOMIC: the design library is user-authored content; an interrupted save
+    // must leave the previous document intact rather than truncating it.
+    return platform::PlatformAccessor::Get().Filesystem().WriteAtomic(storageFile_, text);
 }
 
 // ---------------------------------------------------------------------------

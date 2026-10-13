@@ -256,13 +256,31 @@ void TestOverlayLibrary() {
         CHECK(again->RestoreDefaults().value() == 5 && again->Get("clock").value().name == "Big clock");
     }
 
-    // ---- a damaged file is reported and what ships is still there ----
+    // ---- a damaged file SELF-HEALS: set aside as evidence, defaults stand ----
+    // (was: Load() failed with ParseError and the damaged bytes were left for the
+    // next save to overwrite — the library read was a dead end)
     {
         CHECK(fs.Write(file, "{ this is not json").ok());
         auto broken = lib::MakeOverlayLibrary(file);
-        const auto loaded = broken->Load();
-        CHECK(!loaded.ok() && loaded.error().code == bps::Err::ParseError);
+        CHECK(broken->Load().ok());   // damage never fails the read any more
+        // What ships is still there, exactly like a first run…
         CHECK(broken->Designs().size() == 6 && broken->Categories().size() == 1);
+        // …and the damaged bytes are preserved verbatim under `.corrupt-<stamp>`.
+        std::vector<std::string> quarantine;
+        auto entries = fs.FindFiles(root, "");
+        CHECK(entries.ok());
+        if (entries.ok())
+            for (const auto& e : entries.value())
+                if (e.find(".corrupt-") != std::string::npos) quarantine.push_back(e);
+        CHECK(quarantine.size() == 1);
+        if (quarantine.size() == 1) {
+            auto kept = fs.ReadText(quarantine.front());
+            CHECK(kept.ok() && kept.value() == "{ this is not json");
+        }
+        // …and the next change rebuilds a healthy file at the same path.
+        CHECK(broken->Create().ok());
+        auto rebuilt = fs.ReadText(file);
+        CHECK(rebuilt.ok() && json::Parse(rebuilt.value()).ok());
     }
 
     // ---- a design filed under a category that is gone is unlabeled, and the app's category flag wins ----

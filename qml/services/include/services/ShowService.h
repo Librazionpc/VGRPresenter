@@ -245,8 +245,15 @@ private:
     void publishLibrary();
 
     QString libraryPath_;
-    std::unique_ptr<bps::presentation::ShowLibrary> library_;
+    // shared_ptr, not unique_ptr: refreshLibrary() hands a copy to a worker so
+    // the scan can outlive a library-path change (setLibraryPath resets the
+    // member) without the worker's pointer dangling.
+    std::shared_ptr<bps::presentation::ShowLibrary> library_;
     QStringList categories_;
     QVariantList shows_;
     QStringList problems_;
+    // Library scan state (GUI-thread owned): one filesystem pass at a time, and
+    // a rescan that arrives while one is in flight runs after it.
+    bool refreshBusy_ = false;
+    bool refreshPending_ = false;
 };

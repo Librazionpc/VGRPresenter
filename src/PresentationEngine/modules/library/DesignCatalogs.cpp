@@ -347,25 +347,46 @@ std::vector<Design> ShippedTemplates() {
     out.push_back(Template("parentheses", "Parentheses", "scripture", "#515151",
                            { Text(50, 88, 1820, 904, "(Parentheses)", 60, "transparent", false, "center", "Segoe UI", "", "#cccccc") }));
 
-    // ---- table: the sermon layouts (The Table tab) — the same placeholder
-    // machinery as scripture, its own content type so each tab lists only its
-    // own layouts. Paragraphs stream into the "text" box exactly as verses do.
+    // ---- table: the sermon layouts (The Table tab) — its own content type so
+    // each tab lists only its own layouts, and now its OWN placeholders too
+    // ({table_*}, see BookFill.hpp). The Table used to be written in the
+    // Bible's words here, which put an empty line at the foot of both shipped
+    // layouts: {scripture_name} is the Bible VERSION, and a sermon has none.
+    // The year takes that slot, and the body is paragraphs, not verses.
     {
         std::vector<pres::ContentBlock> s = { Box(30, 30, 1860, 865, "#66000000", 20),
-                                              Text(55, 45, 1810, 835, "{scripture_number} {scripture_text}", 64, "transparent", false, "left", "Segoe UI", "text"),
+                                              Text(55, 45, 1810, 835, "{table_number} {table_text}", 64, "transparent", false, "left", "Segoe UI", "text"),
                                               Box(30, 900, 1860, 150, "transparent"),
-                                              Text(30, 905, 1860, 80, "{scripture_reference}", 55, "transparent", false, "left", "Segoe UI", "ref", "#cccccc"),
-                                              Text(30, 970, 1860, 70, "{scripture_name}", 40, "transparent", false, "left", "Segoe UI", "", "#b3b3b3") };
+                                              Text(30, 905, 1860, 80, "{table_reference}", 55, "transparent", false, "left", "Segoe UI", "ref", "#cccccc"),
+                                              Text(30, 970, 1860, 70, "{table_year}", 40, "transparent", false, "left", "Segoe UI", "", "#b3b3b3") };
         out.push_back(Template("table", "Table", "table", kTableAccent, std::move(s)));
     }
     {
+        // TABLE 3: a FULL three-part sermon layout — the title, the paragraphs and
+        // the citation — with every slab carrying its OWN slot of the table family,
+        // so all three fill. What it used to be is worth recording, because it is
+        // the shape of mistake this family exists to remove: three identical body
+        // boxes, two of them written in the BIBLE's parallel-Bible spelling
+        // ({scripture2_text} / {scripture3_text} — which only the scripture family
+        // resolves, and then only for a second Bible that this app does not have),
+        // so a shipped Table layout showed two slabs that could never hold
+        // anything while telling every reader the layout belonged to the Bible
+        // family.
+        //
+        // Only the middle slab is BOUND (bind "text"): the body is the slide's own
+        // content, while the title and the citation are slots the fill resolves
+        // from their tokens (an unbound block that names placeholders is resolved
+        // through the same vocabulary — see SceneBuilder::BindTemplateBlocks).
+        // Binding all three to "text" would paint the body into every slab.
         std::vector<pres::ContentBlock> s;
+        const char* slots[3] = { "{table_title}", "{table_number} {table_text}", "{table_citation}" };
         for (int i = 0; i < 3; ++i) {
             s.push_back(Box(30, 40 + i * 280, 1860, 250, "#66000000", 20));
-            s.push_back(Text(55, 50 + i * 280, 1810, 230, "{scripture" + std::to_string(i + 1) + "_number} {scripture" + std::to_string(i + 1) + "_text}", 54, "transparent", false, "left", "Segoe UI", "text"));
+            s.push_back(Text(55, 50 + i * 280, 1810, 230, slots[i], i == 0 ? 72.0 : 54.0,
+                             "transparent", false, "left", "Segoe UI", i == 1 ? "text" : ""));
         }
-        s.push_back(Text(30, 905, 1860, 80, "{scripture_reference}", 55, "transparent", false, "left", "Segoe UI", "ref", "#cccccc"));
-        s.push_back(Text(30, 970, 1860, 70, "{scripture_name}", 40, "transparent", false, "left", "Segoe UI", "", "#b3b3b3"));
+        s.push_back(Text(30, 905, 1860, 80, "{table_reference}", 55, "transparent", false, "left", "Segoe UI", "ref", "#cccccc"));
+        s.push_back(Text(30, 970, 1860, 70, "{table_year} · {table_code}", 40, "transparent", false, "left", "Segoe UI", "", "#b3b3b3"));
         out.push_back(Template("table_3", "Table 3", "table", kTableAccent, std::move(s)));
     }
     return out;

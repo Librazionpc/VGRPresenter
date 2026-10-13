@@ -74,7 +74,10 @@ Result<std::string> BackupManager::Backup(std::string_view projectId, std::strin
         auto& fs = platform::PlatformAccessor::Get().Filesystem();
         (void)fs.CreateDirectories(rec.destination);
         std::string path = rec.destination + "/" + rec.id + ".bak.json";
-        if (auto r = fs.Write(path, doc.value().ToString()); !r.ok()) return r.error();
+        // ATOMIC: a backup a user cannot restore is worse than no backup at all,
+        // and this file is written at the moment the machine is already under
+        // load (autosave, full project).
+        if (auto r = fs.WriteAtomic(path, doc.value().ToString()); !r.ok()) return r.error();
         rec.destination = path;
     } else {
         // Store the full project document under the backup id.
@@ -116,8 +119,8 @@ Result<void> BackupManager::ApplyRetention(std::string_view projectId, int keepF
         backups_.erase(std::remove_if(backups_.begin(), backups_.end(),
                                       [&](const BackupRecord& b) { return b.id == id; }),
                        backups_.end());
-        (void)DatabaseManager::Instance().Remove("backups", id);
-        (void)DatabaseManager::Instance().Remove("backups-data", id);
+        (void)DatabaseManager::Instance().Remove("backups", id);       // lock-ok: in-memory map erase
+        (void)DatabaseManager::Instance().Remove("backups-data", id);  // lock-ok: in-memory map erase
     }
     return Ok();
 }
@@ -174,10 +177,11 @@ Result<void> BackupManager::Restore(std::string_view backupId, std::string_view 
         if (!text.ok()) return text.error();
         auto parsed = json::Parse(text.value());
         if (!parsed.ok()) return parsed.error();
-        return platform::PlatformAccessor::Get().Filesystem().Write(
+        return platform::PlatformAccessor::Get().Filesystem().WriteAtomic(
             destPath, parsed.value().ToString());
     }
-    return platform::PlatformAccessor::Get().Filesystem().Write(destPath, doc.value().ToString());
+    return platform::PlatformAccessor::Get().Filesystem().WriteAtomic(destPath,
+                                                                      doc.value().ToString());
 }
 
 Result<void> BackupManager::ClearProject(std::string_view projectId) {
@@ -189,8 +193,8 @@ Result<void> BackupManager::ClearProject(std::string_view projectId) {
                                   [&](const BackupRecord& b) { return b.projectId == projectId; }),
                    backups_.end());
     for (const auto& id : toRemove) {
-        (void)DatabaseManager::Instance().Remove("backups", id);
-        (void)DatabaseManager::Instance().Remove("backups-data", id);
+        (void)DatabaseManager::Instance().Remove("backups", id);       // lock-ok: in-memory map erase
+        (void)DatabaseManager::Instance().Remove("backups-data", id);  // lock-ok: in-memory map erase
     }
     return Ok();
 }

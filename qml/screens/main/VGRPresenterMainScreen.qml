@@ -17,6 +17,75 @@ Rectangle {
     clip: true
     color: Theme.windowBg
 
+    // Side columns give width back to the main workspace on smaller windows.
+    //
+    // Each of the three is its OWN width, remembered by the engine (all three ride
+    // the settings store, -1 = "auto"): dragging the output-monitors column must
+    // not move the template column and vice versa, and a restart must come back to
+    // the widths the user left behind rather than to the defaults. The saved values
+    // are written on a short idle after a drag stops, not on every drag frame.
+    property real projectsColumnOverride: Number(SettingsService.values["session.projectsColumnWidth"] ?? -1)
+    property real outputsColumnOverride: Number(SettingsService.values["session.outputsColumnWidth"] ?? -1)
+    property real templateColumnOverride: Number(SettingsService.values["session.templateColumnWidth"] ?? -1)
+    // Writes ONE column width, and only when it actually differs from what the store
+    // already holds.
+    //
+    // The four writes used to happen unconditionally on every timer fire, which wrote the
+    // three columns the user had NOT touched on every drag — and, because the overrides
+    // above are BOUND to the store, on every launch too: the store's `values` map is
+    // re-published once it finishes loading, that re-runs these bindings, the timer starts,
+    // and four settings nobody changed were written back (measured on a clean start with no
+    // drag at all: `[Settings] session.projectsColumnWidth = -1`, `session.outputsColumnWidth
+    // = -1`, `session.templateColumnWidth = -1`, `session.dockHeightTop = -1` in the log,
+    // and settings.json re-written for nothing).
+    //
+    // `SettingsService.values` is pre-seeded with every DECLARED default (see
+    // SettingsService's constructor), so an untouched column compares equal to its -1
+    // sentinel and is skipped instead of stored.
+    function saveColumnWidth(key, value) {
+        const stored = SettingsService.values[key]
+        if (stored !== undefined && stored !== null && Number(stored) === value)
+            return
+        SettingsService.setValue(key, value)
+    }
+    Timer {
+        id: saveColumnWidthsTimer
+        interval: 500
+        onTriggered: {
+            // Not open yet: `values` still holds the ENGINE's defaults, so "saving" now
+            // would write a default over whatever the user chose last time. Retry rather
+            // than drop the drag that started this timer.
+            if (!SettingsService.ready) {
+                saveColumnWidthsTimer.restart()
+                return
+            }
+            const s = vGRPresenter_Main_Screen
+            saveColumnWidth("session.projectsColumnWidth", Math.round(s.projectsColumnOverride))
+            saveColumnWidth("session.outputsColumnWidth", Math.round(s.outputsColumnOverride))
+            saveColumnWidth("session.templateColumnWidth", Math.round(s.templateColumnOverride))
+            saveColumnWidth("session.dockHeightTop", Math.round(workspace_body.topOverride))
+        }
+    }
+    onProjectsColumnOverrideChanged: saveColumnWidthsTimer.restart()
+    onOutputsColumnOverrideChanged: saveColumnWidthsTimer.restart()
+    onTemplateColumnOverrideChanged: saveColumnWidthsTimer.restart()
+    // The room the two right-hand columns may take is measured against the WINDOW
+    // (and the left column), never against each other: that independence is the
+    // point. Each ceiling keeps a minimum centre workspace of its own, so the
+    // preview can never be squeezed to nothing by two wide side columns.
+    readonly property real projectsColumnMaxWidth: Math.min(560, Math.max(160,
+        width - Math.min(560, Math.max(240, width * 0.278)) - 400))
+    readonly property real projectsColumnWidth: Math.max(160, Math.min(projectsColumnMaxWidth,
+        projectsColumnOverride > 0 ? projectsColumnOverride : Math.min(280, Math.max(160, width * 0.195))))
+    readonly property real outputsColumnMaxWidth: Math.min(560,
+        Math.max(240, width - projectsColumnWidth - 400))
+    readonly property real outputsColumnWidth: Math.max(240, Math.min(outputsColumnMaxWidth,
+        outputsColumnOverride > 0 ? outputsColumnOverride : width * 0.278))
+    readonly property real templateColumnMaxWidth: Math.min(560, Math.max(220, width - projectsColumnWidth - 400))
+    readonly property real templateColumnWidth: Math.max(220, Math.min(templateColumnMaxWidth,
+        templateColumnOverride > 0 ? templateColumnOverride
+                                   : (width - projectsColumnWidth - outputsColumnWidth) * 0.36))
+
     // Emitted by BOTH "New show" buttons (the clock panel's primary CTA
     // and the dock footer's red one) — Main.qml funnels it into
     // EditScreen.newShow(), the single place the reset lives. The two
@@ -63,10 +132,17 @@ Rectangle {
     // ("1953 12 · ¶3") — pasted into the pane's citation search it matches nothing
     // (the citation line reads "47-0412 - Faith Is The Substance"), which is the
     // "quick search lands on an empty tab" bug.
-    function openSermonAt(bookId, chapter, verse) {
+    function openSermonAt(bookId, chapter, verse, matchText) {
+        const t0 = Date.now()
         showInLibrary("table", "")          // the tab + a cleared query
+        const t1 = Date.now()
         tablePane.clearCitationMatches()    // (a stale filter list must not cover the sermon)
-        tablePane.goTo({ bookId: bookId, chapter: chapter, verseStart: verse, verseEnd: verse })
+        tablePane.goTo({ bookId: bookId, chapter: chapter, verseStart: verse, verseEnd: verse,
+                         matchText: matchText || "" })
+        // Where the click's time actually goes: the tab/pane switch vs. the goTo
+        // (the engine's chapter read + the verses column's rebuild).
+        EngineBridge.log("info", "OpenTrace",
+                         "openSermonAt switch=" + (t1 - t0) + "ms goto=" + (Date.now() - t1) + "ms")
     }
     // The app-wide search jumps straight to a Bible verse: switch to the Scripture
     // tab and open the passage there (goTo selects the verse and scrolls to it).
@@ -100,7 +176,9 @@ Rectangle {
         // Where the top region ends and the library dock begins. Drag the splitter on that
         // edge to change it (topOverride, in px; -1 = the default 54%, restored by double-click);
         // it can't leave room for less than the top region's content or the dock's tab bar.
-        property real topOverride: -1
+        // Remembered by the engine like the side columns (session.dockHeightTop), because the
+        // dock is the other splitter whose edge the user sets up and then loses on restart.
+        property real topOverride: Number(SettingsService.values["session.dockHeightTop"] ?? -1)
         readonly property real minTop: 320
         readonly property real maxTop: Math.max(minTop, height - 220)
         readonly property real topHeight: Math.max(minTop, Math.min(maxTop,
@@ -111,8 +189,10 @@ Rectangle {
         Rectangle {
             id: left_column
 
-            height: parent.height
-            width: 280
+            // The project pane ends where the top workspace ends; the library
+            // dock below spans the full window independently.
+            height: workspace_body.topHeight
+            width: vGRPresenter_Main_Screen.projectsColumnWidth
 
             border.color: Theme.border
             border.width: 1
@@ -122,7 +202,7 @@ Rectangle {
                 id: projects_section
 
                 height: workspace_body.topHeight
-                width: 280
+                width: parent.width
 
                 color: "transparent"
 
@@ -136,7 +216,7 @@ Rectangle {
                     y: 10
 
                     height: workspace_body.topHeight - 22
-                    width: 256
+                    width: parent.width - 24
 
                     onItemActivated: (item) => vGRPresenter_Main_Screen.centerItem = item
                     // Double-click here used to jump straight to Edit — the
@@ -159,10 +239,10 @@ Rectangle {
         Rectangle {
             id: middle_column
 
-            x: 280
+            x: left_column.width
 
             height: parent.height
-            width: parent.width - 280 - 400
+            width: parent.width - left_column.width - right_column.width
 
             color: "transparent"
 
@@ -248,7 +328,7 @@ Rectangle {
                     y: 188 + (workspace_body.topHeight - 460) / 2
 
                     height: 40
-                    width: 520
+                    width: Math.min(520, parent.width - 40)
 
                     color: "transparent"
 
@@ -256,7 +336,7 @@ Rectangle {
                         id: for_everything_there_is_an_appointed_time_and_an
 
                         height: 40
-                        width: 521
+                        width: parent.width
 
                         color: Theme.textSecondary
                         font.family: "Segoe UI"
@@ -654,7 +734,8 @@ Rectangle {
                     // template column sits at the far right, the way
                     // FreeShow's does, instead of being squeezed in beside
                     // the clock. Every other pane leaves the clock its 400px.
-                    width: (media_tab_bar.currentPane === "scripture" || media_tab_bar.currentPane === "table") ? parent.width : parent.width - 400
+                    width: (media_tab_bar.currentPane === "scripture" || media_tab_bar.currentPane === "table")
+                           ? parent.width : parent.width - shows_template_sidebar.width
 
                     clip: true
                     color: "transparent"
@@ -1314,6 +1395,7 @@ Rectangle {
 
                     NameDialog {
                         id: showCategoryDialog
+                        objectName: "selfTestCategoryNameDialog"
                         anchors.fill: parent
                         z: 30000
                         title: qsTr("New category")
@@ -1621,7 +1703,7 @@ Rectangle {
                 }   // media_table
                 // ---- Shows template sidebar (Shows tab) ---- the right column
                 // Scripture/The Table have, per CATEGORY: each category keeps its
-                // own template pick (settings key shows.categoryTemplate.<name>),
+                // own template pick (one declared JSON key, session.showsCategoryTemplates),
                 // shown and changed here with the same chooser popup Scripture
                 // uses (TemplatePickerModal, self-reparented to the window
                 // overlay). "All" selects no category, so the panel says so
@@ -1630,9 +1712,9 @@ Rectangle {
                     id: shows_template_sidebar
 
                     visible: media_tab_bar.currentPane === "shows"
-                    x: parent.width - 400
+                    x: parent.width - width
                     y: 39
-                    width: 400
+                    width: vGRPresenter_Main_Screen.templateColumnWidth
                     height: parent.height - 39
 
                     color: Theme.windowBg
@@ -1640,9 +1722,22 @@ Rectangle {
                     // The selected category's name ("" for All — the DEFAULT row).
                     readonly property string categoryName: media_table.currentCategory <= 0
                                                            ? "" : media_table.showCategories[media_table.currentCategory - 1].name
-                    // Per-category storage — the same values-map pattern scripture's
-                    // "scripture.template" setting uses.
-                    readonly property string settingsKey: "shows.categoryTemplate." + categoryName
+                    // Per-category storage — ONE declared JSON key, the same shape
+                    // session.audioRoster uses. A category's name only exists once
+                    // the user creates it, and settings keys must be declared up
+                    // front, so a per-name "shows.categoryTemplate.<name>" key was
+                    // refused by the store on every pick ("there is no setting …").
+                    readonly property string categoryPicksKey: "session.showsCategoryTemplates"
+                    readonly property var categoryPicks: {
+                        const raw = SettingsService.values[categoryPicksKey]
+                        if (raw === undefined || raw === null || String(raw) === "") return ({})
+                        try {
+                            const parsed = JSON.parse(String(raw))
+                            return (parsed !== null && typeof parsed === "object") ? parsed : ({})
+                        } catch (e) {
+                            return ({})
+                        }
+                    }
                     // THE FALLBACK RULE — the same one every template sidebar follows
                     // (Scripture/The Table's engine default already works this way):
                     // when no template is selected FOR a category, what is chosen for
@@ -1651,8 +1746,23 @@ Rectangle {
                     readonly property string defaultKey: "shows.defaultTemplate"
                     readonly property string defaultTemplateId: String(SettingsService.values[defaultKey] ?? "")
                     readonly property string ownTemplateId: categoryName === ""
-                                                            ? "" : String(SettingsService.values[settingsKey] ?? "")
+                                                            ? "" : String(categoryPicks[categoryName] ?? "")
                     readonly property bool inherited: categoryName !== "" && ownTemplateId === "" && defaultTemplateId !== ""
+                    // The picker and the Clear ✕ both write through here: the All row owns
+                    // shows.defaultTemplate, every other category its own entry in the JSON
+                    // key — writing the map back WITHOUT an entry is how a category goes
+                    // back to inheriting All's pick.
+                    function setOwnTemplate(id) {
+                        if (categoryName === "") {
+                            SettingsService.setValue(defaultKey, id)
+                            return
+                        }
+                        const next = {}
+                        for (const k in categoryPicks)
+                            if (k !== categoryName && String(categoryPicks[k]) !== "") next[k] = categoryPicks[k]
+                        if (id !== "") next[categoryName] = id
+                        SettingsService.setValue(categoryPicksKey, JSON.stringify(next))
+                    }
                     readonly property string templateId: categoryName === "" ? defaultTemplateId
                                                          : (ownTemplateId !== "" ? ownTemplateId : defaultTemplateId)
                     // Resolved from the designs() CATALOG (its rows provably carry
@@ -1708,8 +1818,17 @@ Rectangle {
                         anchors.top: parent.top; anchors.bottom: parent.bottom
                         anchors.left: parent.left; anchors.right: parent.right
                         // Reserve the scrollbar's strip so the toggles never sit
-                        // under it (ReferencePane's exact pattern).
-                        anchors.rightMargin: optionsScrollBar.visible ? 9 : 0
+                        // under it (ReferencePane's exact pattern) — ALWAYS, not
+                        // only while the bar is showing. "visible ? 9 : 0" made
+                        // the bar's own visibility change this Flickable's WIDTH,
+                        // which re-laid the column inside it, which changed
+                        // contentHeight (the template tile is sized from width),
+                        // which flipped the bar's visibility — a self-feeding
+                        // loop that never settled: the GUI thread spun inside
+                        // polishItems() forever (AppHangB1 "the moment I click
+                        // Settings", whose modal opening re-polishes the whole
+                        // screen behind it). The 9px strip belongs to the layout,
+                        // so it is reserved unconditionally now.
                         contentWidth: width
                         contentHeight: previewContent.height
                         clip: true
@@ -1730,7 +1849,7 @@ Rectangle {
                                     anchors.horizontalCenter: parent.horizontalCenter
                                     y: 20
                                     width: parent.width - 32
-                                    height: Math.round(width * 428 / 754)   // the 16:9-ish design ratio, purely from width
+                                    height: StageGrid.heightForWidth(width)   // the stage's own ratio, purely from width
                                     color: "#000000"
                                     clip: true
 
@@ -1795,10 +1914,7 @@ Rectangle {
                                             width: 36; height: 56
                                             IconGlyph { anchors.centerIn: parent; name: "close"; color: clearHover.hovered ? Theme.textPrimary : Theme.textSecondary; width: 10; height: 10 }
                                             HoverHandler { id: clearHover; cursorShape: Qt.PointingHandCursor }
-                                            TapHandler { onTapped: SettingsService.setValue(
-                                                shows_template_sidebar.categoryName === ""
-                                                ? shows_template_sidebar.defaultKey
-                                                : shows_template_sidebar.settingsKey, "") }
+                                            TapHandler { onTapped: shows_template_sidebar.setOwnTemplate("") }
                                         }
                                         // choose another template (the shared picker popup)
                                         Item {
@@ -1923,18 +2039,24 @@ Rectangle {
                                         x: 14; y: 4; width: parent.width - 28
                                         spacing: 0
 
+                                        // No "... on individual lines" / "Smart split"
+                                        // rows: the fill always does what their defaults
+                                        // did. No "Tolerance" row either — it was a
+                                        // second, invisible rule over the words-per-slide
+                                        // number (see AppSettings::AddFillOptions).
                                         ShowsOptionToggle { settingKey: "shows.verseNumbers" }
-                                        ShowsOptionToggle { settingKey: "shows.versesOnIndividualLines" }
                                         ShowsOptionToggle { settingKey: "shows.splitLongVerses" }
                                         Column {
                                             visible: SettingsService.values["shows.splitLongVerses"] === true
                                             width: parent.width
-                                            ShowsOptionToggle { settingKey: "shows.splitLongVersesSuffix" }
-                                            ShowsOptionNumber { settingKey: "shows.longVersesChars"; step: 10 }
-                                            ShowsOptionNumber { settingKey: "shows.longVersesTolerance"; step: 5 }
+                                            // The "Number the parts (1a, 1b)" row is gone
+                                            // (user call: "you can remove this") — see
+                                            // AppSettings::AddFillOptions.
+                                            // Words, not characters: "Max words per
+                                            // slide" — the whole rule for where a long
+                                            // item is divided.
+                                            ShowsOptionNumber { settingKey: "shows.wordsPerSlide"; step: 5 }
                                         }
-                                        ShowsOptionToggle { settingKey: "shows.smartSplit" }
-                                        ShowsOptionNumber { settingKey: "shows.versesPerSlide" }
                                     }
                                 }
                             }
@@ -1987,19 +2109,33 @@ Rectangle {
                         contentTypeLabel: qsTr("All")
                         onApplied: (tpl) => {
                             templatePicker.open = false
-                            SettingsService.setValue(shows_template_sidebar.settingsKey, tpl.key)
+                            shows_template_sidebar.setOwnTemplate(tpl.key)
                         }
                         onCancelled: templatePicker.open = false
                     }
+                }
+
+                // Match the draggable category rail on the left: the Shows
+                // template inspector can be widened or narrowed, while the
+                // show list automatically takes the remaining width.
+                SplitHandle {
+                    visible: media_tab_bar.currentPane === "shows"
+                    value: parent.width - shows_template_sidebar.width
+                    minValue: parent.width - Math.min(560, Math.max(220, parent.width - 360))
+                    maxValue: parent.width - 220
+                    y: 39
+                    height: parent.height - 39
+                    onDragged: (v) => vGRPresenter_Main_Screen.templateColumnOverride = parent.width - v
+                    onResetRequested: vGRPresenter_Main_Screen.templateColumnOverride = -1
                 }
             }
         Rectangle {
             id: right_column
 
-            x: parent.width - 400
+            x: parent.width - vGRPresenter_Main_Screen.outputsColumnWidth
 
             height: workspace_body.topHeight
-            width: 400
+            width: vGRPresenter_Main_Screen.outputsColumnWidth
 
             border.color: Theme.border
             border.width: 1
@@ -2024,9 +2160,21 @@ Rectangle {
                 // pixel-sampling the checkerboard/style-bg rendering).
                 objectName: "selfTestMonitorWall"
 
-                x: (parent.width - width) / 2
+                // FLUSH WITH THE COLUMN — 0 inset, full width. It used to be
+                // `Math.min(376, parent.width - 16)`, centered: on any column
+                // wider than 392px that capped the wall at 376 and left a
+                // strip of empty background at EACH end (measured on a live
+                // grab: the tiles spanned 34..501 inside a 532px column, ~27px
+                // of dead space per side). The wall owns the whole column
+                // (there is nothing else in it but the divider below), so the
+                // tiles now start at the column's left edge, run to its right
+                // edge, and sit flush against each other in between
+                // (columnGap is already 0) — live report: "the monitor tiles
+                // should touch the both ends, there should not be any space
+                // in between".
+                x: 0
                 y: 0
-                width: 376
+                width: parent.width
             }
 
             // Divider between the monitor wall and the clock panel (the
@@ -2043,6 +2191,20 @@ Rectangle {
 
         }
 
+        // The projects/show list on the left is a resizable sidebar. Its
+        // width is shared by the Projects panel and the centre workspace;
+        // double-click restores the responsive default.
+        SplitHandle {
+            // Harness hook: the split-drag scenario grabs this strip and drags it, to
+            // prove a sidebar width is actually REMEMBERED (session.projectsColumnWidth).
+            objectName: "selfTestProjectSplit"
+            value: left_column.width
+            minValue: 160
+            maxValue: vGRPresenter_Main_Screen.projectsColumnMaxWidth
+            height: workspace_body.topHeight
+            onDragged: (v) => vGRPresenter_Main_Screen.projectsColumnOverride = v
+            onResetRequested: vGRPresenter_Main_Screen.projectsColumnOverride = -1
+        }
 
         // ---- Divider between the top region and the library dock: drag to resize, double-click
         // for the default (the same SplitHandle every sidebar uses).
@@ -2051,8 +2213,20 @@ Rectangle {
             value: workspace_body.topHeight
             minValue: workspace_body.minTop
             maxValue: workspace_body.maxTop
-            onDragged: (v) => workspace_body.topOverride = v
-            onResetRequested: workspace_body.topOverride = -1
+            onDragged: (v) => { workspace_body.topOverride = v; saveColumnWidthsTimer.restart() }
+            onResetRequested: (v) => { workspace_body.topOverride = -1; saveColumnWidthsTimer.restart() }
+        }
+
+        // Drag the divider between the main preview workspace and the output
+        // monitors. The middle column and its preview canvas follow the new
+        // width; double-click restores the responsive default.
+        SplitHandle {
+            value: workspace_body.width - right_column.width
+            minValue: left_column.width + 400
+            maxValue: workspace_body.width - 240
+            height: workspace_body.topHeight
+            onDragged: (v) => vGRPresenter_Main_Screen.outputsColumnOverride = workspace_body.width - v
+            onResetRequested: vGRPresenter_Main_Screen.outputsColumnOverride = -1
         }
     }
 }

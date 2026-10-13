@@ -8,6 +8,7 @@
 #include <QStringList>
 #include <QJSValue>
 #include <QVariantList>
+#include <QThreadPool>
 #include <qqml.h>
 
 #include "core/events/EventBus.hpp"
@@ -66,6 +67,22 @@ class EngineBridge : public QObject
     // monitor_connected / monitor_disconnected).
     Q_PROPERTY(QVariantList audioDevices READ audioDevices NOTIFY devicesChanged)
     Q_PROPERTY(QVariantList screenDevices READ screenDevices NOTIFY devicesChanged)
+    // True once the sweep that carried the app's OWN device set has landed.
+    // boot() opens with one enumeration before QML has handed that set over
+    // (nothing configured yet, so nothing demanded) — correct for "what is
+    // attached", useless as a device report: a boot summary taken off it reads
+    // "0 audio device(s)". Anything that reports the ROSTERS as the app's
+    // hardware (the startup toast) waits for this instead of reading a list
+    // that is still the placeholder for its own truth.
+    Q_PROPERTY(bool bootSweepDone READ bootSweepDone NOTIFY bootSweepDoneChanged)
+    // The PRIMARY display's REAL size, straight from the engine's platform layer
+    // (IMonitor: IDXGI/EnumDisplayMonitors truth), as the map { id, label,
+    // widthPx, heightPx, primary }. This is what Main.qml sizes and scales the
+    // app against: Qt's own Screen geometry is the DPI-SCALED logical size, so on
+    // a scaled display it does not say what panel the user actually has. Empty
+    // before boot, or when the PAL has no monitor backend — callers fall back to
+    // Qt's Screen then.
+    Q_PROPERTY(QVariantMap primaryDisplay READ primaryDisplay NOTIFY devicesChanged)
     // Real video-capture devices (Media Foundation on Windows): each entry
     // { id, label, value, modes: ["1080p60", …], maxFps } — modes are the
     // device's actual capability list and maxFps the device-wide ceiling
@@ -109,8 +126,9 @@ class EngineBridge : public QObject
     // least one tap is active; peaks/rms are 0..1 fractions of full scale and
     // the list is EMPTY when nothing is metered ("no signal", never a
     // synthetic waveform). QML calls startInputMeter(label) when an audio
-    // dialog opens (empty label meters the default input) and
-    // stopInputMeter() when it closes.
+    // dialog opens and stopInputMeter() when it closes. An EMPTY label is
+    // REFUSED (see startInputMeter below): the list stays empty until the user
+    // has actually chosen a device.
     Q_PROPERTY(QVariantList inputLevels READ inputLevels NOTIFY inputLevelsChanged)
 
 public:
@@ -155,12 +173,25 @@ public:
     Q_INVOKABLE QString bootError() const;
     Q_INVOKABLE QStringList bootLog() const;
     Q_INVOKABLE QString health() const;
+    // NOTE: there is no QML-side "which subsystems are degraded" list any more.
+    // boot() replays one warning toast per degraded subsystem (see the
+    // SubsystemDegraded replay below) and folds the count into bootSummary(),
+    // which Main.qml shows — so a second accessor for the same list was API
+    // with no consumer.
     // One-line boot report for the startup toast: systems count + how many
     // real audio devices / displays the engine's platform layer enumerated.
     // Empty until boot() runs. QML reads it in Component.onCompleted —
     // events published before QML loads have no subscribers, so the summary
     // is pulled, not pushed.
     Q_INVOKABLE QString bootSummary() const { return bootSummary_; }
+    // The device names that summary names as "in use" (audio, display, camera),
+    // in the order they read there. QML hands them to the boot toast as its
+    // crux, so the toast can bold WHICH hardware this session is using instead
+    // of phrasing the whole sentence (see NotificationToast.crux).
+    Q_INVOKABLE QStringList bootInUseDevices() const { return bootInUse_; }
+    // The primary display's real pixel size (see the primaryDisplay property).
+    // Never empty once the platform layer enumerated a display.
+    Q_INVOKABLE QVariantMap primaryDisplay() const;
     // Re-enumerate the platform's audio + display devices (QML-invokable so
     // a screen can force a refresh when it opens). Safe before boot — yields
     // empty lists when the PAL has no backend installed.
@@ -169,20 +200,79 @@ public:
     // displays, open windows, or network sources on the GUI thread.
     Q_INVOKABLE void refreshAudioDevices();
 
+    // ---- The USED-device set (boot sweep filter) -------------------------
+    // Headless device probing is not free: every audio endpoint is a WASAPI
+    // COM activation, every camera a Media Foundation capability walk, every
+    // monitor/window an enumeration — and a session touches a handful of them.
+    // QML hands over what the app actually SET UP (the audio endpoints its
+    // input roster names, the cameras/NDI sources its video roster names, the
+    // display or window each output is bound to — all restored from the store
+    // before this call), and the FIRST sweep ASKS FOR those and nothing else:
+    // the PAL enumerates them targeted (IAudio/IVideo::EnumerateFor), so an
+    // endpoint or camera this setup does not use is never activated at all —
+    // the boot sweep does not enumerate the machine and then throw the answer
+    // away. Any device picker opening calls refreshDevices()/
+    // refreshAudioDevices() — Settings · Audio & Video's Add/Edit does, which
+    // is where the user is genuinely choosing a NEW device — and those do the
+    // full sweep from then on: a new pick has to come from somewhere, it just
+    // should not be paid for at boot. A used device that is gone this time is
+    // announced once (the missing-device notice), which is the other half of
+    // remembering it.
+    Q_INVOKABLE void requestUsedDevices(const QStringList &audioLabels,
+                                        const QStringList &videoLabels,
+                                        const QStringList &displayNames);
+    // The used devices that were NOT there when the boot check ran (friendly
+    // names, in the order they were handed over; empty until then and after a
+    // clean boot). The UI — not the bridge — publishes the notice: it has to
+    // land AFTER the engine boot toast, and that toast goes out from the UI's
+    // own devicesChanged handler, so the UI is the only place that can order
+    // the two (see Main.qml's reportMissingDevices).
+    Q_INVOKABLE QStringList missingUsedDevices() const { return missingUsedDevices_; }
+    bool bootSweepDone() const { return bootSweepDone_; }
+
     // ---- Live input metering (see the inputLevels property) -------------
     // Taps are a SET keyed by device — the AV board keeps every device row
     // metered while it is open, and a dialog reading a device's snapshot is
     // just another consumer. startInputMeter ENSURES a tap for the capture
     // device with this roster label (the AV board stores labels as its
-    // sublabels; an empty label meters the platform's DEFAULT input) and is
-    // idempotent per device. Safe to call when a device vanishes: unknown
-    // labels warn and no-op, failures never throw.
+    // sublabels) and is idempotent per device. Safe to call when a device
+    // vanishes: unknown labels warn and no-op, failures never throw.
+    //
+    // An EMPTY label is REFUSED — there is no "meter whatever the machine's
+    // default input happens to be" mode. It used to be implicit, and that is
+    // what the live report "it is animating without any device selected … so
+    // the WASAPI is being opened" was: any dialog or card that reached this
+    // with no pick opened a real capture session on the default microphone,
+    // lit the MonitorWall's audio button (anyInputMetering) and animated every
+    // strip that reads a snapshot. A tap belongs to a device the user chose.
     Q_INVOKABLE void startInputMeter(const QString &deviceLabel);
     // Stop one device's tap (identified by the label it was started with).
     Q_INVOKABLE void stopInputMeter(const QString &deviceLabel);
     // Stop every meter tap and the refresh pump — the AV screen calls this
     // when it is destroyed (nothing meters while settings are closed).
     Q_INVOKABLE void stopAllInputMeters();
+
+    // ---- Live STREAM metering (a video/NDI row's OWN audio) ----------------
+    // A media file and an NDI stream carry audio no capture device can reach,
+    // so the PAL's stream tap (IAudio::StartStreamTap) is the one carrier for
+    // it. startStreamMeter ENSURES a tap for this row and publishes its
+    // snapshot into the SAME inputLevels list every device meter already lands
+    // in (matched by label, exactly as a microphone's is), which is what lets
+    // a video card's L/R pills, its Edit dialog's channel strips and the
+    // mixer's own source binding read a video row's audio through the one code
+    // path a device uses. Refcounted per label: a Media-pane card and an open
+    // Edit dialog can hold the same row independently.
+    //
+    // kind is the PAL's producer kind: "media" (the backend decodes the file's
+    // audio track itself) or "ndi" (a receiver pushes the samples as they
+    // arrive). `source` is what the producer opens: for "media" a real FILE
+    // PATH (the row's caption may be just a filename, so pass the path when the
+    // row has one). A refused source (no such file, no NDI runtime) leaves the
+    // row with NO tap — it meters silence, never a fabricated level.
+    Q_INVOKABLE void startStreamMeter(const QString &label, const QString &kind,
+                                      const QString &source = QString());
+    // Release one row's stream tap (label-keyed, like the device meters).
+    Q_INVOKABLE void stopStreamMeter(const QString &label);
 
     // ---- Live video preview ---------------------------------------------
     // Start (or restart) a REAL Media Foundation Source Reader tap for the
@@ -228,6 +318,18 @@ public:
     Q_INVOKABLE void stopNdiPreview(const QString &sourceName,
                                     const QString &owner = QStringLiteral("dialog"));
 
+    // ---- Composition: which blocks paint UNDER a live feed --------------
+    // The INDICES of `blocks` that the engine will paint on the scene's "bg"
+    // layer, i.e. under the compositor's video layer (a live taken camera/screen
+    // input, media on air). The rule itself is the engine's and lives in exactly
+    // one place (SceneBuilder::PlanBlockLayers) — a QML surface asks for the
+    // answer instead of re-deriving it, because a preview with its own copy of a
+    // rule this geometric drifts from the outputs the moment either one changes,
+    // and the operator then sees one picture on the tile and another on air.
+    // The monitor tile draws these blocks' OWN PAINT below the feed and the rest
+    // of them above it, which is what every real output does.
+    Q_INVOKABLE QVariantList backdropBlockIndexes(const QVariantList &blocks) const;
+
     // ---- Live SCREEN preview --------------------------------------------
     // Same owner-counted discipline as the camera taps, keyed by the
     // monitor's roster label; frames flow through the same
@@ -249,45 +351,24 @@ public:
     // layout, ... }) — the Media pane's audio cards read their device's
     // peaks for the live level state window (same list the AV dialogs use).
     Q_INVOKABLE QVariantList inputMeterList() const { return inputLevels_; }
-    // ---- OUTPUT metering (the program mix) -------------------------------
-    // WASAPI loopback on the default render endpoint — the levels of what
-    // the engine is actually playing out. The monitor tile's L/R meters
-    // read outputLevels while outputMetering.
-    Q_INVOKABLE void startOutputMeter();
-    Q_INVOKABLE void stopOutputMeter();
-    // Refcounted release: several tiles may ask for the meter while live —
-    // the tap dies only when the LAST consumer releases. Tiles call this
-    // from destruction/visibility changes; startOutputMeter re-arms.
-    Q_INVOKABLE void maybeStopOutputMeter();
-    Q_PROPERTY(bool outputMetering READ outputMetering NOTIFY outputMeteringChanged)
-    Q_PROPERTY(QVariantMap outputLevels READ outputLevels NOTIFY outputLevelsChanged)
-    bool outputMetering() const { return outputMetering_; }
-    QVariantMap outputLevels() const { return outputLevels_; }
-    // True while ANY audio metering is engaged — an input tap (an audio card
-    // clicked in the Media pane) or the program-mix loopback. The output
-    // tile's OVERLAID LED strips read this: audio clicked → meters on.
-    Q_PROPERTY(bool anyAudioMetering READ anyAudioMetering NOTIFY audioMeteringChanged)
-    bool anyAudioMetering() const { return outputMetering_ || !requestedMeters_.isEmpty(); }
-    // True while at least one INPUT tap specifically is held (an audio/bus
-    // card double-clicked in the Media pane) — NOT the program-mix tap,
-    // which runs automatically the whole time an output is live/active
-    // regardless of whether there is any real audio content. The
+    // ---- Input metering (the only metering the bridge owns) --------------
+    // There is NO program-mix meter any more. It read AudioMixer::ProgramLevel,
+    // which could only ever publish from the WASAPI render callback of the
+    // unreachable setAudioRender path — so it read a flat zero for its whole
+    // life, and the monitor tiles' strips were really fed by the input taps
+    // below. It went with that path: see the removal note on the pump in the
+    // .cpp. Nothing here can acquire a sample for a "mix".
+    // True while at least one INPUT tap is held (an audio/bus
+    // card double-clicked in the Media pane). The
     // MonitorWall toolbar's "audio" clear button reads this (plus
-    // mediaOnAir&&mediaIsAudio) instead of anyAudioMetering, which would
-    // otherwise light it up any time the show is simply live.
+    // mediaOnAir&&mediaIsAudio).
     Q_PROPERTY(bool anyInputMetering READ anyInputMetering NOTIFY audioMeteringChanged)
-    // THE ENGINE'S AUDIO OUT: on = the WASAPI render client is live and the
-    // mixer is summing the graph's buses (the first real playout path).
-    Q_PROPERTY(bool audioRenderActive READ audioRenderActive NOTIFY audioRenderChanged)
     bool anyInputMetering() const { return !requestedMeters_.isEmpty(); }
     // Each entry: { id, label, value } — value mirrors label because the AV
     // board stores the human-readable sublabel on its rows; ids ride along
     // for the future capture-graph plumbing.
     QVariantList audioDevices() const { return audioDevices_; }
     QVariantList inputLevels() const { return inputLevels_; }
-    bool audioRenderActive() const;
-    // Start/stop the real render stream + the graph-driven mixer.
-    Q_INVOKABLE void setAudioRender(bool on);
     QVariantList screenDevices() const { return screenDevices_; }
     QVariantList videoDevices() const { return videoDevices_; }
     QVariantList ndiSources() const { return ndiSources_; }
@@ -296,6 +377,66 @@ public:
     // detect first frames itself, instead of QML confirming back (a write
     // into the tile's own URL binding = binding loop).
     QImage previewFrameFor(const QString &label);
+    // WHY a held camera/screen tap will never produce a frame, in the platform's
+    // own words ("device activation failed", "window closed", …), or "" while the
+    // tap is fine — which includes merely warming up. This is the answer the UI
+    // never had: a tap whose open failed used to look exactly like one that was
+    // still connecting, so the card pulsed its ring for as long as it was on
+    // screen with nothing anywhere to say why (see IVideo::PreviewFailure). Empty
+    // for a label with no tap, and for NDI (its receiver reports through its
+    // frames, not a reason).
+    Q_INVOKABLE QString previewFailure(const QString &deviceLabel);
+    // THE STATUS LIGHT'S OWN PROBE — the cached roster first, and if that cannot
+    // answer, a PING: one device refresh that NAMES this source, queued, so the
+    // light comes right by itself. This is what "the probe gate should not affect
+    // this light — give them access to ping so they can stay updated without me
+    // having to open the gate" asks for: inputSourceReachable() is a pure cache
+    // read, and the cache is only filled by an enumeration that the MEDIA/SOURCE
+    // PICKERS used to trigger (the "gate" — the window list in particular is only
+    // walked when a picker asks). A card whose only interest is a status light
+    // therefore sat on a stale answer until the operator opened a screen they did
+    // not need.
+    //
+    // Cost: the refresh is the SAME async, used-device-filtered sweep boot runs
+    // (off the GUI thread), with one addition — the label the light is asking
+    // about is added to what that sweep walks (see lightAsks_ below), so the
+    // device the light is about is the device this sweep asks for. It is refused
+    // while a scan is in flight and rate-limited here, so a binding re-evaluating
+    // at the pump's rate cannot queue a second enumeration.
+    Q_INVOKABLE bool inputSourceAlive(const QString &label, const QString &kind);
+    // THE STATUS LIGHT'S LIVE HALF — is anything actually ARRIVING from this
+    // source right now? "" while the app is not pulling it at all (or was, but
+    // stopped — see kWatchWindowMs), "ok" while it is and frames are being handed
+    // over — a STILL feed counts, since a frame that arrives is a frame whether
+    // or not its bytes changed — "starved" while it is being WATCHED and none
+    // have arrived for kDeliveryWindowMs (a tap that opened but never produced, a
+    // window that closed under it, a network feed that stopped).
+    //
+    // NOTHING IS OPENED TO ANSWER IT, which is the whole point: it reads the
+    // taps the app ALREADY holds (a card's thumbnail, a held monitor, the output
+    // take, a meter tap) and the timestamps those taps write. "" therefore means
+    // "only presence can be known" — the light stays on its roster answer rather
+    // than opening a device to decorate a card.
+    Q_INVOKABLE QString inputDelivery(const QString &label, const QString &kind);
+    // A tap that has just opened is not starved for this long: opening a camera
+    // or a screen-capture session takes ~100-300 ms and an NDI receiver needs a
+    // moment on the network, so the verdict waits before it calls a source
+    // silent. Past it, a tap that has delivered NOTHING reads starved — and
+    // previewFailure() is where the platform's reason for that lives.
+    static constexpr qint64 kDeliveryWindowMs = 5000;
+    // WATCHED, not merely HELD. Silence only means starvation if somebody was
+    // actually asking the tap for frames: a monitor that scrolled out of view, a
+    // card behind a closed dock, or a thumbnail nobody renders pulls nothing, and
+    // reading that as "starved" would paint a perfectly good source amber for the
+    // crime of not being looked at. So the verdict needs BOTH clocks — the last
+    // pull and the last frame — and a tap nobody pulled from within this window
+    // answers "" (see previewPulledAt_).
+    static constexpr qint64 kWatchWindowMs = 3000;
+    // The two clocks behind inputDelivery's live half, as ages in ms (-1 = never),
+    // for the self-test's diagnostics: WHICH half a "starved" came from is the
+    // difference between a dead source and a tap nothing is watching.
+    Q_INVOKABLE qint64 previewDeliveryAgeMs(const QString &label) const;
+    Q_INVOKABLE qint64 previewPullAgeMs(const QString &label) const;
     // The newest frame of the NDI receiver tapped for this source name —
     // the SAME contract previewFrameFor serves the camera/screen taps (a
     // null QImage = no receiver or no frame yet, the warm-up signal).
@@ -307,7 +448,11 @@ public:
     // id (not the roster label) to tell the engine's CompositorState which
     // tap SceneBuilder should pull real pixels from — "" if the label never
     // resolved (tap never started, or resolution failed).
-    QString resolvedPreviewDeviceId(const QString &label) const { return previewIds_.value(label.trimmed()); }
+    // Q_INVOKABLE as well: the same resolution a status light's live half and the
+    // self-test's diagnostics need to say WHICH device a tap resolved to (a tap
+    // that never resolved has nothing to deliver from) — it was C++-only, so a
+    // QML caller read `resolvedPreviewDeviceId is not a function`.
+    Q_INVOKABLE QString resolvedPreviewDeviceId(const QString &label) const { return previewIds_.value(label.trimmed()); }
     bool ndiAvailable() const { return ndiAvailable_; }
     QString ndiStatus() const { return ndiStatus_; }
     QString ndiState() const { return ndiState_; }
@@ -374,8 +519,6 @@ public:
     Q_INVOKABLE void clearHistory();
 
 signals:
-    // The engine's playout state flipped (see audioRenderActive).
-    void audioRenderChanged();
     void stackChanged();
     void bootedChanged();
     void bootErrorChanged();
@@ -394,6 +537,9 @@ signals:
     // Emitted whenever the device lists are (re)enumerated — boot and every
     // platform hot-plug event.
     void devicesChanged();
+    // Fired when the sweep that carried the app's own device set completed —
+    // see bootSweepDone.
+    void bootSweepDoneChanged();
 
     // ~20×/s while a meter tap is live: inputLevels_ was refreshed from the
     // PAL's snapshots. QML reads the property fresh on each emission — a
@@ -406,8 +552,6 @@ signals:
     // NDI program-sender connection telemetry + firewall authorization state.
     void ndiConnectedReceiversChanged();
     void ndiFirewallPromptedChanged();
-    void outputLevelsChanged();
-    void outputMeteringChanged();
     void audioMeteringChanged();
 
 private:
@@ -416,7 +560,12 @@ private:
 
     QString bootError_;
     QString bootSummary_;
+    QStringList bootInUse_;
     QString logPath_;
+    QThreadPool deviceEnumerationPool_;
+    bool deviceEnumerationBusy_ = false;       // GUI-thread owned
+    bool deviceEnumerationPending_ = false;    // coalesce hot-plug bursts
+    bool deviceEnumerationStopping_ = false;   // shutdown gate
 
     // ---- Engine → UI relay (see startRelay in EngineBridge.cpp) ----------
     // The kernel drives everything; the UI only relays. Attaches a Logger
@@ -426,8 +575,11 @@ private:
     void startRelay();
     void stopRelay();
 
-    // GUI-thread-only device enumeration into audioDevices_/screenDevices_.
+    // Platform discovery runs on a worker; roster properties are updated on
+    // the GUI thread after the worker returns.
     void enumerateDevices();
+    void enumeratePlatformDevicesAsync();
+    void updateBootSummary();
     // NDI runtime probe + source discovery OFF the GUI thread (runs on the
     // global QThreadPool; results land via a queued invokeMethod + one
     // devicesChanged emit). The first successful check loads and initializes
@@ -445,20 +597,23 @@ private:
 
     // ---- Live input metering state --------------------------------------
     QVariantList inputLevels_;          // the published snapshot set
-    // The engine's playout: the mixer consuming the production graph + the
-    // WASAPI render client. Created on first start; lives for the bridge.
-    // void* keeps the engine header out of this one (same convention as
-    // TheTableService's library_); the .cpp casts it.
-    void *audioMixer_ = nullptr;         // bps::production::AudioMixer*
-    void feedMixerLevels();              // the meter pump's mixer-publish step
-    // Output (program-mix) meter state: the loopback tap's id + the single
-    // published snapshot (the default render endpoint's L/R).
-    bool outputMetering_ = false;
-    QVariantMap outputLevels_;
-    uint32_t outputMeterDevice_ = 0;   // the waveout roster number
-    int outputMeterRefs_ = 0;          // consumers holding the loopback tap
+    // ONE "first meter signal" log line per session (see pumpMeterSnapshot) —
+    // the mirror of the video chain's one-shot "first preview frame". Without
+    // it a dead-looking meter is indistinguishable in engine.log from a
+    // genuinely silent device (what the "the meters never move" reports were).
+    bool firstMeterSignal_ = false;
     class QTimer *inputMeterPump_ = nullptr;   // 50 ms poll while taps are live
     QMap<uint32_t, QString> inputLabels_;   // waveIn device id → roster label
+    // The used-device set and its one-shot gate (see requestUsedDevices).
+    QStringList usedAudioLabels_;
+    QStringList usedVideoLabels_;
+    QStringList usedDisplayNames_;
+    bool usedDeviceSweepOnly_ = true;    // false once anything asked for the full roster
+    bool deviceHandoverSeen_ = false;    // the app has said which devices it uses (see requestUsedDevices)
+    bool bootDeviceCheckDone_ = false;   // the missing-device check runs once per session
+    QStringList missingUsedDevices_;     // what that check found gone (see missingUsedDevices)
+    bool bootSweepDone_ = false;         // the app's own device set has been swept (see bootSweepDone)
+    static bool labelWanted(const QStringList &wanted, const QString &label);
     // Every label with a requested tap, REFCOUNTED — the board row that
     // creates a device row and a dialog editing that same device can both
     // hold it open independently (e.g. closing the Edit dialog must not
@@ -466,8 +621,32 @@ private:
     // re-enumeration so hot-plug re-binds.
     QMap<QString, int> requestedMeters_;
     void resolveAndStartMeter(const QString &deviceLabel);
-    // One tick of the shared meter pump: input snapshots + (when on) the
-    // program-mix loopback snapshot. Both meter UIs breathe off this.
+    // The 50 ms meter pump the device taps ride — created once, started whenever
+    // anything holds a meter.
+    void ensureMeterPump();
+    // Resolve a roster DEVICE label to its PAL wavein number (the one place that
+    // walks the cached roster): false when the label names no input device on
+    // this machine, or the id is not a WASAPI wavein number at all.
+    bool resolveDeviceTap(const QString &deviceLabel, uint32_t *deviceId) const;
+
+    // ---- Video/NDI row audio: the stream taps behind the inputLevels list --
+    QMap<QString, int> requestedStreams_;      // label → holds (refcounted)
+    QMap<QString, QString> streamKinds_;       // label → the kind it was opened as
+    QMap<QString, QString> streamSources_;     // label → what the producer opens
+    QMap<QString, uint32_t> streamTapIds_;     // label → its stream tap id
+    quint32 nextStreamTap_ = 0;                // ids counted from IAudio::kStreamTapBase
+    // "label\nkind" → when its open was last REFUSED. The mix's source refresh
+    // runs ~20×/s, so a row whose media file is gone (or an NDI kind nothing
+    // feeds yet) is retried on a slow beat instead of re-attempting — and
+    // re-logging — on every tick.
+    QMap<QString, qint64> streamRefusedAt_;
+    // An EXISTING tap is reused (never replaced): a stream tap is a decoder, so
+    // a second hold must not restart the row's audio mid-sentence.
+    bool ensureStreamTap(const QString &label, const QString &kind, const QString &source);
+    // Stop a stream tap that nobody holds any more (a UI hold or the mix).
+    void releaseStreamTap(const QString &label);
+
+    // One tick of the shared meter pump: the input taps' published snapshots.
     void pumpMeterSnapshot();
 
     // ---- Live video preview state ---------------------------------------
@@ -503,6 +682,15 @@ private:
     // own "<HOST> (<sender>)" shape, distinctive enough that a real camera/
     // screen label collision is not a practical concern.
     QHash<QString, QString> ndiTaps_;
+    // Snapshot of label -> owners taken right before the "ndi" feature
+    // switch tears every tap down (applyNdiFeatureState) — card/dialog/
+    // board previews have no "my tap died, please re-fetch" signal of their
+    // own (only the OUTPUT take is re-synced via LiveOutputService::
+    // clearNdiInput), so without this they stayed permanently dark after an
+    // off->on cycle even once NDI was usable again. Replayed (one
+    // startNdiPreview call per label/owner pair) the moment the switch goes
+    // back on, then cleared.
+    QHash<QString, QSet<QString>> ndiTapsPendingReattach_;
     bool ndiAvailable_ = false;
     int ndiRetries_ = 0;   // deferred NDI re-query budget (2) per boot/refreshDevices()
     // One async NDI probe at a time (see probeNdiAsync): a second recheck
@@ -516,6 +704,31 @@ private:
     bool ndiFirewallPrompted_ = false;   // once per install (settings-backed)
     qint64 lastEnumerationMs_ = 0;   // throttles refreshDevices()
     qint64 lastAudioEnumerationMs_ = 0; // throttles the audio-only picker refresh
+    // Throttles the status light's own ping (see inputSourceAlive): the light is
+    // read from bindings that re-evaluate at the pump's rate, so an unthrottled
+    // ping would queue a device refresh every tick.
+    qint64 lastLightPingMs_ = 0;
+    // The sources the lights have asked about since the last sweep (see
+    // inputSourceAlive). Each is added to what the next enumeration WALKS, so the
+    // answer is about the device the light names and not about whatever the
+    // setup's used-device set happened to contain; consumed (cleared) by the
+    // sweep that takes the snapshot, which is why several lights asking between
+    // two sweeps cost one enumeration, not one each.
+    QStringList lightAsks_;
+    // One diagnostic line per (label, kind) a light could not answer for, so a
+    // mislabelled source is distinguishable in engine.log from a device that is
+    // genuinely gone. See inputSourceAlive.
+    QSet<QString> lightProbeLogged_;
+    // When each OPEN tap last handed over a real frame, by tap key (the device id
+    // for camera/screen taps, the source name for NDI receivers — the same key
+    // previewLastFrame_ uses). Written where the frame is actually fetched and
+    // cleared wherever the tap dies, so a closed tap can never read as a live one.
+    // See inputDelivery.
+    QMap<QString, qint64> previewDeliveredAt_;
+    // ...and when each open tap was last ASKED for a frame, same key. Held and
+    // watched are different facts: a tap can be held with nothing rendering it,
+    // and then its silence says nothing about the device (see kWatchWindowMs).
+    QMap<QString, qint64> previewPulledAt_;
     QString ndiStatus_;
     QString ndiState_ = QStringLiteral("unknown");
     QString ndiVersion_;

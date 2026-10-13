@@ -142,7 +142,7 @@ Item {
             text: root.caption
             color: Theme.textMuted
             font.family: Theme.fontFamily
-            font.pixelSize: Theme.textXs
+            font.pixelSize: Theme.textSub
         }
     }
 }

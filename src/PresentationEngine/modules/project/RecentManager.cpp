@@ -72,7 +72,7 @@ Result<void> RecentManager::Save() {
         o["ts"] = json::Value::Number(static_cast<double>(r.timestampMs));
         arr.push_back(json::Value(std::move(o)));
     }
-    return DatabaseManager::Instance().Put("recent", "items", json::Value(std::move(arr)));
+    return DatabaseManager::Instance().Put("recent", "items", json::Value(std::move(arr)));  // lock-ok: in-memory map write
 }
 
 Result<void> RecentManager::Load() {

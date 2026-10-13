@@ -24,6 +24,10 @@ MouseArea {
     property real pressMouseX: 0
     property real pressMouseY: 0
     property bool dragMoved: false
+    // A press is live (cleared on release) — see EditableCanvasLabel's
+    // dragArea: the grab must end with the button, while dragMoved latches for
+    // the rest of the gesture so a drag never also counts as a tap.
+    property bool dragging: false
 
     hoverEnabled: true
     // Cursor via the AppCursor override stack (see EditableCanvasLabel's
@@ -36,12 +40,15 @@ MouseArea {
         // besides `pressed`: containsMouse latches in this build (hover-exit
         // never delivers — KNOWN_ISSUES.md), so gating on it left the hand
         // cursor stuck on after leaving the item.
+        // `pressed` grabs immediately and outranks a hover claim: the drag cursor
+        // no longer waits for the 4px threshold (see EditableCanvasLabel).
         if (visible && enabled && (pressed || AppCursor.hovered(root)))
-            AppCursor.push(root.dragMoved ? Qt.ClosedHandCursor : Qt.PointingHandCursor, root)
+            AppCursor.push((pressed && root.dragging) ? Qt.ClosedHandCursor : Qt.PointingHandCursor,
+                           root, pressed ? AppCursor.priorityPressed : AppCursor.priorityHover)
         else
             AppCursor.pop(root)
     }
-    cursorShape: root.dragMoved ? Qt.ClosedHandCursor : Qt.PointingHandCursor
+    cursorShape: root.dragging ? Qt.ClosedHandCursor : Qt.PointingHandCursor
     // Recompute from the pointer-position stream (every move) instead of
     // onContainsMouseChanged — same mechanism as PositionHoverArea.
     Connections {
@@ -52,11 +59,12 @@ MouseArea {
     Component.onDestruction: AppCursor.pop(root)
 
     onPressed: (mouse) => {
+        dragging = true
+        dragMoved = false
         syncCursor()
         const g = mapToItem(null, mouse.x, mouse.y)
         pressMouseX = g.x
         pressMouseY = g.y
-        dragMoved = false
     }
     onPositionChanged: (mouse) => {
         if (!pressed)
@@ -73,6 +81,7 @@ MouseArea {
         }
     }
     onReleased: {
+        dragging = false   // before the re-claim: the grab ends with the button
         syncCursor()
         root.dragFinished()
     }

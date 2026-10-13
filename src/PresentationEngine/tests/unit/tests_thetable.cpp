@@ -30,6 +30,19 @@ void WriteFileBytes(const std::string& path, const std::string& data) {
     out.write(data.data(), static_cast<std::streamsize>(data.size()));
 }
 
+// The bytes a damaged document was set aside as, read back from the first
+// `<name>.corrupt-*` beside it ("" when there is none).
+std::string QuarantineOf(const std::string& dir, const std::string& name) {
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        const std::string leaf = entry.path().filename().string();
+        if (leaf.rfind(name + ".corrupt-", 0) != 0) continue;
+        std::ifstream in(entry.path(), std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }
+    return {};
+}
+
 // A minimal single-page PDF with an UNCOMPRESSED content stream — every
 // parser path (string harvesting, Td line breaks) exercised without zlib.
 // Lines inside one text object are HARD-WRAPPED source lines: our extractor
@@ -139,6 +152,27 @@ void TestTheTableLibrary() {
     CHECK(lib->Citation("Y1953", 1, 2) == "53-0217 - Only Believe 2");
     CHECK(lib->Citation("Y1953", 2, 1) == "53-0218 - My Angel 1");
     CHECK(lib->Citation("Y1953", 99).empty());   // unknown chapter
+    // ---- the citation's leading code alone ({table_code}) ----
+    CHECK(lib->CitationCode("Y1953", 1) == "53-0217");
+    CHECK(lib->CitationCode("Y1953", 2) == "53-0218");
+    CHECK(lib->CitationCode("Y1953", 99).empty());   // unknown chapter
+    // ---- a typed HANDLE reads the same however its dash is spaced ----
+    // The citation line is written without spaces beside its dash, and people
+    // type a date code either way; both sides of the comparison are squeezed
+    // onto one form, so "47 - 1020" reaches the sermon "47-1020" names.
+    // (fully qualified: `lib` is the local library handle in this function)
+    CHECK(bps::library::TheTableLibrary::CitationNeedle("47-1020") == "47-1020");
+    CHECK(bps::library::TheTableLibrary::CitationNeedle("47 - 1020") == "47-1020");
+    CHECK(bps::library::TheTableLibrary::CitationNeedle("47 -1020") == "47-1020");
+    CHECK(bps::library::TheTableLibrary::CitationNeedle("47- 1020") == "47-1020");
+    CHECK(bps::library::TheTableLibrary::CitationNeedle("  47  -  1020  ") == "47-1020");
+    // A title's own spaces survive: they are what makes a typed word findable.
+    CHECK(bps::library::TheTableLibrary::CitationNeedle("Faith Is The Substance") == "faith is the substance");
+    // ...which is what makes a HANDLE reach a stored citation line: the two forms
+    // differ only in the spaces the stored line never has, so a spaced handle is
+    // a prefix of the citation exactly as the unspaced one is.
+    CHECK(bps::library::TheTableLibrary::CitationNeedle(lib->Citation("Y1953", 1, 0))
+              .rfind(bps::library::TheTableLibrary::CitationNeedle("53 - 0217"), 0) == 0);
     // A code-less sermon keeps its slot empty instead of inventing one.
     auto rNoCode = lib->ImportSermon("downloads/1953/Believest Thou This.txt",
                                      "Believest thou this? We would know for sure here.\n\n"
@@ -188,6 +222,137 @@ void TestTheTableLibrary() {
     CHECK(bareYear.ok());
     for (const auto& h : bareYear.value())
         CHECK(!(h.verse == 0 && h.bookId == "Y1947"));   // no sermon-level code row
+    // ---- citation + paragraph: the paragraph answers as its OWN row ----
+    // "47-0412 2" names the sermon's SECOND paragraph: the hit carries that
+    // paragraph (verse = 2, its text as the snippet), not the sermon-level
+    // listing. The trailing number used to fold into the space-stripped code
+    // ("47-04122") and match nothing, so a typed paragraph was silently
+    // dropped and the picker landed on the sermon's first paragraph — the
+    // app-wide quick search and The Table's own search box both read the hit.
+    auto paraHit = lib->Search("47-0412 2");
+    CHECK(paraHit.ok() && paraHit.value().size() == 1);
+    CHECK(paraHit.value()[0].bookId == "Y1947");
+    CHECK(paraHit.value()[0].chapter == 1);
+    CHECK(paraHit.value()[0].verse == 2);
+    CHECK(paraHit.value()[0].reference == "47-0412 - Faith Is The Substance 2");
+    CHECK(paraHit.value()[0].snippet.find("second paragraph") != std::string::npos);
+    // A paragraph the sermon does NOT have falls back to the sermon-level row
+    // (never an empty answer, and never a verse number past the sermon's end).
+    auto paraMiss = lib->Search("47-0412 54");
+    CHECK(paraMiss.ok() && !paraMiss.value().empty());
+    CHECK(paraMiss.value()[0].bookId == "Y1947");
+    CHECK(paraMiss.value()[0].verse == 0);
+    // ---- exact words (the search boxes' padlock) ----
+    // Locked, the typed words must appear VERBATIM as whole words: no completion
+    // ("word" stops finding "words"), no inner substring, and no typo/resolution
+    // pass over the typing. Unlocked, the same query finds the paragraph — the
+    // pair below is the whole point of the toggle, so both halves are asserted.
+    auto looseWord = lib->Search("word");            // fuzzy: "words" completes it
+    CHECK(looseWord.ok() && !looseWord.value().empty());
+    auto exactWord = lib->Search("word", 60, true);
+    CHECK(exactWord.ok() && exactWord.value().empty());   // ...but nothing says "word"
+    auto exactRoad = lib->Search("road", 60, true);      // a whole word: still found
+    CHECK(exactRoad.ok() && exactRoad.value().size() == 1);
+    CHECK(exactRoad.value()[0].reference == "53-0218 - My Angel 1");
+    // Two words that sit in the SAME paragraph but not next to each other are not
+    // a combination: locked, that paragraph is not listed at all (the angel
+    // sermon says "My angel shall go before thee this night, and the road is
+    // prepared." — angel, then road, with half a sentence between them).
+    auto exactApart = lib->Search("angel road", 60, true);
+    CHECK(exactApart.ok() && exactApart.value().empty());
+    auto looseApart = lib->Search("angel road");   // loose: the same pair is found
+    CHECK(looseApart.ok() && looseApart.value().size() == 1);
+    CHECK(looseApart.value()[0].chapter == 2);
+    // A citation CODE is not a word search: the padlock leaves the code tier
+    // alone (locking must not make a sermon citation stop resolving).
+    auto exactCode = lib->Search("47-0412", 60, true);
+    CHECK(exactCode.ok() && !exactCode.value().empty());
+    CHECK(exactCode.value()[0].verse == 0);
+    // ---- the sentence first, then the NEXT COMBINATION (never lone words) ----
+    // User calls: "you have to make it prioritize the sentence first; if the main
+    // sentence does not work then now you work with other words — so make it more
+    // resilient", then "no individual words, the next available word combination".
+    // The fixture:
+    //   ¶1 says "my wife and the children..."  (the combination "my wife and")
+    //   ¶2 says "My brother said that my wife would help us..."  ("my wife", and
+    //      both "wife" and "brother" — never next to each other)
+    auto rSent = lib->ImportSermon("downloads/1947/47_0513_Test_Words.txt",
+                                   "My wife and the children went out into the field, and the work waited.\n\n"
+                                   "My brother said that my wife would help us, and my mother agreed.");
+    CHECK(rSent.ok());
+    CHECK(lib->IndexWithSearchEngine().ok());
+    auto loosePhrase = lib->Search("my wife");
+    CHECK(loosePhrase.ok() && loosePhrase.value().size() == 2);
+    // The sentence itself is there ("my wife" verbatim) in both paragraphs; the
+    // earlier one leads (reading order breaks the tie).
+    auto exactPhrase = lib->Search("my wife", 60, true);
+    CHECK(exactPhrase.ok() && exactPhrase.value().size() == 2);
+    CHECK(exactPhrase.value()[0].bookId == "Y1947");
+    CHECK(exactPhrase.value()[0].chapter == 2);
+    CHECK(exactPhrase.value()[0].verse == 1);
+    CHECK(exactPhrase.value()[1].verse == 2);
+    // NO LONE WORDS: ¶2 carries both words, but never as a combination — locked,
+    // it is not a match at all.
+    auto exactSprinkle = lib->Search("wife brother", 60, true);
+    CHECK(exactSprinkle.ok() && exactSprinkle.value().empty());
+    auto looseSprinkle = lib->Search("wife brother");
+    CHECK(looseSprinkle.ok() && looseSprinkle.value().size() == 1);   // loose: found
+    // A typed sentence the corpus does not have verbatim: the NEXT available
+    // combination answers, the longest one first — ¶1's "my wife and" (3 words)
+    // leads ¶2's "my wife" (2), both under the lock.
+    auto exactCombos = lib->Search("my wife and brother", 60, true);
+    CHECK(exactCombos.ok() && exactCombos.value().size() == 2);
+    CHECK(exactCombos.value()[0].verse == 1);
+    CHECK(exactCombos.value()[1].verse == 2);
+
+    // ---- the chapter lock: search inside the sermon that is open --------------
+    // The pane's book pill locks search to what is on screen (user call: open
+    // "faith is the substance", turn the lock, and the words are looked for in
+    // THAT sermon instead of the 1,205 others). The fixture's two sermons both
+    // say "my" and "wife"/"the", so the same query answers differently scoped:
+    // the book ("Y1947") or the one sermon (chapter 2) — and never both sermons.
+    {
+        auto wholeLibrary = lib->Search("my wife", 60, false);
+        CHECK(wholeLibrary.ok() && wholeLibrary.value().size() == 2);
+
+        auto lockedBook = lib->Search("my wife", 60, false, "Y1947", 0);
+        CHECK(lockedBook.ok() && lockedBook.value().size() == 2);
+        for (const auto& h : lockedBook.value())
+            CHECK(h.bookId == "Y1947");
+
+        // Locked to the ONE sermon that is open (47-0513, chapter 2 of Y1947):
+        // its own two paragraphs, both of which really carry the words.
+        auto lockedSermon = lib->Search("my wife", 60, false, "Y1947", 2);
+        CHECK(lockedSermon.ok() && lockedSermon.value().size() == 2);
+        CHECK(lockedSermon.ok() && lockedSermon.value()[0].bookId == "Y1947");
+        CHECK(lockedSermon.ok() && lockedSermon.value()[0].chapter == 2);
+        CHECK(lockedSermon.ok() && lockedSermon.value()[0].verse == 1);
+        CHECK(lockedSermon.ok() && lockedSermon.value()[1].verse == 2);
+
+        // The sibling sermon (47-0412, chapter 1 of the same year) is out of scope.
+        // Its own word is unreachable from the open sermon — and reachable again
+        // when the lock is only on the year: the lock narrows the search rather
+        // than merely labelling it.
+        auto siblingOnly = lib->Search("substance", 60, false, "Y1947", 2);
+        CHECK(siblingOnly.ok() && siblingOnly.value().empty());
+        auto siblingIn = lib->Search("substance", 60, false, "Y1947", 1);
+        CHECK(siblingIn.ok() && !siblingIn.value().empty());
+        auto siblingInBook = lib->Search("substance", 60, false, "Y1947", 0);
+        CHECK(siblingInBook.ok() && !siblingInBook.value().empty());
+        for (const auto& h : siblingInBook.value())
+            CHECK(h.bookId == "Y1947" && h.chapter == 1);
+
+        // A scope outside the query's reach answers NOTHING — the lock must not
+        // fall back to the whole library (loose == the same query unscoped above).
+        auto unreached = lib->Search("my wife", 60, false, "Y1953", 0);
+        CHECK(unreached.ok() && unreached.value().empty());
+
+        // A sermon CITATION is scoped too (the code tier shares the lock).
+        auto codeIn = lib->Search("47-0513", 60, false, "Y1947", 2);
+        CHECK(codeIn.ok() && !codeIn.value().empty());
+        auto codeOut = lib->Search("47-0513", 60, false, "Y1953", 0);
+        CHECK(codeOut.ok() && codeOut.value().empty());
+    }
     // This test indexed its sermons into the SHARED Search Engine; the next
     // suite owns "table:*" documents and asserts a clean slate — drop ours
     // (production never shares one process across two libraries, tests do).
@@ -241,6 +406,70 @@ void TestTheTableLibrary() {
     for (const auto& b : batch->Books()) { has1956 |= b.name == "1956"; has1957 |= b.name == "1957"; has2099 |= b.name == "2099"; }
     CHECK(has1956 && has1957 && !has2099);
 
+    // ---- a folder of MIXED files: what is not a sermon is counted and NAMED ----
+    // The walk dropped every other file silently, so a folder of sermons beside a
+    // pile of spreadsheets and images answered "4 imported" and said nothing else.
+    WriteFileBytes(folder + "/1955/55_0201_Notes.docx", std::string("PK\x03\x04\x14\x00", 6) + " a document that is not a sermon");
+    WriteFileBytes(folder + "/1955/55_0202_Chart.png", std::string("\x89PNG\r\n\x1a\n", 8) + " image bytes");
+    WriteFileBytes(folder + "/1955/55_0203_Renamed.txt", std::string("PK\x03\x04\x14\x00", 6) + " a spreadsheet named .txt");
+    {
+        const size_t booksBefore = batch->Books().size();
+        auto mixed = batch->ImportFolder(folder);
+        CHECK(mixed.ok());
+        CHECK(mixed.value().imported == 0);          // nothing new in the sermons that were already in
+        CHECK(mixed.value().skipped == 4);
+        CHECK(mixed.value().unsupported == 2);       // the .docx and the .png: never read
+        CHECK(mixed.value().failed == 1);            // the .txt that is really a ZIP
+        CHECK(mixed.value().rejected.size() == 3);   // ...and each refusal is named
+        int named = 0;
+        for (const std::string& why : mixed.value().rejected) {
+            const bool isOne = why.find("55_0201_Notes.docx") != std::string::npos
+                            || why.find("55_0202_Chart.png") != std::string::npos
+                            || why.find("55_0203_Renamed.txt") != std::string::npos;
+            if (isOne && why.find(':') != std::string::npos) ++named;
+        }
+        CHECK(named == 3);
+        // The EXACT sentences, not merely that a reason exists: this is the
+        // wording the import's notice prints, and the QML service only joins
+        // what the library words here (a service has no unit coverage, which
+        // is exactly why the wording is pinned at its source rather than
+        // eyeballed on screen).
+        const auto reasonFor = [&](const std::string& base) -> std::string {
+            for (const std::string& why : mixed.value().rejected)
+                if (why.rfind(base + ":", 0) == 0)
+                    return why;
+            return {};
+        };
+        CHECK(reasonFor("55_0201_Notes.docx")
+              == "55_0201_Notes.docx: not a sermon file (the library reads .txt and .pdf)");
+        CHECK(reasonFor("55_0202_Chart.png")
+              == "55_0202_Chart.png: not a sermon file (the library reads .txt and .pdf)");
+        CHECK(reasonFor("55_0203_Renamed.txt")
+              == "55_0203_Renamed.txt: \"55_0203_Renamed.txt\" is a ZIP or Office document "
+                 "(.docx/.xlsx/.pptx), not a sermon (.txt or .pdf)");
+        CHECK(batch->Books().size() == booksBefore); // refused files added no book
+    }
+
+    // ---- MORE REFUSALS THAN THE OLD CAP: every one is still named ----
+    // The report used to carry at most five reasons (kMaxRejections), so a
+    // folder of wrong files answered "8 not sermon files" and explained five -
+    // the operator could not tell which files to fix. All eight are named now,
+    // and the counts stay exact.
+    {
+        for (int i = 0; i < 8; ++i)
+            WriteFileBytes(folder + "/1955/55_030" + std::to_string(i) + "_Sheet.xlsx",
+                           std::string("PK\x03\x04\x14\x00", 6) + " a spreadsheet");
+        auto capped = batch->ImportFolder(folder);
+        CHECK(capped.ok());
+        CHECK(capped.value().unsupported == 10);   // the 2 earlier + these 8
+        CHECK(capped.value().failed == 1);         // the earlier renamed .txt
+        // ONE REASON PER REFUSED FILE — six more than the old cap of five, and
+        // all of them present. (This assertion is what the cap would fail.)
+        CHECK(capped.value().rejected.size() == 11);
+        CHECK(capped.value().rejected.size() == static_cast<size_t>(
+                  capped.value().failed + capped.value().unsupported));
+    }
+
     // ---- the clean-up stage, before anything is imported ----
     // A .txt of unknown make: BOM, Windows-1252 quotes, control characters, a soft hyphen, runs of spaces and blank lines.
     {
@@ -250,6 +479,58 @@ void TestTheTableLibrary() {
         CHECK(clean.value() == "He said,\xE2\x80\x9C" "Come\xE2\x80\x9D unto me.\n\nSecond paragraph here.");
         CHECK(!lib::TheTableLibrary::ConvertToCleanText("x/1958/58_0102_Empty.txt", " \r\n\t\r\n").ok());
         CHECK(!lib::TheTableLibrary::ConvertToCleanText("x/1958/58_0103_Bad.pdf", "not a pdf at all, sorry").ok());
+    }
+    // ---- the FORMAT gate: a file the library cannot read is refused, by name ----
+    // The dialog's "All files (*.*)" option can hand over anything, and binary
+    // bytes read as text import "successfully" as pages of mangled glyphs - so the
+    // refusal has to happen before a byte is parsed, and it has to say why.
+    {
+        const std::string sermon = "This paragraph is long enough to survive the forty character filter, and it is real text.";
+        std::string why;
+        // "This name and these bytes are a sermon file" - the reason is read
+        // fresh every time (`why` is an out-parameter that is only written on a
+        // refusal, so a stale one from an earlier case would prove nothing).
+        const auto accepted = [](const char* name, const std::string& content) {
+            std::string reason;
+            return lib::TheTableLibrary::IsSermonFile(name, content, reason) && reason.empty();
+        };
+
+        // 1. The extension decides the format.
+        CHECK(!lib::TheTableLibrary::IsSermonFile("x/1958/58_0201_Notes.docx", sermon, why));
+        CHECK(why.find(".docx") != std::string::npos && why.find(".txt") != std::string::npos);
+        CHECK(!lib::TheTableLibrary::ConvertToCleanText("x/1958/58_0201_Notes.docx", sermon).ok());
+        CHECK(!lib::TheTableLibrary::ConvertToCleanText("x/1958/58_0202_Slides.pptx", sermon).ok());
+        CHECK(!lib::TheTableLibrary::ConvertToCleanText("x/1958/58_0203_Art.png", sermon).ok());
+        CHECK(!lib::TheTableLibrary::ConvertToCleanText("x/1958/58_0204_No_Extension", sermon).ok());
+        // ...and its case does not matter, exactly like the folder walk's test.
+        CHECK(accepted("x/1958/58_0205_UPPER.TXT", sermon));
+        CHECK(accepted("x/1958/58_0206_Upper.PDF", "%PDF-1.4\n"));
+
+        // 2. A name that LIES is caught by the file's own first bytes: a .txt that
+        //    is really a ZIP (sermon.docx renamed), an image, a program, or a PDF.
+        CHECK(!lib::TheTableLibrary::IsSermonFile("x/1958/58_0207_Renamed.txt", std::string("PK\x03\x04\x14\x00rest of a zip"), why));
+        CHECK(why.find("ZIP or Office document") != std::string::npos);
+        CHECK(!lib::TheTableLibrary::ConvertToCleanText("x/1958/58_0207_Renamed.txt", std::string("PK\x03\x04\x14\x00rest of a zip")).ok());
+        CHECK(!lib::TheTableLibrary::IsSermonFile("x/1958/58_0208_Shot.txt", std::string("\x89PNG\r\n\x1a\n and the rest"), why));
+        CHECK(why.find("PNG image") != std::string::npos);
+        CHECK(!lib::TheTableLibrary::IsSermonFile("x/1958/58_0209_Tool.txt", std::string("\x7F\x45\x4C\x46\x02\x01"), why));
+        // A PDF saved under the wrong name gets the sentence that fixes it.
+        CHECK(!lib::TheTableLibrary::IsSermonFile("x/1958/58_0210_Scanned.txt", "%PDF-1.4\n%not really", why));
+        CHECK(why.find("rename it .pdf") != std::string::npos);
+
+        // 3. A real .txt is NOT refused, whatever is in it: control characters,
+        //    Windows-1252 quotes and a stray form feed are the clean-up stage's
+        //    job (the gate is about FORMAT, never about content), and a sermon is
+        //    still a sermon with an "MZ" or "BM" opening a paragraph.
+        CHECK(accepted("x/1958/58_0211_Plain.txt", sermon));
+        const std::string messy = std::string("BMW\x0Cthe car\x01 in the story\r\n\r\n\x93Come\x94 to Me, \xADnow.\r\n");
+        CHECK(accepted("x/1958/58_0212_Odd.txt", messy));
+        CHECK(lib::TheTableLibrary::ConvertToCleanText("x/1958/58_0212_Odd.txt", messy).ok());
+        // A string that begins with a signature's letters but is not the signature.
+        CHECK(accepted("x/1958/58_0213_Gift.txt", "GIF87b is not a GIF, and PKX is not a zip."));
+        // A real PDF is accepted (the magic is what its own reader demands) - a
+        // gate that refused it would refuse every sermon PDF there is.
+        CHECK(accepted("x/1958/58_0214_Real.pdf", MinimalPdf("This line carries real sermon text for the gate to accept.", "And a second line.")));
     }
     // A PDF's running head, footer and page numbers are not sermon text; its body lines are.
     {
@@ -583,4 +864,104 @@ void TestTheTableSearchIndexing() {
 
     CHECK(eng.Shutdown().ok());
     CHECK(eng.Initialize().ok());   // other tests re-start the engine
+
+    // ---- a DAMAGED store never fails the read, and its bytes survive -------
+    // The store carries the operator's notes and highlights as well as the
+    // sermons: reading a damaged one as "empty" and then saving over it is what
+    // this prevents. The bytes are set aside under `.corrupt-<stamp>` and the
+    // next save rebuilds a healthy document at the same path.
+    {
+        const std::string path = PathOf("damaged.json");
+        WriteFileBytes(path, "{ not json");
+        auto broken = lib::TheTableLibrary::Open(path);
+        CHECK(broken->Books().empty());                       // the read goes on
+        CHECK(QuarantineOf(kRoot, "damaged.json") == "{ not json");
+        CHECK(broken->ImportSermon("downloads/1953/53_0401_Healed.txt",
+                                   "A sermon imported after the store was rebuilt still lands, with paragraphs this long.\n\n"
+                                   "And its second paragraph is long enough to be kept as well, which is the point.").ok());
+        std::ifstream rebuilt(path, std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(rebuilt)), std::istreambuf_iterator<char>());
+        CHECK(text.find("\"books\"") != std::string::npos);   // a healthy document again
+    }
+
+    // ---- a store that PARSES but has no 'books' is damaged too ------------
+    {
+        const std::string path = PathOf("shapeless.json");
+        WriteFileBytes(path, R"({"schema":1,"notes":[{"id":"n1","ref":"John 1:1"}]})");
+        auto broken = lib::TheTableLibrary::Open(path);
+        auto shapelessNotes = broken->Notes();
+        CHECK(broken->Books().empty() && shapelessNotes.ok() && shapelessNotes.value().empty());
+        // nothing loadable was in it, and it was not silently thrown away either
+        CHECK(!QuarantineOf(kRoot, "shapeless.json").empty());
+    }
+}
+
+// ===========================================================================
+// THE TYPING TAIL (the sermon pane's own search box)
+// ===========================================================================
+// The user's report, with the pane's screenshot: typing
+//   "compelling that you rec"
+// listed ONE sermon — one whose paragraph happened to carry whatever single word
+// the resolver guessed "rec" meant — while the sermon that says
+//   "... absolutely essential and necessary, and compelling and compulsory, that
+//    you receive the Holy Ghost now ..."
+// was missing. The last word is the one the caret is on, so it is a PREFIX: it
+// matches every word starting with what was typed, the readings ordered most
+// confident first (how often the corpus uses them), and every word before it is
+// still required. The padlock (exact words) keeps meaning verbatim, so it does
+// NOT prefix-match.
+void TestTheTableTypingTail() {
+    const std::string path = PathOf("tail/library.json");
+    std::filesystem::remove_all(kRoot + "/tail");
+    auto lib = lib::TheTableLibrary::Open(path);
+    CHECK(lib->Books().empty());
+
+    // The sermon the user expected to see, and two decoys: one that carries only
+    // some of the typed words, one whose paragraph says a different "rec" word.
+    CHECK(lib->ImportSermon(
+        "downloads/1959/59_1217_What_Was_The_Holy_Ghost_Given_For.txt",
+        "You people, it's absolutely essential and necessary, and compelling and compulsory, "
+        "that you receive the Holy Ghost now. For, if you don't, you can't come in.\n\n"
+        "And the second paragraph of this sermon stands on its own words entirely, which keeps it.").ok());
+    CHECK(lib->ImportSermon(
+        "downloads/1957/57_1211_Sirs_We_Would_See_Jesus.txt",
+        "Whoever who has his heart right with God, God will honor that person, because the people "
+        "of the world are watching the church and the living God they claim to serve.\n\n"
+        "And a second paragraph here is long enough to be kept by the importer, without fail.").ok());
+    CHECK(lib->ImportSermon(
+        "downloads/1947/47_0412_Faith_Is_The_Substance.txt",
+        "Faith is the substance of things hoped for, compelling every man to record what he has "
+        "seen and heard in this life among the people of God in the earth.\n\n"
+        "And its second paragraph is a little longer so that it survives the length filter.").ok());
+    CHECK(lib->IndexWithSearchEngine().ok());
+
+    // 1. The half-typed tail finds the "receive" paragraph — the bug's whole point.
+    auto halfTyped = lib->Search("compelling that you rec", 20);
+    CHECK(halfTyped.ok() && !halfTyped.value().empty());
+    bool foundReceive = false;
+    for (const auto& h : halfTyped.value())
+        foundReceive |= h.fullText.find("that you receive the Holy Ghost") != std::string::npos;
+    CHECK(foundReceive);
+
+    // 2. And it LEADS: the likeliest reading of "rec" (the one the corpus uses
+    //    most) is ranked above the merely possible one ("record").
+    CHECK(halfTyped.value()[0].fullText.find("you receive the Holy Ghost") != std::string::npos);
+    CHECK(halfTyped.value()[0].reference.rfind("59-1217", 0) == 0);
+
+    // 3. Every typed word still counts: a paragraph carrying only "that you" is
+    //    not an answer to a query that also typed "compelling".
+    auto withoutFirst = lib->Search("compelling his heart right", 20);
+    for (const auto& h : withoutFirst.value())
+        CHECK(h.fullText.find("compelling") != std::string::npos);
+
+    // 4. The same query with the word COMPLETE behaves identically (nothing about
+    //    a finished word changed).
+    auto complete = lib->Search("compelling that you receive", 20);
+    CHECK(complete.ok() && !complete.value().empty());
+    CHECK(complete.value()[0].fullText.find("you receive the Holy Ghost") != std::string::npos);
+
+    // 5. The padlock stays verbatim: locked, "rec" is not a word and the
+    //    half-typed query finds nothing — completion is exactly what it refuses.
+    auto locked = lib->Search("compelling that you rec", 20, /*exactWords=*/true);
+    CHECK(locked.ok() && locked.value().empty());
 }

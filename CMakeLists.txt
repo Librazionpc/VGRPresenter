@@ -52,6 +52,7 @@ message(STATUS "PresentationEngine target: ${CMAKE_SYSTEM_NAME} "
 # ---- Engine core (all systems from src/PresentationEngine/docs/specs/) ----
 set(BPS_CORE_SOURCES
     ${BPS_ROOT}/core/logging/Logger.cpp
+    ${BPS_ROOT}/core/recovery/DocumentRecovery.cpp
     ${BPS_ROOT}/core/config/ConfigurationManager.cpp
     ${BPS_ROOT}/core/services/ServiceManager.cpp
     ${BPS_ROOT}/core/events/EventBus.cpp
@@ -115,6 +116,9 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/adaptive/AdaptiveRuntime.cpp
     # Rendering Engine (Phase 6, docs/specs/17)
     ${BPS_ROOT}/modules/rendering/GraphicsBackends.cpp
+    # The scale filter both picture paths share (ImageScale.hpp): the rasterizer's
+    # scaled blits and the per-output frame resize.
+    ${BPS_ROOT}/modules/rendering/ImageScale.cpp
     ${BPS_ROOT}/modules/rendering/Scene.cpp
     ${BPS_ROOT}/modules/rendering/RenderObject.cpp
     ${BPS_ROOT}/modules/rendering/TextEngine.cpp
@@ -136,10 +140,11 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/presentation/PresentationCues.cpp
     ${BPS_ROOT}/modules/presentation/PresentationTimeline.cpp
     ${BPS_ROOT}/modules/presentation/PresentationNavigator.cpp
-    ${BPS_ROOT}/modules/presentation/ScriptureSlides.cpp
+    ${BPS_ROOT}/modules/presentation/BookFill.cpp
     ${BPS_ROOT}/modules/presentation/PresentationValidator.cpp
     ${BPS_ROOT}/modules/presentation/PresentationCompiler.cpp
     ${BPS_ROOT}/modules/presentation/SceneBuilder.cpp
+    ${BPS_ROOT}/modules/presentation/SlideRules.cpp
     ${BPS_ROOT}/modules/presentation/CompositorState.cpp
     ${BPS_ROOT}/modules/presentation/PresentationRuntime.cpp
     ${BPS_ROOT}/modules/presentation/PresentationSerializer.cpp
@@ -407,12 +412,18 @@ qt_add_executable(appVGRPresenterUI
     src/main.cpp
     qml/services/include/services/EventBus.h
     qml/services/EventBus.cpp
+    qml/services/include/services/CursorService.h
+    qml/services/CursorService.cpp
+    qml/services/include/services/CallTrace.h
+    qml/services/CallTrace.cpp
     qml/services/include/services/CrashHandler.h
     qml/services/CrashHandler.cpp
     qml/services/include/services/EngineBridge.h
     qml/services/EngineBridge.cpp
     qml/services/include/services/ShowConverter.h
     qml/services/ShowConverter.cpp
+    qml/services/include/services/StyleSpecBuilder.h
+    qml/services/StyleSpecBuilder.cpp
     qml/services/include/services/LiveOutputService.h
     qml/services/LiveOutputService.cpp
     qml/services/include/services/TelemetryService.h
@@ -450,6 +461,7 @@ qt_add_executable(appVGRPresenterUI
     qml/models/OutputListModel.cpp
     qml/models/include/models/StyleListModel.h
     qml/models/StyleListModel.cpp
+    qml/models/include/models/ChannelTrim.h
     qml/models/include/models/AudioInputListModel.h
     qml/models/AudioInputListModel.cpp
     qml/models/include/models/VideoSourceListModel.h
@@ -466,6 +478,16 @@ qt_add_executable(appVGRPresenterUI
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/Theme.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/AppCursor.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/Db.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/AppScale.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
+# The Edit stage's grid (754x428) and the mapping from it to a target frame — the
+# ONE definition every surface that draws a design block reads, so the canvas, a
+# library card, a thumbnail and a monitor tile cannot disagree about where a block
+# lands. The engine's half is in DesignLibrary.hpp (kStageWidth/kStageHeight).
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/StageGrid.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/MetadataFields.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
+# The hover tooltip's one source (who wants a tip / what it says) — the L/R
+# pills and the gain knob publish into it, the window-level ToolTipLayer draws it.
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/TipService.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/components/NotificationCenter.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 
 qt_add_qml_module(appVGRPresenterUI
@@ -574,3 +596,83 @@ target_include_directories(appVGRPresenterUI PRIVATE
     src
     qml/services/include qml/services/include/services
     qml/models/include qml/models/include/models)
+
+# =============================================================================
+# Lock-scope guard (tools/check_lock_scope.mjs) — part of the default build
+# =============================================================================
+# A lock held across a PAL/provider/cross-engine call — or across a
+# callback/event dispatch (EventBus::Publish, a listener notification, a stored
+# std::function) — is what turned a slow NDI/encoder/disk call into an app-wide
+# lock pile-up. The scan covers the feature modules, core/resources AND the
+# platform layer, whose waits are the OS's own (a device read, a Win32 wait
+# object, a socket, a capture callback) and are unbounded. The scan is a heuristic source pass but it is cheap (well under
+# a second over the ~290 module sources with node), so it runs on every build and
+# a NEW finding FAILS the build with `file:line (lock at :N)` plus the offending
+# source line — the offending file is printed, not buried in the middle of a
+# parallel build log.
+#
+# Waive a site (justification required, see AGENTS.md "Lock-scope guard") with
+# `// lock-ok: <reason>` on the flagged line. Disabling the guard for a whole
+# build is a last resort: -DBPS_ENABLE_LOCK_SCOPE_CHECK=OFF. The dispatch sites
+# that already existed are recorded in tools/lock_scope_baseline.json, so they
+# are reported as known debt while only NEW findings fail; after hoisting one out
+# of its lock, shrink the ledger with `node tools/check_lock_scope.mjs
+# --update-baseline`. Stale waivers (a lock-ok that no longer waives anything)
+# fail too.
+option(BPS_ENABLE_LOCK_SCOPE_CHECK
+    "Fail the build when a module lock is held across a blocking call or a dispatch" ON)
+
+if(BPS_ENABLE_LOCK_SCOPE_CHECK)
+    # node is wanted only by this guard; like the dev scripts' CMAKE_BIN/
+    # MINGW_BIN/QT_BIN, allow the checkout to override it without editing here.
+    find_program(BPS_NODE_EXE
+        NAMES node node.exe
+        HINTS ENV NODE_BIN
+        DOC "node runtime used by the lock-scope guard")
+    if(NOT BPS_NODE_EXE)
+        message(FATAL_ERROR
+            "check_lock_scope needs node, which was not found on PATH. Install node, "
+            "pass -DBPS_NODE_EXE=/path/to/node (or set NODE_BIN), or build once without "
+            "the guard: -DBPS_ENABLE_LOCK_SCOPE_CHECK=OFF")
+    endif()
+    # One scope variable, shared by the build gate and the CTest entry, so the
+    # two can never drift apart. Three roots: the feature modules,
+    # core/resources — ResourceManager's sampler held its own mutex across an
+    # EventBus dispatch whose subscriber re-enters the manager, which froze the
+    # GUI thread (a settings write waits on the AdaptiveRuntime lock the
+    # deadlocked sampler owns) far away from the bug — and the PLATFORM layer,
+    # where the waits are the operating system's own (a device read, a Win32 wait
+    # object, a socket, a capture callback) and have no bound at all: a lock held
+    # across one blocks every thread that needs it for as long as the driver
+    # takes. A list expands to one argument per root.
+    set(BPS_LOCK_SCOPE_TARGET
+        "${BPS_ROOT}/modules" "${BPS_ROOT}/core/resources" "${BPS_ROOT}/platform")
+
+    add_custom_target(lock_scope_check ALL
+        COMMAND "${BPS_NODE_EXE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_lock_scope.mjs"
+                ${BPS_LOCK_SCOPE_TARGET}
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "check_lock_scope: locks held across a blocking call or a dispatch"
+        VERBATIM)
+    # Named targets get the same gate, so `--target bps_unit_tests` or a release
+    # build of the app cannot skip the guard by not building `all`.
+    add_dependencies(appVGRPresenterUI lock_scope_check)
+    add_dependencies(bps_unit_tests lock_scope_check)
+
+    # Also registered with CTest, so a violation lands in the test report as a
+    # failing `lock_scope` test and CI can run the scan on its own —
+    # `ctest -R lock_scope` — without depending on the build graph. The
+    # WORKING_DIRECTORY matters: the guard resolves its baseline ledger relative
+    # to the current directory, so running from build/ would miss it and fail
+    # every baselined site. The entry follows the same ON/OFF as the build gate,
+    # so the documented "skip the guard for one build" escape hatch disables it in
+    # both places at once. TIMEOUT is a backstop: the scan takes well under a
+    # second, so anything near it means node is wedged, not that the tree is slow.
+    add_test(NAME lock_scope
+        COMMAND "${BPS_NODE_EXE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_lock_scope.mjs"
+                ${BPS_LOCK_SCOPE_TARGET}
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_tests_properties(lock_scope PROPERTIES
+        LABELS "lock-scope"
+        TIMEOUT 120)
+endif()

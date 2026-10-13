@@ -39,7 +39,9 @@ Column {
         text: root.label
         color: Theme.textSecondary
         font.family: Theme.fontFamily
-        font.pixelSize: Theme.textXs
+        // The field's caption is the same "subscript" family as a settings row's
+        // description (see Theme.textSub) — the unit suffix below stays textXs.
+        font.pixelSize: Theme.textSub
     }
 
     Rectangle {

@@ -37,9 +37,15 @@ public:
 
 private:
     DatabaseManager() = default;
-    Result<void> Persist();   // requires mutex_
+    // Serialize the in-memory documents to JSON text. Requires mutex_ held.
+    std::string SerializeLocked() const;
+    // Write JSON text through the PAL filesystem. No lock is held (callers
+    // hold writeMutex_ so snapshots stay ordered on disk); the disk write must
+    // never run under mutex_, which every other DB op also needs.
+    static Result<void> WriteFile(const std::string& filePath, const std::string& text);
 
     mutable std::mutex mutex_;
+    std::mutex writeMutex_;                      // serializes disk writes (outside mutex_)
     std::unordered_map<std::string, std::unordered_map<std::string, json::Value>> db_;
     std::string filePath_;                       // guarded by mutex_
     std::atomic<bool> initialized_{false};

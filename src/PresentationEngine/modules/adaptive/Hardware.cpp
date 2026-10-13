@@ -13,57 +13,67 @@
 namespace bps::adaptive {
 
 void HardwareProfiler::Refresh() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Gather from the PAL FIRST, with no lock held. Info/Sample/Monitor/Power/
+    // Environment are OS calls — a monitor enumeration can block on a sleeping
+    // panel or a hung display driver — and mutex_ is shared with every reader
+    // (Info/CoreCount/TotalRamBytes), so it must never be held across them.
+    HardwareInfo info;
     auto& platform = platform::PlatformAccessor::Get();
     auto sys = platform.Info();
-    info_.osName = sys.osName;
-    info_.osVersion = sys.osVersion;
-    info_.arch = sys.arch;
-    info_.coreCount = sys.coreCount > 0 ? sys.coreCount
-                                        : static_cast<unsigned>(std::thread::hardware_concurrency());
-    info_.totalRamBytes = sys.totalRamBytes;
+    info.osName = sys.osName;
+    info.osVersion = sys.osVersion;
+    info.arch = sys.arch;
+    info.coreCount = sys.coreCount > 0 ? sys.coreCount
+                                       : static_cast<unsigned>(std::thread::hardware_concurrency());
+    info.totalRamBytes = sys.totalRamBytes;
 
     // Rich telemetry (Snapshot) + monitors + power, all best effort.
     auto snap = platform.Sample();
-    info_.gpuVramTotalBytes = snap.gpuVramTotalBytes;
-    info_.gpuDetected = snap.gpuVramTotalBytes > 0;
-    info_.diskTotalBytes = snap.diskTotalBytes;
-    info_.diskFreeBytes = snap.diskFreeBytes;
-    info_.onBattery = snap.onBattery;
-    info_.batteryPercent = snap.batteryPercent;
-    info_.hasBattery = snap.batteryPercent >= 0;
+    info.gpuVramTotalBytes = snap.gpuVramTotalBytes;
+    info.gpuDetected = snap.gpuVramTotalBytes > 0;
+    info.diskTotalBytes = snap.diskTotalBytes;
+    info.diskFreeBytes = snap.diskFreeBytes;
+    info.onBattery = snap.onBattery;
+    info.batteryCharging = snap.batteryCharging;
+    info.batteryPercent = snap.batteryPercent;
+    info.hasBattery = snap.batteryPercent >= 0;
     // Package temperature, where the backend exposes one (Windows PDH thermal
     // zones). -1 keeps "not exposed", which is what a desktop/server is.
-    info_.thermalCelsius = snap.cpuTempC;
+    info.thermalCelsius = snap.cpuTempC;
 
     try {
         auto monitors = platform.Monitor().Enumerate();
-        info_.displayCount = static_cast<int>(monitors.size());
-        info_.maxRefreshRateHz = 0;
-        info_.hdrSupported = false;
+        info.displayCount = static_cast<int>(monitors.size());
+        info.maxRefreshRateHz = 0;
+        info.hdrSupported = false;
         for (const auto& m : monitors) {
             if (m.connected) {
-                info_.maxRefreshRateHz = std::max(info_.maxRefreshRateHz, m.refreshRateHz);
-                if (m.hdrSupported) info_.hdrSupported = true;
+                info.maxRefreshRateHz = std::max(info.maxRefreshRateHz, m.refreshRateHz);
+                if (m.hdrSupported) info.hdrSupported = true;
             }
         }
     } catch (...) {
-        info_.displayCount = 0;   // PAL backend may be minimal
+        info.displayCount = 0;   // PAL backend may be minimal
     }
 
     try {
         auto power = platform.Power().Current();
-        info_.hasBattery = power.hasBattery;
-        info_.onBattery = power.onBattery;
-        if (power.batteryPercent >= 0) info_.batteryPercent = power.batteryPercent;
+        info.hasBattery = power.hasBattery;
+        info.onBattery = power.onBattery;
+        info.batteryCharging = power.charging;
+        if (power.batteryPercent >= 0) info.batteryPercent = power.batteryPercent;
     } catch (...) {
     }
 
     // GPU name: only for the dashboard; never used for decisions.
     try {
-        info_.gpuName = platform.Environment().Current().gpuName;
+        info.gpuName = platform.Environment().Current().gpuName;
     } catch (...) {
     }
+
+    // Publish the finished view: the lock covers the assignment only.
+    std::lock_guard<std::mutex> lock(mutex_);
+    info_ = info;
 }
 
 namespace {

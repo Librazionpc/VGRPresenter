@@ -27,6 +27,40 @@ public:
     virtual Result<void> WriteBinary(std::string_view path, const std::vector<uint8_t>& data) = 0;
     virtual Result<void> Append(std::string_view path, std::string_view data) = 0;
 
+    // ---- Atomic replace: the ONE way the engine saves a file it owns -------
+    // Writes the bytes to a SIBLING temp file, checks they all landed, then
+    // renames the temp over `path`. A reader therefore sees either the previous
+    // complete file or the complete new one — never a truncated or zero-filled
+    // one. Writing the target IN PLACE is what left <dataDir>/kernel.json as
+    // 5973 bytes of NULs after an interrupted flush, and the next boot failed on
+    // the file it had just corrupted.
+    //
+    // Use it for every internal document the engine reads back: settings,
+    // project files, backups, library indexes, caches. Do NOT use it for
+    // user-facing exports (exporters, render output, packages), where the
+    // destination is the user's own choice and a plain Write is the honest op.
+    // Parent directories are created as needed.
+    virtual Result<void> WriteAtomic(std::string_view path, std::string_view data) = 0;
+    virtual Result<void> WriteBinaryAtomic(std::string_view path,
+                                           const std::vector<uint8_t>& data) = 0;
+
+    // The same guarantee for a file-to-file save: copy into a sibling temp,
+    // prove it landed whole, then swap. Used where the new file's bytes come
+    // from an existing one — a backup snapshot, promoting a crash-recovery file
+    // into place — because a copy interrupted halfway leaves a file that LOOKS
+    // like a complete backup or show and cannot be read.
+    virtual Result<void> CopyAtomic(std::string_view from, std::string_view to) = 0;
+
+    // Rename with a BOUNDED retry — the swap WriteAtomic performs. A rename
+    // onto or within a live-synced folder (OneDrive, Dropbox) transiently fails
+    // with EIO/EBUSY while the sync filter holds the file; the lock clears
+    // within a fraction of a second, so a few bounded attempts rescue the save
+    // (the batch import of 680 shows into a OneDrive library hit this on ~8% of
+    // writes). Exposed so hand-rolled savers that need extra ordering — see
+    // vgr::VgrFile, which parks the previous file as .bak first — share the one
+    // retry policy instead of each carrying their own copy.
+    virtual Result<void> RenameRetry(std::string_view from, std::string_view to) = 0;
+
     virtual Result<void> CreateDirectory(std::string_view path) = 0;
     virtual Result<void> CreateDirectories(std::string_view path) = 0;
     virtual Result<void> Remove(std::string_view path) = 0;      // file or empty dir

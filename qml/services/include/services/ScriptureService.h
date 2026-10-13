@@ -14,7 +14,7 @@ class QJSEngine;
 
 // The UI's window onto the ENGINE's scripture: the installed Bibles (bps::bible::BibleEngine), their books / chapters / verses,
 // reference lookup and search, and - the FreeShow way - the slides a chosen passage becomes when a scripture template is
-// filled with it (bps::presentation::BuildScriptureSlides). The rules (how a reference is written, how many verses a slide
+// filled with it (bps::presentation::FillBookSlides). The rules (how a reference is written, how many verses a slide
 // takes, the placeholders a template may use, what the options do) are the engine's; this hands the results to QML.
 //
 // Blocks come out in the Edit screen's block shape, so the Scripture tab's preview is drawn by the same DesignPreview as
@@ -40,16 +40,47 @@ public:
     Q_INVOKABLE QVariantList books(const QString &bibleId) const;
     // One chapter: [{ number, text, heading }]
     Q_INVOKABLE QVariantList chapter(const QString &bibleId, const QString &bookId, int chapter) const;
+    // Loads a chapter off the UI thread; stale requests are discarded.
+    Q_INVOKABLE void chapterAsync(const QString &bibleId, const QString &bookId, int chapter, int token);
     // "John 3:16", "Ps 23" -> { bookId, book, chapter, verseStart, verseEnd }, or {} when it is not a reference.
     Q_INVOKABLE QVariantMap resolve(const QString &text, const QString &bibleId) const;
     // Searches the verse text: [{ reference, bookId, book, chapter, verse, snippet }], best first.
-    Q_INVOKABLE QVariantList search(const QString &text, const QString &bibleId, int limit = 60) const;
+    // `exactWords` (the search boxes' padlock): every typed word must appear in the
+    // verse as a WHOLE word — the engine's own fuzzy/typo matching is filtered out
+    // here (its index has no exact switch), so "word" stops finding "words".
+    // `scopeBookId` + `scopeChapter` are the pane's CHAPTER LOCK: when the search
+    // is locked to the passage on screen, only that book's chapter is searched
+    // (Revelation 1's verses, not the rest of Revelation and not another book).
+    // Empty `scopeBookId` = the whole Bible; `scopeChapter` 0 = the whole book.
+    Q_INVOKABLE QVariantList search(const QString &text, const QString &bibleId, int limit = 60,
+                                    bool exactWords = false,
+                                    const QString &scopeBookId = QString(),
+                                    int scopeChapter = 0) const;
     // ASYNC search (the Quick-search pattern): the same rows on a worker thread
     // — the pill search pane runs this per keystroke and the GUI never blocks.
     // `token` = newest request wins; answers arrive as searchResultsReady(token, rows).
-    Q_INVOKABLE void searchAsync(const QString &text, const QString &bibleId, int limit, int token);
+    Q_INVOKABLE void searchAsync(const QString &text, const QString &bibleId, int limit, int token,
+                                 bool exactWords = false, const QString &scopeBookId = QString(),
+                                 int scopeChapter = 0);
     // "Genesis 1:1-3, 5" (the engine's way of writing it). No verses = the whole chapter.
     Q_INVOKABLE QString reference(const QString &book, int chapter, const QVariantList &verses) const;
+
+    // ---- PARALLEL VERSIONS (the "Scripture 2 / 3 / 4" layouts) ----------------
+    //
+    // The EXTRA Bibles shown BESIDE the selected one, in slot order: the first is
+    // {scripture2_*}, the second {scripture3_*}, the third {scripture4_*}. Kept in
+    // the session (so the choice comes back with the tab) and read by the fill,
+    // which gives every version the same verses of the same passage in its OWN
+    // wording — see BookFill's ParallelBible.
+    Q_INVOKABLE QStringList parallelBibles() const;
+    // Replace that selection. False when an id is not an installed Bible, or the
+    // list is longer than the four-Bible vocabulary — the caller can say so,
+    // instead of a layout quietly rendering empty columns.
+    Q_INVOKABLE bool setParallelBibles(const QStringList &bibleIds);
+    // Add or drop one (what a chip in the version picker does).
+    Q_INVOKABLE bool toggleParallelBible(const QString &bibleId);
+    // Is this id one of the extra versions? (the picker's tick)
+    Q_INVOKABLE bool isParallelBible(const QString &bibleId) const;
 
     // ---- scripture templates ----
     // The templates made for scripture: [{ id, name, color }] (the engine's own set plus the user's).
@@ -101,8 +132,11 @@ signals:
     // searchAsync's answer: token matches the request, rows are the hits
     // (search()'s shape). Stale tokens never emit.
     void searchResultsReady(int token, const QVariantList &rows);
+    void chapterReady(int token, const QString &bibleId, const QString &bookId,
+                      int chapter, const QVariantList &rows);
 
 private:
     std::atomic<int> latestSearchToken_{0};   // searchAsync: only the newest emits
+    std::atomic<int> latestChapterToken_{0};  // chapterAsync: only the newest emits
     explicit ScriptureService(QObject *parent = nullptr);
 };

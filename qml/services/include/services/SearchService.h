@@ -61,13 +61,20 @@ public:
 
     // Searches everything. At most `perKind` results per kind, best first; results
     // are grouped by kind in a fixed order. Empty/blank text -> {}.
-    Q_INVOKABLE QVariantList search(const QString &text, int perKind = 5) const;
+    // `exactWords` is the dialog's padlock: every typed word must appear VERBATIM
+    // as a whole word — no completion ("word" stops finding "words"), no inner
+    // substring, no typo correction. The sermons' words are matched exactly by the
+    // library itself; the Bible, songs, media and the local show/slide/setting
+    // surfaces have their fuzzy hits filtered out here.
+    Q_INVOKABLE QVariantList search(const QString &text, int perKind = 5,
+                                    bool exactWords = false) const;
     // ASYNC search: the same aggregation on a worker thread (the GUI never
     // blocks on a big query — "the" has ~1,200 candidates and a synchronous
     // call froze typing for hundreds of ms). `token` is the caller's identity:
     // only the LATEST request's results are emitted (a fast typist's older
     // keystrokes answer into the void), delivered as resultsReady(token, rows).
-    Q_INVOKABLE void searchAsync(const QString &text, int perKind, int token);
+    Q_INVOKABLE void searchAsync(const QString &text, int perKind, int token,
+                                 bool exactWords = false);
 
     // What the engine's word resolution would change about `text` — the same
     // resolution every search applies internally: incomplete words completed

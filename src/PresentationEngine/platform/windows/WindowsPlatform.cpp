@@ -226,6 +226,7 @@ Snapshot WindowsPlatform::Sample() {
         if (sp.BatteryFlag != 128 && sp.BatteryFlag != 255) {
             s.batteryPercent = sp.BatteryLifePercent <= 100 ? sp.BatteryLifePercent : -1;
             s.onBattery = (sp.ACLineStatus == 0);
+            s.batteryCharging = (sp.BatteryFlag == 8);        // 8 = charging
         }
     }
 

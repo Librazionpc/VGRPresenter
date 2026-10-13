@@ -63,6 +63,12 @@ struct DrawCommand {
     Color color;
     TextureId texture;
     Rect srcRect;               // source region (blit)
+    // Rounded-rect corner radius in DESTINATION pixels (DrawShape only; 0 =
+    // square corners). Carried through the generic command so a GPU backend can
+    // upload it the same way the software rasterizer uses it — the shape's
+    // radius is authored on the stage grid and scaled by the caller
+    // (SceneBuilder), so a backend only ever sees real pixels.
+    float cornerRadius = 0.0f;
     uint32_t shaderId = 0;      // 0 = default
     int effect = 0;             // EffectType
     float effectParam = 0.0f;

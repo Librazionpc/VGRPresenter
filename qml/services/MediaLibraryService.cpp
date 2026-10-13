@@ -1,3 +1,4 @@
+#include "services/CallTrace.h"
 #include "services/MediaLibraryService.h"
 
 #include "services/EngineBridge.h"
@@ -263,6 +264,7 @@ void MediaLibraryService::rescan(const QString &path)
 
 void MediaLibraryService::startScan(const QString &path)
 {
+    VGR_CALL_TRACE("MediaLibraryService.startScan");
     if (!library_)
         return;
     scanning_.insert(path);
@@ -283,5 +285,9 @@ void MediaLibraryService::startScan(const QString &path)
 
 void MediaLibraryService::shutdown()
 {
-    QThreadPool::globalInstance()->waitForDone(10000);
+    // BOUNDED: GUI thread, in aboutToQuit. A folder scan on a slow/network
+    // drive could otherwise hold the UI here for the full 10s — past Windows'
+    // ~5s hang threshold (AppHangB1 -> killed). Scans are safe to abandon at
+    // quit: each result is delivered through a queued call into this object.
+    (void)QThreadPool::globalInstance()->waitForDone(2000);
 }

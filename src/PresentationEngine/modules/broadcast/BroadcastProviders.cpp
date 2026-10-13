@@ -422,21 +422,24 @@ public:
     }
 
     Result<void> ShutdownProvider() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (find_ && api_.find_destroy) api_.find_destroy(find_);
-        find_ = nullptr;
-        for (auto& [id, inst] : sends_) if (api_.send_destroy) api_.send_destroy(inst);
-        sends_.clear();
-        sendNames_.clear();
-        for (auto& [id, inst] : recvs_) if (api_.recv_destroy) api_.recv_destroy(inst);
-        recvs_.clear();
-        if (api_.destroy) api_.destroy();
-        api_ = NdiApi{};
-        version_.clear();
-        if (libHandle_) {
-            (void)platform::PlatformAccessor::Get().Library().Unload(libHandle_);
+        platform::ILibrary::Handle handle = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (find_ && api_.find_destroy) api_.find_destroy(find_);
+            find_ = nullptr;
+            for (auto& [id, inst] : sends_) if (api_.send_destroy) api_.send_destroy(inst);
+            sends_.clear();
+            sendNames_.clear();
+            for (auto& [id, inst] : recvs_) if (api_.recv_destroy) api_.recv_destroy(inst);
+            recvs_.clear();
+            if (api_.destroy) api_.destroy();
+            api_ = NdiApi{};
+            version_.clear();
+            handle = libHandle_;
             libHandle_ = nullptr;
         }
+        // Unloading the vendor DLL can block; never hold the lock for it.
+        if (handle) (void)platform::PlatformAccessor::Get().Library().Unload(handle);
         return Ok();
     }
 
@@ -637,10 +640,15 @@ public:
     }
 
     Result<void> ShutdownProvider() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (libHandle_) (void)platform::PlatformAccessor::Get().Library().Unload(libHandle_);
-        libHandle_ = nullptr;
-        createIterator_ = nullptr;
+        platform::ILibrary::Handle handle = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            handle = libHandle_;
+            libHandle_ = nullptr;
+            createIterator_ = nullptr;
+        }
+        // Unloading the vendor DLL can block; never hold the lock for it.
+        if (handle) (void)platform::PlatformAccessor::Get().Library().Unload(handle);
         return Ok();
     }
 

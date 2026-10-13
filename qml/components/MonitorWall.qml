@@ -4,8 +4,6 @@ import VGRPresenterUI
 // The output monitor wall — ONE component, TWO hosts (Show screen right
 // column, Edit screen ITEMS tab). FreeShow's preview chrome, adapted:
 //
-//   [• Main Output] [• Stage]        <- output tabs (click = that output
-//   [  GO LIVE  ]                     becomes the on-air one)
 //   [ live frame | live frame ]      <- REAL frames from the engine preview
 //   [ < >  ▶  ⌫ Clear ]              <- transport: prev/next slide, clear
 //
@@ -55,9 +53,23 @@ Item {
     // live: "the icon is still selected... when there's no active show").
     readonly property bool hasRealOnAirContent: !!(LiveOutputService.onAirSlide.blocks
         && LiveOutputService.onAirSlide.blocks.length > 0)
+    // Deliberately does NOT count metering taps: a meter TAP is an observation,
+    // not content, and this app holds taps that have nothing to do with the
+    // wall at all — an audio row being configured in Settings ·
+    // Audio & Video meters its device so the strips move while you aim it, and
+    // every source card in Media can hold one. Counting those put the toolbar on
+    // screen (and lit the audio button) with nothing taken, nothing live and
+    // nothing on air, and then "Clear all" could never clear it: there was no
+    // wall-side state to clear, the tap belonged to another screen. What the
+    // wall reports is what the WALL is doing.
     readonly property bool anythingOnAir: root.live || root.inputTaken || root.staged
         || LiveOutputService.mediaOnAir || LiveOutputService.activeOverlays.length > 0
-        || EngineBridge.anyAudioMetering
+        // ...AND while a Clear all is still undoable. This is the one entry
+        // here that is not "something is on the wall" — but it has to be, or
+        // Clear all would hide the very toolbar that holds its own undo the
+        // instant it ran: the button clearing everything is what takes the
+        // toolbar down, so "Show all" could never be reached.
+        || LiveOutputService.canRestoreCleared
 
     // External contract: hosts position content under the wall and drive
     // the page dots from these.
@@ -67,108 +79,30 @@ Item {
         wall.goTo(page)
     }
 
-    height: tabs.height + wall.height + (toolbar.visible ? toolbar.height : 0)
-
-    // ---- Output tabs (FreeShow's PreviewOutputs tab strip) -----------------
-    // GO LIVE lives in the app header now (user call) — the wall keeps only
-    // the per-output tabs.
-    Item {
-        id: tabs
-        anchors.horizontalCenter: parent.horizontalCenter
-        y: 0
-        width: wall.pageW
-        height: wall.rowsPerPage * 26
-        clip: true
-
-        Repeater {
-            model: root._wallRev >= 0 ? OutputListModel.rowCount() : 0
-
-            delegate: Rectangle {
-                id: tab
-                required property int index
-                // getOutput() is an invokable snapshot, so explicitly depend
-                // on the model's data revision to refresh enabled/active state.
-                readonly property var out: {
-                    root._wallRev
-                    return OutputListModel.getOutput(index)
-                }
-                readonly property bool isCurrent: tab.out.active === true
-                readonly property int slot: index % wall.perPage
-                readonly property int page: Math.floor(index / wall.perPage)
-                readonly property int columns: wall.columnsForPage(page)
-                readonly property real tileWidth: wall.slotWidthForPage(page)
-
-                x: page * wall.pageW + (slot % columns) * (tileWidth + wall.columnGap) - wall.contentX
-                y: Math.floor(slot / columns) * 26
-                width: tileWidth
-                height: 26
-                radius: 0
-                color: isCurrent ? Theme.activeBg : (tabArea.containsMouse ? Theme.hoverBg : Theme.panelBg)
-                border.color: isCurrent ? Theme.borderSubtle : Theme.border
-                border.width: 1
-
-                Row {
-                    anchors.centerIn: parent
-                    spacing: 6
-
-                    // State dot: green = the selected active output, grey =
-                    // inactive. Enabled/disabled controls whether the tab can
-                    // be selected; it is not the on-air status.
-                    Rectangle {
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: 7; height: 7; radius: 3.5
-                        color: tab.isCurrent ? Theme.success : Theme.textMuted
-                    }
-                    Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: Math.min(implicitWidth, tab.width - 30)
-                        text: tab.out.name
-                        color: tab.isCurrent ? Theme.textPrimary : Theme.textSecondary
-                        elide: Text.ElideRight
-                        font.family: "Segoe UI"
-                        font.pixelSize: 11
-                        font.bold: tab.isCurrent
-                    }
-                }
-
-                // Disabled screens can't take air — the click is inert.
-                MouseArea {
-                    id: tabArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: tab.out.isEnabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor
-                    onClicked: if (tab.out.isEnabled) {
-                        OutputListModel.setActive(tab.index)
-                        root.goTo(Math.floor(tab.index / wall.perPage))
-                    }
-                }
-            }
-        }
-    }
+    height: wall.height + Math.max(wall.pageCount > 1 ? 12 : 0,
+        toolbar.visible ? (wall.pageCount > 1 ? 22 : 8) + toolbar.height : 0)
 
     // ---- Paged tile wall -----------------------------------------------------
     Flickable {
         id: wall
 
         anchors.horizontalCenter: parent.horizontalCenter
-        y: tabs.height
+        y: 0
 
         readonly property int count: root._wallRev >= 0 ? OutputListModel.rowCount() : 0
-        // Page capacity: a lone output gets a hero page of its own.
+        // Page capacity: previews are grouped four to a page.
         readonly property int perPage: count === 1 ? 1 : 4
         readonly property int pageCount: Math.max(1, Math.ceil(count / perPage))
-        readonly property real pageW: 376
+        readonly property real pageW: root.width
         readonly property real columnGap: 0
-        // Each page sizes itself to its own roster. A lone output fills the
-        // page; two use two columns; three use three columns; four use 2×2.
-        // This also lets a partial final page grow (for example output 5).
+        // Each page uses a consistent two-column grid when it has multiple
+        // previews. A lone output fills its page.
         function itemsOnPage(page) {
             return Math.max(0, Math.min(perPage, count - page * perPage))
         }
         function columnsForPage(page) {
             const items = itemsOnPage(page)
             if (items <= 1) return 1
-            if (items === 3) return 3
             return 2
         }
         function slotWidthForPage(page) {
@@ -188,7 +122,7 @@ Item {
         readonly property int columns: columnsForPage(currentPage)
         readonly property int rowsPerPage: rowsForPage(currentPage)
 
-        width: 376
+        width: root.width
         height: {
             let tallestPage = 0
             for (let page = 0; page < pageCount; ++page)
@@ -233,6 +167,11 @@ Item {
 
             delegate: OutputMonitorTile {
                 required property int index
+                // Hook for the style-background self-test, which reads a tile's
+                // own styleBg before and after a style gains a background
+                // image (run_style_bg_test.sh) — proof the tile repaints, not
+                // just that the model changed.
+                objectName: "selfTestMonitorTile" + index
                 readonly property int page: wall.count === 1 ? 0 : Math.floor(index / wall.perPage)
                 readonly property int slot: wall.count === 1 ? 0 : index % wall.perPage
                 readonly property int columns: wall.columnsForPage(page)
@@ -297,7 +236,7 @@ Item {
         visible: root.anythingOnAir
         anchors.horizontalCenter: parent.horizontalCenter
         y: wall.y + wall.height + (wall.pageCount > 1 ? 22 : 8)
-        width: 376
+        width: root.width
         height: transportRow.height + 12
         radius: 8
         color: Theme.panelBg
@@ -340,17 +279,17 @@ Item {
                     if (!toolBtn.enabled2) return Theme.inset
                     if (toolBtn.danger)
                         return toolBtn.active
-                            ? (toolArea.containsMouse ? Qt.alpha(Theme.danger, 0.20) : Qt.alpha(Theme.danger, 0.15))
-                            : (toolArea.containsMouse ? Theme.chip : Theme.inset)
-                    return toolArea.containsMouse ? Theme.chip : Theme.inset
+                            ? (toolArea.hovered ? Qt.alpha(Theme.danger, 0.20) : Qt.alpha(Theme.danger, 0.15))
+                            : (toolArea.hovered ? Theme.chip : Theme.inset)
+                    return toolArea.hovered ? Theme.chip : Theme.inset
                 }
                 border.color: {
                     if (!toolBtn.enabled2) return Theme.chip
                     if (toolBtn.danger)
                         return toolBtn.active
-                            ? (toolArea.containsMouse ? Qt.alpha(Theme.danger, 0.40) : Qt.alpha(Theme.danger, 0.20))
-                            : (toolArea.containsMouse ? Qt.alpha(Theme.danger, 0.22) : Qt.alpha(Theme.danger, 0.14))
-                    return toolArea.containsMouse ? Theme.borderSubtle : Theme.chip
+                            ? (toolArea.hovered ? Qt.alpha(Theme.danger, 0.40) : Qt.alpha(Theme.danger, 0.20))
+                            : (toolArea.hovered ? Qt.alpha(Theme.danger, 0.22) : Qt.alpha(Theme.danger, 0.14))
+                    return toolArea.hovered ? Theme.borderSubtle : Theme.chip
                 }
                 border.width: 1
                 Behavior on color { ColorAnimation { duration: 100 } }
@@ -365,6 +304,52 @@ Item {
             }
             HoverHandler { id: toolArea; cursorShape: toolBtn.enabled2 ? Qt.PointingHandCursor : Qt.ArrowCursor }
             TapHandler { onTapped: if (toolBtn.enabled2) toolBtn.picked() }
+        }
+
+        // A full-width row button — the Clear all / Show all PAIR below. Same
+        // accent-tinted pill the old full-width Clear all was, plus the
+        // disabled dimming the per-layer row's buttons use, so "Show all" with
+        // nothing to bring back reads as unavailable rather than as a control
+        // that silently does nothing.
+        component RowButton: Item {
+            id: rowBtn
+            property string icon: ""
+            property string caption: ""
+            property color tint: Theme.dangerLight
+            property bool enabled2: true
+            signal picked()
+            height: 28
+            Rectangle {
+                anchors.fill: parent; radius: 8
+                color: !rowBtn.enabled2 ? Theme.inset
+                     : rowArea.hovered ? Qt.alpha(Theme.accent, 0.18)
+                                                     : Qt.alpha(Theme.accent, 0.11)
+                border.color: !rowBtn.enabled2 ? Theme.chip
+                            : rowArea.hovered ? Qt.alpha(Theme.accent, 0.40)
+                                                           : Qt.alpha(Theme.accent, 0.20)
+                border.width: 1
+                Behavior on color { ColorAnimation { duration: 100 } }
+            }
+            Row {
+                anchors.centerIn: parent
+                spacing: 6
+                IconGlyph {
+                    name: rowBtn.icon
+                    color: rowBtn.enabled2 ? rowBtn.tint : Theme.textMuted
+                    width: 13; height: 13
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+                Text {
+                    text: rowBtn.caption
+                    color: rowBtn.enabled2 ? rowBtn.tint : Theme.textMuted
+                    font.family: "Segoe UI"
+                    font.pixelSize: 12
+                    font.weight: Font.Medium
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+            }
+            HoverHandler { id: rowArea; cursorShape: rowBtn.enabled2 ? Qt.PointingHandCursor : Qt.ArrowCursor }
+            TapHandler { onTapped: if (rowBtn.enabled2) rowBtn.picked() }
         }
 
         Column {
@@ -440,47 +425,39 @@ Item {
                 }
             }
 
-            // Clear all (ClearButtons' red full-width clear.all).
-            Item {
+            // Clear all + its undo (ClearButtons' red full-width clear.all,
+            // split in two now).
+            //
+            // WHY AN UNDO EXISTS: Clear all is the wall's one destructive
+            // control, and it used to be a dead end — whatever it took off the
+            // monitor was gone ("the clear all button should have showall or
+            // something so when it click ... it bring the things back"). The
+            // whole action and its snapshot now live behind ONE service call,
+            // so the two can't drift apart; the button no longer runs the four
+            // clears itself.
+            Row {
                 width: parent.width; height: 28
-                Rectangle {
-                    anchors.fill: parent; radius: 8
-                    color: clearAllArea.containsMouse ? Qt.alpha(Theme.accent, 0.18) : Qt.alpha(Theme.accent, 0.11)
-                    border.color: clearAllArea.containsMouse ? Qt.alpha(Theme.accent, 0.40) : Qt.alpha(Theme.accent, 0.20)
-                    border.width: 1
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                spacing: 6
+
+                RowButton {
+                    width: (parent.width - parent.spacing) / 2
+                    icon: "clearIcon"
+                    caption: qsTr("Clear all")
+                    // The one destructive action on this bar — it keeps the
+                    // red-ish tint it always had. Never touches GO LIVE/STOP:
+                    // live_ is the ONE thing only the user's own GO LIVE/STOP
+                    // press controls (see LiveOutputService::clearAll).
+                    onPicked: LiveOutputService.clearAll()
                 }
-                Row {
-                    anchors.centerIn: parent
-                    spacing: 6
-                    IconGlyph { name: "clearIcon"; color: Theme.dangerLight; width: 13; height: 13; anchors.verticalCenter: parent.verticalCenter }
-                    Text { text: qsTr("Clear all"); color: Theme.dangerLight; font.family: "Segoe UI"; font.pixelSize: 12; font.weight: Font.Medium; anchors.verticalCenter: parent.verticalCenter }
-                }
-                HoverHandler { id: clearAllArea; cursorShape: Qt.PointingHandCursor }
-                TapHandler {
-                    onTapped: {
-                        // A taken input is one of the things "Clear all"
-                        // clears — releasing it here (without leaving the
-                        // wall for the Media pane) is the discoverable path.
-                        if (LiveOutputService.inputLabel !== "")
-                            LiveOutputService.clearInput()
-                        if (LiveOutputService.activeOverlays.length > 0)
-                            LiveOutputService.clearAllOverlays()
-                        // Never touches GO LIVE/STOP itself anymore — same
-                        // rule as every per-layer icon in this row now:
-                        // live_ is the ONE thing only the user's own GO
-                        // LIVE/STOP press controls. Clears the on-air SLIDE
-                        // content instead (same as the book icon), leaving
-                        // the output live and showing the style's own
-                        // background in its place.
-                        if (root.hasRealOnAirContent)
-                            LiveOutputService.clearOnAirSlide()
-                        // A STAGED pick (double-clicked, not yet committed
-                        // by GO LIVE) is independent of live_ — it kept
-                        // showing in the tile after Clear All otherwise.
-                        if (root.staged)
-                            LiveOutputService.clearStaged()
-                    }
+                RowButton {
+                    width: (parent.width - parent.spacing) / 2
+                    icon: "layers"
+                    caption: qsTr("Show all")
+                    // Lit only while a Clear all is undoable; consumed by the
+                    // press, so the pair can't be pressed twice for one clear.
+                    enabled2: LiveOutputService.canRestoreCleared
+                    tint: Theme.textPrimary
+                    onPicked: LiveOutputService.restoreCleared()
                 }
             }
 
@@ -546,20 +523,29 @@ Item {
                 // input/bus meter tap (the Media pane's audio/bus double-
                 // click interim — see MediaLibraryPane.qml's onDoubleClicked
                 // comment; it's what's actually moving the tile's L/R
-                // meters in that case). anyInputMetering, not the broader
-                // anyAudioMetering: that also covers the program-mix tap
-                // every active/live tile runs automatically regardless of
-                // whether there is any real audio, which would light this
-                // button up any time the show is simply live.
+                // meters in that case). anyInputMetering, i.e. a tap somebody
+                // actually asked for — never "a meter is running somewhere",
+                // which would light this button up any time the show is simply
+                // live (that broader reading used to include the program-mix
+                // meter, now removed with the engine-audio path).
                 ToolButton {
                     width: parent.btnW; height: 30
                     icon: "audio"
                     danger: true
+                    // Audio CONTENT the wall is playing: a taken audio file, or a
+                    // taken input. It used to also light on anyInputMetering —
+                    // "a tap is running somewhere in the app" — which is how it
+                    // came on while a settings row was merely being set up, and
+                    // how it stayed on through Clear all (see anythingOnAir).
                     enabled2: (LiveOutputService.mediaOnAir && LiveOutputService.mediaIsAudio)
-                              || EngineBridge.anyInputMetering
+                              || root.inputTaken
                     onPicked: {
                         if (LiveOutputService.mediaOnAir) LiveOutputService.clearMedia()
-                        EngineBridge.stopAllInputMeters()
+                        // Releasing all input taps here also stopped meters
+                        // owned by the Media pane, while its cards still
+                        // appeared to be monitoring. Settings reads those
+                        // same shared snapshots, so leave their taps alone;
+                        // LiveOutputService releases only its own media take.
                     }
                 }
                 ToolButton {
@@ -585,5 +571,6 @@ Item {
     // same expression as a binding keeps the recompute-on-show intent without
     // killing the live dependency on toolbar.visible.
     onVisibleChanged: if (visible)
-        root.height = Qt.binding(() => tabs.height + wall.height + (toolbar.visible ? toolbar.height : 0))
+        root.height = Qt.binding(() => wall.height + Math.max(wall.pageCount > 1 ? 12 : 0,
+            toolbar.visible ? (wall.pageCount > 1 ? 22 : 8) + toolbar.height : 0))
 }

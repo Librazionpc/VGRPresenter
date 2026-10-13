@@ -27,6 +27,21 @@ struct RenderFrameView {
     const uint32_t* pixels = nullptr;   // Color::Pack format (0xAABBGGRR)
 };
 
+// THE OUTPUT FRAME RATE RULE — what a provider will accept as a cadence, and
+// what it falls back to when the requested one is unusable. ONE home: the NDI
+// provider's own guard is this, and the app's NDI send clock asks for the same
+// answer instead of re-stating the bound (it used to spell out "0 < fps <= 240"
+// in two places beside this one — a clock and a provider that disagree about
+// the accepted rate is a feed that runs at the wrong cadence, or stops).
+inline constexpr float kMaxOutputFrameRateHz = 240.0f;
+inline constexpr float kDefaultOutputFrameRateHz = 30.0f;
+
+inline float AcceptedOutputFrameRate(float requestedHz)
+{
+    return (requestedHz > 0.0f && requestedHz <= kMaxOutputFrameRateHz)
+        ? requestedHz : kDefaultOutputFrameRateHz;
+}
+
 // --- Null provider: no displays. The engine still works (18 §Display Independence).
 class NullDisplayProvider final : public IDisplayProvider {
 public:
@@ -139,6 +154,14 @@ public:
 
 private:
     mutable std::mutex mutex_;
+    // Serializes FRAME SENDS only, so mutex_ is never held across the
+    // BroadcastEngine call below. An SDK send takes milliseconds and mutex_ is
+    // what Probe/Enumerate/SetFrameRate also take — a hot-plug tick must not
+    // queue behind an in-flight frame (the captured DisplayEngine pile-up), and
+    // holding it inverted the lock order against BroadcastEngine's own mutex.
+    // This lock still guarantees the copy+send atomicity the sendBuffer_
+    // lifetime contract needs.
+    mutable std::mutex sendMutex_;
     std::vector<DisplayDevice> devices_;
     std::string senderName_ = "VGR Program";
     float frameRate_ = 30.0f;       // advertised fps (SetFrameRate; legacy default)

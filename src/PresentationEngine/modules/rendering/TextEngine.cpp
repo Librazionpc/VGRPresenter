@@ -469,16 +469,38 @@ RgbaImage FontManager::BuildSystemAtlas(const std::string& family, float sizePx,
     }
     const int scW = static_cast<int>(cellW + 1.5f);
     const int scH = static_cast<int>(cellH + 1.5f);
+    // The MEASURE gives the advance box (GDI+'s typographic format reports
+    // X=0/Y=0 with Width = the real advance — verified against GDI's own
+    // GetCharWidth32), but some ink lands OUTSIDE it: round letters overshoot
+    // their side bearings, and display faces can run their ink PAST the
+    // advance ("TT Nooks Trial"'s 'W' rasterizes 98px wide at size 90 while
+    // its advance is 95.85). A cell equal to the advance box therefore cut
+    // that ink off — the glyph looked clipped/narrow on the engine-rendered
+    // outputs (NDI/HDMI read the engine's frames), which is why they read
+    // differently from the QML preview drawn by Qt's own text stack. The cell
+    // is the advance box PLUS this pad, and the pad offset is published as
+    // the glyph's bearing so the painter puts the advance origin back on the
+    // pen (see RenderEngine::DrawTextObject) — painted position unchanged,
+    // only what the cell was allowed to keep.
+    constexpr int kCellPad = 3;
+    const int cellPx = scW + kCellPad * 2;   // sampled cell size (advance + pad)
+    const int cellPy = scH + kCellPad * 2;
     const int cols = 16;
     const int rows = 6;   // covers 96 glyphs (32..126), same layout as BuildAtlas
-    // Cell gap: GDI+ glyph ink spills ~1-2px past its measured advance/height
-    // (antialiasing + overshoot). The old 1px packing let that spill cross
-    // into the NEIGHBOR cell's blit region — every glyph that followed a
-    // wide-ink character carried a small foreign tick (the stray
-    // "apostrophe" marks under ti/nt/ro in live text). 8px absorbs it.
-    constexpr int kCellGap = 8;
+    // Cell gap: GDI+ glyph ink spills past its measured advance/height
+    // (antialiasing + overshoot), and a few glyphs poke LEFT of their own
+    // origin — 'j'/'f' swing their descender/hook back under the previous
+    // character (measured: 9px left of the origin at size 90, i.e. ~0.10em).
+    // The old 1px packing let that spill cross into the NEIGHBOR cell's blit
+    // region — every glyph that followed such a character carried a small
+    // foreign tick (the stray "apostrophe" marks under ti/nt/ro in live text).
+    // The gap therefore has to SCALE with the raster size: a fixed 8px absorbs
+    // it at 90px and is crossed again at 200px, where the same poke is 20px.
+    // 0.12em covers the measured poke with margin.
+    constexpr int kMinCellGap = 8;
+    const int kCellGap = std::max(kMinCellGap, static_cast<int>(sizePx * 0.12f));
 
-    Gdiplus::Bitmap sheet(cols * (scW + kCellGap), rows * (scH + kCellGap), PixelFormat32bppARGB);
+    Gdiplus::Bitmap sheet(cols * (cellPx + kCellGap), rows * (cellPy + kCellGap), PixelFormat32bppARGB);
     Gdiplus::Graphics draw(&sheet);
     draw.Clear(Gdiplus::Color(0, 0, 0, 0));
     draw.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
@@ -487,8 +509,8 @@ RgbaImage FontManager::BuildSystemAtlas(const std::string& family, float sizePx,
 
     int cell = 0;
     for (int cp = 32; cp <= 126 && cell < cols * rows; ++cp, ++cell) {
-        const int cx = (cell % cols) * (scW + kCellGap);
-        const int cy = (cell / cols) * (scH + kCellGap);
+        const int cx = (cell % cols) * (cellPx + kCellGap);
+        const int cy = (cell / cols) * (cellPy + kCellGap);
         // The apostrophe cell draws the TYPOGRAPHIC U+2019 glyph, not the
         // ASCII straight quote. FoldToAtlasAscii maps every ’ the transcripts
         // use onto 0x27 so the byte-wise draw loop always hits the atlas — but
@@ -501,14 +523,23 @@ RgbaImage FontManager::BuildSystemAtlas(const std::string& family, float sizePx,
         // SOMETHING for the folded apostrophe, and the measure pass above
         // made the identical choice.
         const wchar_t ch = cp == 0x27 ? quote : static_cast<wchar_t>(cp);
-        draw.DrawString(&ch, 1, font.get(), Gdiplus::PointF(static_cast<float>(cx), static_cast<float>(cy)),
+        // The glyph is drawn at the ADVANCE origin (cell + pad) and the whole
+        // cell — pad included — is sampled, so ink that overshoots the advance
+        // is kept.
+        draw.DrawString(&ch, 1, font.get(),
+                        Gdiplus::PointF(static_cast<float>(cx + kCellPad),
+                                        static_cast<float>(cy + kCellPad)),
                         &TightFormat(), &white);
         FontGlyph g;
         g.codepoint = static_cast<uint8_t>(cp);
         g.x = cx;
         g.y = cy;
-        g.width = scW;
-        g.height = scH;
+        g.width = cellPx;
+        g.height = cellPy;
+        // Cell origin relative to the pen: negative = the cell starts LEFT/ABOVE
+        // the advance origin (the pad), so the painter re-anchors by this.
+        g.bearingX = -kCellPad;
+        g.bearingY = -kCellPad;
         g.advance = static_cast<int>(advances[static_cast<uint8_t>(cp)] + 0.5f);
         outGlyphs[static_cast<uint8_t>(cp)] = g;
     }

@@ -87,7 +87,7 @@ Result<void> SessionManager::Save() {
     o["presentationsOpened"] = json::Value::Number(static_cast<double>(info_.presentationsOpened));
     o["savesPerformed"] = json::Value::Number(static_cast<double>(info_.savesPerformed));
     o["errorsEncountered"] = json::Value::Number(static_cast<double>(info_.errorsEncountered));
-    return DatabaseManager::Instance().Put("session", "current", json::Value(std::move(o)));
+    return DatabaseManager::Instance().Put("session", "current", json::Value(std::move(o)));  // lock-ok: in-memory map write
 }
 
 Result<void> SessionManager::Load() {

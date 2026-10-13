@@ -2,10 +2,55 @@
 // Split from tests/unit/main.cpp so a single phase can run alone:
 //   ./bps_unit_tests rendering
 #include "TestHarness.hpp"
+#include "modules/rendering/ImageScale.hpp"
 #include "modules/rendering/PngCodec.hpp"
 
 #include <fstream>
 
+// Glyph-atlas TEXTURE identity. Two styles whose pixel sizes collide under a
+// truncated font-atlas texture name (88.42 and 88.62 both truncate to "88")
+// land in DIFFERENT RenderCache buckets (int(size+0.5) -> 88 and 89) and so
+// have DIFFERENT cell geometry (cellPx 91 vs 92, atlas 1616x846 vs 1632x846).
+// Sharing one uploaded texture made the second style sample the first style's
+// atlas with its OWN per-glyph source rectangles, shifting every cell by its
+// column index (source x = col*(cellPx+gap)) — a round vowel like 'o'
+// (column 15) visibly narrowed/garbled while early-column letters looked fine.
+// The fix folds the rounded size AND the atlas dimensions into the texture
+// name; this asserts the second style uploads its OWN texture, not a reuse.
+void TestGlyphAtlasTextureIdentity() {
+    auto& engine = r::RenderEngine::Instance();
+    CHECK(engine.Initialize().ok());
+    CHECK(engine.SetBackend("software").ok());
+    r::FontManager probe;
+    probe.RegisterBuiltin();
+    if (!probe.HasSystemFont("Segoe UI")) return;   // Windows-only assertion
+
+    const auto makeScene = [&](const std::string& id, float size) {
+        CHECK(engine.CreateScene(id, id, r::Size(640, 200)).ok());
+        CHECK(engine.AddLayer(id, r::Layer("t", "Text", r::LayerKind::Text, 1)).ok());
+        auto t = std::make_shared<r::TextObject>("t" + id, "Body", "o");
+        t->SetBounds(r::Rect(0, 0, 640, 200));
+        r::TextStyle ts;
+        ts.fontId = "Segoe UI";
+        ts.size = size;
+        ts.color = r::Color::White();
+        t->AddComponent(r::MakeTextStyle(ts));
+        CHECK(engine.AddObject(id, t, "t").ok());
+    };
+    makeScene("gaA", 88.42f);
+    makeScene("gaB", 88.62f);
+
+    CHECK(engine.Render("gaA").ok());
+    const uint32_t afterA = engine.Stats().textureCount;
+    CHECK(engine.Render("gaB").ok());
+    const uint32_t afterB = engine.Stats().textureCount;
+    // The colliding size must add a texture of its own: under the old name the
+    // second render reused the first atlas and this delta was 0.
+    CHECK(afterB == afterA + 1);
+
+    CHECK(engine.DestroyScene("gaA").ok());
+    CHECK(engine.DestroyScene("gaB").ok());
+}
 void TestRenderTypes() {
     // Color pack/unpack round trip (0xAABBGGRR native little-endian).
     r::Color c(0.5f, 0.25f, 1.0f, 0.75f);
@@ -297,6 +342,86 @@ void TestRenderText() {
     CHECK(!atlas.empty() && atlas.width > 0 && atlas.height > 0);
     CHECK(!glyphs.empty());
     CHECK(glyphs.count(static_cast<uint8_t>('A')) == 1);
+
+    // What a SYSTEM-font atlas has to guarantee for the engine's distributed
+    // frame (the pixels NDI/HDMI carry, which the QML tiles show only after
+    // Qt downscales them) to agree with what the preview implies:
+    //   (a) the pen step the painter takes for a glyph IS the advance the
+    //       layout measured — FontManager's typographic measure reports the
+    //       real advance (GDI+'s X=0/Y=0, Width=advance; checked against GDI
+    //       GetCharWidth32 outside the tests: they agree within a pixel), so a
+    //       drift here would re-space every painted line, and
+    //   (b) each cell holds its glyph's COMPLETE ink — nothing cut at the
+    //       cell's edges and nothing of that glyph left lying in the gap beside
+    //       it. Ink overshoots the advance for round letters and for display
+    //       faces ("TT Nooks Trial"'s 'W' rasterizes 98px wide at size 90
+    //       against a 95.85px advance), and the pre-fix cell WAS the advance
+    //       box, so that overshoot was cut — the clipped look reported on the
+    //       engine-rendered outputs.
+#ifdef _WIN32
+    for (const char* fam : {"Segoe UI", "Arial", "TT Nooks Trial"}) {
+        if (!fm.HasSystemFont(fam))
+            continue;
+        std::map<uint8_t, r::FontGlyph> sys;
+        const auto sysAtlas = fm.BuildSystemAtlas(fam, 90.0f, false, false, sys);
+        CHECK(!sysAtlas.empty() && !sys.empty());
+        CHECK(sys.size() == 95);   // ASCII 32..126
+        const std::string probeChars = "aoimtruWHoj'g";
+        // Widest advance the layout can hand this font at this size — the cell
+        // has to be at least this wide PLUS the atlas's own margin, because the
+        // sampled cell is shared by every glyph.
+        float maxAdvance = 0.0f;
+        for (char ch : probeChars)
+            maxAdvance = std::max(maxAdvance, fm.SystemCharAdvance(fam, 90.0f, false, false,
+                                                                   static_cast<uint8_t>(ch)));
+        CHECK(maxAdvance > 0.0f);
+        int checked = 0;
+        for (char ch : probeChars) {
+            const auto it = sys.find(static_cast<uint8_t>(ch));
+            if (it == sys.end())
+                continue;
+            const r::FontGlyph& gl = it->second;
+            // (a) the step the painter takes == the advance the layout measured
+            // (the atlas stores whole pixels, so 1px of rounding is expected).
+            const float measured = fm.SystemCharAdvance(fam, 90.0f, false, false,
+                                                        static_cast<uint8_t>(ch));
+            CHECK(measured > 0.0f);
+            CHECK(std::abs(static_cast<float>(gl.advance) - measured) <= 1.0f);
+            // (b) THE CELL IS THE ADVANCE BOX PLUS A MARGIN, and the painter is
+            // told where that margin sits (bearing) so it can put the advance
+            // origin back on the pen. Asserting the EXTRA WIDTH is what pins the
+            // clipped-glyph regression: with a cell equal to the advance box
+            // (the pre-fix geometry) the widest glyph's cell is only ~1.5px
+            // wider than its own advance, and any ink overshooting the advance
+            // — round-letter overshoot, display faces like TT Nooks Trial's 'W'
+            // (98px of ink against a 95.85px advance) — was cut off in the
+            // distributed frame.
+            CHECK(static_cast<float>(gl.width) - gl.advance >= 6.0f);
+            CHECK(static_cast<float>(gl.width) >= maxAdvance + 2.0f);
+            CHECK(gl.height > 0);
+            // The cell starts up-left of the pen by exactly the atlas margin, and
+            // the painter must re-anchor by it (RenderEngine::DrawTextObject) —
+            // a bearing left at 0 would paint every glyph one margin too low-right.
+            CHECK(gl.bearingX < 0 && gl.bearingY < 0);
+            // (c) the cell actually holds ink, and the glyph ink sits INSIDE it
+            // (a cell sampled from empty atlas space renders an invisible glyph).
+            int inside = 0;
+            for (int y = 0; y < gl.height; ++y)
+                for (int x = 0; x < gl.width; ++x) {
+                    const int px = gl.x + x, py = gl.y + y;
+                    if (px < 0 || py < 0 || px >= sysAtlas.width || py >= sysAtlas.height)
+                        continue;
+                    if (((sysAtlas.pixels[static_cast<size_t>(py) * sysAtlas.width + px] >> 24) & 0xFF) < 32)
+                        continue;
+                    ++inside;
+                }
+            if (ch != ' ') CHECK(inside > 0);
+            ++checked;
+        }
+        CHECK(checked >= 12);
+        break;   // one real family is enough
+    }
+#endif
 
     // Layout: measure + wrap + split.
     r::TextStyle style;
@@ -615,6 +740,52 @@ void TestRenderGpu() {
     CHECK(drained);
     up.Shutdown();
 }
+// A LIVE VIDEO LAYER MUST RE-UPLOAD ITS FRAME. The video draw path acquired
+// its texture create-once (GPUResourceManager::AcquireTexture dedups by name),
+// so a VideoObject that pushed a new frame every tick — media on air, a camera
+// tap — kept blitting the FIRST frame's texture forever: the real NDI/HDMI
+// output froze on whatever the decoder's first frame was (typically the black
+// opening frame) while the QML preview tile, which reads the live QImage
+// through its own provider, kept showing the moving picture. Structural
+// rebuilds (adding a text block) created the texture at a moment when the
+// frame was already live, which is why the media "appeared" then.
+void TestVideoLayerFrameRefresh() {
+    auto& engine = r::RenderEngine::Instance();
+    CHECK(engine.Initialize().ok());
+    CHECK(engine.SetBackend("software").ok());
+    CHECK(engine.CreateScene("vframe", "VideoFrame", r::Size(32, 32)).ok());
+    CHECK(engine.AddLayer("vframe", r::Layer("media", "Media", r::LayerKind::Video, 1)).ok());
+
+    const auto solid = [](r::Color c) {
+        r::RgbaImage img;
+        img.width = 8;
+        img.height = 8;
+        img.pixels.assign(64, c.Pack());
+        return img;
+    };
+    auto video = std::make_shared<r::VideoObject>("vlive", "Live");
+    video->SetFrame(solid(r::Color::Black()));   // the decoder's opening frame
+    video->SetBounds(r::Rect(0, 0, 32, 32));
+    CHECK(engine.AddObject("vframe", video, "media").ok());
+
+    auto first = engine.Render("vframe");
+    CHECK(first.ok());
+    if (first.ok())
+        CHECK(r::Color::Unpack(first.value().pixels[16 * 32 + 16]).r < 0.1f);
+
+    // The source pushes frame 2 through the SAME object — no scene change, no
+    // object swap, exactly what SceneBuilder's UpsertVideoLayer does per tick.
+    const uint64_t rev1 = video->FrameRevision();
+    video->SetFrame(solid(r::Color::Red()));
+    CHECK(video->FrameRevision() > rev1);
+    auto second = engine.Render("vframe");
+    CHECK(second.ok());
+    if (second.ok()) {
+        const r::Color c = r::Color::Unpack(second.value().pixels[16 * 32 + 16]);
+        CHECK(c.r > 0.9f && c.g < 0.1f);   // the NEW frame, not the stale first
+    }
+    CHECK(engine.DestroyScene("vframe").ok());
+}
 void TestRenderOutputs() {
     // FrameBufferOutput: present + scale to target.
     auto out = std::make_shared<r::FrameBufferOutput>(r::OutputKind::Preview, "preview",
@@ -657,6 +828,27 @@ void TestRenderOutputs() {
     CHECK(a->FramesReceived() == 1);
     CHECK(st->FramesReceived() == 1);
     CHECK(st->LastFrame().width == 32);
+
+    // A PER-OUTPUT-PASS buffer owns its own frames: the main pass's distribute
+    // must skip it. Two writers on one buffer meant the NDI sender and the real
+    // output window (both sampling snapshots on their own cadence) caught
+    // whichever write landed last — the live "output glitching between the two
+    // templates" report.
+    auto own = std::make_shared<r::FrameBufferOutput>(r::OutputKind::Audience, "own",
+                                                      r::Size(64, 64));
+    CHECK(own->AcceptsDistributedFrames());   // default: the program feed may write it
+    CHECK(mgr.Add(own).ok());
+    mgr.Distribute(f);
+    CHECK(own->FramesReceived() == 1);
+    own->SetAcceptsDistributedFrames(false);   // its own pass owns it now
+    mgr.Distribute(f);
+    CHECK(own->FramesReceived() == 1);         // skipped — no second writer
+    CHECK(a->FramesReceived() == 3);           // a normal output still receives
+    own->SetAcceptsDistributedFrames(true);    // fallback: no scene of its own this frame
+    mgr.Distribute(f);
+    CHECK(own->FramesReceived() == 2);
+    CHECK(mgr.Remove("own").ok());
+
     CHECK(mgr.Remove("stage").ok());
     CHECK(mgr.Count() == 1);
     mgr.Clear();
@@ -1117,3 +1309,146 @@ void TestPngCodec() {
 // ===========================================================================
 // Phase 7 — Display & Output Engine (docs/specs/18)
 // ===========================================================================
+
+// A PICTURE DRAWN AT ANOTHER SIZE — the shared scale filter (ImageScale).
+//
+// The software backend is the engine's only real rasterizer, and a media frame,
+// a camera tap or a style's background image almost never arrives at the exact
+// pixel size it is drawn at: a 720p sermon into a 1080p output, a 4K photo
+// cover-fit onto the stage. Every one of those used to be answered with the
+// NEAREST source pixel, which is why such a picture read blocky when the source
+// is smaller than the draw and aliased/moiré ("meshed") when it is larger — the
+// reported "the media frame looks pixel like, not crispy clear".
+//
+// What is pinned here is that the filter is chosen from the ratio and nothing
+// else: a 1:1 draw is the source pixel untouched, a magnified draw is
+// interpolated (a ramp, not blocks), a minified one AVERAGES its footprint
+// (never aliasing to an extreme), averaging happens in premultiplied space so a
+// transparent pixel cannot tint its neighbours, and both places a picture gets
+// resized — the blit and the output's own frame resize — ride that one filter.
+void TestImageScale() {
+    r::RgbaImage ramp;   // 2 x 1: red | blue, opaque
+    ramp.width = 2;
+    ramp.height = 1;
+    ramp.pixels = {r::Color::Red().Pack(), r::Color::Blue().Pack()};
+
+    r::ScaleTaps tx, ty;
+    r::ScaleTaps x0, x1, x2, x3;
+    r::ScaleTaps row;
+
+    // --- 1:1 through the filter is the pixel itself, not a half-pixel blur ---
+    CHECK(r::BuildScaleTaps(0.0, 1.0, 2, tx) >= 1);
+    CHECK(r::BuildScaleTaps(0.0, 1.0, 1, ty) >= 1);
+    const r::Color exact = r::Color::Unpack(r::CombineTaps(ramp, tx, ty));
+    CHECK(exact.r > 0.98f && exact.b < 0.02f && exact.a > 0.98f);
+
+    // --- MAGNIFIED: the two middle pixels are real blends, in a ramp order ---
+    CHECK(r::BuildScaleTaps(0.0, 0.5, 2, x0) >= 1);
+    CHECK(r::BuildScaleTaps(0.5, 0.5, 2, x1) >= 1);
+    CHECK(r::BuildScaleTaps(1.0, 0.5, 2, x2) >= 1);
+    CHECK(r::BuildScaleTaps(1.5, 0.5, 2, x3) >= 1);
+    CHECK(r::BuildScaleTaps(0.0, 1.0, 1, row) >= 1);
+    const r::Color d0 = r::Color::Unpack(r::CombineTaps(ramp, x0, row));
+    const r::Color d1 = r::Color::Unpack(r::CombineTaps(ramp, x1, row));
+    const r::Color d2 = r::Color::Unpack(r::CombineTaps(ramp, x2, row));
+    const r::Color d3 = r::Color::Unpack(r::CombineTaps(ramp, x3, row));
+    CHECK(d0.r > 0.98f);                                  // the edge keeps the source's colour
+    CHECK(d3.b > 0.98f);
+    CHECK(d1.r > 0.5f && d1.b > 0.1f && d1.b < 0.5f);     // 75% red / 25% blue
+    CHECK(d2.b > 0.5f && d2.r > 0.1f && d2.r < 0.5f);
+    CHECK(d1.r > d2.r);   // interpolated: the blend MOVES, it is not a block edge
+
+    // --- MINIFIED: the footprint is averaged, not point-sampled ---
+    // A 4x4 black/white checker into ONE destination pixel: point sampling
+    // answers pure white (its corner pixel); the box average answers mid grey.
+    r::RgbaImage checker;
+    checker.width = 4;
+    checker.height = 4;
+    checker.pixels.assign(16, r::Color::Black().Pack());
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x)
+            if (((x + y) & 1) == 0)
+                checker.pixels[static_cast<size_t>(y) * 4 + x] = r::Color::White().Pack();
+    r::ScaleTaps bx, by;
+    CHECK(r::BuildScaleTaps(0.0, 4.0, 4, bx) >= 1);
+    CHECK(r::BuildScaleTaps(0.0, 4.0, 4, by) >= 1);
+    const r::Color avg = r::Color::Unpack(r::CombineTaps(checker, bx, by));
+    CHECK(avg.r > 0.4f && avg.r < 0.6f);   // eight white of sixteen
+    CHECK(avg.a > 0.98f);                  // opaque black is still opaque
+
+    // --- PREMULTIPLIED: a transparent pixel must not tint its neighbours ---
+    // White opaque beside a FULLY TRANSPARENT red: averaging straight alpha
+    // would leave red's green/blue out of the result (a pink edge), so the
+    // blend must stay white and only lose alpha.
+    r::RgbaImage edge;
+    edge.width = 2;
+    edge.height = 1;
+    edge.pixels = {r::Color::White().Pack(), r::Color(1.0f, 0.0f, 0.0f, 0.0f).Pack()};
+    const r::Color mixed = r::Color::Unpack(r::CombineTaps(edge, x1, row));
+    CHECK(mixed.g > 0.9f && mixed.b > 0.9f);   // white, not pink
+    CHECK(mixed.a > 0.7f && mixed.a < 0.8f);   // the transparent quarter of the footprint
+
+    // --- THE BLIT PATH rides the same filter ---
+    r::SoftwareGraphicsBackend sw;
+    auto tid = sw.CreateTexture(ramp);
+    CHECK(tid.ok());
+    CHECK(sw.BeginFrame(4, 1).ok());
+    r::DrawCommand blit;
+    blit.type = r::DrawCommand::Type::BlitImage;
+    blit.texture = tid.value();
+    blit.rect = r::Rect(0, 0, 4, 1);
+    blit.srcRect = r::Rect(0, 0, 2, 1);
+    blit.color = r::Color::White();
+    CHECK(sw.Submit({blit}).ok());
+    auto fb = sw.Readback();
+    CHECK(fb.ok());
+    if (fb.ok() && fb.value().pixels.size() == 4) {
+        const r::Color b0 = r::Color::Unpack(fb.value().pixels[0]);
+        const r::Color b1 = r::Color::Unpack(fb.value().pixels[1]);
+        const r::Color b2 = r::Color::Unpack(fb.value().pixels[2]);
+        const r::Color b3 = r::Color::Unpack(fb.value().pixels[3]);
+        CHECK(b0.r > 0.98f && b3.b > 0.98f);                 // ends stay crisp
+        CHECK(b1.r > 0.5f && b1.b > 0.1f && b1.b < 0.5f);    // middle is a blend
+        CHECK(b2.b > 0.5f && b2.r > 0.1f && b2.r < 0.5f);
+        CHECK(b1.r > b2.r);
+    }
+    // ...and a 1:1 blit of the same texture is still the source pixel, exactly
+    // (this is the glyph atlas and every unscaled draw in the engine).
+    CHECK(sw.BeginFrame(2, 1).ok());
+    r::DrawCommand un = blit;
+    un.rect = r::Rect(0, 0, 2, 1);
+    CHECK(sw.Submit({un}).ok());
+    auto fb1 = sw.Readback();
+    CHECK(fb1.ok());
+    if (fb1.ok() && fb1.value().pixels.size() == 2) {
+        const r::Color u0 = r::Color::Unpack(fb1.value().pixels[0]);
+        const r::Color u1 = r::Color::Unpack(fb1.value().pixels[1]);
+        CHECK(u0.r > 0.98f && u0.b < 0.02f);
+        CHECK(u1.b > 0.98f && u1.r < 0.02f);
+    }
+    CHECK(sw.DestroyTexture(tid.value()).ok());
+    CHECK(sw.Shutdown().ok());
+
+    // --- THE OUTPUT'S OWN FRAME RESIZE rides it too (a mid-session resolution
+    // change resizes a composed frame, media picture and all) ---
+    r::FrameBufferOutput resized(r::OutputKind::Audience, "scale-aud", r::Size(4, 1));
+    r::Frame f;
+    f.sceneId = "scale";
+    f.frame = 1;
+    f.width = 2;
+    f.height = 1;
+    f.pixels = {r::Color::Red().Pack(), r::Color::Blue().Pack()};
+    CHECK(resized.Present(f).ok());
+    const r::Frame last = resized.LastFrame();
+    CHECK(last.width == 4 && last.height == 1);
+    if (last.width == 4 && last.pixels.size() == 4) {
+        const r::Color r1 = r::Color::Unpack(last.pixels[1]);
+        const r::Color r2 = r::Color::Unpack(last.pixels[2]);
+        CHECK(r1.r > 0.5f && r1.b > 0.1f && r1.b < 0.5f);   // interpolated, not nearest
+        CHECK(r2.b > 0.5f && r2.r > 0.1f && r2.r < 0.5f);
+    }
+    // No resize needed: the bytes are handed through untouched.
+    r::FrameBufferOutput untouched(r::OutputKind::Audience, "scale-same", r::Size(2, 1));
+    CHECK(untouched.Present(f).ok());
+    CHECK(untouched.LastFrame().pixels == f.pixels);
+}

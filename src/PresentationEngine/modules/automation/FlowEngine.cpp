@@ -759,22 +759,33 @@ Result<void> FlowEngine::RegisterMacro(
 
 Result<void> FlowEngine::RunMacro(std::string_view name,
                                   const std::map<std::string, std::string, std::less<>>& vars) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto it = macros_.find(std::string(name));
-    if (it == macros_.end())
-        return Error::Make(Err::Flow_MacroNotFound, "FlowEngine",
-                           "macro not found: " + std::string(name));
+    // Snapshot the macro steps under the lock, then execute each action with NO
+    // lock held: registered actions call into live services and can block.
+    std::vector<std::pair<std::string, std::string>> steps;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = macros_.find(std::string(name));
+        if (it == macros_.end())
+            return Error::Make(Err::Flow_MacroNotFound, "FlowEngine",
+                               "macro not found: " + std::string(name));
+        steps = it->second;
+    }
     std::map<std::string, std::string, std::less<>> variables = vars;
-    for (const auto& [type, payload] : it->second) {
-        auto aIt = actions_.find(type);
-        if (aIt == actions_.end())
-            return Error::Make(Err::Flow_ActionNotFound, "FlowEngine",
-                               "macro action not registered: " + type);
+    for (const auto& [type, payload] : steps) {
+        ActionFactory factory;
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            auto aIt = actions_.find(type);
+            if (aIt == actions_.end())
+                return Error::Make(Err::Flow_ActionNotFound, "FlowEngine",
+                                   "macro action not registered: " + type);
+            factory = aIt->second;
+        }
         FlowNode stub;
         stub.actionType = type;
         stub.actionPayload = payload;
         AutomationContext ctx{&stub, &variables, "macro:" + std::string(name), this};
-        auto outcome = aIt->second()->Execute(ctx);
+        auto outcome = factory()->Execute(ctx);
         if (outcome.ok() && outcome.value().kind == ActionOutcome::Kind::Failed)
             return Error::Make(Err::Flow_ActionFailed, "FlowEngine", outcome.value().error);
     }
@@ -786,7 +797,7 @@ Result<void> FlowEngine::RunMacro(std::string_view name,
 // ===========================================================================
 Result<std::string> FlowEngine::Start(
     std::string_view flowId, const std::map<std::string, std::string, std::less<>>& vars) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     auto it = flows_.find(std::string(flowId));
     if (it == flows_.end())
         return Error::Make(Err::Flow_NotFound, "FlowEngine",
@@ -821,7 +832,7 @@ Result<std::string> FlowEngine::Start(
     auto& stored = executions_[execId];
     (void)EventBus::Instance().Publish(
         events::FlowStarted{std::string(flowId), execId, it->second.name});
-    (void)Drain(stored);
+    (void)Drain(lock, stored);
     return execId;
 }
 
@@ -839,7 +850,7 @@ Result<void> FlowEngine::Pause(std::string_view executionId) {
 }
 
 Result<void> FlowEngine::Resume(std::string_view executionId) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     auto it = executions_.find(std::string(executionId));
     if (it == executions_.end())
         return Error::Make(Err::Flow_NotFound, "FlowEngine",
@@ -848,7 +859,7 @@ Result<void> FlowEngine::Resume(std::string_view executionId) {
         return Error::Make(Err::Flow_InvalidState, "FlowEngine", "execution is not paused");
     it->second.state = FlowState::Running;
     (void)EventBus::Instance().Publish(events::FlowResumed{std::string(executionId)});
-    (void)Drain(it->second);
+    (void)Drain(lock, it->second);
     return Ok();
 }
 
@@ -869,21 +880,26 @@ Result<void> FlowEngine::Stop(std::string_view executionId) {
 }
 
 Result<std::string> FlowEngine::Restart(std::string_view executionId) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto it = executions_.find(std::string(executionId));
-    if (it == executions_.end())
-        return Error::Make(Err::Flow_NotFound, "FlowEngine",
-                           "execution not found: " + std::string(executionId));
-    std::string flowId = it->second.flowId;
-    auto vars = it->second.variables;
-    it->second.state = FlowState::Stopped;
-    (void)EventBus::Instance().Publish(events::FlowStopped{std::string(executionId)});
-    // Reuse the flow's defaults plus the current variable values.
+    std::string flowId;
+    std::map<std::string, std::string, std::less<>> vars;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = executions_.find(std::string(executionId));
+        if (it == executions_.end())
+            return Error::Make(Err::Flow_NotFound, "FlowEngine",
+                               "execution not found: " + std::string(executionId));
+        flowId = it->second.flowId;
+        vars = it->second.variables;
+        it->second.state = FlowState::Stopped;
+        (void)EventBus::Instance().Publish(events::FlowStopped{std::string(executionId)});
+    }
+    // Reuse the flow's defaults plus the current variable values. Start() takes
+    // its own lock (and drains), so run it outside this one.
     return Start(flowId, vars);
 }
 
 Result<void> FlowEngine::Skip(std::string_view executionId) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     auto it = executions_.find(std::string(executionId));
     if (it == executions_.end())
         return Error::Make(Err::Flow_NotFound, "FlowEngine",
@@ -900,7 +916,7 @@ Result<void> FlowEngine::Skip(std::string_view executionId) {
         exec.waitDeadlineMs = 0;
         if (!exec.waitNodeId.empty()) {
             if (auto* w = const_cast<FlowNode*>(FindNode(exec, exec.waitNodeId))) {
-                CompleteNode(exec, *w, NodeState::Skipped, "skipped by operator");
+                CompleteNode(lock, exec, *w, NodeState::Skipped, "skipped by operator");
                 exec.pc = AdvancePc(exec.order, exec.pc);
             }
             exec.waitNodeId.clear();
@@ -908,19 +924,19 @@ Result<void> FlowEngine::Skip(std::string_view executionId) {
             // Start-trigger skip == manual start.
             (void)EventBus::Instance().Publish(events::FlowStarted{exec.flowId, exec.executionId, ""});
         }
-        (void)Drain(exec);
+        (void)Drain(lock, exec);
         return Ok();
     }
     if (exec.pc >= exec.order.size()) return Ok();
     FlowNode& cur = exec.order[exec.pc];
-    CompleteNode(exec, cur, NodeState::Skipped, "skipped by operator");
+    CompleteNode(lock, exec, cur, NodeState::Skipped, "skipped by operator");
     exec.pc = AdvancePc(exec.order, exec.pc);
-    (void)Drain(exec);
+    (void)Drain(lock, exec);
     return Ok();
 }
 
 Result<void> FlowEngine::JumpTo(std::string_view executionId, std::string_view nodeId) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     auto it = executions_.find(std::string(executionId));
     if (it == executions_.end())
         return Error::Make(Err::Flow_NotFound, "FlowEngine",
@@ -938,7 +954,7 @@ Result<void> FlowEngine::JumpTo(std::string_view executionId, std::string_view n
     exec.waitDeadlineMs = 0;
     exec.waitNodeId.clear();
     if (exec.state == FlowState::Paused) exec.state = FlowState::Running;
-    (void)Drain(exec);
+    (void)Drain(lock, exec);
     return Ok();
 }
 
@@ -998,18 +1014,25 @@ Result<void> FlowEngine::EmergencyStop() {
 Result<std::string> FlowEngine::ExecuteAction(
     std::string_view actionType, std::string_view payload,
     const std::map<std::string, std::string, std::less<>>& vars) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto aIt = actions_.find(std::string(actionType));
-    if (aIt == actions_.end())
-        return Error::Make(Err::Flow_ActionNotFound, "FlowEngine",
-                           "action not registered: " + std::string(actionType));
+    // Resolve the factory under the lock, then run the action with NO lock
+    // held: a registered action drives live services (media, recording, live
+    // output) and must not stall every other FlowEngine operation.
+    ActionFactory factory;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto aIt = actions_.find(std::string(actionType));
+        if (aIt == actions_.end())
+            return Error::Make(Err::Flow_ActionNotFound, "FlowEngine",
+                               "action not registered: " + std::string(actionType));
+        factory = aIt->second;
+    }
     FlowNode stub;
     stub.id = "manual";
     stub.actionType = std::string(actionType);
     stub.actionPayload = std::string(payload);
     std::map<std::string, std::string, std::less<>> variables = vars;
     AutomationContext ctx{&stub, &variables, "manual", this};
-    auto outcome = aIt->second()->Execute(ctx);
+    auto outcome = factory()->Execute(ctx);
     if (!outcome.ok()) return outcome.error();
     if (outcome.value().kind == ActionOutcome::Kind::Failed)
         return Error::Make(Err::Flow_ActionFailed, "FlowEngine", outcome.value().error);
@@ -1019,8 +1042,59 @@ Result<std::string> FlowEngine::ExecuteAction(
 // ===========================================================================
 // The deterministic executor core (docs/specs/26 §Deterministic Execution)
 // ===========================================================================
-void FlowEngine::CompleteNode(Execution& exec, FlowNode& node, NodeState state,
-                              const std::string& result) {
+// ===========================================================================
+// Unlocked action/condition execution
+// ===========================================================================
+// Registered actions drive other engines (media, recording, live output) and
+// may block. They therefore run with the engine lock RELEASED; the action gets
+// a private copy of the execution variables, and any changes it makes are
+// merged back (without clobbering values written concurrently meanwhile).
+Result<ActionOutcome> FlowEngine::RunActionUnlocked(std::unique_lock<std::recursive_mutex>& lk,
+                                                    Execution& exec, const FlowNode& node,
+                                                    const ActionFactory& factory) {
+    std::map<std::string, std::string, std::less<>> vars = exec.variables;
+    AutomationContext ctx{&node, &vars, exec.executionId, this};
+    Result<ActionOutcome> outcome = ActionOutcome{};
+    {
+        Unlocker rel(lk);
+        outcome = factory()->Execute(ctx);
+    }
+    for (const auto& [k, v] : vars) {
+        auto it = exec.variables.find(k);
+        if (it == exec.variables.end() || it->second != v) exec.variables[k] = v;
+    }
+    return outcome;
+}
+
+Result<bool> FlowEngine::RunConditionUnlocked(std::unique_lock<std::recursive_mutex>& lk,
+                                              Execution& exec, const FlowNode& node,
+                                              const ConditionFactory& factory) {
+    std::map<std::string, std::string, std::less<>> vars = exec.variables;
+    AutomationContext ctx{&node, &vars, exec.executionId, this};
+    Result<bool> result = false;
+    {
+        Unlocker rel(lk);
+        result = factory()->Evaluate(ctx);
+    }
+    for (const auto& [k, v] : vars) {
+        auto it = exec.variables.find(k);
+        if (it == exec.variables.end() || it->second != v) exec.variables[k] = v;
+    }
+    return result;
+}
+
+void FlowEngine::RunCueUnlocked(std::unique_lock<std::recursive_mutex>& lk, Execution& exec,
+                                const std::string& actionType) {
+    if (actionType.empty()) return;
+    auto aIt = actions_.find(actionType);
+    if (aIt == actions_.end()) return;
+    FlowNode cue;
+    cue.actionType = actionType;
+    (void)RunActionUnlocked(lk, exec, cue, aIt->second);
+}
+
+void FlowEngine::CompleteNode(std::unique_lock<std::recursive_mutex>& lk, Execution& exec,
+                              FlowNode& node, NodeState state, const std::string& result) {
     exec.completedNodes.insert(node.id);
     for (auto& rec : exec.history)
         if (rec.nodeId == node.id) {
@@ -1031,13 +1105,7 @@ void FlowEngine::CompleteNode(Execution& exec, FlowNode& node, NodeState state,
     switch (state) {
         case NodeState::Completed:
             (void)EventBus::Instance().Publish(events::NodeCompleted{exec.executionId, node.id});
-            if (!node.cues.onComplete.empty()) {
-                FlowNode cue;
-                cue.actionType = node.cues.onComplete;
-                AutomationContext ctx{&cue, &exec.variables, exec.executionId, this};
-                auto aIt = actions_.find(cue.actionType);
-                if (aIt != actions_.end()) (void)aIt->second()->Execute(ctx);
-            }
+            RunCueUnlocked(lk, exec, node.cues.onComplete);
             break;
         case NodeState::Skipped:
             (void)EventBus::Instance().Publish(events::NodeSkipped{exec.executionId, node.id});
@@ -1055,16 +1123,10 @@ void FlowEngine::CompleteNode(Execution& exec, FlowNode& node, NodeState state,
     }
 }
 
-Result<void> FlowEngine::HandleFailure(Execution& exec, FlowNode& node,
-                                       const std::string& message) {
+Result<void> FlowEngine::HandleFailure(std::unique_lock<std::recursive_mutex>& lk, Execution& exec,
+                                       FlowNode& node, const std::string& message) {
     errorCount_.fetch_add(1);
-    if (!node.cues.onError.empty()) {
-        FlowNode cue;
-        cue.actionType = node.cues.onError;
-        AutomationContext ctx{&cue, &exec.variables, exec.executionId, this};
-        auto aIt = actions_.find(cue.actionType);
-        if (aIt != actions_.end()) (void)aIt->second()->Execute(ctx);
-    }
+    RunCueUnlocked(lk, exec, node.cues.onError);
     switch (node.onFailure) {
         case FailurePolicy::Retry:
             if (node.retries < node.retryLimit) {
@@ -1073,32 +1135,32 @@ Result<void> FlowEngine::HandleFailure(Execution& exec, FlowNode& node,
                     events::NodeFailed{exec.executionId, node.id, message});
                 return Ok();
             }
-            CompleteNode(exec, node, NodeState::Failed, "retries exhausted: " + message);
+            CompleteNode(lk, exec, node, NodeState::Failed, "retries exhausted: " + message);
             exec.state = FlowState::Stopped;
             (void)EventBus::Instance().Publish(events::FlowStopped{exec.executionId});
             (void)EventBus::Instance().Publish(
                 events::AutomationCancelled{exec.executionId, "retries exhausted: " + message});
             break;
         case FailurePolicy::Skip:
-            CompleteNode(exec, node, NodeState::Skipped, message);
+            CompleteNode(lk, exec, node, NodeState::Skipped, message);
             exec.pc = AdvancePc(exec.order, exec.pc);
             break;
         case FailurePolicy::Fallback:
-            CompleteNode(exec, node, NodeState::Failed, message);
+            CompleteNode(lk, exec, node, NodeState::Failed, message);
             if (!node.fallbackNodeId.empty()) exec.pc = IndexOf(exec.order, node.fallbackNodeId);
             else ++exec.pc;
             break;
         case FailurePolicy::Pause:
-            CompleteNode(exec, node, NodeState::Failed, message);
+            CompleteNode(lk, exec, node, NodeState::Failed, message);
             exec.state = FlowState::Paused;
             (void)EventBus::Instance().Publish(events::FlowPaused{exec.executionId});
             break;
         case FailurePolicy::Notify:
-            CompleteNode(exec, node, NodeState::Failed, message);
+            CompleteNode(lk, exec, node, NodeState::Failed, message);
             exec.pc = AdvancePc(exec.order, exec.pc);
             break;
         case FailurePolicy::Abort:
-            CompleteNode(exec, node, NodeState::Failed, message);
+            CompleteNode(lk, exec, node, NodeState::Failed, message);
             exec.state = FlowState::Stopped;
             (void)EventBus::Instance().Publish(events::FlowStopped{exec.executionId});
             (void)EventBus::Instance().Publish(events::AutomationCancelled{exec.executionId, message});
@@ -1107,15 +1169,10 @@ Result<void> FlowEngine::HandleFailure(Execution& exec, FlowNode& node,
     return Ok();
 }
 
-Result<void> FlowEngine::ExecuteNode(Execution& exec, FlowNode& node) {
+Result<void> FlowEngine::ExecuteNode(std::unique_lock<std::recursive_mutex>& lk, Execution& exec,
+                                     FlowNode& node) {
     // Cues: beforeStart (then onStart right after the node begins).
-    if (!node.cues.beforeStart.empty()) {
-        FlowNode cue;
-        cue.actionType = node.cues.beforeStart;
-        AutomationContext ctx{&cue, &exec.variables, exec.executionId, this};
-        auto aIt = actions_.find(cue.actionType);
-        if (aIt != actions_.end()) (void)aIt->second()->Execute(ctx);
-    }
+    RunCueUnlocked(lk, exec, node.cues.beforeStart);
     NodeRecord rec;
     rec.nodeId = node.id;
     rec.label = node.label;
@@ -1124,22 +1181,15 @@ Result<void> FlowEngine::ExecuteNode(Execution& exec, FlowNode& node) {
     exec.history.push_back(std::move(rec));
     nodeCount_.fetch_add(1);
     (void)EventBus::Instance().Publish(events::NodeStarted{exec.executionId, node.id, node.label});
-    if (!node.cues.onStart.empty()) {
-        FlowNode cue;
-        cue.actionType = node.cues.onStart;
-        AutomationContext ctx{&cue, &exec.variables, exec.executionId, this};
-        auto aIt = actions_.find(cue.actionType);
-        if (aIt != actions_.end()) (void)aIt->second()->Execute(ctx);
-    }
+    RunCueUnlocked(lk, exec, node.cues.onStart);
 
     switch (node.kind) {
         case NodeKind::Action: {
             auto aIt = actions_.find(node.actionType);
             if (aIt == actions_.end())
-                return HandleFailure(exec, node, "unknown action type: " + node.actionType);
-            AutomationContext ctx{&node, &exec.variables, exec.executionId, this};
-            auto outcome = aIt->second()->Execute(ctx);
-            if (!outcome.ok()) return HandleFailure(exec, node, outcome.error().message);
+                return HandleFailure(lk, exec, node, "unknown action type: " + node.actionType);
+            auto outcome = RunActionUnlocked(lk, exec, node, aIt->second);
+            if (!outcome.ok()) return HandleFailure(lk, exec, node, outcome.error().message);
             if (outcome.value().kind == ActionOutcome::Kind::WaitingFor) {
                 exec.waitingFor = outcome.value().topic;
                 exec.waitNodeId = node.id;
@@ -1148,20 +1198,20 @@ Result<void> FlowEngine::ExecuteNode(Execution& exec, FlowNode& node) {
                 return Ok();
             }
             if (outcome.value().kind == ActionOutcome::Kind::Failed)
-                return HandleFailure(exec, node, outcome.value().error);
-            CompleteNode(exec, node, NodeState::Completed, "ok");
+                return HandleFailure(lk, exec, node, outcome.value().error);
+            CompleteNode(lk, exec, node, NodeState::Completed, "ok");
             exec.pc = AdvancePc(exec.order, exec.pc);
             return Ok();
         }
         case NodeKind::Condition: {
             auto cIt = conditions_.find(node.conditionType);
             if (cIt == conditions_.end())
-                return HandleFailure(exec, node, "unknown condition type: " + node.conditionType);
-            AutomationContext ctx{&node, &exec.variables, exec.executionId, this};
+                return HandleFailure(lk, exec, node,
+                                     "unknown condition type: " + node.conditionType);
             exec.activeConditions.push_back(node.conditionType);
-            auto r = cIt->second()->Evaluate(ctx);
-            if (!r.ok()) return HandleFailure(exec, node, r.error().message);
-            CompleteNode(exec, node, NodeState::Completed, r.value() ? "true" : "false");
+            auto r = RunConditionUnlocked(lk, exec, node, cIt->second);
+            if (!r.ok()) return HandleFailure(lk, exec, node, r.error().message);
+            CompleteNode(lk, exec, node, NodeState::Completed, r.value() ? "true" : "false");
             size_t target = r.value() ? IndexOf(exec.order, node.trueNodeId)
                                       : IndexOf(exec.order, node.falseNodeId);
             exec.pc = target >= exec.order.size() ? exec.pc + 1 : target;
@@ -1178,8 +1228,7 @@ Result<void> FlowEngine::ExecuteNode(Execution& exec, FlowNode& node) {
                 if (mi < exec.order.size()) maxIdx = std::max(maxIdx, mi);
                 auto aIt = actions_.find(member->actionType);
                 if (aIt == actions_.end()) continue;
-                AutomationContext ctx{member, &exec.variables, exec.executionId, this};
-                auto outcome = aIt->second()->Execute(ctx);
+                auto outcome = RunActionUnlocked(lk, exec, *member, aIt->second);
                 if (outcome.ok() && outcome.value().kind == ActionOutcome::Kind::WaitingFor) {
                     if (exec.waitingFor.empty()) {
                         exec.waitingFor = outcome.value().topic;
@@ -1193,7 +1242,7 @@ Result<void> FlowEngine::ExecuteNode(Execution& exec, FlowNode& node) {
             node.skipAfter = maxIdx + 1 < exec.order.size() ? static_cast<int64_t>(maxIdx + 1)
                                                             : -1;
             if (!exec.waitingFor.empty()) return Ok();   // parallel group waits
-            CompleteNode(exec, node, NodeState::Completed, "ok");
+            CompleteNode(lk, exec, node, NodeState::Completed, "ok");
             exec.pc = node.skipAfter >= 0 ? static_cast<size_t>(node.skipAfter)
                                           : AdvancePc(exec.order, exec.pc);
             return Ok();
@@ -1207,7 +1256,7 @@ Result<void> FlowEngine::ExecuteNode(Execution& exec, FlowNode& node) {
                 ms = 0;
             }
             if (ms <= 0) {
-                CompleteNode(exec, node, NodeState::Completed, "ok");
+                CompleteNode(lk, exec, node, NodeState::Completed, "ok");
                 exec.pc = AdvancePc(exec.order, exec.pc);
                 return Ok();
             }
@@ -1225,7 +1274,7 @@ Result<void> FlowEngine::ExecuteNode(Execution& exec, FlowNode& node) {
         case NodeKind::Macro: {
             auto mIt = macros_.find(node.actionType);
             if (mIt == macros_.end())
-                return HandleFailure(exec, node, "unknown macro: " + node.actionType);
+                return HandleFailure(lk, exec, node, "unknown macro: " + node.actionType);
             for (const auto& [type, payload] : mIt->second) {
                 auto aIt = actions_.find(type);
                 if (aIt == actions_.end()) continue;
@@ -1233,17 +1282,16 @@ Result<void> FlowEngine::ExecuteNode(Execution& exec, FlowNode& node) {
                 stub.id = node.id;
                 stub.actionType = type;
                 stub.actionPayload = payload;
-                AutomationContext ctx{&stub, &exec.variables, exec.executionId, this};
-                auto outcome = aIt->second()->Execute(ctx);
+                auto outcome = RunActionUnlocked(lk, exec, stub, aIt->second);
                 if (outcome.ok() && outcome.value().kind == ActionOutcome::Kind::Failed)
-                    return HandleFailure(exec, node, outcome.value().error);
+                    return HandleFailure(lk, exec, node, outcome.value().error);
             }
-            CompleteNode(exec, node, NodeState::Completed, "ok");
+            CompleteNode(lk, exec, node, NodeState::Completed, "ok");
             exec.pc = AdvancePc(exec.order, exec.pc);
             return Ok();
         }
         case NodeKind::End:
-            CompleteNode(exec, node, NodeState::Completed, "ok");
+            CompleteNode(lk, exec, node, NodeState::Completed, "ok");
             exec.state = FlowState::Completed;   // an End node terminates the flow
             (void)EventBus::Instance().Publish(
                 events::FlowCompleted{exec.executionId, exec.history.size()});
@@ -1253,7 +1301,7 @@ Result<void> FlowEngine::ExecuteNode(Execution& exec, FlowNode& node) {
     return Ok();
 }
 
-Result<size_t> FlowEngine::Drain(Execution& exec) {
+Result<size_t> FlowEngine::Drain(std::unique_lock<std::recursive_mutex>& lk, Execution& exec) {
     size_t steps = 0;
     while (exec.state == FlowState::Running) {
         // 1. Pending wait: satisfied by an event, or timed out.
@@ -1271,11 +1319,11 @@ Result<size_t> FlowEngine::Drain(Execution& exec) {
                 exec.waitNodeId.clear();
                 if (wnode) {
                     if (isDelay) {
-                        CompleteNode(exec, *wnode, NodeState::Completed, "ok");
+                        CompleteNode(lk, exec, *wnode, NodeState::Completed, "ok");
                         exec.pc = wnode->skipAfter >= 0 ? static_cast<size_t>(wnode->skipAfter)
                                                          : AdvancePc(exec.order, exec.pc);
                     } else {
-                        (void)HandleFailure(exec, *wnode, "wait timeout for " + topic);
+                        (void)HandleFailure(lk, exec, *wnode, "wait timeout for " + topic);
                     }
                 }
                 ++steps;
@@ -1293,11 +1341,16 @@ Result<size_t> FlowEngine::Drain(Execution& exec) {
         }
         // 3. Execute the current node.
         FlowNode& node = exec.order[exec.pc];
-        auto r = ExecuteNode(exec, node);
+        auto r = ExecuteNode(lk, exec, node);
         if (!r.ok()) return r.error();
         ++steps;
     }
-    ProcessPendingDispatches();
+    // Deferred dispatches re-enter Notify; run them with the lock released so
+    // their actions execute unlocked too.
+    {
+        Unlocker rel(lk);
+        ProcessPendingDispatches();
+    }
     return steps;
 }
 
@@ -1314,9 +1367,14 @@ Result<void> FlowEngine::RequestDispatch(std::string_view executionId, std::stri
 }
 
 void FlowEngine::ProcessPendingDispatches() {
-    while (!pendingDispatches_.empty()) {
+    // Self-locking: may be called with mutex_ released (see Drain).
+    while (true) {
         std::vector<std::string> batch;
-        batch.swap(pendingDispatches_);
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            if (pendingDispatches_.empty()) return;
+            batch.swap(pendingDispatches_);
+        }
         for (const auto& topic : batch) (void)Notify(topic, "");
     }
 }
@@ -1325,7 +1383,7 @@ void FlowEngine::ProcessPendingDispatches() {
 // Event pump (docs/specs/26 §EventBus Integration)
 // ===========================================================================
 Result<size_t> FlowEngine::Notify(std::string_view eventTopic, std::string_view executionId) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     size_t satisfied = 0;
     std::vector<std::string> toDrain;
     for (auto& [id, exec] : executions_) {
@@ -1343,7 +1401,7 @@ Result<size_t> FlowEngine::Notify(std::string_view eventTopic, std::string_view 
             exec.waitNodeId.clear();
             exec.waitDeadlineMs = 0;
             if (wnode) {
-                CompleteNode(exec, *wnode, NodeState::Completed, "ok");
+                CompleteNode(lock, exec, *wnode, NodeState::Completed, "ok");
                 exec.pc = wnode->skipAfter >= 0 ? static_cast<size_t>(wnode->skipAfter)
                                                  : AdvancePc(exec.order, exec.pc);
             }
@@ -1353,16 +1411,16 @@ Result<size_t> FlowEngine::Notify(std::string_view eventTopic, std::string_view 
     }
     for (const auto& id : toDrain) {
         auto it = executions_.find(id);
-        if (it != executions_.end()) (void)Drain(it->second);
+        if (it != executions_.end()) (void)Drain(lock, it->second);
     }
     return satisfied;
 }
 
 Result<void> FlowEngine::Poll(std::string_view executionId) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     for (auto& [id, exec] : executions_) {
         if (!executionId.empty() && id != executionId) continue;
-        (void)Drain(exec);
+        (void)Drain(lock, exec);
     }
     return Ok();
 }
@@ -1424,7 +1482,7 @@ Result<FlowSnapshot> FlowEngine::Snapshot(std::string_view executionId) const {
 }
 
 Result<std::string> FlowEngine::Recover(const FlowSnapshot& snapshot) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     auto fit = flows_.find(snapshot.flowId);
     if (fit == flows_.end())
         return Error::Make(Err::Flow_NotFound, "FlowEngine",
@@ -1459,7 +1517,7 @@ Result<std::string> FlowEngine::Recover(const FlowSnapshot& snapshot) {
     executions_[execId] = std::move(exec);
     executionCount_.fetch_add(1);
     (void)EventBus::Instance().Publish(events::FlowRecovered{execId, snapshot.currentNodeId});
-    if (executions_[execId].state == FlowState::Running) (void)Drain(executions_[execId]);
+    if (executions_[execId].state == FlowState::Running) (void)Drain(lock, executions_[execId]);
     return execId;
 }
 

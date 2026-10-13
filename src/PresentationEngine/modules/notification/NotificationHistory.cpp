@@ -93,8 +93,11 @@ Result<void> NotificationHistory::Export(std::string_view hostPath) const {
         o["dismissed"] = json::Value::Bool(n.dismissed);
         arr.push_back(json::Value(std::move(o)));
     }
+    // ATOMIC: read back at the next launch — a truncated history file fails to
+    // parse and the user loses their notification list rather than their last
+    // few entries.
     auto& fs = platform::PlatformAccessor::Get().Filesystem();
-    return fs.Write(hostPath, json::Value(std::move(arr)).ToString());
+    return fs.WriteAtomic(hostPath, json::Value(std::move(arr)).ToString());
 }
 
 } // namespace bps::notification

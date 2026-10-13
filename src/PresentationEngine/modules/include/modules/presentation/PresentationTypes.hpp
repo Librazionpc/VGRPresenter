@@ -9,6 +9,7 @@
 #include "modules/rendering/RenderTypes.hpp"
 
 #include <chrono>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -260,6 +261,19 @@ struct Presentation {
 // through the kernel's StyleStore); the engine only ever sees the ONE spec for
 // the output that is on air, so live-editing a style restyles every frame the
 // moment the UI pushes it (PresentationEngine::SetActiveOutputStyle).
+// THE FAMILY → SLOT INDICES, NAMED. The order is the show* gates' order (shows |
+// media | scripture | table) and these constants are the ONLY place it is
+// written: the arrays below are sized by the count, and every index that was a
+// bare 0/1/2/3 (the QML style model's load/save/toVariant, the output model's
+// "familyTemplate" + capitalised-tag key) reads one of these or asks
+// SlideRules::FamilyTemplateSlot, which is the one place a page's content TAG
+// becomes a slot.
+inline constexpr std::size_t kFamilySlotShows = 0;
+inline constexpr std::size_t kFamilySlotMedia = 1;
+inline constexpr std::size_t kFamilySlotScripture = 2;
+inline constexpr std::size_t kFamilySlotTable = 3;
+inline constexpr std::size_t kFamilySlotCount = 4;
+
 struct OutputStyleSpec {
     std::string name;                        // diagnostics only
     // "shows" | "media" | "scripture" | "table" — which content the style is
@@ -286,6 +300,14 @@ struct OutputStyleSpec {
     bool showMedia = true;
     bool showScripture = true;
     bool showTable = true;
+    // A fifth pill, same on/off shape as the four above but gating a
+    // DIFFERENT axis: not a slide content family (overlays aren't slides),
+    // the Overlays pane's own compositor layer (SceneBuilder's
+    // AddCompositorLayers) — an output wearing a style with this off shows
+    // no overlay, even while the same overlay is live for every other
+    // output. No per-family template: an overlay always renders from its
+    // own design's blocks, never a style template.
+    bool showOverlay = true;
     // PER-FAMILY TEMPLATE KEYS ("" = no template for that family — NO
     // inherit; the family renders plain, and SHOWS alone falls back to the
     // Bible template the UI bakes into its slot): one style renders Shows,
@@ -293,12 +315,27 @@ struct OutputStyleSpec {
     // SceneBuilder picks by the slide's content family (untagged slides are
     // shows content). Index order = shows | media | scripture | table (the
     // show* gates' order).
-    std::string familyTemplateKeys[4];
+    // The four family gates by SLOT: what lets a caller that already holds the
+    // family table set them by walking it, instead of naming each field (the QML
+    // style layer builds a spec from a style's variant map key by key).
+    bool FamilyGate(std::size_t slot) const {
+        if (slot == kFamilySlotMedia)     return showMedia;
+        if (slot == kFamilySlotScripture) return showScripture;
+        if (slot == kFamilySlotTable)     return showTable;
+        return showShows;
+    }
+    void SetFamilyGate(std::size_t slot, bool on) {
+        if (slot == kFamilySlotMedia)          showMedia = on;
+        else if (slot == kFamilySlotScripture) showScripture = on;
+        else if (slot == kFamilySlotTable)     showTable = on;
+        else                                   showShows = on;
+    }
+    std::string familyTemplateKeys[kFamilySlotCount];
     // BAKED BLOCKS per family (same transient bake as templateBlocks: the UI
     // copies the family design's blocks in at push time; empty vector = the
     // family has no template — the legacy LayoutFor layout, or templateBlocks
     // for a slide matching the style's own contentType).
-    std::vector<ContentBlock> familyTemplateBlocks[4];
+    std::vector<ContentBlock> familyTemplateBlocks[kFamilySlotCount];
     // Shows-only category label (diagnostic display for now).
     std::string category;
     // BAKED TEMPLATE LAYOUT (Settings · Styles ← the Template library): when

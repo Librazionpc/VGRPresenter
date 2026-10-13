@@ -184,12 +184,22 @@ public:
     // The engine treats video as a frame source: modules push decoded frames.
     void SetFrame(RgbaImage frame) {
         frame_ = std::move(frame);
+        // Bumped on EVERY push so a renderer can tell a stale upload from a
+        // current one. A live frame source (media on air, a camera tap) pushes
+        // a new frame every tick through this SAME object, and the GPU texture
+        // upload path is create-once/dedup-by-name — without a revision the
+        // first frame ever uploaded stayed on the output forever (see
+        // GPUResourceManager::UpdateTexture).
+        ++frameRev_;
     }
     const RgbaImage& Frame() const { return frame_; }
     bool HasFrame() const { return !frame_.empty(); }
+    // Monotonic version of the pixels currently in Frame() (0 = never pushed).
+    uint64_t FrameRevision() const { return frameRev_; }
 
 private:
     RgbaImage frame_;
+    uint64_t frameRev_ = 0;
 };
 
 class ShapeObject final : public RenderObject {
@@ -200,10 +210,15 @@ public:
     const char* TypeName() const noexcept override { return "Shape"; }
     ShapeComponent* Shape() { return FindComponent<ShapeComponent>(); }
     const ShapeComponent* Shape() const { return FindComponent<ShapeComponent>(); }
-    void SetRectangle(Color fill) {
+    // `cornerRadius` is in the shape's OWN (destination) pixels and is clamped
+    // by the rasterizer to half the shorter side, exactly like Qt's Rectangle
+    // in DesignPreview/the Edit canvas. Defaulted so the square-corner callers
+    // (and the rendering phase's own tests) are untouched.
+    void SetRectangle(Color fill, float cornerRadius = 0.0f) {
         auto c = std::make_shared<ShapeComponent>();
         c->kind = ShapeKind::Rectangle;
         c->fill = fill;
+        c->radius = cornerRadius > 0.0f ? cornerRadius : 0.0f;
         components_.push_back(std::move(c));
     }
 };

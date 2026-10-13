@@ -1,9 +1,15 @@
 #include "modules/rendering/GraphicsBackends.hpp"
 
 #include "core/logging/Logger.hpp"
+#include "modules/rendering/ImageScale.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <format>
+#include <mutex>
+#include <set>
+#include <vector>
 
 namespace bps::rendering {
 
@@ -21,6 +27,14 @@ inline uint8_t To8(float v) {
 // Straight-alpha blend helpers.
 inline uint32_t Pack8(uint32_t r, uint32_t g, uint32_t b, uint32_t a) {
     return (a << 24) | (b << 16) | (g << 8) | r;
+}
+
+// Scales a packed colour's alpha — the coverage of a partially covered pixel
+// (anti-aliasing) or an edge feather.
+inline uint32_t ScaleAlpha(uint32_t px, float k) {
+    const float a = static_cast<float>((px >> 24) & 0xFF) * k;
+    const uint32_t ai = static_cast<uint32_t>(a < 0.0f ? 0.0f : (a > 255.0f ? 255.0f : a));
+    return (px & 0x00FFFFFFu) | (ai << 24);
 }
 
 } // namespace
@@ -347,7 +361,26 @@ void SoftwareGraphicsBackend::Execute(const DrawCommand& cmd) {
             break;
         case DrawCommand::Type::BlitImage: {
             auto it = textures_.find(cmd.texture.id);
-            if (it == textures_.end()) break;
+            if (it == textures_.end()) {
+                // ONE-SHOT PER TEXTURE ID: a BlitImage whose texture the backend
+                // does not hold draws NOTHING, so a stale id (the resource
+                // manager's id table outliving a backend rebind) silently turns
+                // a fully composed scene into background-only pixels — the
+                // "preview fine, outputs black" shape. Says so once.
+                static std::mutex m;
+                static std::set<uint64_t> seen;
+                bool first = false;
+                {
+                    std::lock_guard<std::mutex> lock(m);
+                    first = seen.insert(cmd.texture.id).second;
+                }
+                if (first)
+                    Logger::Instance().Warning(
+                        std::format("blit: texture id {} not held by this backend — nothing drawn",
+                                    cmd.texture.id),
+                        "Graphics");
+                break;
+            }
             const RgbaImage& src = it->second;
             Blit(static_cast<int>(cmd.rect.x), static_cast<int>(cmd.rect.y),
                  static_cast<int>(cmd.rect.width), static_cast<int>(cmd.rect.height),
@@ -403,6 +436,56 @@ void SoftwareGraphicsBackend::FillRectBlended(int x, int y, int w, int h, Color 
         }
 }
 
+// A ROUNDED-rect fill with anti-aliased edges — the engine twin of Qt's
+// `Rectangle { radius: … }` that every QML surface uses (DesignPreview's block
+// boxes, the Edit canvas, the template previews), so a template's rounded band
+// or panel looks the same on the engine's outputs as it does in the app.
+//
+// Coverage comes from the rounded rect's signed distance: `dist` is NEGATIVE
+// inside the shape (the min corner radius away from the boundary), so a pixel
+// whose centre sits exactly on an edge lands on 0.5 and the transition band is
+// one pixel wide. `radius` is clamped to half the shorter side, like Qt's own
+// Rectangle (a radius of width/2 is a stadium/circle, never an over-round),
+// and sub-half-pixel radii are routed to the plain rect by the caller — at
+// that size a rounded corner is indistinguishable from a square one and the
+// SDF would otherwise shade the whole interior below full coverage.
+void SoftwareGraphicsBackend::FillRoundedRectBlended(int x, int y, int w, int h,
+                                                     float radius, Color c,
+                                                     BlendMode mode) {
+    if (w <= 0 || h <= 0) return;
+    const float fw = static_cast<float>(w);
+    const float fh = static_cast<float>(h);
+    const float r = std::min(radius, 0.5f * std::min(fw, fh));
+    if (r < 0.5f) {
+        FillRectBlended(x, y, w, h, c, mode);
+        return;
+    }
+    const int x1 = std::min(fbWidth_, x + w);
+    const int y1 = std::min(fbHeight_, y + h);
+    const int x0 = std::max(0, x);
+    const int y0 = std::max(0, y);
+    if (x1 <= x0 || y1 <= y0) return;
+    const float fx = static_cast<float>(x);
+    const float fy = static_cast<float>(y);
+    const uint32_t src = c.Pack();
+    for (int yy = y0; yy < y1; ++yy) {
+        for (int xx = x0; xx < x1; ++xx) {
+            const float px = static_cast<float>(xx) + 0.5f;
+            const float py = static_cast<float>(yy) + 0.5f;
+            // The corner-arc centre this pixel's quadrant rounds around.
+            const float cx = fx + std::clamp(px - fx, r, fw - r);
+            const float cy = fy + std::clamp(py - fy, r, fh - r);
+            const float dx = px - cx;
+            const float dy = py - cy;
+            const float dist = std::sqrt(dx * dx + dy * dy) - r;
+            const float coverage = std::clamp(0.5f - dist, 0.0f, 1.0f);
+            if (coverage <= 0.0f) continue;
+            uint32_t& dst = fb_.pixels[static_cast<size_t>(yy) * fbWidth_ + xx];
+            dst = BlendPixel(dst, coverage >= 1.0f ? src : ScaleAlpha(src, coverage), mode);
+        }
+    }
+}
+
 void SoftwareGraphicsBackend::Blit(int x, int y, int w, int h, const RgbaImage& src,
                                    const Rect& srcRect, Color tint, BlendMode mode) {
     if (src.empty() || w <= 0 || h <= 0) return;
@@ -420,12 +503,39 @@ void SoftwareGraphicsBackend::Blit(int x, int y, int w, int h, const RgbaImage& 
     const int tg = static_cast<int>(tint.g * 255.0f + 0.5f);
     const int tb = static_cast<int>(tint.b * 255.0f + 0.5f);
     const int ta = static_cast<int>(tint.a * 255.0f + 0.5f);
+
+    // ---- THE FILTER -------------------------------------------------------
+    // A draw at the source's OWN size is a straight copy, and it stays one:
+    // that is the glyph atlas, a fullscreen image at the stage's resolution, a
+    // 1:1 video — the pixel-exact path everything already relies on. Anything
+    // else is resampled through ImageScale (bilinear when magnifying, a box
+    // average when minifying) instead of the nearest-pixel grab that made media
+    // and background pictures look blocky on the outputs (see ImageScale.hpp).
+    const bool unitScale = w == static_cast<int>(sw) && h == static_cast<int>(sh);
+    std::vector<ScaleTaps> xTaps, yTaps;
+    if (!unitScale) {
+        xTaps.resize(static_cast<size_t>(w));
+        yTaps.resize(static_cast<size_t>(h));
+        const double stepX = static_cast<double>(sw) / w;
+        const double stepY = static_cast<double>(sh) / h;
+        for (int dx = 0; dx < w; ++dx)
+            BuildScaleTaps(sx0 + dx * stepX, stepX, src.width, xTaps[static_cast<size_t>(dx)]);
+        for (int dy = 0; dy < h; ++dy)
+            BuildScaleTaps(sy0 + dy * stepY, stepY, src.height, yTaps[static_cast<size_t>(dy)]);
+    }
+
     for (int yy = y0; yy < y1; ++yy)
         for (int xx = x0; xx < x1; ++xx) {
-            const int sx = static_cast<int>(sx0 + (xx - x) * (sw / static_cast<float>(w)));
-            const int sy = static_cast<int>(sy0 + (yy - y) * (sh / static_cast<float>(h)));
-            if (sx < 0 || sx >= src.width || sy < 0 || sy >= src.height) continue;
-            uint32_t sp = src.pixels[static_cast<size_t>(sy) * src.width + sx];
+            uint32_t sp = 0;
+            if (unitScale) {
+                const int sx = static_cast<int>(sx0) + (xx - x);
+                const int sy = static_cast<int>(sy0) + (yy - y);
+                if (sx < 0 || sx >= src.width || sy < 0 || sy >= src.height) continue;
+                sp = src.pixels[static_cast<size_t>(sy) * src.width + sx];
+            } else {
+                sp = CombineTaps(src, xTaps[static_cast<size_t>(xx - x)],
+                                 yTaps[static_cast<size_t>(yy - y)]);
+            }
             if (tinted) {
                 // Pack is 0xAABBGGRR — R in the low byte.
                 const int cr = static_cast<int>((sp >> 0) & 0xFF);
@@ -447,6 +557,14 @@ void SoftwareGraphicsBackend::RasterizeShape(const DrawCommand& cmd) {
     // Shapes are rasterized as filled rects/ellipses; polygons are handled by
     // the scene layer above as a list of rects in the common cases.
     if (cmd.color.a <= 0.0f) return;
+    // A rounded rectangle takes the anti-aliased path; a square one (the
+    // default, and every pre-radius caller) keeps the exact old fill.
+    if (cmd.cornerRadius >= 0.5f) {
+        FillRoundedRectBlended(static_cast<int>(r.x), static_cast<int>(r.y),
+                               static_cast<int>(r.width), static_cast<int>(r.height),
+                               cmd.cornerRadius, cmd.color, BlendMode::Alpha);
+        return;
+    }
     FillRectBlended(static_cast<int>(r.x), static_cast<int>(r.y),
                     static_cast<int>(r.width), static_cast<int>(r.height), cmd.color,
                     BlendMode::Alpha);

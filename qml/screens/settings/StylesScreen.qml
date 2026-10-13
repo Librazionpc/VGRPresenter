@@ -112,6 +112,12 @@ Item {
     property bool editShowMedia: false
     property bool editShowScripture: false
     property bool editShowTable: false
+    // A fifth gate, same on/off shape as the four content-type chips above
+    // but NOT one of them: it doesn't drive editTemplateFamily and has no
+    // template of its own (overlays render from their own design's blocks,
+    // via OverlayLibraryService) — it just refuses the Overlays pane's
+    // compositor layer on an output wearing this style.
+    property bool editShowOverlay: false
     // PER-FAMILY template picks — each active content type carries its OWN
     // template ("" = none for that family). NO INHERIT: a family only ever
     // renders a template picked for IT (Shows alone falls back to the Bible
@@ -150,6 +156,7 @@ Item {
         root.editShowMedia = data.showMedia
         root.editShowScripture = data.showScripture
         root.editShowTable = data.showTable
+        root.editShowOverlay = data.showOverlay
         root.editFamilyShows = data.familyTemplateShows
         root.editFamilyMedia = data.familyTemplateMedia
         root.editFamilyScripture = data.familyTemplateScripture
@@ -172,6 +179,7 @@ Item {
         StyleListModel.setShowTemplate(root.editStyleIndex, "media", root.editShowMedia)
         StyleListModel.setShowTemplate(root.editStyleIndex, "scripture", root.editShowScripture)
         StyleListModel.setShowTemplate(root.editStyleIndex, "table", root.editShowTable)
+        StyleListModel.setShowTemplate(root.editStyleIndex, "overlay", root.editShowOverlay)
         StyleListModel.setFamilyTemplateKey(root.editStyleIndex, "shows", root.editFamilyShows)
         StyleListModel.setFamilyTemplateKey(root.editStyleIndex, "media", root.editFamilyMedia)
         StyleListModel.setFamilyTemplateKey(root.editStyleIndex, "scripture", root.editFamilyScripture)
@@ -184,7 +192,26 @@ Item {
     // ShowService/ScriptureService use). Non-image files simply fail to
     // decode later and the colour shows instead — a second dialog would be
     // kinder but this keeps the flow one click.
+    //
+    // DEFERRED on purpose (fixed 2026-10-10 — the reported crash "the app
+    // crashes when i update the styles and go back to output"): the picker is a
+    // NATIVE modal dialog, so it runs its own nested event loop inside this
+    // call. Run straight from the button's click handler, that handler sat on
+    // the stack for the whole loop, and anything the loop tears down takes the
+    // handler's own object with it — engine.log carried exactly that verdict:
+    // "Object 0x… destroyed while one of its QML signal handlers is in
+    // progress … StylesScreen.qml:1166: function() { [native code] }", one
+    // line before the process died of an access violation. A section switch
+    // (Settings · Outputs) destroys this page, and the section Loader can run
+    // while the nested loop is still pumping events. Through Qt.callLater the
+    // click handler has already RETURNED when the picker opens, so there is no
+    // QML handler for the teardown to collide with — and if this page is gone
+    // by the time the deferred call comes round, Qt simply drops it instead of
+    // writing to a dead object.
     function pickBackgroundImage() {
+        Qt.callLater(root.applyPickedBackgroundImage)
+    }
+    function applyPickedBackgroundImage() {
         const path = StyleListModel.pickImageFile()
         if (path !== "")
             root.editStyleBackgroundImage = path
@@ -263,6 +290,9 @@ Item {
 
                         AppButton {
                             id: addStyleButton
+                            // Hook for the output-save scenario, which adds a style
+                            // the way the operator does before saving an output.
+                            objectName: "selfTestAddStyle"
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
                             text: qsTr("+ Add style")
@@ -445,15 +475,15 @@ Item {
                                         height: 18
                                         width: onAirLabel.implicitWidth + 12
                                         radius: 9
-                                        color: "#33ff4d3d"
-                                        border.color: "#66ff4d3d"
+                                        color: Qt.alpha(Theme.liveBg, 0.2)
+                                        border.color: Qt.alpha(Theme.liveBg, 0.4)
                                         border.width: 1
 
                                         Text {
                                             id: onAirLabel
                                             anchors.centerIn: parent
                                             text: qsTr("● ON AIR")
-                                            color: "#ff6b61"
+                                            color: Theme.dangerLight
                                             font.family: Theme.fontFamily
                                             font.pixelSize: 9
                                             font.weight: Font.Bold
@@ -581,7 +611,7 @@ Item {
                                             const u = root.styleUsage(styleRow.styleId)
                                             return "·  applied by " + u + (u === 1 ? " output" : " outputs")
                                         }
-                                        color: root.isOnAir(styleRow.styleId) ? "#ff8a80" : Theme.textSecondary
+                                        color: root.isOnAir(styleRow.styleId) ? Theme.dangerLight : Theme.textSecondary
                                         font.family: Theme.fontFamily
                                         font.pixelSize: Theme.textXs
                                         font.weight: root.isOnAir(styleRow.styleId) ? Font.DemiBold : Font.Normal
@@ -803,6 +833,38 @@ Item {
             Text {
                 width: parent.width
                 text: qsTr("An unselected type is not allowed on an output wearing this style — its content is refused on air. The Template below belongs to the picked type; a type with none set renders plain (Shows falls back to the Bible template).")
+                color: Theme.textMuted
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
+                wrapMode: Text.WordWrap
+            }
+        }
+
+        // OVERLAY — a plain on/off gate, same effect as the four chips above
+        // (refused on an output wearing this style) but NOT one of them: it
+        // never targets editTemplateFamily and has no template row of its
+        // own, since an overlay always renders from its own design's blocks
+        // (the Overlays pane), never a style template.
+        Column {
+            width: parent.width
+            spacing: Theme.space2
+
+            Text {
+                text: qsTr("Overlay")
+                color: Theme.textSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
+            }
+
+            SelectableChip {
+                label: qsTr("Overlay")
+                selected: root.editShowOverlay
+                onPicked: root.editShowOverlay = !root.editShowOverlay
+            }
+
+            Text {
+                width: parent.width
+                text: qsTr("Off refuses the Overlays pane's live overlays on an output wearing this style — the rest of the output still shows normally.")
                 color: Theme.textMuted
                 font.family: Theme.fontFamily
                 font.pixelSize: Theme.textXs

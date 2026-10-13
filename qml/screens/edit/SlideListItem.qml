@@ -53,7 +53,7 @@ Rectangle {
     // (and the button fade out) the instant the cursor reached it.
     readonly property bool hovered: hoverArea.containsMouse || deleteArea.containsMouse
 
-    // The thumbnail keeps the stage's proportions (754 x 428), so the row is as tall as the picture needs.
+    // The thumbnail keeps the stage's proportions (StageGrid.w x StageGrid.h), so the row is as tall as the picture needs.
     height: canvasThumb.height + 8
     width: 256
     border.color: root.active ? Theme.accent : "#232530"
@@ -73,8 +73,8 @@ Rectangle {
         id: canvasThumb
         x: 16
         y: 4
-        width: 224
-        height: Math.round((width - 2) * 428 / 754) + 2
+        width: Math.max(96, parent.width - 32)
+        height: StageGrid.heightForWidth(width - 2) + 2
         border.color: "#262a38"
         border.width: 1
         color: "#0d0f16"
@@ -160,7 +160,7 @@ Rectangle {
 
         Text {
             anchors.centerIn: parent
-            color: "#ff6b61"
+            color: Theme.dangerLight
             font.pixelSize: 12
             text: "✕"
         }

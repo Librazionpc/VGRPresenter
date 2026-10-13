@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import VGRPresenterUI
 
 // "Select Style" picker — opens from the Outputs Edit dialog's Style row
@@ -15,7 +16,9 @@ Item {
     id: root
     // Shared top-level modal layer: keep the scrim and card above the page
     // so clicks and hover never reach the controls behind the dialog.
-    z: 30000
+    // This picker opens over the Edit Output dialog on the shared window
+    // overlay, so it needs a higher layer than the dialog's modal card.
+    z: 31000
 
     property bool open: false
     // Selection by the style's STABLE id ("" = the None card). Ids survive
@@ -42,6 +45,15 @@ Item {
     anchors.fill: parent
     visible: root.open
 
+    // The dialog belongs to the WINDOW, not to the pane that declares it. A modal
+    // declared inside a settings page (every Add / Edit dialog in Settings) must dim
+    // the whole app, not just that page's content column: parented in place its scrim
+    // covered one side of the settings card, so the dialog read as half-modal (user
+    // report: "the black box doesn't cover the whole settings modal, only one side").
+    // Reparented to the window overlay, this component has no scaled ancestor to
+    // inherit a scale from, so its CARD applies the app scale itself (see AppScale.qml).
+    parent: Overlay.overlay
+
     ModalScrim {
         anchors.fill: parent
         onDismissed: root.cancelled()
@@ -49,6 +61,10 @@ Item {
 
     Rectangle {
         id: card
+        // The app's one scale, on the card (see AppScale.qml) — never on the root,
+        // whose scrim IS the dialog's black box and has to stay window-sized.
+        scale: AppScale.cardScale(card)
+        transformOrigin: Item.Center
         anchors.centerIn: parent
         width: 620
         height: Math.min(parent.height - 80, content.height + 40)

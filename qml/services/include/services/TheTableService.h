@@ -45,17 +45,31 @@ public:
 
     // One sermon's paragraphs: [{ number, text, heading }]
     Q_INVOKABLE QVariantList chapter(const QString &bookId, int chapter) const;
+    // Loads a chapter off the UI thread; stale requests are discarded.
+    Q_INVOKABLE void chapterAsync(const QString &bookId, int chapter, int token);
     // A paragraph's FULL text — `count` 1 = just that paragraph, 2 = it and its
     // successor blank-line joined. The hover preview asks for 2 on a spanned
     // match (words spread across both), 1 otherwise. "" when unknown.
     Q_INVOKABLE QString paragraphPair(const QString &bookId, int chapter, int verse, int count = 2) const;
     // Whole-library search: [{ reference, bookId, chapter, verse, snippet }]
-    Q_INVOKABLE QVariantList search(const QString &text, int limit = 60) const;
+    // `exactWords` (the search boxes' padlock): the typed words must appear
+    // verbatim as whole words — no completion, no inner substring, no typo
+    // correction. See TheTableLibrary::Search.
+    // `scopeBookId` + `scopeChapter` are the pane's CHAPTER LOCK: when the search
+    // is locked to the sermon on screen, only that sermon's paragraphs are
+    // searched (never another sermon, never another year). Empty `scopeBookId` =
+    // the whole library; `scopeChapter` 0 = every sermon of that year.
+    Q_INVOKABLE QVariantList search(const QString &text, int limit = 60,
+                                    bool exactWords = false, bool includeFullText = false,
+                                    const QString &scopeBookId = QString(),
+                                    int scopeChapter = 0) const;
     // ASYNC search (the Quick-search pattern): the same rows on a worker thread
     // — the pill search pane runs this per keystroke and the GUI never blocks
     // on a big query. `token` = newest request wins; answers arrive as
     // searchResultsReady(token, rows) (stale tokens are dropped).
-    Q_INVOKABLE void searchAsync(const QString &text, int limit, int token);
+    Q_INVOKABLE void searchAsync(const QString &text, int limit, int token,
+                                 bool exactWords = false, const QString &scopeBookId = QString(),
+                                 int scopeChapter = 0);
 
     // ---- the shared reference-pane adapter (the same calls ScriptureService
     // answers, so ONE pane UI serves both tabs) ----
@@ -76,6 +90,14 @@ public:
     // {} (the dropdown lists them, the user picks the actual sermon).
     // Used by resolve() when the text is not a year/paragraph reference.
     QVariantMap resolveCitation(const QString &text) const;
+    // A typed HANDLE put into the one form the citation search compares on:
+    // lower case with the spaces beside a dash removed, so "47-0412", "47 - 0412"
+    // and "47 -0412" all name the same sermon while the title's own spaces are
+    // left alone. Exposed (not just internal) because ReferencePane.suggest
+    // mirrors this search for the pane's dropdown — one formatter, so the box
+    // that jumps and the list that appears can never disagree about what was
+    // typed.
+    Q_INVOKABLE QString citationNeedle(const QString &handle) const;
     // The preview slide for the picked paragraphs, in the Edit screen's block
     // shape (DesignPreview draws it): { blocks, background, reference, slideCount }.
     Q_INVOKABLE QVariantMap preview(const QString &bookId, int chapter, const QVariantList &verses) const;
@@ -124,6 +146,11 @@ public:
     // carries { done, total, current } per file and one final `imported`
     // ({ imported, skipped, failed }) toast lands when it finishes.
     Q_INVOKABLE bool newSermonFolder();
+    // The same sweep for a root that is already known - the folder picker above
+    // calls this, and the env-gated self-test scenario drives it directly (the
+    // same worker thread, the same progress and the same final toast, without a
+    // dialog a script cannot answer).
+    Q_INVOKABLE bool importSermonFolder(const QString &root);
     Q_PROPERTY(bool importing READ importing NOTIFY importingChanged)
     bool importing() const { return importing_; }
     Q_PROPERTY(QVariantMap progress READ progress NOTIFY progressChanged)
@@ -136,10 +163,12 @@ signals:
     // searchAsync's answer: token matches the request, rows are the hits
     // (search()'s shape). Stale tokens never emit.
     void searchResultsReady(int token, const QVariantList &rows);
+    void chapterReady(int token, const QString &bookId, int chapter, const QVariantList &rows);
     void userDataChanged();
 
 private:
     std::atomic<int> latestSearchToken_{0};   // searchAsync: only the newest emits
+    std::atomic<int> latestChapterToken_{0};  // chapterAsync: only the newest emits
     explicit TheTableService(QObject *parent = nullptr);
 
     void loadLibrary();

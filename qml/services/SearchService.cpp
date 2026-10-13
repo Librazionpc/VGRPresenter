@@ -1,3 +1,4 @@
+#include "services/CallTrace.h"
 #include "services/SearchService.h"
 
 #include <QThread>
@@ -28,9 +29,11 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 
 #include <algorithm>
 #include <functional>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -73,34 +76,97 @@ QStringList splitWords(const QString &s)
     return out;
 }
 
+// Exact lock semantics: every typed token must occur as a complete word in
+// the same verse. Word order and intervening words do not matter.
+bool containsAllExactWords(std::string_view text, const std::vector<std::string> &terms)
+{
+    const auto words = ts::TokenizeWords(text);
+    return !terms.empty() && std::all_of(terms.begin(), terms.end(), [&](const std::string &term) {
+        return std::find(words.begin(), words.end(), term) != words.end();
+    });
+}
+
+// The first WHOLE-WORD occurrence of `needle` in `hay` (case-insensitive), or -1:
+// the characters on both sides of the match are not letters/digits, so "word"
+// does not match inside "words" or "password". The padlock's rule.
+int wholeWordAt(const QString &hay, const QString &needle)
+{
+    int from = 0;
+    while (true) {
+        const int at = hay.indexOf(needle, from, Qt::CaseInsensitive);
+        if (at < 0)
+            return -1;
+        const int end = at + needle.length();
+        const bool leftOk = at == 0 || !hay.at(at - 1).isLetterOrNumber();
+        const bool rightOk = end >= hay.length() || !hay.at(end).isLetterOrNumber();
+        if (leftOk && rightOk)
+            return at;
+        from = at + 1;
+    }
+}
+
+// Rank a row's words by how they read together: the query phrase first, then
+// the same words in order with up to two fillers, then all words scattered.
+// This keeps every app-wide result type on the same proximity ladder as Table.
+int proximityScore(const QString &field, const QStringList &words)
+{
+    if (words.size() < 2) return 0;
+    const QStringList hay = splitWords(field);
+    int bestGap = std::numeric_limits<int>::max();
+    for (int start = 0; start < hay.size(); ++start) {
+        if (hay[start] != words.front()) continue;
+        int pos = start;
+        int gaps = 0;
+        bool ordered = true;
+        for (int w = 1; w < words.size(); ++w) {
+            int next = pos + 1;
+            while (next < hay.size() && next <= pos + 3 && hay[next] != words[w]) ++next;
+            if (next >= hay.size() || next > pos + 3) { ordered = false; break; }
+            gaps += next - pos - 1;
+            pos = next;
+        }
+        if (ordered) bestGap = qMin(bestGap, gaps);
+    }
+    if (bestGap == 0) return 0;       // verbatim words, punctuation ignored
+    if (bestGap != std::numeric_limits<int>::max()) return 10 + bestGap;
+    return 30;                        // all words are present, but scattered/reversed
+}
+
 // Word-level matching for the Quick search's local surfaces (slides, settings,
 // show names) — the same semantics the engine gives songs/Bible/The Table:
 // EVERY query word must land in a field, words may sit anywhere in it, and a
 // MISSPELLED word is corrected against the field's own words (bounded edit
 // distance, first letter kept). "setings" finds "Settings", "outpt colr"
-// finds "Outputs". Quality: name starts with the query word 0 < word start 1
-// < inside a word 2 < typo-corrected 3; -1 = no match.
-int matchScore(const QString &needle, std::initializer_list<QString> fields)
+// finds "Outputs". Exact whole-word matches rank by phrase proximity; fuzzy
+// corrections rank after exact words. -1 means no match.
+// `exactWords` (the padlock) drops the typo pass and demands whole words in the
+// exact one: every query word must occur whole in the same result field.
+int matchScoreList(const QString &needle, const QStringList &fields, bool exactWords)
 {
     const QStringList words = splitWords(needle);
     if (words.isEmpty()) return needle.trimmed().isEmpty() ? 0 : -1;
     int best = -1;
     for (const QString &f : fields) {
         if (f.isEmpty()) continue;
-        // Exact pass: every word present.
+        // Exact pass: every word present (as a WHOLE word when the search is locked).
         bool all = true;
         int worst = 0;
         for (const QString &w : words) {
-            const int at = f.indexOf(w, 0, Qt::CaseInsensitive);
+            const int at = exactWords ? wholeWordAt(f, w)
+                                      : f.indexOf(w, 0, Qt::CaseInsensitive);
             if (at < 0) { all = false; break; }
             const int ws = at == 0 ? 0 : (!f.at(at - 1).isLetterOrNumber() ? 1 : 2);
             worst = qMax(worst, ws);
         }
         if (all) {
-            if (best < 0 || worst < best) best = worst;
+            const int score = proximityScore(f, words) * 10 + worst;
+            if (best < 0 || score < best) best = score;
             continue;
         }
         // Fuzzy pass: each missing word must correct to a word of this field.
+        // (Never when locked: refusing this pass is what the padlock means.)
+        if (exactWords)
+            continue;
         std::vector<std::string> vocab;
         for (const QString &w : splitWords(f))
             vocab.push_back(w.toStdString());
@@ -115,9 +181,14 @@ int matchScore(const QString &needle, std::initializer_list<QString> fields)
                     && bs::textmatch::EditDistanceBounded(q, v, maxDist) <= maxDist) { fixed = true; break; }
             if (!fixed) { all = false; break; }
         }
-        if (all && (best < 0 || 3 < best)) best = 3;
+        if (all && (best < 0 || 400 < best)) best = 400;
     }
     return best;
+}
+
+int matchScore(const QString &needle, std::initializer_list<QString> fields, bool exactWords)
+{
+    return matchScoreList(needle, QStringList(fields), exactWords);
 }
 
 // Appends the best `limit` of `found` (stable, so ties keep their source order).
@@ -165,15 +236,15 @@ constexpr SettingEntry kSettings[] = {
 };
 
 // The Settings entries that match `text` (name first, then section), best first.
-QVariantList settingsMatches(const QString &text, int limit)
+QVariantList settingsMatches(const QString &text, int limit, bool exactWords)
 {
     std::vector<Scored> found;
     for (const SettingEntry &e : kSettings) {
         const QString label = QString::fromUtf8(e.label);
         const QString section = QString::fromUtf8(e.section);
-        int score = matchScore(text, { label });
+        int score = matchScore(text, { label }, exactWords);
         if (score < 0) {
-            score = matchScore(text, { section });
+            score = matchScore(text, { section }, exactWords);
             if (score < 0) continue;
             score += 3;   // an entry that only matches through its section comes after real name matches
         }
@@ -297,6 +368,24 @@ QVariantList SearchService::resolveWords(const QString &text) const
         m.insert(QStringLiteral("resolved"), QString::fromStdString(r));
         m.insert(QStringLiteral("weight"), resolved.value()[i].weight);
         m.insert(QStringLiteral("changed"), r != typed);
+        // THE LAST WORD MAY STILL BE HALF TYPED (the caret is on it): hand the
+        // search boxes its CANDIDATE LADDER — every word the typed prefix can
+        // become, MOST CONFIDENT FIRST ("rec" -> receive, received, record, ...),
+        // so the hint can show what the smart money is on and then the rest, and
+        // the highlight can wrap the reading the search itself preferred (user
+        // call: "start from the ones it confident about then come as far as
+        // possible options exist"). Empty for every other word, and for a word
+        // that is already whole.
+        if (i + 1 == words.size()) {
+            std::vector<std::string> ladder =
+                bs::SearchEngine::Instance().PrefixCandidates(typed);
+            if (!ladder.empty()) {
+                QStringList rows;
+                for (const std::string &w : ladder)
+                    rows << QString::fromStdString(w);
+                m.insert(QStringLiteral("candidates"), rows);
+            }
+        }
         out.append(m);
     }
     return out;
@@ -323,8 +412,7 @@ void SearchService::resolveWordsAsync(const QString &text, int token)
 
 QVariantList SearchService::searchSettings(const QString &text, int limit) const
 {
-    const QString q = text.trimmed();
-    return q.isEmpty() ? QVariantList{} : settingsMatches(q, limit);
+    const QString q = text.trimmed();        return q.isEmpty() ? QVariantList{} : settingsMatches(q, limit, false);
 }
 
 // One verse's full text — the Quick search hover preview (see the header).
@@ -342,13 +430,38 @@ QString SearchService::fullVerse(const QString &bibleId, const QString &bookId,
 // Search
 // ===========================================================================
 
-QVariantList SearchService::search(const QString &rawText, int perKind) const
+QVariantList SearchService::search(const QString &rawText, int perKind, bool exactWords) const
 {
     QVariantList out;
-    const QString text = rawText.trimmed();
+    QString text = rawText.trimmed();
     if (text.isEmpty() || !EngineBridge::instance().booted())
         return out;
     const int limit = qMax(1, perKind);
+    // Exact mode still forgives a detected typo. Resolve only misspelled terms
+    // (weight < 1); completions remain locked to what the user typed. Applying
+    // the same correction to retrieval and the whole-word filter prevents the
+    // hint from saying "recieve -> receive" while the padlock searches for
+    // "recieve" and rejects every correctly spelled passage.
+    if (exactWords) {
+        const QVariantList resolved = resolveWords(text);
+        for (const QVariant &row : resolved) {
+            const QVariantMap word = row.toMap();
+            if (!word.value(QStringLiteral("changed")).toBool()
+                || word.value(QStringLiteral("weight")).toDouble() >= 1.0)
+                continue;
+            const QString typed = word.value(QStringLiteral("typed")).toString();
+            const QString fixed = word.value(QStringLiteral("resolved")).toString();
+            if (!typed.isEmpty() && !fixed.isEmpty()) {
+                const QRegularExpression re(QStringLiteral("\\b") + QRegularExpression::escape(typed)
+                                            + QStringLiteral("\\b"),
+                                            QRegularExpression::CaseInsensitiveOption);
+                text.replace(re, fixed);
+            }
+        }
+    }
+    // The padlock's words (lower-cased): every surface whose engine matching
+    // cannot be locked (Bible, songs, media) has its hits filtered against these.
+    const QStringList exactQueryWords = exactWords ? splitWords(text) : QStringList();
 
     // ---- A typed Bible reference goes first ("john 3:16", "ps 23") ------------
     const std::vector<std::string> bibleIds = bb::BibleEngine::Instance().BibleIds();
@@ -389,7 +502,13 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
             const QVariantMap s = v.toMap();
             const QString category = s.value(QStringLiteral("category")).toString();
             const int slides = s.value(QStringLiteral("slideCount")).toInt();
-            found.emplace_back(matchScore(text, { s.value(QStringLiteral("name")).toString(), category }),
+            const int score = matchScore(text, { s.value(QStringLiteral("name")).toString(), category },
+                                         exactWords);
+            // Locked, the library's own fuzzy hit is not enough — the name (or
+            // category) must carry the typed words whole, or the show drops out.
+            if (exactWords && score < 0)
+                continue;
+            found.emplace_back(score,
                                makeResult(QStringLiteral("show"), s.value(QStringLiteral("name")).toString(),
                                           (category.isEmpty() ? QString() : category + QStringLiteral(" · "))
                                               + QObject::tr("%n slide(s)", "", slides),
@@ -414,7 +533,7 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
             const QString line1 = s.value(QStringLiteral("line1")).toString();
             const QString line2 = s.value(QStringLiteral("line2")).toString();
             const QString ref = s.value(QStringLiteral("ref")).toString();
-            const int score = matchScore(text, { title, line1, line2, ref });
+            const int score = matchScore(text, { title, line1, line2, ref }, exactWords);
             if (score < 0) continue;
             slides.emplace_back(score,
                 makeResult(QStringLiteral("slide"), title.isEmpty() ? slideNumberLabel(i) : title,
@@ -430,7 +549,7 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
             for (const QVariant &v : show.value(listKey).toList()) {
                 const QVariantMap m = v.toMap();
                 const QString name = m.value(QStringLiteral("name")).toString();
-                const int score = matchScore(text, { name });
+                const int score = matchScore(text, { name }, exactWords);
                 if (score < 0) continue;
                 found.emplace_back(score, makeResult(kind, name, subtitle(m),
                                                      m.value(QStringLiteral("id")).toString()));
@@ -452,36 +571,47 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
     }
 
     // ---- Settings -------------------------------------------------------------------
-    out += settingsMatches(text, limit);
+    out += settingsMatches(text, limit, exactWords);
 
     // ---- Media: images and videos by name (the media library's folders) ------------------------
     {
-        int n = 0;
+        std::vector<Scored> found;
         for (const QVariant &v : MediaLibraryService::instance().items(QString(), text)) {
-            if (n++ >= limit) break;
             const QVariantMap m = v.toMap();
+            const QString name = m.value(QStringLiteral("name")).toString();
+            int score = matchScore(text, { name }, exactWords);
+            // The media index can return fuzzy candidates in unlocked mode;
+            // keep those behind exact whole-word/proximity matches.
+            if (exactWords && score < 0) continue;
+            if (score < 0) score = 500;
             const QString mediaKind = m.value(QStringLiteral("kind")).toString();
-            out.append(makeResult(QStringLiteral("media"), m.value(QStringLiteral("name")).toString(),
-                                  (mediaKind == QLatin1String("video") ? QObject::tr("Video")
-                                   : mediaKind == QLatin1String("audio") ? QObject::tr("Audio") : QObject::tr("Image")) + QStringLiteral(" \u00b7 ")
-                                      + QFileInfo(m.value(QStringLiteral("folder")).toString()).fileName(),
-                                  m.value(QStringLiteral("id")).toString(), m.value(QStringLiteral("path")).toString()));
+            found.emplace_back(score, makeResult(QStringLiteral("media"), name,
+                                (mediaKind == QLatin1String("video") ? QObject::tr("Video")
+                                 : mediaKind == QLatin1String("audio") ? QObject::tr("Audio") : QObject::tr("Image")) + QStringLiteral(" \u00b7 ")
+                                    + QFileInfo(m.value(QStringLiteral("folder")).toString()).fileName(),
+                                m.value(QStringLiteral("id")).toString(), m.value(QStringLiteral("path")).toString()));
         }
+        take(out, found, limit);
     }
 
     // ---- Songs (engine) -------------------------------------------------------------
     if (text.size() >= 2) {
         auto songs = sg::SongEngine::Instance().Search(text.toStdString());
         if (songs.ok()) {
-            int n = 0;
+            std::vector<Scored> found;
             for (const sg::Song &s : songs.value()) {
-                if (n++ >= limit) break;
                 QStringList authors;
                 for (const std::string &a : s.metadata.authors) authors << qstr(a);
-                out.append(makeResult(QStringLiteral("song"), qstr(s.metadata.title),
-                                      authors.isEmpty() ? QObject::tr("Song") : authors.join(QStringLiteral(", ")),
-                                      qstr(s.id)));
+                QStringList fields{ qstr(s.metadata.title) };
+                fields += authors;
+                int score = matchScoreList(text, fields, exactWords);
+                if (exactWords && score < 0) continue;
+                if (score < 0) score = 500;
+                found.emplace_back(score, makeResult(QStringLiteral("song"), qstr(s.metadata.title),
+                                    authors.isEmpty() ? QObject::tr("Song") : authors.join(QStringLiteral(", ")),
+                                    qstr(s.id)));
             }
+            take(out, found, limit);
         }
     }
 
@@ -489,10 +619,25 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
     if (!bibleIds.empty() && !referenceFound && text.size() >= 3) {
         auto &bible = bb::BibleEngine::Instance();
         auto hits = bible.Search(text.toStdString());
+        // The locked words as plain std::string, once — ContainsNearPhrase takes
+        // the engine's own term shape, not Qt's.
+        std::vector<std::string> exactTerms;
+        if (exactWords) {
+            exactTerms.reserve(size_t(exactQueryWords.size()));
+            for (const QString &w : exactQueryWords) exactTerms.push_back(w.toStdString());
+        }
         if (hits.ok()) {
             int n = 0;
             for (const bb::BibleSearchHit &h : hits.value()) {
-                if (n++ >= qMax(limit, 6)) break;
+                if (n >= qMax(limit, 6)) break;
+                QString exactVerseText;
+                auto wholeVerse = bible.GetVerse(h.bibleId, h.bookId, h.chapter, h.verse);
+                if (wholeVerse.ok())
+                    exactVerseText = qstr(wholeVerse.value().text);
+                if (exactWords && (!wholeVerse.ok()
+                                   || !containsAllExactWords(wholeVerse.value().text, exactTerms)))
+                    continue;
+                ++n;
                 const QString name = bookNameFor(bible, h.bibleId, h.bookId, std::string());
                 QString body = cleanVerse(qstr(h.snippet));
                 if (body.isEmpty()) {
@@ -511,6 +656,8 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
                 r.insert(QStringLiteral("bookId"), qstr(h.bookId));
                 r.insert(QStringLiteral("chapter"), h.chapter);
                 r.insert(QStringLiteral("verse"), h.verse);
+                if (!exactVerseText.isEmpty())
+                    r.insert(QStringLiteral("fullText"), cleanVerse(exactVerseText));
                 out.append(r);
             }
         }
@@ -545,7 +692,7 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
         // A code listing IS The Table's answer ("47-" = every 1947 sermon): the
         // per-kind cap (4) would truncate the sermon list to a few rows.
         const int tableLimit = codeShaped ? qMax(limit, 30) : qMax(limit, 4);
-        const QVariantList hits = TheTableService::instance().search(text, tableLimit);
+        const QVariantList hits = TheTableService::instance().search(text, tableLimit, exactWords, true);
         for (const QVariant &v : hits) {
             const QVariantMap h = v.toMap();
             // Title = the sermon's citation line minus the paragraph — the same
@@ -571,6 +718,10 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
             r.insert(QStringLiteral("chapter"), h.value(QStringLiteral("chapter")));
             r.insert(QStringLiteral("verse"), h.value(QStringLiteral("verse")));
             r.insert(QStringLiteral("spanned"), h.value(QStringLiteral("spanned")));
+            // The search hit carries its matched paragraph(s), avoiding a
+            // second chapter lookup for every row merely to support ranking,
+            // exact-word filtering, and the hover preview.
+            r.insert(QStringLiteral("fullText"), h.value(QStringLiteral("fullText")));
             // The library's ranking score rides along: the dialog's pick-float
             // lets a previously-picked row keep its boost only over rows it
             // actually outscores (a picked ¶ must not bury the verbatim match).
@@ -589,12 +740,21 @@ QVariantList SearchService::search(const QString &rawText, int perKind) const
 // The same aggregation off the GUI thread. The dialog passes a token (its
 // request counter): stale responses (an older keystroke finishing late) are
 // dropped here, so the UI only ever sees the LATEST query's rows.
-void SearchService::searchAsync(const QString &text, int perKind, int token)
+void SearchService::searchAsync(const QString &text, int perKind, int token, bool exactWords)
 {
-    auto *runner = QThread::create([this, text, perKind, token] {
+    VGR_CALL_TRACE("SearchService.searchAsync");
+    // A word search scans the full sermon corpus. Serialize these scans and
+    // recheck the token after acquiring the gate: when typing outruns a scan,
+    // queued stale requests then exit without rescanning or holding the Table
+    // library's read lock while a result is being opened on the UI thread.
+    static std::mutex asyncSearchMutex;
+    auto *runner = QThread::create([this, text, perKind, token, exactWords] {
         if (token != latestToken_.load(std::memory_order_acquire))
             return;
-        const QVariantList rows = search(text, perKind);
+        std::unique_lock<std::mutex> searchLock(asyncSearchMutex);
+        if (token != latestToken_.load(std::memory_order_acquire))
+            return;
+        const QVariantList rows = search(text, perKind, exactWords);
         QMetaObject::invokeMethod(this, [this, token, rows] {
             if (token == latestToken_)
                 emit resultsReady(token, rows);
@@ -734,6 +894,12 @@ bool SearchService::importBibleFile(const QString &path)
 
 void SearchService::shutdown()
 {
+    // BOUNDED: this runs on the GUI thread in aboutToQuit. A bible import is a
+    // one-shot worker that normally finishes long before this, but waiting the
+    // full 20s while it is still parsing 31k verses froze the app past
+    // Windows' ~5s hang threshold (AppHangB1 -> process killed), which is what
+    // "it crashes when I quit" looked like. The worker's result is delivered by
+    // a queued call that the exiting loop simply never runs.
     if (loader_)
-        loader_->wait(20000);
+        (void)loader_->wait(2000);
 }

@@ -1,3 +1,4 @@
+#include "services/CallTrace.h"
 #include "services/TheTableService.h"
 
 #include "services/DesignLibraryService.h"
@@ -10,7 +11,7 @@
 #include <QThread>
 
 #include "modules/library/TheTableLibrary.hpp"
-#include "modules/presentation/ScriptureSlides.hpp"
+#include "modules/presentation/BookFill.hpp"
 #include "platform/PlatformAccessor.hpp"
 
 #include <QCoreApplication>
@@ -43,8 +44,14 @@ void report(const QString &message, const QString &level)
 
 namespace pf = bps::presentation;
 
+// The engine's default table template (the id the template catalog gives the plain
+// "Table" layout) — named, one definition, exactly as ScriptureService names its
+// own (kDefaultTemplate): the id used to be a literal repeated in the profile and
+// again in defaultTemplateId(), so changing one left the other behind.
+constexpr const char *kDefaultTemplate = "tpl-table";
+
 // This tab's place in the shared slide builder: its own "table" templates and its own setting.
-const SlideBuilder::Profile kProfile{ "table", "table.template", "tpl-table" };
+const SlideBuilder::Profile kProfile{ "table", "table.template", kDefaultTemplate };
 
 // The engine's paragraph source for the slide builder: a "book" (year) +
 // chapter (sermon) and the picked paragraphs as verses.
@@ -90,9 +97,9 @@ int citationSearchMinChars(const QString &needle)
 }
 
 bool sourceFor(bl::TheTableLibrary *lib, const QString &bookId, int chapter,
-               const QVariantList &verses, pf::ScriptureSource &out)
+               const QVariantList &verses, pf::BookSource &out)
 {
-    out = pf::ScriptureSource{};
+    out = pf::BookSource{};
     if (!lib)
         return false;
     auto ch = lib->GetChapter(bookId.toStdString(), chapter);
@@ -102,26 +109,40 @@ bool sourceFor(bl::TheTableLibrary *lib, const QString &bookId, int chapter,
         if (b.id != bookId.toStdString())
             continue;
         // The citation line ("53-0217 - Only Believe") is what the engine's
-        // reference builder prepends: ScriptureReference(book, chapter, verses)
-        // writes `<book> <chapter>:<verses>`, and with the citation as book +
-        // chapter 0 that becomes exactly the sermon citation + paragraph
-        // numbers. (Scripture keeps its own plain book name.)
+        // reference builder takes as its "book": with the family set to Table,
+        // BookReference writes the citation followed by the paragraph numbers and
+        // no chapter — "47-0412 - Faith Is The Substance 1-3". (Scripture keeps
+        // its own plain book name and writes its chapter.) The FAMILY is what
+        // says which of the two shapes this is; it used to be chapter zero.
         out.book = lib->Citation(bookId.toStdString(), chapter, 0);
+        // ...and the citation's leading code on its own ("47-0412"), which is
+        // what {table_code} renders — a template with room for a date code has
+        // nowhere to put the whole citation line. The year and the sermon's
+        // title come off the same citation (Parts): a design with a slot for
+        // each of them gets the real pieces instead of an empty {scripture_name}
+        // (a sermon has no Bible version) and a title buried inside the line.
+        const auto parts = lib->Parts(bookId.toStdString(), chapter);
+        out.code = lib->CitationCode(bookId.toStdString(), chapter);
+        out.year = parts.year;
+        out.title = parts.title;
         break;
     }
-    // The engine skips the chapter and ":" for chapter 0 (ScriptureReference);
-    // the verses still come out as "1-3" after the citation.
-    out.chapter = 0;
+    // A SERMON, NAMED (BookFill::ContentFamily): the filler shapes the reference
+    // for a citation (no chapter, a space before the paragraph numbers) and
+    // answers only the tokens a sermon has one for, so nothing here has to encode
+    // "this is a sermon" as a missing chapter.
+    out.family = pf::ContentFamily::Table;
+    out.chapter = 0;   // a fact about the data: a sermon has no chapter
     for (const QVariant &v : verses) {
         const int n = v.toInt();
         for (const bl::TheTableVerse &tv : ch.value().verses) {
             if (tv.number == n) {
-                out.verses.push_back({ n, tv.text });
+                out.items.push_back({ n, tv.text });
                 break;
             }
         }
     }
-    return !out.verses.empty();
+    return !out.items.empty();
 }
 
 } // namespace
@@ -247,6 +268,20 @@ QVariantList TheTableService::chapter(const QString &bookId, int chapter) const
     return out;
 }
 
+void TheTableService::chapterAsync(const QString &bookId, int chapter, int token)
+{
+    auto *runner = QThread::create([this, bookId, chapter, token] {
+        const QVariantList rows = this->chapter(bookId, chapter);
+        QMetaObject::invokeMethod(this, [this, bookId, chapter, token, rows] {
+            if (token == latestChapterToken_)
+                emit chapterReady(token, bookId, chapter, rows);
+        }, Qt::QueuedConnection);
+    });
+    connect(runner, &QThread::finished, runner, &QObject::deleteLater);
+    latestChapterToken_ = token;
+    runner->start();
+}
+
 QString TheTableService::paragraphPair(const QString &bookId, int chapter, int verse, int count) const
 {
     if (!library_ || !EngineBridge::instance().booted())
@@ -267,12 +302,18 @@ QString TheTableService::paragraphPair(const QString &bookId, int chapter, int v
     return out;
 }
 
-QVariantList TheTableService::search(const QString &text, int limit) const
+QVariantList TheTableService::search(const QString &text, int limit, bool exactWords,
+                                     bool includeFullText, const QString &scopeBookId,
+                                     int scopeChapter) const
 {
     QVariantList out;
     if (!library_ || !EngineBridge::instance().booted())
         return out;
-    auto hits = tableLibrary(library_)->Search(text.toStdString(), size_t(limit));
+    // The chapter lock goes INTO the scan (see TheTableLibrary::Search): a locked
+    // query reads the one open sermon's paragraphs and stops, instead of scanning
+    // the library and discarding everything outside the scope.
+    auto hits = tableLibrary(library_)->Search(text.toStdString(), size_t(limit), exactWords,
+                                               scopeBookId.toStdString(), scopeChapter);
     if (!hits.ok())
         return out;
     for (const bl::TheTableSearchHit &h : hits.value()) {
@@ -287,6 +328,8 @@ QVariantList TheTableService::search(const QString &text, int limit) const
         row.insert(QStringLiteral("chapter"), h.chapter);
         row.insert(QStringLiteral("verse"), h.verse);
         row.insert(QStringLiteral("snippet"), qstr(h.snippet));
+        if (includeFullText)
+            row.insert(QStringLiteral("fullText"), qstr(h.fullText));
         // Words spread across this paragraph and its next: the preview must fetch
         // BOTH (paragraphPair) — a single-paragraph hit previews alone.
         row.insert(QStringLiteral("spanned"), h.spanned);
@@ -303,14 +346,15 @@ QVariantList TheTableService::search(const QString &text, int limit) const
 // the GUI-thread cost drops to a token check. The library's mutex makes the
 // worker's Search() safe against the GUI's reads; stale tokens are dropped on
 // delivery so a fast typist's older keystrokes answer into the void.
-void TheTableService::searchAsync(const QString &text, int limit, int token)
+void TheTableService::searchAsync(const QString &text, int limit, int token, bool exactWords,
+                                  const QString &scopeBookId, int scopeChapter)
 {
-    auto *runner = QThread::create([this, text, limit, token] {
+    auto *runner = QThread::create([this, text, limit, token, exactWords, scopeBookId, scopeChapter] {
         // Typing creates newer requests faster than the full corpus scan can
         // finish. Skip queued stale work before it enters the serialized scan.
         if (token != latestSearchToken_.load(std::memory_order_acquire))
             return;
-        const QVariantList rows = search(text, limit);
+        const QVariantList rows = search(text, limit, exactWords, false, scopeBookId, scopeChapter);
         QMetaObject::invokeMethod(this, [this, token, rows] {
             if (token == latestSearchToken_)
                 emit searchResultsReady(token, rows);
@@ -381,11 +425,13 @@ QString TheTableService::reference(const QString &book, int chapter, const QVari
         if (!citation.empty()) {
             const QString cite = qstr(citation);
             return numbers.empty() ? cite
-                                   : cite + QStringLiteral(" %1").arg(qstr(pf::ScriptureVerseRange(numbers)));
+                                   : cite + QStringLiteral(" %1").arg(qstr(pf::NumberRange(numbers)));
         }
     }
-    // Unknown book/chapter (a stale pane): the scripture shape still resolves.
-    return qstr(pf::ScriptureReference(book.toStdString(), chapter, numbers));
+    // Unknown book/chapter (a stale pane): this tab's own shape still resolves
+    // (a citation with paragraph numbers and no chapter — the family, not chapter
+    // zero, is what says so).
+    return qstr(pf::BookReference(book.toStdString(), chapter, numbers, pf::ContentFamily::Table));
 }
 
 QVariantMap TheTableService::resolve(const QString &text) const
@@ -427,6 +473,17 @@ QVariantMap TheTableService::resolve(const QString &text) const
 // (suggest, THE TABLE branch) and the user picks the actual sermon. The resolve
 // re-runs per keystroke, so typing past the ambiguity jumps the moment one sermon is
 // left. Five-char minimum for every needle (citationSearchMinChars above).
+QString TheTableService::citationNeedle(const QString &handle) const
+{
+    // The citation line is WRITTEN by the library, so the rule for reading one
+    // back lives there too (TheTableLibrary::CitationNeedle): "47-1020" and
+    // "47 - 1020" name the same sermon — people write a date code either way —
+    // and both sides of a comparison are squeezed onto that one form. This side
+    // only asks for it, so the box that jumps and the pane's dropdown cannot
+    // disagree about what was typed.
+    return qstr(bl::TheTableLibrary::CitationNeedle(handle.toStdString()));
+}
+
 QVariantMap TheTableService::resolveCitation(const QString &text) const
 {
     const QString needle = text.trimmed();
@@ -442,7 +499,7 @@ QVariantMap TheTableService::resolveCitation(const QString &text) const
     // the number is stripped ONLY when the needle as typed matched nothing —
     // a real part-numbered title ("…The Way Of A Prophet 2" typed whole)
     // still wins on its own match first.
-    const QString lower = needle.toLower();
+    const QString lower = citationNeedle(needle);
     QVariantMap best;
     int matches = 0;
     for (const auto &b : tableLibrary(library_)->BookIndex()) {
@@ -453,7 +510,7 @@ QVariantMap TheTableService::resolveCitation(const QString &text) const
             const QString cite = qstr(tableLibrary(library_)->Citation(bookId.toStdString(), ch.number, 0));
             if (cite.isEmpty())
                 continue;
-            if (cite.indexOf(lower, 0, Qt::CaseInsensitive) < 0)
+            if (citationNeedle(cite).indexOf(lower) < 0)
                 continue;
             if (++matches > 1)
                 return {};   // several sermons match: the dropdown lists them, the user picks
@@ -476,7 +533,7 @@ QVariantMap TheTableService::resolveCitation(const QString &text) const
     const int para = m.captured(2).toInt(&ok);
     if (!ok || para <= 0 || base.size() < citationSearchMinChars(base))
         return {};
-    const QString lowerBase = base.toLower();
+    const QString lowerBase = citationNeedle(base);
     QVariantMap paraBest;
     int paraMatches = 0;
     for (const auto &b : tableLibrary(library_)->BookIndex()) {
@@ -487,7 +544,7 @@ QVariantMap TheTableService::resolveCitation(const QString &text) const
             const QString cite = qstr(tableLibrary(library_)->Citation(bookId.toStdString(), ch.number, 0));
             if (cite.isEmpty())
                 continue;
-            if (cite.indexOf(lowerBase, 0, Qt::CaseInsensitive) < 0)
+            if (citationNeedle(cite).indexOf(lowerBase) < 0)
                 continue;
             if (++paraMatches > 1)
                 return {};   // ambiguous even without the number: the dropdown handles it
@@ -502,10 +559,14 @@ QVariantMap TheTableService::resolveCitation(const QString &text) const
 
 QVariantMap TheTableService::preview(const QString &bookId, int chapter, const QVariantList &verses) const
 {
-    pf::ScriptureSource source;
+    pf::BookSource source;
     if (!library_ || !EngineBridge::instance().booted() || verses.isEmpty() || !sourceFor(tableLibrary(library_), bookId, chapter, verses, source))
         return SlideBuilder::preview(templateId(), {}, {});   // (nothing to show: the empty shape)
-    source.versionName = "The Table";
+    // (No `versionName` for a sermon: it used to be set to the tab's BRAND string
+    // here, and since that field is "the Bible's version" it flowed into
+    // {scripture_name} — a slot that means "King James Version" — and rendered the
+    // app's own name onto the slide. A sermon has no Bible version; the family set
+    // in sourceFor is what makes that answerable rather than a silent blank.)
     // The chosen template laid out by the SHARED slide builder - the same engine machinery Scripture uses, fed paragraphs instead of
     // verses, and shaped by the tab's own "table." options (splitting, per-slide counts).
     return SlideBuilder::preview(templateId(), source, SettingsService::instance().theTableSettings());
@@ -513,10 +574,10 @@ QVariantMap TheTableService::preview(const QString &bookId, int chapter, const Q
 
 QVariantList TheTableService::slides(const QString &bookId, int chapter, const QVariantList &verses) const
 {
-    pf::ScriptureSource source;
+    pf::BookSource source;
     if (!library_ || !EngineBridge::instance().booted() || verses.isEmpty() || !sourceFor(tableLibrary(library_), bookId, chapter, verses, source))
         return {};
-    source.versionName = "The Table";
+    // (No `versionName` — see preview() above: a sermon has no Bible version.)
     return SlideBuilder::slides(templateId(), source, SettingsService::instance().theTableSettings(),
                                 QStringLiteral("table"));
 }
@@ -529,7 +590,7 @@ QString TheTableService::templateId() const
     return SlideBuilder::templateId(kProfile);
 }
 
-QString TheTableService::defaultTemplateId() const { return QStringLiteral("tpl-table"); }
+QString TheTableService::defaultTemplateId() const { return QString::fromLatin1(kDefaultTemplate); }
 
 QVariantList TheTableService::templates() const
 {
@@ -554,6 +615,7 @@ void TheTableService::setTemplate(const QString &id) const
 
 bool TheTableService::newSermonFolder()
 {
+    VGR_CALL_TRACE("TheTableService.newSermonFolder");
     if (!EngineBridge::instance().booted() || !library_) {
         report(tr("The engine is still starting — try again in a moment."), QStringLiteral("warning"));
         return false;
@@ -564,7 +626,24 @@ bool TheTableService::newSermonFolder()
         tr("Pick the folder of sermons to import (every .pdf and .txt under it)").toStdString());
     if (!picked.ok() || !picked.value())
         return false;
-    const QString root = QString::fromStdString(*picked.value());
+    return importSermonFolder(QString::fromStdString(*picked.value()));
+}
+
+// The sweep itself, for a root that is already known: the picker above, and the
+// env-gated self-test scenario (which drives this same path so the toast it
+// reads is the one a hand would see). Everything below is unchanged by the
+// split - the dialog only chose the root.
+bool TheTableService::importSermonFolder(const QString &root)
+{
+    VGR_CALL_TRACE("TheTableService.importSermonFolder");
+    if (!EngineBridge::instance().booted() || !library_) {
+        report(tr("The engine is still starting — try again in a moment."), QStringLiteral("warning"));
+        return false;
+    }
+    if (importing_)
+        return false;   // one import at a time (shared with the single-file flow)
+    if (root.isEmpty())
+        return false;
 
     importing_ = true;
     emit importingChanged();
@@ -602,9 +681,34 @@ bool TheTableService::newSermonFolder()
             emit importingChanged();
             if (r.ok()) {
                 const auto &rep = r.value();
-                report(tr("Imported %1 sermons · %2 already in · %3 failed")
-                           .arg(rep.imported).arg(rep.skipped).arg(rep.failed),
-                       QStringLiteral("success"));
+                // What the sweep DID, and what it would not take. A folder that
+                // was mostly something else used to answer "40 imported" with
+                // nothing said about the rest; the refused files are named now,
+                // with the library's own reason (see ImportReport::rejected).
+                QString summary = tr("Imported %1 sermons · %2 already in").arg(rep.imported).arg(rep.skipped);
+                if (rep.failed > 0)
+                    summary += tr(" · %1 failed").arg(rep.failed);
+                if (rep.unsupported > 0)
+                    summary += tr(" · %1 not sermon files").arg(rep.unsupported);
+                report(summary, rep.imported > 0 ? QStringLiteral("success")
+                                                 : (rep.failed + rep.unsupported > 0 ? QStringLiteral("warning")
+                                                                                     : QStringLiteral("info")));
+                if (!rep.rejected.empty()) {
+                    // EVERY refused file, each with the library's own reason —
+                    // not the first two. The list used to stop at two names
+                    // while the count ran on ("40 not sermon files (and 38
+                    // more)"), which told the operator a number and left them
+                    // to guess which files it meant.
+                    QStringList why;
+                    for (const std::string &w : rep.rejected)
+                        why << qstr(w);
+                    // The notice is one line and elides when long; the log keeps
+                    // the whole list verbatim, so nothing is lost either way.
+                    EngineBridge::write(QStringLiteral("warning"), QStringLiteral("Table"),
+                                        QStringLiteral("Refused %1 file(s): ").arg(why.size())
+                                        + why.join(QStringLiteral(" | ")));
+                    report(tr("Skipped %1").arg(why.join(QStringLiteral("; "))), QStringLiteral("warning"));
+                }
                 if (rep.imported > 0)
                     startIndexing();   // the new sermons into the app-wide search (coalesced)
                 emit changed();
@@ -616,42 +720,78 @@ bool TheTableService::newSermonFolder()
     connect(worker, &QThread::finished, worker, &QObject::deleteLater);
     // Quitting while the import runs must not destroy a running thread: give it a moment to finish (the connection goes when the thread
     // object is deleted, so this never touches a dead pointer).
-    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, worker, [worker] { worker->wait(10000); });
+    // BOUNDED (GUI thread in aboutToQuit): 10s here froze the app past
+    // Windows' ~5s hang threshold (AppHangB1 -> killed) when a large folder
+    // import was still parsing. Imports are abandonable at quit.
+    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, worker, [worker] { (void)worker->wait(2000); });
     worker->start();
     return true;
 }
 
 bool TheTableService::newSermon()
 {
-    if (!EngineBridge::instance().booted()) {
+    VGR_CALL_TRACE("TheTableService.newSermon");
+    if (!EngineBridge::instance().booted() || !library_) {
         report(tr("The engine is still starting — try again in a moment."), QStringLiteral("warning"));
         return false;
     }
+    if (importing_)
+        return false;   // one import at a time (shared with the folder import)
     const std::string title = tr("Add a sermon").toStdString();
     auto picked = bps::platform::PlatformAccessor::Get().Dialogs().OpenFileDialog(
-        title, { std::string("Sermons (*.txt *.pdf)"), std::string("All files (*.*)") });
+        // Sermon patterns ONLY, no "All files (*.*)": picking a spreadsheet
+        // there was a guaranteed refusal (IsSermonFile reads the extension
+        // first), so the filter is what makes the choice fail at PICK time
+        // instead of at import — the picker is the only place the operator can
+        // still change their mind for free.
+        title, { std::string("Sermons (*.txt *.pdf)") });
     if (!picked.ok() || !picked.value())
         return false;
     const std::string path = *picked.value();
+    const QString name = QFileInfo(QString::fromStdString(path)).fileName();
 
-    QFile file(QString::fromStdString(path));
-    if (!file.open(QIODevice::ReadOnly)) {
-        report(tr("Couldn't read %1.").arg(qstr(path)), QStringLiteral("error"));
-        return false;
-    }
-    const QByteArray bytes = file.readAll();
-
-    auto r = tableLibrary(library_)->ImportSermon(path,
-                                                  std::string_view(bytes.constData(), size_t(bytes.size())));
-    if (!r.ok()) {
-        report(qstr(r.error().message), QStringLiteral("error"));
-        return false;
-    }
-    report(tr("Added %1 · %2").arg(QFileInfo(QString::fromStdString(path)).fileName(),
-                                   qstr(r.value())),
-           QStringLiteral("success"));
-    startIndexing();   // the new sermon into the app-wide search (coalesced)
-    emit changed();
+    // Read + parse OFF the GUI thread: ImportSermon parses the whole document
+    // (a large PDF is not a UI-speed operation), so doing it inline here
+    // stalled the UI on every "Add a sermon" — the same reason the folder
+    // import beside it already runs on a worker. The library pointer outlives
+    // the thread (process-lifetime singleton) and the engine locks internally.
+    // Returns true = the import STARTED (the QML discards the value; the toast
+    // reports the outcome).
+    importing_ = true;
+    emit importingChanged();
+    auto *worker = QThread::create([this, path, name] {
+        QFile file(QString::fromStdString(path));
+        if (!file.open(QIODevice::ReadOnly)) {
+            QMetaObject::invokeMethod(this, [this, name] {
+                importing_ = false;
+                emit importingChanged();
+                report(tr("Couldn't read %1.").arg(name), QStringLiteral("error"));
+            }, Qt::QueuedConnection);
+            return;
+        }
+        const QByteArray bytes = file.readAll();
+        auto r = tableLibrary(library_)->ImportSermon(
+            path, std::string_view(bytes.constData(), size_t(bytes.size())));
+        const QString failure = r.ok() ? QString() : qstr(r.error().message);
+        const QString added = r.ok() ? qstr(r.value()) : QString();
+        QMetaObject::invokeMethod(this, [this, name, failure, added] {
+            importing_ = false;
+            emit importingChanged();
+            if (!failure.isEmpty()) {
+                report(failure, QStringLiteral("error"));
+                return;
+            }
+            report(tr("Added %1 · %2").arg(name, added), QStringLiteral("success"));
+            startIndexing();   // the new sermon into the app-wide search (coalesced)
+            emit changed();
+        }, Qt::QueuedConnection);
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    // Quitting mid-import must not destroy a running thread (same as the folder
+    // import), and must not freeze the UI waiting for it (see the folder path).
+    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, worker,
+            [worker] { (void)worker->wait(2000); });
+    worker->start();
     return true;
 }
 

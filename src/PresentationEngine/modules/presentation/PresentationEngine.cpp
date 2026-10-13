@@ -436,14 +436,19 @@ OutputStyleSpec PresentationEngine::ActiveOutputStyle() const {
 }
 
 Result<void> PresentationEngine::SetLiveOutputStyles(const std::vector<OutputStyleSpec>& styles,
-                                                     const std::vector<std::string>& bufferNames) {
+                                                     const std::vector<std::string>& bufferNames,
+                                                     const std::vector<std::pair<int, int>>& bufferSizes) {
     if (styles.size() != bufferNames.size())
         return Error::Make(Err::InvalidArgument, "PresentationEngine",
                            "live style/buffer count mismatch");
+    if (!bufferSizes.empty() && bufferSizes.size() != bufferNames.size())
+        return Error::Make(Err::InvalidArgument, "PresentationEngine",
+                           "live style/size count mismatch");
     {
         std::lock_guard<std::mutex> lock(mutex_);
         liveOutputStyles_ = styles;
         liveOutputBuffers_ = bufferNames;
+        liveOutputSizes_ = bufferSizes;
     }
     // The live loop re-reads the set every frame and re-keys its passes on a
     // hash of the set — a push lands within a frame, no revision bump needed
@@ -452,10 +457,12 @@ Result<void> PresentationEngine::SetLiveOutputStyles(const std::vector<OutputSty
 }
 
 std::vector<OutputStyleSpec> PresentationEngine::LiveOutputStyles(
-    std::vector<std::string> *outBuffers) const {
+    std::vector<std::string> *outBuffers, std::vector<std::pair<int, int>> *outSizes) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (outBuffers)
         *outBuffers = liveOutputBuffers_;
+    if (outSizes)
+        *outSizes = liveOutputSizes_;
     return liveOutputStyles_;
 }
 

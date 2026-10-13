@@ -185,7 +185,7 @@ Item {
                 width: takeLabel.implicitWidth + 20
                 height: 26
                 radius: 13
-                color: root.onAir ? "#c8321e" : "#b0000000"
+                color: root.onAir ? Theme.liveBg : "#b0000000"
                 Behavior on color { ColorAnimation { duration: 120 } }
                 Row {
                     anchors.centerIn: parent

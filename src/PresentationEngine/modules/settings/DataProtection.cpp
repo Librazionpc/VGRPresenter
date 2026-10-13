@@ -1,6 +1,8 @@
 #include "modules/settings/DataProtection.hpp"
 
 #include "core/config/Json.hpp"
+#include "core/logging/Logger.hpp"
+#include "core/recovery/DocumentRecovery.hpp"
 #include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
@@ -68,7 +70,10 @@ Result<std::string> BackupStore::Create(std::string_view sourceFile, std::string
     std::string target = fs.Join(directory_, std::format("{}{}{}{}", stem, kSeparator, stamp, ext));
     for (int n = 2; fs.Exists(target); ++n)
         target = fs.Join(directory_, std::format("{}{}{}-{}{}", stem, kSeparator, stamp, n, ext));
-    if (auto copied = fs.Copy(sourceFile, target); !copied.ok()) return copied.error();
+    // ATOMIC COPY: a plain copy interrupted halfway left a file with a real
+    // backup's name that could not be restored — a backup that fails exactly when
+    // it is needed. CopyAtomic proves the bytes landed before the name exists.
+    if (auto copied = fs.CopyAtomic(sourceFile, target); !copied.ok()) return copied.error();
     return target;
 }
 
@@ -146,7 +151,10 @@ Result<void> RecoveryStore::Note(std::string_view showName, std::string_view ori
     json::Value::Object o;
     o["showName"] = json::Value::String(std::string(showName));
     o["originalPath"] = json::Value::String(std::string(originalPath));
-    return fs.Write(fs.Join(directory_, "unsaved-show.json"), json::Value(std::move(o)).ToString());
+    // ATOMIC: the crash-recovery note is read back by the very next launch, and
+    // a truncated one would either fail to parse or blame the wrong show.
+    return fs.WriteAtomic(fs.Join(directory_, "unsaved-show.json"),
+                          json::Value(std::move(o)).ToString());
 }
 
 std::optional<RecoveryInfo> RecoveryStore::Info() const {
@@ -154,13 +162,29 @@ std::optional<RecoveryInfo> RecoveryStore::Info() const {
     if (!fs.IsRegularFile(Path())) return std::nullopt;
     RecoveryInfo info;
     info.path = Path();
+    // The show itself (unsaved-show.vgr) is the user's work and is listed as an
+    // offer no matter what the note beside it says. The NOTE is an internal
+    // document: unreadable or damaged, it is set aside as evidence and the offer
+    // stands with a generic name, so a crash-recovery offer can never be lost to
+    // a broken caption.
     const std::string note = fs.Join(directory_, "unsaved-show.json");
-    if (fs.IsRegularFile(note))
-        if (auto text = fs.ReadText(note); text.ok())
-            if (auto parsed = json::Parse(text.value()); parsed.ok()) {
-                if (const auto* n = parsed.value().Find("showName")) info.showName = std::string(n->asString());
-                if (const auto* p = parsed.value().Find("originalPath")) info.originalPath = std::string(p->asString());
-            }
+    if (fs.IsRegularFile(note)) {
+        auto text = fs.ReadText(note);
+        if (!text.ok()) {
+            Logger::Instance().Warning(
+                std::format("RecoveryStore: could not read {} ({}) — the unsaved show is still "
+                            "offered",
+                            note, text.error().message),
+                kModule);
+        } else if (auto parsed = json::Parse(text.value()); parsed.ok()) {
+            if (const auto* n = parsed.value().Find("showName"))
+                info.showName = std::string(n->asString());
+            if (const auto* p = parsed.value().Find("originalPath"))
+                info.originalPath = std::string(p->asString());
+        } else {
+            (void)recovery::SetAsideDamagedDocument(note, kModule, parsed.error().message);
+        }
+    }
     if (info.showName.empty()) info.showName = "Untitled show";
     return info;
 }
@@ -171,7 +195,10 @@ Result<void> RecoveryStore::RestoreTo(std::string_view target) const {
         return Error::Make(Err::NotFound, kModule, "there is nothing to recover");
     if (fs.Exists(target))
         return Error::Make(Err::AlreadyExists, kModule, std::format("'{}' already exists", target));
-    if (auto r = fs.Copy(Path(), target); !r.ok()) return r;
+    // ATOMIC COPY: this writes the recovered show into place; the recovery file is
+    // cleared straight afterwards, so a copy interrupted halfway would destroy
+    // the only copy of the user's unsaved work.
+    if (auto r = fs.CopyAtomic(Path(), target); !r.ok()) return r;
     return Clear();
 }
 

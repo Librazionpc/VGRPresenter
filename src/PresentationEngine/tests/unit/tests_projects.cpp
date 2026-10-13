@@ -137,7 +137,29 @@ void TestProjectLibrary() {
         CHECK(again.Get(other.value()).value().archived);
     }
     CHECK(ProjectFs().Write(file, "{ nope").ok());
-    { lb::ProjectLibrary broken(file); CHECK(!broken.Load().ok() && broken.Tree().empty()); }
+    {
+        lb::ProjectLibrary broken(file);
+        CHECK(broken.Load().ok());       // damage never fails the read any more
+        CHECK(broken.Tree().empty());    // it comes up empty instead…
+        // …with the damaged bytes preserved VERBATIM under `.corrupt-<stamp>`,
+        // which is the evidence a "my projects vanished" report needs.
+        std::vector<std::string> quarantine;
+        auto entries = ProjectFs().FindFiles(kProjectsRoot, "");
+        CHECK(entries.ok());
+        if (entries.ok())
+            for (const auto& e : entries.value())
+                if (e.find(".corrupt-") != std::string::npos) quarantine.push_back(e);
+        CHECK(quarantine.size() == 1);
+        if (quarantine.size() == 1) {
+            auto kept = ProjectFs().ReadText(quarantine.front());
+            CHECK(kept.ok() && kept.value() == "{ nope");
+        }
+        // …and the next change REBUILDS a healthy registry at the same path, so
+        // the next launch reads a real library again.
+        CHECK(broken.Create("Rebuilt").ok());
+        auto rebuilt = ProjectFs().ReadText(file);
+        CHECK(rebuilt.ok() && json::Parse(rebuilt.value()).ok());
+    }
     // an item of an unknown type, and something filed in a folder that is gone, are tidied on load
     CHECK(ProjectFs().Write(file, R"({"version":1,"folders":[{"id":"folder-1","name":"F","parent":"folder-9"}],"projects":[{"id":"project-1","name":"P","parent":"folder-9","items":[{"id":"pi-1","type":"show","ref":"a.vgr","name":"A"},{"id":"pi-2","type":"weird","ref":"x","name":"X"},{"id":"pi-3","type":"show","ref":"","name":"E"}]}]})").ok());
     {

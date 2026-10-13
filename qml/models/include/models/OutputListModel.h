@@ -2,13 +2,18 @@
 
 #include <QAbstractListModel>
 #include <QList>
+#include <QMetaObject>
 #include <QPointer>
 #include <QVariantMap>
 #include <QVariantList>
 #include <qqml.h>
 
+// Fully defined, not forward-declared: adoptStyleRoster takes it by pointer and
+// moc needs the complete type to build the metatype for that slot.
+#include "models/StyleListModel.h"
+
 namespace bps::presentation {
-struct OutputStyleSpec;
+
 }
 
 class QScreen;
@@ -136,12 +141,12 @@ public:
     explicit OutputListModel(QObject *parent = nullptr);
     // Model-to-model callers (StyleListModel::removeStyle) use this.
     //
-    // EAGER, not lazy (fixed 2026-10-01). QML_SINGLETON alone lets QML build
+    // EAGER, not lazy (fixed 2026-10-01). QML_SINGLETON alone let QML build
     // the object itself on first property access, so a C++ reader running
-    // earlier got null and silently did nothing. create() below hands QML the
-    // same static instance C++ reads, so the two cannot disagree about
-    // whether it exists.
+    // earlier got null and silently did nothing.
     static OutputListModel *instance();
+    // See StyleListModel::create's comment: the engine does not call this,
+    // which is why the style roster is handed over explicitly at startup.
     static OutputListModel *create(QQmlEngine *engine, QJSEngine *jsEngine);
 
     int rowCount(const QModelIndex &parent = QModelIndex()) const override;
@@ -150,6 +155,34 @@ public:
 
     // type: "HDMI" | "NDI" | "SDI" | "REC" | "STREAM" — stored as the
     // item's kind and baked into the generated badge.
+    // ---- The style roster C++ reads -------------------------------------
+    // QML builds its OWN StyleListModel: the engine does not call that class's
+    // create() factory (it registers the type with qmlRegisterTypesAndRevisions
+    // and then default-constructs the singleton), so StyleListModel::instance()
+    // and the object the Styles screen edits are two different rosters unless
+    // they are joined explicitly. Main.qml joins them at startup by handing its
+    // instance in here, and EVERY style lookup goes through styleRoster() —
+    // otherwise a style edit reaches the tiles, the output windows and the
+    // engine's spec only after a restart. PUBLIC, not private: a Q_INVOKABLE in
+    // a private section is in the metaobject but is NOT exposed as a callable
+    // QML property (QML reported "Property 'adoptStyleRoster' ... is not a
+    // function" while this sat below `private:`).
+    Q_INVOKABLE void adoptStyleRoster(StyleListModel *styles);
+    // The roster Main.qml handed over, for C++ readers that resolve styles
+    // WITHOUT going through an OutputListModel object — StyleSpecBuilder (the
+    // preview's composition, and every spec this model pushes) is the one that
+    // matters.
+    // STATIC on purpose: QML builds its own OutputListModel as well (the
+    // engine default-constructs the registered singleton instead of calling
+    // create()), and the hand-over lands on THAT object, so a reader holding
+    // the C++ `instance()` would see no adoption and fall back to
+    // StyleListModel::instance() — a second roster holding the style as it was
+    // at boot. Composing a monitor tile through it produced a different
+    // template and background from the real output ("it only happens on the
+    // preview tile"). Null until the hand-over; callers fall back to
+    // StyleListModel::instance().
+    static StyleListModel *adoptedStyleRoster();
+
     Q_INVOKABLE void addScreen(const QString &name, const QString &type,
                                const QString &resolution, const QString &refresh,
                                const QString &testPattern = QStringLiteral("none"));
@@ -225,19 +258,30 @@ public:
     // this before going live (a private Q_INVOKABLE is invisible to QML).
     Q_INVOKABLE bool activeStyleAllows(const QString &contentType) const;
 
-    // This output's style background as QML colours: { color, image,
-    // hasImage }. What the output renders behind its content when nothing
-    // else paints there (the engine's OutputStyleSpec): a monitor tile paints
-    // it when the output is CLEAR (off air) — the style's look, not a
-    // transparency checkerboard that reads as "unstyled" — and under the
-    // block render while live (DesignPreview draws only flat colours, so a
-    // style background IMAGE would be invisible on the tile otherwise).
-    // Delivered as the StyleBackground ROLE (per OUTPUT, not a global "active"
-    // invokable): data() re-resolves through StyleListModel per read, and the
-    // dataChanged/rosterChanged relays below make every tile re-evaluate.
-    // Q_INVOKABLE: the self-test scenario reads every output's background
-    // straight from QML (OutputListModel.styleBackground(i)) to log the
-    // state beside the monitor-wall grab.
+    // The template the OUTPUT really renders `contentType` with: the active
+    // output's style names a template for that content family (Settings ·
+    // Styles · Scripture / The Table) and SceneBuilder prefers a style's
+    // family template over the blocks a slide carries — so a scripture or The
+    // Table pick goes on air in the STYLE's template, not in the one the
+    // Reference pane itself picked. Empty = the style names none for that
+    // family, and the tab's own pick is what reaches the output. QML calls
+    // this for the pane's template row and its edit pencil ("edit template: I
+    // meant the template selected in Styles and used by output and go live").
+    Q_INVOKABLE QString activeStyleTemplateId(const QString &contentType) const;
+
+    // This output's style background AS THE MODEL ROLE sees it: { color, image,
+    // hasImage, clearOnText }, resolved through the style roster for this
+    // output's style id.
+    //
+    // This is NOT what a surface paints from any more. The monitor tile and the
+    // output window draw the style's facts out of the ONE composition call that
+    // composes the frame the outputs consume (LiveOutputService
+    // .previewWithStyle), so no surface has to resolve a style role for itself
+    // and disagree with the frame about it. What is left here is the MODEL'S own
+    // reading — the baseline the self-test compares the tile's composed picture
+    // against (Q_INVOKABLE so the scenario can log the model's state beside the
+    // monitor-wall grab), and the roster relay that makes a style edit visible.
+    // Nothing in qml/components reads it.
     Q_INVOKABLE QVariantMap styleBackground(int index) const;
 
 signals:
@@ -272,20 +316,29 @@ private:
 
     int m_screensRevision = 0;
 
-    // Style lookup helpers over StyleListModel::instance() (null-safe).
+    // The adopted roster, or the C++ singleton as the fallback (null-safe).
+    StyleListModel *styleRoster() const;
+    // Everything the roster feeds, re-resolved: the tiles' style roles and the
+    // engine spec. Runs on adopt AND on every rosterChanged of the ADOPTED
+    // roster.
+    void styleRosterChanged();
+
+    // Style lookup helpers over styleRoster() (null-safe).
     QString styleIdAt(int row) const;
     QString styleNameAt(int row) const;
     // Composes the engine spec for `styleId` and pushes it to the
     // PresentationEngine. styleId "" pushes an empty spec (unstyled).
+    //
+    // The COMPOSITION itself is not a member any more: the spec — the style's
+    // fields, its per-family template keys, and the blocks of every template
+    // design it picks baked in — comes from StyleSpecBuilder, the one function
+    // the live preview composes through as well. It used to be written out here
+    // twice (this spec and one per other styled output) and once in
+    // LiveOutputService, and the three had already drifted: the preview did not
+    // carry the style's category and fell back to the Bible layout on a
+    // different condition, so the tile could render a layout the outputs were
+    // not rendering.
     void pushEngineStyle(const QString &styleId);
-    // When the spec's templateKey names an ENGINE TEMPLATE design ("tpl-…"),
-    // copies that design's blocks into spec.templateBlocks — the engine
-    // renders the template as the style's layout. Legacy preset keys and
-    // unknown ids bake nothing (the engine keeps its plain-layout fallback).
-    void bakeTemplateBlocks(bps::presentation::OutputStyleSpec &spec);
-    // Bakes each per-family template design's blocks into the spec's
-    // familyTemplateBlocks slots (no-op for ""/preset family keys).
-    void bakeFamilyTemplateBlocks(bps::presentation::OutputStyleSpec &spec);
     // Re-pushes the ACTIVE output's style (the one entry point every "the
     // on-air look changed" relay funnels into). No-op before the roster is
     // adopted.
@@ -311,6 +364,12 @@ private:
     void connectToEngineBoot();
 
     QList<OutputItem> m_outputs;
+    // The roster Main.qml handed over (empty until then — see adoptStyleRoster).
+    QPointer<StyleListModel> styleRoster_;
+    // The same hand-over, visible to EVERY OutputListModel object (QML's and
+    // the C++ static) — see adoptedStyleRoster().
+    static QPointer<StyleListModel> s_adoptedStyleRoster;
+    QMetaObject::Connection styleRosterConn_;
     bool styleRosterConnected_ = false;
     bool templateLibraryConnected_ = false;
     bool engineBootConnected_ = false;

@@ -76,12 +76,102 @@ public:
                                              rendering::RenderEngine& engine,
                                              rendering::Size size = rendering::Size(1920, 1080));
 
+    // WHICH OF A DESIGN'S BLOCKS PAINT UNDER THE COMPOSITOR'S VIDEO LAYER.
+    // `underVideo[i]` answers for block i (parallel to the list handed in) and
+    // `stageCovered` says whether the rule's leading run reached the stage.
+    // This is the rule's ONE home: BuildSlideScene/BuildGatedSlideScene paint a
+    // scene with it, and the UI's live preview (the monitor tile) asks for it
+    // through EngineBridge::backdropBlockIndexes instead of re-deriving it — a
+    // preview with its own copy of a rule this geometric is how the tile and the
+    // real outputs come to disagree about what covers a live feed.
+    struct BlockLayerPlan {
+        std::vector<bool> underVideo;
+        bool stageCovered = false;
+    };
+    static BlockLayerPlan PlanBlockLayers(const std::vector<ContentBlock>& blocks);
+
+    // WHAT A SLIDE LOOKS LIKE ON AN OUTPUT WEARING ONE STYLE — the composition
+    // decision, in one place: whether the style's gates refuse it, which layout
+    // owns it (the style's per-family template, the whole-style template, a
+    // built-in preset per family or for the style, or the slide's own blocks),
+    // the template blocks bound to the slide's content, and the background the
+    // output paints (style colour vs the slide's, clearBackgroundOnText, and an
+    // explicitly transparent style).
+    //
+    // This is the rule the engine renders AND the live preview draws. It used to
+    // exist twice — SceneBuilder's branch chain and LiveOutputService's mirror
+    // of it — and two copies of "which template owns this slide, and on what
+    // background" is how a tile comes to show a picture no output is sending.
+    struct SlideComposition {
+        enum class Source {
+            Refused,          // the style's gates refuse this slide's family
+            FamilyTemplate,   // the style's per-family engine template (blocks)
+            StyleTemplate,    // the style's whole-style template (blocks)
+            FamilyPreset,     // per-family built-in layout preset (title + body)
+            StylePreset,      // the style's own built-in layout preset (same)
+            SlideBlocks,      // the slide's own blocks carry the layout
+        };
+        Source source = Source::SlideBlocks;
+        std::string contentType;      // the slide's family ("" = untagged = shows)
+        size_t familyIdx = 0;         // the style slot that family styles through
+
+        // The layout the caller draws, already bound to the slide's content:
+        // template blocks for the two template sources, or the two text regions
+        // of a built-in preset (the engine renders them as its Title/Body text
+        // objects; a preview draws them on the preset's own rectangles).
+        std::vector<ContentBlock> blocks;
+        std::string presetKey;        // the two preset sources
+        StyleBuilder::Layout preset;
+
+        // THE BACKGROUND, composed once. `background` is the colour that won (a
+        // style colour, or the slide's own when clearBackgroundOnText lets it),
+        // empty when NOTHING named one — and nothing named means the frame
+        // paints NOTHING: `paintBackground == false`, a keyable frame, rather
+        // than an opaque fill of the engine's own. What is keyed, recorded or
+        // composited behind such a frame shows through it until something
+        // actually paints (a style colour, a design's own backdrop, an image,
+        // pushed content).
+        // `explicitTransparent` marks the case that LOOKS identical in pixels
+        // but was chosen: the style's own value is "transparent". Surfaces that
+        // show transparency as transparency (the monitor tile's checkerboard)
+        // need that distinction, and only this composition has it.
+        // `slideOwnsBackground` is the slide's own colour being real (not "" or
+        // "transparent") — the input clearBackgroundOnText turns on.
+        bool paintBackground = true;
+        std::string background;
+        bool explicitTransparent = false;
+        bool slideOwnsBackground = false;
+
+        // THE STYLE'S BACKGROUND IMAGE STEPS ASIDE FOR CONTENT ON AIR
+        // (clearBackgroundOnText). It does so for a slide that CARRIES content
+        // (blocks), and not for one that does not — a blank GO LIVE carrier keeps
+        // the branded backdrop, which is the whole point of going live with
+        // nothing. THE RULE, once, here: both build paths paint (or do not paint)
+        // the style image from this flag, and the preview hands it to the tile
+        // and the output window instead of each surface re-deriving it from its
+        // own idea of "has content" — which is how a blank carrier came to lose
+        // the image on the tile while the engine was still painting it.
+        bool styleImageSuppressed = false;
+    };
+    // `applyGates`: does this caller apply the style's content gates? The gated
+    // build does, and so does the live preview (it shows what the gates leave on
+    // air); the plain styled build renders the slide regardless, as it always
+    // has. Every other rule above is unconditional.
+    static SlideComposition ComposeSlide(const Slide& slide, const OutputStyleSpec& style,
+                                         bool applyGates = false);
+
     // Deterministic scene id for a slide ("pres:<presentationId>:<slideId>").
     static std::string SceneIdFor(const Presentation& p, const Slide& s);
     // Style-fingerprinted scene id: "<baseId>@s:<bg>-<key>-<clear>" — a change
     // to any styled field yields a different id (and a rebuild).
+    // `sceneSize` is the size the scene will be BUILT at: a non-default size
+    // appends a "@size:WxH" tag, because the build cache is keyed by this id
+    // and a cache hit returns the scene at the size it was FIRST built with —
+    // two outputs at different resolutions must never share one cached scene
+    // (the wider scene's layout is what a narrower output would then show).
     static std::string StyledSceneIdFor(const Presentation& p, const Slide& s,
-                                        const OutputStyleSpec& style);
+                                        const OutputStyleSpec& style,
+                                        rendering::Size sceneSize = rendering::Size(1920, 1080));
 };
 
 } // namespace bps::presentation

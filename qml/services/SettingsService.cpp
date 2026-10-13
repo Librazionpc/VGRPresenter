@@ -20,6 +20,7 @@
 #include <QProcess>
 #include <QQmlEngine>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QTranslator>
 #include <QUrl>
 
@@ -30,7 +31,7 @@ namespace bs = bps::settings;
 namespace {
 
 // One place the app's version is written for the Settings screens (the nav rail and menus still carry their own copy).
-constexpr const char *kAppVersion = "0.0.6";
+constexpr const char *kAppVersion = "0.0.7";
 
 QString qstr(const std::string &s) { return QString::fromStdString(s); }
 
@@ -146,6 +147,21 @@ void SettingsService::load()
         return;
     auto &platform = bps::platform::PlatformAccessor::Get();
     dataDir_ = platform.Paths().UserDataDir();
+    // VGR_SANDBOX (QStandardPaths test mode, set in main.cpp) must cover the
+    // SETTINGS store as well as the engine data it already redirects. It did
+    // not: UserDataDir() is the PAL's own known-folder path ("%LOCALAPPDATA%")
+    // and knows nothing about Qt, so a sandboxed diagnostic run — every selftest
+    // script — read and WROTE the operator's real settings.json. A scenario that
+    // adds a test row to a roster therefore left that row on the real board
+    // (found exactly that way: a routing-diagnostic scenario's row survived in
+    // session.audioRoster), which is the one thing a "throwaway test area"
+    // promise must not allow. In test mode the store lives under Qt's own
+    // test tree instead.
+    if (QStandardPaths::isTestModeEnabled()) {
+        const QString sandbox = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+        if (!sandbox.isEmpty())
+            dataDir_ = sandbox.toStdString();
+    }
     settings_ = std::make_unique<bs::AppSettings>(platform.Filesystem().Join(dataDir_, "settings.json"));
     if (auto loaded = settings_->Load(); !loaded.ok())
         report(tr("Your settings could not be read (%1). The defaults are in use.").arg(qstr(loaded.error().message)), QStringLiteral("warning"));
@@ -159,7 +175,7 @@ void SettingsService::load()
         if (key == "startup.launchAtLogin")
             applyLaunchAtLogin();
         else if (key == "appearance.language")
-            applyLanguage();
+            announceLanguage();   // applies the locale AND says what it did
         emit valueChanged(qstr(key));
         emit changed();
     });
@@ -298,7 +314,19 @@ void SettingsService::refreshHardware()
 {
     if (!EngineBridge::instance().booted())
         return;
-    const bs::HardwareReport report = bs::CurrentHardwareReport();
+    // The audio counts come from the bridge's CACHED roster (kept current off
+    // the GUI thread), never from a fresh IAudio::Enumerate() here: that call
+    // queries device caps and WASAPI mix formats per endpoint on the calling
+    // thread, so building the report inline stalled the UI every time
+    // Settings · Smart Config opened (the AppHangB1 class).
+    bs::AudioCounts audio;
+    for (const QVariant &v : EngineBridge::instance().audioDevices()) {
+        if (v.toMap().value(QStringLiteral("isInput")).toBool())
+            ++audio.inputs;
+        else
+            ++audio.outputs;
+    }
+    const bs::HardwareReport report = bs::CurrentHardwareReport(audio);
     QVariantList rows;
     for (const bs::HardwareRow &r : report.rows)
         rows.append(QVariantMap{ { QStringLiteral("key"), qstr(r.key) }, { QStringLiteral("label"), qstr(r.label) },
@@ -336,10 +364,24 @@ QVariantMap SettingsService::capsFor(const QString &profile) const
 // Starting with the OS (the one setting only the app itself can carry out)
 // ---------------------------------------------------------------------------
 
-void SettingsService::applyLanguage()
+// The chosen language as a person reads it (the engine's own label for the
+// choice) — what the change notice names.
+QString SettingsService::languageLabel() const
 {
     if (!settings_)
-        return;
+        return {};
+    const QString current = qstr(settings_->GetString("appearance.language"));
+    for (const bs::SettingChoice &c : bs::AppSettings::Find("appearance.language")->choices)
+        if (qstr(c.value) == current)
+            return qstr(c.label);
+    return current;
+}
+
+// Answers whether a TRANSLATION was put in force (see announceLanguage).
+bool SettingsService::applyLanguage()
+{
+    if (!settings_)
+        return false;
 
     const QString tag = qstr(settings_->GetString("appearance.language"));
     const QLocale locale(tag.isEmpty() ? QStringLiteral("en-US") : tag);
@@ -362,11 +404,13 @@ void SettingsService::applyLanguage()
     const QString file = QStringLiteral("vgrpresenter_") + locale.name();
     const QString appDir = QCoreApplication::applicationDirPath();
     const QString dirs[] = { appDir + QStringLiteral("/translations"), QStringLiteral(":/i18n") };
+    bool translated = false;
     for (const QString &dir : dirs) {
         auto candidate = std::make_unique<QTranslator>();
         if (candidate->load(file, dir)) {
             QCoreApplication::installTranslator(candidate.get());
             translator_ = std::move(candidate);
+            translated = true;
             break;
         }
     }
@@ -377,6 +421,29 @@ void SettingsService::applyLanguage()
         qmlEngine_->retranslate();
     ++localeRevision_;
     emit localeChanged();
+    return translated;
+}
+
+// What a language change actually DID, said out loud.
+//
+// Every other Appearance choice is visible the moment it is made: picking a
+// theme or an accent recolours the interface in front of the user. The language
+// choice is the one that can look like nothing happened — and half of it
+// genuinely does nothing. The LOCALE half takes effect at once (dates, times,
+// numbers, via Qt's own CLDR data), while the STRING half needs a translation
+// the build does not ship yet, so the interface stays English whichever language
+// is picked. That is invisible from the Settings row, which is what the notice is
+// for: it says which of the two happened, so a user who picks Deutsch is not left
+// wondering whether the app ignored them.
+void SettingsService::announceLanguage()
+{
+    const QString label = languageLabel();
+    const QString message = applyLanguage()
+        ? tr("Language set to %1 \u2014 dates, times and numbers follow it, and the interface is translated.").arg(label)
+        : tr("Language set to %1. Dates, times and numbers follow it now; the interface text stays English until a translation ships with the build.").arg(label);
+    EventBus::instance().notify(message, QStringLiteral("info"), tr("Settings"),
+                                QStringLiteral("settings.language.changed"));
+    EngineBridge::instance().log(QStringLiteral("info"), QStringLiteral("Settings"), message);
 }
 
 void SettingsService::applyLaunchAtLogin()
@@ -541,11 +608,12 @@ bool SettingsService::restoreCategoryBackup(const QString &backupPath)
         return false;   // a show backup goes through restoreBackup instead
     auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
     const std::string target = fs.Join(dataDir_, live.toStdString());
-    // Over the live file: Copy refuses an existing destination, so drop the old
-    // one first (the backup itself is left untouched).
-    if (fs.Exists(target))
-        (void)fs.Remove(target);
-    if (auto copied = fs.Copy(backupPath.toStdString(), target); !copied.ok()) {
+    // Over the live file, ATOMICALLY (CopyAtomic): copy into a sibling temp and
+    // rename it on top. This used to delete the live file FIRST and then copy the
+    // backup in — so a failure between the two steps left the user with no
+    // settings file at all, and an interrupted copy left a truncated one, on the
+    // exact path a restore is meant to rescue.
+    if (auto copied = fs.CopyAtomic(backupPath.toStdString(), target); !copied.ok()) {
         report(qstr(copied.error().message));
         return false;
     }
@@ -621,15 +689,17 @@ bool SettingsService::restoreBackup(const QString &backupPath, const QString &ta
 {
     if (backupPath.isEmpty() || target.isEmpty())
         return false;
-    // NOT const: IFilesystem::Copy is a non-const member (unlike Exists/Join,
-    // which are const), so a const reference cannot call it.
+    // NOT const: the filesystem member functions are non-const (unlike
+    // Exists/Join, which are const), so a const reference cannot call them.
     auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
     // Never over an existing file: a restore ADDS a show, it does not replace one.
     if (fs.Exists(target.toStdString())) {
         report(tr("There is already a file with that name."));
         return false;
     }
-    if (auto copied = fs.Copy(backupPath.toStdString(), target.toStdString()); !copied.ok()) {
+    // ATOMIC (CopyAtomic): the recovered show appears complete or not at all — a
+    // half-copied show file here would be presented to the user as their backup.
+    if (auto copied = fs.CopyAtomic(backupPath.toStdString(), target.toStdString()); !copied.ok()) {
         report(qstr(copied.error().message));
         return false;
     }
@@ -652,14 +722,14 @@ bool SettingsService::fileExists(const QString &path) const
     return !path.isEmpty() && bps::platform::PlatformAccessor::Get().Filesystem().IsRegularFile(path.toStdString());
 }
 
-bps::presentation::ScriptureSettings SettingsService::scriptureSettings() const
+bps::presentation::BookFillOptions SettingsService::scriptureSettings() const
 {
-    return settings_ ? settings_->Scripture() : bps::presentation::ScriptureSettings{};
+    return settings_ ? settings_->Scripture() : bps::presentation::BookFillOptions{};
 }
 
-bps::presentation::ScriptureSettings SettingsService::theTableSettings() const
+bps::presentation::BookFillOptions SettingsService::theTableSettings() const
 {
-    return settings_ ? settings_->TheTable() : bps::presentation::ScriptureSettings{};
+    return settings_ ? settings_->TheTable() : bps::presentation::BookFillOptions{};
 }
 
 // ---------------------------------------------------------------------------
@@ -676,8 +746,9 @@ void SettingsService::setActiveOutputStyle(const bps::presentation::OutputStyleS
 
 void SettingsService::setLiveOutputStyles(
     const std::vector<bps::presentation::OutputStyleSpec> &specs,
-    const std::vector<std::string> &bufferNames)
+    const std::vector<std::string> &bufferNames,
+    const std::vector<std::pair<int, int>> &bufferSizes)
 {
     if (EngineBridge::instance().booted())
-        (void)bps::presentation::PresentationEngine::Instance().SetLiveOutputStyles(specs, bufferNames);
+        (void)bps::presentation::PresentationEngine::Instance().SetLiveOutputStyles(specs, bufferNames, bufferSizes);
 }

@@ -2,7 +2,8 @@
 
 #include "modules/bible/BibleEngine.hpp"
 #include "modules/bible/BibleTypes.hpp"
-#include "modules/presentation/ScriptureSlides.hpp"
+#include "modules/presentation/BookFill.hpp"
+#include "modules/search/TextMatching.hpp"
 #include "platform/PlatformAccessor.hpp"
 #include "services/DesignLibraryService.h"
 #include "services/EngineBridge.h"
@@ -23,8 +24,55 @@ namespace {
 
 QString qstr(const std::string &s) { return QString::fromStdString(s); }
 
+// The query's words, lower-cased (a word = a letter/digit run) — what the
+// padlock's whole-word filter tests each verse against.
+QStringList queryWords(const QString &text)
+{
+    QStringList out;
+    QString cur;
+    for (const QChar &c : text) {
+        if (c.isLetterOrNumber()) cur += c.toLower();
+        else if (!cur.isEmpty()) { out << cur; cur.clear(); }
+    }
+    if (!cur.isEmpty()) out << cur;
+    return out;
+}
+
 // The engine's default scripture template (the id the template catalog gives the plain "Scripture" layout).
 constexpr const char *kDefaultTemplate = "tpl-scripture";
+
+// The session key that keeps the parallel-version selection (declared in AppSettings: an
+// undeclared key refuses every write).
+constexpr const char *kParallelKey = "session.scriptureParallelBibles";
+// The vocabulary stops at the FOURTH Bible ({scripture4_text}), so three extras is
+// the whole of what a layout can ask for.
+constexpr int kMaxParallel = 3;
+
+// The stored extra versions, in slot order: an empty entry or a duplicate is dropped
+// (a hand-edited settings file must not shift every column by one).
+QStringList storedParallelBibles()
+{
+    QStringList out;
+    const QString stored = SettingsService::instance().value(QString::fromLatin1(kParallelKey)).toString();
+    for (const QString &part : stored.split(QLatin1Char(','), Qt::SkipEmptyParts)) {
+        const QString id = part.trimmed();
+        if (!id.isEmpty() && !out.contains(id) && out.size() < kMaxParallel)
+            out << id;
+    }
+    return out;
+}
+
+// Every id this app can actually read, so a stored selection cannot point at a Bible
+// that has since been removed.
+QStringList installedBibleIds()
+{
+    QStringList out;
+    if (!EngineBridge::instance().booted())
+        return out;
+    for (const std::string &id : bb::BibleEngine::Instance().BibleIds())
+        out << QString::fromStdString(id);
+    return out;
+}
 // This tab's place in the shared slide builder (its templates, its setting).
 const SlideBuilder::Profile kProfile{ "scripture", "scripture.template", kDefaultTemplate };
 
@@ -37,7 +85,7 @@ std::vector<int> numbersOf(const QVariantList &verses)
 }
 
 // The picked verses of one chapter as the slide builder takes them. False when the Bible / book / chapter is not there.
-bool sourceFor(const QString &bibleId, const QString &bookId, int chapter, const QVariantList &verses, pf::ScriptureSource &out)
+bool sourceFor(const QString &bibleId, const QString &bookId, int chapter, const QVariantList &verses, pf::BookSource &out)
 {
     auto &engine = bb::BibleEngine::Instance();
     const std::string bible = bibleId.toStdString();
@@ -46,7 +94,12 @@ bool sourceFor(const QString &bibleId, const QString &bookId, int chapter, const
     auto ch = engine.GetChapter(bible, bookId.toStdString(), chapter);
     if (!meta.ok() || !book.ok() || !ch.ok())
         return false;
-    out = pf::ScriptureSource{};
+    out = pf::BookSource{};
+    // WHICH FAMILY this selection is, NAMED (BookFill::ContentFamily): the filler
+    // reads it to shape the reference (a Bible joins with a colon and writes its
+    // chapter) and to answer only the tokens a Bible has one for. No branch
+    // downstream has to infer "a Bible" from the presence of a chapter.
+    out.family = pf::ContentFamily::Scripture;
     out.versionName = meta.value().name;
     out.copyright = meta.value().copyright;
     out.book = book.value().name;
@@ -55,7 +108,34 @@ bool sourceFor(const QString &bibleId, const QString &bookId, int chapter, const
     const std::vector<int> wanted = numbersOf(verses);
     for (const bb::BibleVerse &v : ch.value().verses)
         if (std::find(wanted.begin(), wanted.end(), v.verse) != wanted.end())
-            out.verses.push_back({ v.verse, v.text });
+            out.items.push_back({ v.verse, v.text });
+    // EVERY OTHER SELECTED VERSION'S OWN VERSES OF THE SAME PASSAGE (BookFill's
+    // ParallelBible), so a parallel layout's second, third and fourth columns carry
+    // that translation's wording of the very verses the first column carries. A
+    // version that has gone missing, or whose book ids do not line up with this
+    // Bible's, simply contributes no column — the layout's slot then renders empty
+    // rather than the wrong verses.
+    for (const QString &extraId : storedParallelBibles()) {
+        if (out.parallels.size() >= static_cast<size_t>(kMaxParallel) || extraId == bibleId)
+            continue;   // the same file twice is not a second version
+        const std::string extra = extraId.toStdString();
+        auto extraMeta = engine.Metadata(extra);
+        auto extraChapter = engine.GetChapter(extra, bookId.toStdString(), chapter);
+        if (!extraMeta.ok() || !extraChapter.ok())
+            continue;
+        pf::ParallelBible column;
+        column.name = extraMeta.value().name;
+        if (auto extraBook = engine.GetBook(extra, bookId.toStdString()); extraBook.ok())
+            column.bookAbbr = extraBook.value().aliases.empty() ? extraBook.value().id
+                                                                : extraBook.value().aliases.front();
+        else
+            column.bookAbbr = book.value().aliases.empty() ? book.value().id : book.value().aliases.front();
+        for (const bb::BibleVerse &v : extraChapter.value().verses)
+            if (std::find(wanted.begin(), wanted.end(), v.verse) != wanted.end())
+                column.items.push_back({ v.verse, v.text });
+        if (!column.items.empty())
+            out.parallels.push_back(std::move(column));
+    }
     return true;
 }
 
@@ -144,6 +224,20 @@ QVariantList ScriptureService::chapter(const QString &bibleId, const QString &bo
     return out;
 }
 
+void ScriptureService::chapterAsync(const QString &bibleId, const QString &bookId, int chapter, int token)
+{
+    auto *runner = QThread::create([this, bibleId, bookId, chapter, token] {
+        const QVariantList rows = this->chapter(bibleId, bookId, chapter);
+        QMetaObject::invokeMethod(this, [this, bibleId, bookId, chapter, token, rows] {
+            if (token == latestChapterToken_)
+                emit chapterReady(token, bibleId, bookId, chapter, rows);
+        }, Qt::QueuedConnection);
+    });
+    connect(runner, &QThread::finished, runner, &QObject::deleteLater);
+    latestChapterToken_ = token;
+    runner->start();
+}
+
 QVariantMap ScriptureService::resolve(const QString &text, const QString &bibleId) const
 {
     if (!EngineBridge::instance().booted() || text.trimmed().isEmpty())
@@ -156,18 +250,43 @@ QVariantMap ScriptureService::resolve(const QString &text, const QString &bibleI
              { QStringLiteral("verseEnd"), ref.value().verseEnd } };
 }
 
-QVariantList ScriptureService::search(const QString &text, const QString &bibleId, int limit) const
+QVariantList ScriptureService::search(const QString &text, const QString &bibleId, int limit,
+                                     bool exactWords, const QString &scopeBookId,
+                                     int scopeChapter) const
 {
     QVariantList out;
     if (!EngineBridge::instance().booted() || text.trimmed().isEmpty())
         return out;
     auto &engine = bb::BibleEngine::Instance();
-    auto hits = engine.Search(text.toStdString(), bibleId.toStdString());
+    // The chapter lock rides along into the engine, which narrows the search to
+    // that one passage before it ranks (see BibleEngine::Search) — so a locked
+    // query is answered from the open chapter, not from the whole Bible filtered
+    // down to whatever survived the engine's candidate cap.
+    auto hits = engine.Search(text.toStdString(), bibleId.toStdString(),
+                              scopeBookId.toStdString(), scopeChapter);
     if (!hits.ok())
+        return out;
+    // THE PADLOCK: the engine's index matches fuzzily (completions, corrections)
+    // and has no exact switch, so the locked search filters its hits here — the
+    // verse itself must carry every typed word as a WHOLE word. The verse text is
+    // fetched per surviving hit (capped by `limit`), never per candidate verse.
+    const QStringList words = exactWords ? queryWords(text) : QStringList();
+    if (exactWords && words.isEmpty())
         return out;
     for (const bb::BibleSearchHit &h : hits.value()) {
         if (!bibleId.isEmpty() && qstr(h.bibleId) != bibleId)
             continue;
+        if (exactWords) {
+            auto verse = engine.GetVerse(h.bibleId, h.bookId, h.chapter, h.verse);
+            if (!verse.ok())
+                continue;
+            const std::string hay = bps::search::textmatch::Lower(qstr(verse.value().text).toStdString());
+            bool all = true;
+            for (const QString &w : words)
+                if (!bps::search::textmatch::ContainsWord(hay, w.toStdString())) { all = false; break; }
+            if (!all)
+                continue;
+        }
         auto book = engine.GetBook(h.bibleId, h.bookId);
         const QString bookName = book.ok() ? qstr(book.value().name) : qstr(h.bookId);
         out.append(QVariantMap{
@@ -184,17 +303,18 @@ QVariantList ScriptureService::search(const QString &text, const QString &bibleI
 
 QString ScriptureService::reference(const QString &book, int chapter, const QVariantList &verses) const
 {
-    return qstr(pf::ScriptureReference(book.toStdString(), chapter, numbersOf(verses)));
+    return qstr(pf::BookReference(book.toStdString(), chapter, numbersOf(verses), pf::ContentFamily::Scripture));
 }
 
 // ASYNC search (the Quick-search pattern): the pill pane runs this per keystroke;
 // the GUI-thread cost drops to a token check. Stale tokens are dropped on
 // delivery — a fast typist's older keystrokes answer into the void.
 void ScriptureService::searchAsync(const QString &text, const QString &bibleId,
-                                   int limit, int token)
+                                   int limit, int token, bool exactWords,
+                                   const QString &scopeBookId, int scopeChapter)
 {
-    auto *runner = QThread::create([this, text, bibleId, limit, token] {
-        const QVariantList rows = search(text, bibleId, limit);
+    auto *runner = QThread::create([this, text, bibleId, limit, token, exactWords, scopeBookId, scopeChapter] {
+        const QVariantList rows = search(text, bibleId, limit, exactWords, scopeBookId, scopeChapter);
         QMetaObject::invokeMethod(this, [this, token, rows] {
             if (token == latestSearchToken_)
                 emit searchResultsReady(token, rows);
@@ -210,6 +330,50 @@ void ScriptureService::searchAsync(const QString &text, const QString &bibleId,
 // ---------------------------------------------------------------------------
 
 QString ScriptureService::defaultTemplateId() const { return QString::fromLatin1(kDefaultTemplate); }
+
+QStringList ScriptureService::parallelBibles() const
+{
+    // Only the versions this app can still read: a Bible removed since the selection
+    // was made must not appear in the picker as if it were there.
+    const QStringList installed = installedBibleIds();
+    QStringList out;
+    for (const QString &id : storedParallelBibles())
+        if (installed.contains(id))
+            out << id;
+    return out;
+}
+
+bool ScriptureService::isParallelBible(const QString &bibleId) const
+{
+    return parallelBibles().contains(bibleId);
+}
+
+bool ScriptureService::setParallelBibles(const QStringList &bibleIds)
+{
+    const QStringList installed = installedBibleIds();
+    QStringList clean;
+    for (const QString &id : bibleIds) {
+        if (!installed.contains(id) || clean.contains(id))
+            return false;   // a version that is not installed (or the same one twice)
+        clean << id;
+    }
+    if (clean.size() > kMaxParallel)
+        return false;       // the vocabulary carries four Bibles, no more
+    if (!SettingsService::instance().setValue(QString::fromLatin1(kParallelKey), clean.join(QLatin1Char(','))))
+        return false;
+    emit changed();         // the preview, the slides and every layout re-derive
+    return true;
+}
+
+bool ScriptureService::toggleParallelBible(const QString &bibleId)
+{
+    QStringList next = parallelBibles();
+    if (next.contains(bibleId))
+        next.removeAll(bibleId);
+    else if (!next.contains(bibleId))
+        next << bibleId;
+    return setParallelBibles(next);
+}
 
 QString ScriptureService::templateId() const
 {
@@ -237,7 +401,7 @@ bool ScriptureService::templateHasValues(const QString &id) const
 
 QVariantMap ScriptureService::preview(const QString &bibleId, const QString &bookId, int chapter, const QVariantList &verses) const
 {
-    pf::ScriptureSource source;
+    pf::BookSource source;
     if (!EngineBridge::instance().booted() || verses.isEmpty() || !sourceFor(bibleId, bookId, chapter, verses, source))
         return SlideBuilder::preview(templateId(), {}, {});   // (nothing to show: the empty shape)
     return SlideBuilder::preview(templateId(), source, SettingsService::instance().scriptureSettings());
@@ -245,7 +409,7 @@ QVariantMap ScriptureService::preview(const QString &bibleId, const QString &boo
 
 QVariantList ScriptureService::slides(const QString &bibleId, const QString &bookId, int chapter, const QVariantList &verses) const
 {
-    pf::ScriptureSource source;
+    pf::BookSource source;
     if (!EngineBridge::instance().booted() || verses.isEmpty() || !sourceFor(bibleId, bookId, chapter, verses, source))
         return {};
     return SlideBuilder::slides(templateId(), source, SettingsService::instance().scriptureSettings(),
@@ -257,7 +421,9 @@ bool ScriptureService::importBible()
     if (!EngineBridge::instance().booted())
         return false;
     auto picked = bps::platform::PlatformAccessor::Get().Dialogs().OpenFileDialog(
-        "Install a Bible", { "Bible files (*.json *.xml *.osis *.usfm *.sfm *.txt)", "All files (*.*)" });
+        // Bible formats only — the installer validates the document it is
+        // handed, so "All files" only invited a refusal after the fact.
+        "Install a Bible", { "Bible files (*.json *.xml *.osis *.usfm *.sfm *.txt)" });
     if (!picked.ok() || !picked.value())
         return false;
     return SearchService::instance().importBibleFile(QString::fromStdString(*picked.value()));

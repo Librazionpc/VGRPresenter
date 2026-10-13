@@ -1,3 +1,4 @@
+#include "services/CallTrace.h"
 #include "services/CrashHandler.h"
 
 #include <QDateTime>
@@ -10,9 +11,11 @@
 #include <cstdio>
 #include <csignal>
 #include <cstdlib>
+#include <cstring>   // std::strlen (the breadcrumb prefix in ConsumePendingCrashSummary)
 #include <ctime>
 #include <exception>
 #include <string>
+#include <vector>    // CreateProcess needs a mutable argv buffer
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -36,6 +39,24 @@ void AppendLine(FILE *f, const char *line)
     std::fputc('\n', f);
 }
 
+// The GUI thread's last entered breadcrumb (services/CallTrace.h), reached
+// through guiChainRaw(): a crash handler may not allocate, lock or call into
+// Qt, so this reads a buffer the GUI thread already published. Empty is a
+// legitimate answer — the chain is "" until something instrumented runs — and
+// it is reported as such rather than left blank, so a reader knows the absence
+// is information (the fault is outside the traced entry points).
+void AppendBreadcrumb(FILE *f)
+{
+    const char *chain = "";
+    (void)calltrace::guiChainRaw(&chain);
+    char buf[600];
+    std::snprintf(buf, sizeof(buf), "  last-call: %s",
+                  chain[0] != '\0'
+                      ? chain
+                      : "(none instrumented — the fault is outside the traced entry points)");
+    AppendLine(f, buf);
+}
+
 // Shared by the signal path and the terminate handler. Same "signal=" record
 // shape the SEH/POSIX records use, so ConsumePendingCrashSummary() reads it
 // without knowing which door the crash came through.
@@ -53,6 +74,10 @@ void WriteAbortRecord(const char *header, const char *detail, int sig)
     std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", std::localtime(&now));
     std::snprintf(buf, sizeof(buf), "signal=%d (%s) at=%s", sig, detail, ts);
     AppendLine(f, buf);
+    // The call the GUI thread was inside when the process died: a frame list
+    // only becomes a culprit once symbols are resolved offline, and an
+    // exception's frames say nothing at all about which QML call site it was.
+    AppendBreadcrumb(f);
     std::fclose(f);
 }
 
@@ -174,6 +199,19 @@ LONG WINAPI HandleSEH(EXCEPTION_POINTERS *info)
 
             FlushLine(buf);
 
+            // The breadcrumb next to the header: the faulting call, before the
+            // raw frames that need symbols to mean anything.
+            {
+                const char *chain = "";
+                (void)calltrace::guiChainRaw(&chain);
+                char crumb[600];
+                std::snprintf(crumb, sizeof(crumb), "  last-call: %s",
+                              chain[0] != '\0'
+                                  ? chain
+                                  : "(none instrumented — the fault is outside the traced entry points)");
+                FlushLine(crumb);
+            }
+
             void *frames[32];
             USHORT count = CaptureStackBackTrace(0, 32, frames, nullptr);
             for (USHORT i = 0; i < count; ++i) {
@@ -292,6 +330,196 @@ void HandleSignal(int sig)
 
 } // namespace
 
+#if defined(_WIN32)
+
+// ---- gdb self-attach (the symbolized stack, with no debugger installed) ----
+// A Windows minidump cannot be read by the MinGW gdb (it only understands ELF
+// core files, which is why `gdb app.exe -c x.dmp` answers "not a core dump"),
+// and the dist has no WinDbg. So instead of writing a dump and hoping someone
+// can open it, the app runs the very capture an agent would: it spawns gdb
+// ATTACHED TO ITSELF (-p <pid> suspends every thread, walks them, detaches).
+// The exe's MinGW/DWARF symbols are exactly what gdb resolves, so the resulting
+// file is a fully symbolized per-thread backtrace — on a target PC that has
+// only the app folder.
+
+// Where to find a gdb: an explicit override, then the gdb the portable dist
+// ships beside the exe (tools/gdb/gdb.exe), then whatever is on PATH.
+std::string ResolveGdb()
+{
+    char env[MAX_PATH];
+    DWORD n = GetEnvironmentVariableA("VGR_GDB_BIN", env, sizeof(env));
+    if (n > 0 && n < sizeof(env) && GetFileAttributesA(env) != INVALID_FILE_ATTRIBUTES)
+        return std::string(env);
+
+    char exe[MAX_PATH];
+    const DWORD m = GetModuleFileNameA(nullptr, exe, sizeof(exe));
+    if (m > 0 && m < sizeof(exe)) {
+        std::string dir(exe);
+        const auto slash = dir.find_last_of("\\/");
+        if (slash != std::string::npos) {
+            const std::string cand = dir.substr(0, slash + 1) + "tools\\gdb\\gdb.exe";
+            if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES)
+                return cand;
+        }
+    }
+
+    char found[MAX_PATH];
+    if (SearchPathA(nullptr, "gdb.exe", nullptr, sizeof(found), found, nullptr) > 0)
+        return std::string(found);
+    return {};   // no gdb on this machine — the text record + minidump remain
+}
+
+void SpawnGdbCapture(const std::string &outPath)
+{
+    const std::string gdb = ResolveGdb();
+    if (gdb.empty())
+        return;
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE hOut = CreateFileA(outPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hOut == INVALID_HANDLE_VALUE)
+        return;
+
+    // thread apply all bt: every thread, not just the blocked one — a deadlock
+    // needs BOTH stacks (who holds the lock, who waits).
+    std::string cmd = "\"" + gdb + "\" -batch"
+                      " -ex \"set pagination off\""
+                      " -ex \"set confirm off\""
+                      " -ex \"info threads\""
+                      " -ex \"thread apply all bt\""
+                      " -p " + std::to_string(GetCurrentProcessId());
+
+    std::vector<char> mutableCmd(cmd.begin(), cmd.end());
+    mutableCmd.push_back('\0');
+
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = hOut;
+    si.hStdError = hOut;
+    si.hStdInput = INVALID_HANDLE_VALUE;
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessA(nullptr, mutableCmd.data(), nullptr, nullptr,
+                       TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        // Bounded: gdb walks + loads the (large) symbol table, then detaches.
+        // The wait runs on the watchdog thread, which gdb suspends along with
+        // every other thread and resumes on detach, so this returns normally.
+        WaitForSingleObject(pi.hProcess, 120000);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+    CloseHandle(hOut);
+}
+
+// A HANG is not a crash: nothing faulted, so the SEH/signal handlers never run
+// and Windows eventually closes the ghosted window (Event Log Id 1002). The
+// only durable evidence is a snapshot taken WHILE the process is intact, from
+// the watchdog's own (healthy) thread — a full-thread minidump plus a text
+// record naming the stall. See CrashHandler.h.
+void WriteHangDump(const char *reason)
+{
+    if (g_crashLogPath.empty())
+        return;
+    const std::time_t now = std::time(nullptr);
+    char ts[32];
+    std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", std::localtime(&now));
+
+    const char *chain = "";
+    (void)calltrace::guiChainRaw(&chain);
+
+    // Text record FIRST: it is tiny and survives even if the (much larger)
+    // dump write fails on a corrupted heap — the same ordering rule the SEH
+    // path follows.
+    char buf[768];
+    if (FILE *f = std::fopen(g_crashLogPath.c_str(), "a")) {
+        AppendLine(f, "---- GUI HANG (watchdog) ----");
+        std::snprintf(buf, sizeof(buf), "at=%s pid=%lu", ts,
+                      static_cast<unsigned long>(GetCurrentProcessId()));
+        AppendLine(f, buf);
+        if (reason != nullptr && reason[0] != '\0') {
+            std::snprintf(buf, sizeof(buf), "  reason: %s", reason);
+            AppendLine(f, buf);
+        }
+        std::snprintf(buf, sizeof(buf), "  last-call: %s",
+                      chain[0] != '\0'
+                          ? chain
+                          : "(none instrumented — the stall is outside the traced entry points)");
+        AppendLine(f, buf);
+        std::fclose(f);
+    }
+
+    // The dump sits beside the crash log: hang-<pid>.dmp.
+    std::string dumpPath = g_crashLogPath;
+    const auto slash = dumpPath.rfind('/');
+    if (slash != std::string::npos)
+        dumpPath = dumpPath.substr(0, slash + 1) + "hang-"
+                   + std::to_string(GetCurrentProcessId()) + ".dmp";
+
+    using FnMiniDump = BOOL(WINAPI *)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
+                                      PMINIDUMP_EXCEPTION_INFORMATION,
+                                      PMINIDUMP_USER_STREAM_INFORMATION,
+                                      PMINIDUMP_CALLBACK_INFORMATION);
+    bool wroteDump = false;
+    if (HMODULE dbgDump = LoadLibraryA("dbghelp.dll")) {
+        const auto miniDump = reinterpret_cast<FnMiniDump>(
+            reinterpret_cast<void *>(GetProcAddress(dbgDump, "MiniDumpWriteDump")));
+        if (miniDump) {
+            if (HANDLE hDump = CreateFileA(dumpPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                hDump != INVALID_HANDLE_VALUE) {
+                // MiniDumpNormal = every thread's stack + module list (what gdb
+                // needs to walk each thread); WithThreadInfo adds the TEB, so a
+                // reader can name which thread is the GUI one.
+                const auto type = static_cast<MINIDUMP_TYPE>(MiniDumpNormal | MiniDumpWithThreadInfo);
+                wroteDump = miniDump(GetCurrentProcess(), GetCurrentProcessId(), hDump,
+                                     type, nullptr, nullptr, nullptr) == TRUE;
+                CloseHandle(hDump);
+            }
+        }
+    }
+    if (FILE *f = std::fopen(g_crashLogPath.c_str(), "a")) {
+        std::snprintf(buf, sizeof(buf), "dump: %s (written=%s)",
+                      dumpPath.c_str(), wroteDump ? "yes" : "no");
+        AppendLine(f, buf);
+        std::fclose(f);
+    }
+
+    // The READABLE half: gdb attached to ourselves, writing symbolized
+    // per-thread backtraces beside the dump. This is what actually names the
+    // blocked call on a machine with no debugger — see SpawnGdbCapture.
+    std::string gdbOut;
+    {
+        const auto sep = dumpPath.find_last_of("\\/");
+        const std::string dir = (sep != std::string::npos) ? dumpPath.substr(0, sep + 1)
+                                                           : std::string();
+        gdbOut = dir + "hang-" + std::to_string(GetCurrentProcessId()) + "-gdb.txt";
+        SpawnGdbCapture(gdbOut);
+    }
+    if (FILE *f = std::fopen(g_crashLogPath.c_str(), "a")) {
+        std::snprintf(buf, sizeof(buf), "gdb capture: %s (present=%s)",
+                      gdbOut.c_str(),
+                      GetFileAttributesA(gdbOut.c_str()) != INVALID_FILE_ATTRIBUTES ? "yes" : "no");
+        AppendLine(f, buf);
+        std::fclose(f);
+    }
+}
+#else
+void WriteHangDump(const char *reason)
+{
+    if (g_crashLogPath.empty())
+        return;
+    if (FILE *f = std::fopen(g_crashLogPath.c_str(), "a")) {
+        AppendLine(f, "---- GUI HANG (watchdog) ----");
+        AppendLine(f, reason != nullptr ? reason : "GUI thread stalled");
+        AppendBreadcrumb(f);
+        std::fclose(f);
+    }
+}
+#endif
+
 QString ConsumePendingCrashSummary()
 {
     // Delivered-exactly-once: read the crash log, summarize its LAST record,
@@ -322,9 +550,24 @@ QString ConsumePendingCrashSummary()
         pos = sigPos;
     if (pos != std::string::npos) {
         const size_t end = contents.find('\n', pos);
-        summary = QString::fromStdString(
-            contents.substr(pos, end == std::string::npos ? std::string::npos : end - pos));
+        const size_t lineEnd = end == std::string::npos ? contents.size() : end;
+        summary = QString::fromStdString(contents.substr(pos, lineEnd - pos));
         summary = summary.trimmed();
+        // The BREADCRUMB rides along with the summary. It is the one line that
+        // says which call the process died in, and the summary is what reaches
+        // the operator — the QML banner AND (see main.cpp) the engine log. The
+        // raw record keeps everything, but nobody reads a crash file unless
+        // they already know something went wrong.
+        size_t callPos = contents.find("  last-call: ", lineEnd);
+        if (callPos == std::string::npos)
+            callPos = contents.find("  last-call: ", pos);
+        if (callPos != std::string::npos) {
+            const size_t callStart = callPos + std::strlen("  last-call: ");
+            const size_t callEnd = contents.find('\n', callStart);
+            summary += QStringLiteral(" | last call in flight: ")
+                       + QString::fromStdString(contents.substr(
+                             callStart, (callEnd == std::string::npos ? contents.size() : callEnd) - callStart)).trimmed();
+        }
     }
 
     // Rotate: crash-<epoch>.log next to the original.

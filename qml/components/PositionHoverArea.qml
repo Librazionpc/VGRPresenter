@@ -55,6 +55,14 @@ Item {
     // hover-only surface that must not claim the cursor.
     property bool showCursor: true
     property int cursorShape: Qt.PointingHandCursor
+    // The claim this area's cursor asserts in AppCursor's priority order.
+    // Default: an ordinary hover claim (priorityHover), which EQUAL-priority
+    // areas settle by push order — and because every area re-pushes on each
+    // pointer move, two equal claims over the same point alternate and the
+    // cursor visibly FLASHES between the two shapes. A frame grip / handle
+    // that overlaps ordinary content must say priorityHandle (or
+    // priorityPressed) so its shape wins outright instead of alternating.
+    property int cursorPriority: AppCursor.priorityHover
     // Hover-only overlays should let the actual control below them receive clicks.
     property bool clickEnabled: true
 
@@ -107,7 +115,7 @@ Item {
     onCursorShapeChanged: _syncCursor()
     function _syncCursor() {
         if (root.hovered && root.showCursor)
-            AppCursor.push(root.cursorShape, root)
+            AppCursor.push(root.cursorShape, root, root.cursorPriority)
         else
             AppCursor.pop(root)
     }

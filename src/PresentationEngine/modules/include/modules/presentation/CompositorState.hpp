@@ -67,6 +67,10 @@ public:
     void SetMediaFrame(MediaFrame frame);
     void ClearMedia();
     MediaFrame GetMediaFrame() const;
+    // Same truth as !GetMediaFrame().empty(), without copying the pixel
+    // buffer — for callers that only need to know whether media is on air
+    // (e.g. RenderOnce's per-tick liveness check), not read it.
+    bool HasMediaFrame() const;
 
     // ---- Overlays on air (multiple, stacked) -------------------------------
     // A resolved SNAPSHOT per active overlay, in take order (index 0 =
@@ -81,6 +85,9 @@ public:
     };
     void SetActiveOverlays(std::vector<ActiveOverlay> overlays);
     std::vector<ActiveOverlay> GetActiveOverlays() const;
+    // Same truth as !GetActiveOverlays().empty(), without copying every
+    // overlay's resolved block list — see HasMediaFrame() above.
+    bool HasActiveOverlays() const;
 
 private:
     CompositorState() = default;

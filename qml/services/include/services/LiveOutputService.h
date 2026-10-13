@@ -31,6 +31,7 @@ class QTimer;
 class QMediaPlayer;
 class QAudioOutput;
 class QVideoSink;
+namespace bps::rendering { struct Frame; }
 
 class LiveOutputService : public QObject {
     Q_OBJECT
@@ -50,6 +51,15 @@ class LiveOutputService : public QObject {
     // tile shows" from "what's actually pushed to real outputs": GO LIVE
     // is now the only thing that commits a stage.
     Q_PROPERTY(QVariantMap stagedSlide READ stagedSlide NOTIFY stagedChanged)
+    // Unstyled source for per-output local monitor previews. `stagedSlide`
+    // remains the active-output preview used by the main preview pane.
+    Q_PROPERTY(QVariantMap stagedSlideRaw READ stagedSlideRaw NOTIFY stagedChanged)
+    // Is there something for Clear all's UNDO to put back? clearAll() (the
+    // wall toolbar's Clear all) snapshots the content layers it takes down,
+    // and the toolbar's "Show all" reads this to know whether it has anything
+    // to restore — and to keep the toolbar on screen after a Clear all, since
+    // the one control that undoes it lives in that toolbar.
+    Q_PROPERTY(bool canRestoreCleared READ canRestoreCleared NOTIFY clearedChanged)
     // Bumped on every new preview frame; QML Image source appends it.
     Q_PROPERTY(qulonglong frameRev READ frameRev NOTIFY frameRevChanged)
     // Frames the loop has rendered this run (diagnostics).
@@ -66,6 +76,9 @@ class LiveOutputService : public QObject {
     // draw the on-air content with DesignPreview — the same renderer as the
     // ReferencePane preview — instead of re-guessing content from a title.
     Q_PROPERTY(QVariantMap onAirSlide READ onAirSlide NOTIFY onAirChanged)
+    // Unstyled runtime slide, for per-output monitor tiles to compose with
+    // their own saved template. The main preview continues to use onAirSlide.
+    Q_PROPERTY(QVariantMap onAirSlideRaw READ onAirSlideRaw NOTIFY onAirChanged)
     // ---- Taken video input (the Media pane's click-to-preview) ----------
     // A video source taken into the OUTPUT PREVIEW: the compositor layer
     // under the on-air content on every monitor tile, exactly like the
@@ -159,7 +172,11 @@ public:
     int onAirIndex() const { return onAirIndex_; }
     int onAirTotal() const { return onAirTotal_; }
     QVariantMap onAirSlide() const { return onAirSlide_; }
+    QVariantMap onAirSlideRaw() const { return onAirSlideRaw_; }
     QVariantMap stagedSlide() const { return stagedSlide_; }
+    QVariantMap stagedSlideRaw() const {
+        return stagedSlidesRaw_.isEmpty() ? QVariantMap{} : stagedSlidesRaw_.first().toMap();
+    }
 
     QString inputLabel() const { return inputLabel_; }
     QString inputKind() const { return inputKind_; }
@@ -182,12 +199,14 @@ public:
     qulonglong ndiFramesSent() const;
     bool ndiWarming() const;
     QString ndiWarmingOutputName() const;
-    // The worker's job: sender-create + force-alpha + SDK send. Static; all
-    // argument state BY VALUE (the pixels' owned buffer crosses threads).
+    // The worker's job: take an immutable latest-frame snapshot, sender-create
+    // + force-alpha + SDK send. Static; the shared frame keeps pixels alive
+    // without copying them on the GUI thread.
     // Provider is a raw pointer (the caller resolved it on the GUI thread);
     // the provider itself is internally mutex'd and thread-safe.
     static void ndiWorkerSendFrame(QObject *worker, void *provider,
-                                   QImage frame, QString senderName, float fps, qint64 sendId);
+                                   std::shared_ptr<const bps::rendering::Frame> frame,
+                                   QString senderName, float fps, qint64 sendId);
     QVariantList cardPreviewsList() const
     {
         QVariantList out;
@@ -238,6 +257,26 @@ public:
     // light its thumbnail too. QML reads it inside bindings that also read
     // inputRev, so it refreshes at the pump's rate.
     Q_INVOKABLE bool inputProducing(const QString &label) const;
+    // WHY this label's HELD tap will never produce a frame, in the platform's own
+    // words — or "" while it is fine, including merely warming up. The third state
+    // the card's state window needs: "connecting" (held, reachable, no frames
+    // yet) and "can't reach" (the device is gone) must not swallow "the tap
+    // died", which used to sit on the connecting ring for ever. Empty for a label
+    // that is not held, and for NDI.
+    Q_INVOKABLE QString inputFailure(const QString &label, const QString &kind) const;
+    // THE STATUS LIGHT'S PROBE (see EngineBridge::inputSourceAlive): the same
+    // reachability question, ALLOWED TO ASK — a cached-roster read first, and a
+    // queued device refresh when the cache cannot answer, so a bus card's
+    // connection light stays true without anyone opening the Audio & Video
+    // screen. inputHealthy() (the slash state) deliberately keeps the quiet,
+    // cache-only behaviour: it is asked per held card and must never enumerate.
+    Q_INVOKABLE bool inputAvailable(const QString &label, const QString &kind);
+    // THE STATUS LIGHT'S LIVE HALF (see EngineBridge::inputDelivery): "" while the
+    // app is not pulling this source at all, "ok" while it is and data is
+    // arriving, "starved" while it is and nothing has arrived for a few seconds.
+    // Answered from the taps the app ALREADY holds — a card's thumbnail, a held
+    // monitor, the output take, a meter tap — so asking never opens a device.
+    Q_INVOKABLE QString inputDelivery(const QString &label, const QString &kind);
 
     // ---- MEDIA ON AIR ----------------------------------------------------
     // takeMedia(path, name): a video/image file plays into the compositor
@@ -295,6 +334,23 @@ public:
     // goLive() falls back to when nothing's queued at all. A no-op when
     // not live.
     Q_INVOKABLE void clearOnAirSlide();
+    // ---- CLEAR ALL / SHOW ALL (the wall toolbar's pair) -------------------
+    // ONE entry point for the toolbar's Clear all, so the action and its undo
+    // cannot drift apart: it snapshots every layer it is about to take down
+    // (the on-air set, or the staged pick when nothing was live; the taken
+    // input; the overlay stack) and then runs the same clears the button used
+    // to call one by one. It deliberately never touches live_/STOP — that is
+    // a separate control now (see stop()).
+    Q_INVOKABLE void clearAll();
+    // "Show all": puts back what the last clearAll() took down — the content
+    // whole (the WHOLE on-air set, not just the slide that was showing, so a
+    // restored passage keeps its ‹ › navigation), the taken input and the
+    // overlay stack. If the snapshot was on air it goes back on air; if it
+    // was only being previewed it goes back to the preview slot (stop()'s
+    // own convention), so a restore never puts frames on a real screen by
+    // itself. Consumes the snapshot — it is a one-shot undo, and the next
+    // Clear all replaces it. A no-op when there is nothing to restore.
+    Q_INVOKABLE void restoreCleared();
     // The runtime's Next()/Previous() while live.
     Q_INVOKABLE bool next();
     Q_INVOKABLE bool previous();
@@ -320,6 +376,9 @@ public:
     // what a slide will ACTUALLY look like on air, not just its own raw
     // blocks. `slide` is the QML block shape (peekShow's own slide maps).
     Q_INVOKABLE QVariantMap previewWithActiveStyle(const QVariantMap &slide) const;
+    // Compose a staged slide with one output's own saved style, for its local
+    // monitor tile (the tile must not borrow the currently active output style).
+    Q_INVOKABLE QVariantMap previewWithStyle(const QVariantMap &slide, const QString &styleId) const;
 
     // The last preview frame for the image provider (scaled to the request).
     QImage previewFrame(const QSize &requested);
@@ -335,6 +394,8 @@ signals:
     void stagedChanged();
     void inputChanged();
     void overlaysChanged();
+    // clearAll() took a snapshot / restoreCleared() consumed it.
+    void clearedChanged();
     // NDI program-sender state (started/stopped, frame counter refresh).
     void ndiChanged();
     // Media-on-air state changes (take/clear/play-pause/mute/end-of-file)
@@ -371,11 +432,17 @@ private:
     // index moving (a document edit re-synced while live), so the 10Hz poll
     // keeps the QML preview honest rather than keying on title/index only.
     void refreshOnAirSlide();
-    // Shared by goLive()'s "nothing to open" fallback and clearOnAirSlide():
-    // pushes the one blank slide both need (empty blocks, transparent
+    // Every visible slide of the on-air presentation in the SAME raw
+    // (unstyled) shape onAirSlideRaw_ carries. clearAll() snapshots the WHOLE
+    // set rather than the current slide, so a restored passage comes back with
+    // its own navigation instead of collapsing to the verse that was showing.
+    QVariantList onAirSlidesRaw() const;
+    // The ONE blank slide clearOnAirSlide() needs (empty blocks, transparent
     // background) — the style's own background paints regardless, since
-    // SceneBuilder composites it unconditionally, before/regardless of
-    // blocks.
+    // SceneBuilder composites it unconditionally, before/regardless of blocks.
+    // Deliberately NOT goLive()'s fallback any more: GO LIVE is an output gate
+    // and never invents content, so a blank holding screen goes out only when
+    // the operator asks for one (clear the on-air slide, or stage a blank).
     void goLiveBlank();
 
     bool live_ = false;
@@ -385,11 +452,32 @@ private:
     int onAirIndex_ = -1;
     int onAirTotal_ = 0;
     QVariantMap onAirSlide_;
+    QVariantMap onAirSlideRaw_;
 
     // ---- stageSlides() — see the header comment on stagedSlide ----
     QString stagedName_;
     QVariantList stagedSlidesRaw_;
     QVariantMap stagedSlide_;
+
+    // ---- Clear all's undo (see clearAll/restoreCleared) -------------------
+    // A plain snapshot of each content layer at the moment Clear all ran.
+    // `valid` IS the gate (canRestoreCleared). The content is held as ONE
+    // slot — the on-air set when something was live, the staged pick
+    // otherwise — because that is exactly what the user was looking at, and
+    // it is what stop() folds into the staged slot when it goes off air.
+    struct ClearedSnapshot {
+        bool valid = false;
+        bool contentWasOnAir = false;   // restore re-sends it live vs re-stages it
+        QString contentTitle;
+        QVariantList contentSlidesRaw;  // whole visible set, raw (unstyled) maps
+        QVariantMap contentStyled;      // the styled map the preview slot keeps
+        QString inputLabel;
+        QString inputKind;
+        QString inputMode;
+        QVariantList overlays;          // [{id,name}], insertion order = z-order
+    };
+    ClearedSnapshot cleared_;
+    bool canRestoreCleared() const { return cleared_.valid; }
 
     QTimer *poll_ = nullptr;   // while live: onAir/frames refresh at 10Hz
     // Off air: asks the engine to keep previewing the open show (see
@@ -408,8 +496,8 @@ private:
     // rate (Settings · Outputs) while live.
     void pushNdiFrame();
     void stopNdiFeed();
-    // The network-visible NDI source name for an output row: "<AppName> .
-    // <Row name>" when the row has a name (Studio Monitor convention), or
+    // The network-visible NDI source name for an output row: "<AppName>-<Row
+    // name>" when the row has a name, or
     // "" to fall back to the provider's own default. With no argument it
     // resolves the first enabled NDI row itself.
     static QString ndiSenderDisplayName(const QString &rowName = QString());
@@ -422,6 +510,10 @@ private:
     // ---- taken-input state ----
     QString inputLabel_;
     QString inputKind_;
+    // The camera capture mode a take was asked for ("" for screen/NDI, whose
+    // takes carry none) — kept ONLY so Clear all's undo can re-take the same
+    // device the same way; nothing else reads it.
+    QString inputMode_;
     qulonglong inputRev_ = 0;
     bool inputLive_ = false;
     // True while an NDI take is feeding CompositorState's media layer (the

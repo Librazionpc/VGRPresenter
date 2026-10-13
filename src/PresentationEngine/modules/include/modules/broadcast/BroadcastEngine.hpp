@@ -18,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -123,6 +124,11 @@ private:
     // plugin provider); returns Err::Broadcast_ProviderNotFound on miss.
     std::shared_ptr<IBroadcastProvider> Find(std::string_view name) const;
 
+    // A copy of the provider registry, for callers that must invoke providers
+    // OUTSIDE every lock (Probe / DiscoverSources / Send / Receive / Shutdown
+    // all enter vendor SDKs and can block for seconds).
+    std::vector<std::shared_ptr<IBroadcastProvider>> ProviderSnapshot() const;
+
     void RecordError(std::string_view provider, std::string_view message);
 
     std::map<std::string, std::shared_ptr<IBroadcastProvider>, std::less<>> providers_;
@@ -151,6 +157,11 @@ private:
     std::atomic<bool> initialized_{false};
     std::atomic<bool> running_{false};
     mutable std::recursive_mutex mutex_;
+    // The provider REGISTRY has its own lock, so a lookup (a map find, and the
+    // first thing every status query does) can never be queued behind a slow
+    // provider call. mutex_ still serializes the sender/receiver/capture maps
+    // and the preferred-provider setting.
+    mutable std::shared_mutex providersMu_;
 };
 
 // Registers the built-in NDI and SDI providers (runtime SDK loading). Called by

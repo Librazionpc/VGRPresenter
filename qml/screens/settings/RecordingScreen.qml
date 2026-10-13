@@ -73,6 +73,13 @@ Item {
 
     // The live transport card reads the service's 1 Hz status.
     readonly property bool recActive: RecordingService.recording
+    // The transport card below reads `root.paused` in four places (the PAUSED
+    // caption, the Pause->Play glyph swap, and the two live-level gates).
+    // Nothing declared it, so every one of those bindings was inert: the
+    // screen always read "recording, not paused", the toggle showed Pause
+    // forever and the strips animated while paused. Expose the service's own
+    // flag, exactly like recActive above.
+    readonly property bool paused: RecordingService.paused
     readonly property var recStatus: RecordingService.status
     readonly property var recStorage: RecordingService.storage
 
@@ -316,7 +323,14 @@ Item {
                 radius: Theme.radiusLg
                 color: Theme.card
                 border.width: 1
-                border.color: root.recActive ? "#85261f" : Theme.border
+                // While it records, this card is a LIVE surface: it wears the same live
+                // red the GO LIVE pill does (Theme.liveBg / liveBgOnAir) and its ink is
+                // Theme.dangerLight, which is exactly how AppHeader's live pill is built.
+                // Before that, "recording" was spelled in five hand-picked reds here
+                // (#85261f, #e05a4e, #ff8d7f, #c8321e) that no other file agreed with;
+                // the fifth, the Start button's staged ground (#241a19), is
+                // Theme.armedStopBg now.
+                border.color: root.recActive ? Theme.liveBgOnAir : Theme.border
 
                 Column {
                     id: transportCol
@@ -345,9 +359,9 @@ Item {
                             width: liveLabel.width + 22
                             height: 20
                             radius: 10
-                            color: root.recActive ? "#2a1210" : Theme.inset
+                            color: root.recActive ? Theme.armedLiveBg : Theme.inset
                             border.width: 1
-                            border.color: root.recActive ? "#e05a4e" : Theme.border
+                            border.color: root.recActive ? Theme.liveBg : Theme.border
 
                             Row {
                                 anchors.centerIn: parent
@@ -356,7 +370,7 @@ Item {
                                 Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     width: 6; height: 6; radius: 3
-                                    color: root.recActive ? "#e05a4e" : Theme.textMuted
+                                    color: root.recActive ? Theme.liveBg : Theme.textMuted
 
                                     SequentialAnimation on opacity {
                                         running: root.recActive && !root.paused
@@ -371,7 +385,7 @@ Item {
                                     text: !root.recActive ? qsTr("IDLE")
                                         : root.paused ? qsTr("PAUSED")
                                         : qsTr("RECORDING")
-                                    color: root.recActive ? "#ff8d7f" : Theme.textMuted
+                                    color: root.recActive ? Theme.dangerLight : Theme.textMuted
                                     font.family: Theme.fontFamily
                                     font.pixelSize: 10
                                     font.weight: Font.Bold
@@ -390,23 +404,23 @@ Item {
                             width: startLabel.width + 34
                             height: 36
                             radius: Theme.radiusMd
-                            color: root.recActive ? "#241a19" : "#c8321e"
+                            color: root.recActive ? Theme.armedStopBg : Theme.liveBg
                             border.width: 1
-                            border.color: root.recActive ? "#85261f" : "transparent"
+                            border.color: root.recActive ? Theme.liveBgOnAir : "transparent"
                             Row {
                                 anchors.centerIn: parent
                                 spacing: 8
                                 IconGlyph {
                                     anchors.verticalCenter: parent.verticalCenter
                                     name: root.recActive ? "stop" : "play"
-                                    color: root.recActive ? "#ff8d7f" : "#ffffff"
+                                    color: root.recActive ? Theme.dangerLight : "#ffffff"
                                     fit: true; width: 14; height: 14
                                 }
                                 Text {
                                     id: startLabel
                                     anchors.verticalCenter: parent.verticalCenter
                                     text: root.recActive ? qsTr("Stop recording") : qsTr("Start recording")
-                                    color: root.recActive ? "#ff8d7f" : "#ffffff"
+                                    color: root.recActive ? Theme.dangerLight : "#ffffff"
                                     font.family: Theme.fontFamily
                                     font.pixelSize: Theme.textSm
                                     font.weight: Font.DemiBold
@@ -530,7 +544,7 @@ Item {
                             Text { text: qsTr("Dropped frames"); color: Theme.textMuted; font.family: Theme.fontFamily; font.pixelSize: Theme.textXs }
                             Text {
                                 text: String(root.recStatus.droppedFrames ?? 0)
-                                color: (root.recStatus.droppedFrames ?? 0) > 0 ? "#ffb454" : Theme.textPrimary
+                                color: (root.recStatus.droppedFrames ?? 0) > 0 ? Theme.warningLight : Theme.textPrimary
                                 font.family: "Consolas"; font.pixelSize: 15
                             }
                         }
@@ -679,9 +693,9 @@ Item {
                                    + (root.recStorage.capacityHours ?? 0).toFixed(1) + " h"
                             pct: root.recStorage.freePercent ?? 100
                             barColor: (root.recStorage.freePercent ?? 100) < 10
-                                        ? "#c8321e"
+                                        ? Theme.danger
                                         : (root.recStorage.freePercent ?? 100) < 20
-                                          ? "#ffb454" : Theme.success
+                                          ? Theme.warningLight : Theme.success
                         }
                     }
                 }

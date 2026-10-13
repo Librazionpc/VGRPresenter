@@ -461,3 +461,69 @@ void TestRecordingEngine() {
     CHECK(prod.Stop().ok());
     CHECK(prod.Shutdown().ok());
 }
+
+// ---------------------------------------------------------------------------
+// Dispatch scope: the bus dispatch runs with the recording engine's lock
+// RELEASED (the behavioural counterpart of the lock-scope guard — the guard
+// reads source, this proves the lock is free while a subscriber runs).
+//
+// A subscriber PARKS inside the dispatch, and a second thread calls engine
+// methods that all take that lock. The dispatch under test is the replay-
+// ready notice from Tick(), which is published after Tick's locked scope.
+// ---------------------------------------------------------------------------
+void TestRecordingDispatchOutsideLock() {
+    auto& rec = rk::RecordingEngine::Instance();
+    auto& prod = pr::ProductionEngine::Instance();
+    CHECK(prod.Initialize().ok());
+    CHECK(prod.Start().ok());
+    CHECK(rec.Initialize().ok());
+    CHECK(rec.Start().ok());
+
+    // A node to hang the replay buffer on (no container/profile needed — the
+    // buffer is filled by Tick, which is what dispatches the notice).
+    auto bus = prod.CreateBus("dispatchscope", "Dispatch Scope", pr::BusRole::Program,
+                              pr::SignalType::Video);
+    CHECK(bus.ok());
+    auto buf = rec.CreateReplayBuffer("dispatchscope", 1000);
+    CHECK(buf.ok());
+
+    std::atomic<bool> inHandler{false};
+    std::atomic<bool> otherThreadDone{false};
+    std::atomic<bool> reachedEngineWhileParked{false};
+    // The park inside the dispatch is bounded on purpose: the call that parks
+    // here is synchronous, so an unbounded spin could only be released from a
+    // thread that is waiting on this one. The failure mode must be a failed
+    // CHECK, never a wedged suite.
+    Subscription sub = EventBus::Instance().Subscribe<events::ReplayBufferReady>(
+        [&](const events::ReplayBufferReady&) {
+            inHandler.store(true);
+            for (int i = 0; i < 3000 && !otherThreadDone.load(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            reachedEngineWhileParked.store(otherThreadDone.load());
+        }, 0);
+
+    std::thread other([&] {
+        for (int i = 0; i < 5000 && !inHandler.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!inHandler.load()) return;   // the dispatch never happened
+        (void)rec.RecordingIds();                       // takes the engine's lock
+        (void)rec.GetRecordingHealth("no-such-id");     // ...and again
+        otherThreadDone.store(true);
+    });
+
+    // Fills the buffer to capacity; Tick dispatches the ready notice after its
+    // locked scope ends, so this call parks INSIDE the subscriber.
+    CHECK(rec.Tick(1000).ok());
+    other.join();
+    CHECK(inHandler.load());   // the subscriber really ran
+    // With the lock held across the dispatch, neither call could have completed
+    // while this one was parked.
+    CHECK(reachedEngineWhileParked.load());
+
+    (void)EventBus::Instance().Unsubscribe(sub);
+    if (buf.ok()) (void)rec.RemoveReplay(buf.value());
+    CHECK(rec.Stop().ok());
+    CHECK(rec.Shutdown().ok());
+    CHECK(prod.Stop().ok());
+    CHECK(prod.Shutdown().ok());
+}

@@ -11,6 +11,7 @@
 #include "core/kernel/Kernel.hpp"
 #include "core/lifecycle/LifecycleManager.hpp"
 #include "core/logging/Logger.hpp"
+#include "core/logging/QtMessagePolicy.hpp"
 #include "core/memory/MemoryManager.hpp"
 #include "core/modules/ModuleManager.hpp"
 #include "core/plugins/PluginManager.hpp"

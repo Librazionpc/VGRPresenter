@@ -134,15 +134,12 @@ Result<void> ThumbnailCache::Generate(const std::string& mediaPath, MediaKind ki
                                          frame.value().height);
     if (!png.ok()) return png.error();
 
+    // Written beside the final name and swapped in, so a half-written picture is
+    // never read — through the shared helper now (WriteBinaryAtomic), which adds
+    // the byte-count check and the synced-folder rename retry this hand-rolled
+    // copy of the dance was missing, and creates the cache dir on the way.
     auto& fs = platform::PlatformAccessor::Get().Filesystem();
-    if (auto made = fs.CreateDirectories(cacheDir_); !made.ok()) return made.error();
-    // Written beside the final name and renamed, so a half-written picture is never read.
-    const std::string tmp = outPath + ".tmp";
-    if (auto wrote = fs.WriteBinary(tmp, png.value()); !wrote.ok()) return wrote.error();
-    if (auto moved = fs.Rename(tmp, outPath); !moved.ok()) {
-        (void)fs.Remove(tmp);
-        return moved.error();
-    }
+    if (auto wrote = fs.WriteBinaryAtomic(outPath, png.value()); !wrote.ok()) return wrote.error();
     ++generated_;
     return {};
 }

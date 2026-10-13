@@ -99,13 +99,6 @@ std::vector<bp::ContentBlock> blocksFromVariant(const QVariant &list)
     return out;
 }
 
-QVariantList blocksToVariant(const std::vector<bp::ContentBlock> &blocks)
-{
-    QVariantList out;
-    for (const bp::ContentBlock &b : blocks)
-        out.append(blockToVariant(b));
-    return out;
-}
 
 QString transitionName(bp::TransitionKind kind)
 {
@@ -140,6 +133,20 @@ bp::OverlayScope scopeFromString(const QString &s)
 
 } // namespace
 
+// The PLURAL block mapping is a ShowConverter symbol, not a file-local helper
+// like the ones above: the live preview builds its block list from the ENGINE's
+// own composition (SceneBuilder::ComposeSlide), so this has to be linkable from
+// LiveOutputService. It stays here, next to blockToVariant, because blockToVariant
+// is the single QML<->engine block mapping and a second copy of the pair would
+// be one more place for the two sides to drift.
+QVariantList ShowConverter::blocksToVariant(const std::vector<bp::ContentBlock> &blocks)
+{
+    QVariantList out;
+    for (const bp::ContentBlock &b : blocks)
+        out.append(ShowConverter::blockToVariant(b));
+    return out;
+}
+
 bp::SlideTemplate ShowConverter::templateFromVariant(const QVariantMap &t)
 {
     bp::SlideTemplate out;
@@ -162,6 +169,22 @@ QVariantMap ShowConverter::templateToVariant(const bp::SlideTemplate &t)
         { QStringLiteral("blocks"), blocksToVariant(t.blocks) },
         { QStringLiteral("meta"), metaFromJson(t.metaJson) },
     };
+}
+
+QVariantMap ShowConverter::fillFromMeta(const QVariantMap &meta)
+{
+    static const char *const kKeys[] = {
+        "ref", "refFull", "refLast",
+        "tableCode", "tableYear", "tableTitle", "tableNumbers",
+        "book", "bookAbbr", "bible", "chapter", "copyright",
+    };
+    QVariantMap out;
+    for (const char *k : kKeys) {
+        const QString key = QString::fromLatin1(k);
+        if (meta.contains(key))
+            out.insert(key, meta.value(key));
+    }
+    return out;
 }
 
 QVariantMap ShowConverter::resolvedToVariant(const bp::ResolvedSlide &r)
@@ -223,20 +246,42 @@ bp::Slide ShowConverter::slideFromVariant(const QVariantMap &s)
         slide.tags.push_back(utf8(tag));
     const QString line1 = s.value(QStringLiteral("line1")).toString();
     const QString line2 = s.value(QStringLiteral("line2")).toString();
-    slide.text = utf8(line2.isEmpty() ? line1 : line1 + QLatin1Char('\n') + line2);
+    // A slide the FILL built brings its own body (SlideBuilder's `body`, from
+    // BookSlide::body). It has to: the design's blocks are filled SLOTS, and once
+    // they are filled nothing in them says which one is the content — so the
+    // engine's "first text-bearing block" guess handed a table design's date code
+    // to every bound block as the body (the outputs drew "47-0412 4" where the
+    // sermon text belonged, in the body's own size and colour, while the preview
+    // pane showed the text). A slide that knows its body is not guessed at. The
+    // line1/line2 pair stays for the slides that have only those.
+    const QString body = s.value(QStringLiteral("body")).toString();
+    slide.text = utf8(!body.isEmpty() ? body
+                                      : (line2.isEmpty() ? line1 : line1 + QLatin1Char('\n') + line2));
     slide.background = utf8(s.value(QStringLiteral("background"), QStringLiteral("transparent")).toString());
     slide.categoryId = utf8(s.value(QStringLiteral("categoryId")).toString());
     // The content family this slide belongs to ("scripture" | "table" | …)
     // rides in the meta (the model has no dedicated field): the output
     // style's own engine template only restyles ITS family, so a style keyed
     // for scripture must not steamroll The Table's layouts.
-    slide.metaJson = metaToJson(QVariantMap{
+    QVariantMap meta{
         { QStringLiteral("tagColor"), s.value(QStringLiteral("tagColor")) },
         { QStringLiteral("line1"), line1 },
         { QStringLiteral("line2"), line2 },
         { QStringLiteral("ref"), s.value(QStringLiteral("ref")) },
         { QStringLiteral("contentType"), s.value(QStringLiteral("contentType")) },
-    });
+    };
+    // A slide the FILL built carries its whole placeholder vocabulary under
+    // `fill` (SlideBuilder::valuesToMeta). Merged AS GIVEN, empties included:
+    // the engine reads these keys to resolve an output style's own slots
+    // (SceneBuilder::SlideValues), so without this a design's
+    // {table_code_paragraphs} corner slot drew an EMPTY box on the outputs
+    // while the preview pane — which fills from the design's own values —
+    // showed "47-0412 3". An empty key is the fill saying "blank here", which
+    // is a different answer from a key that was never there.
+    const QVariantMap fill = s.value(QStringLiteral("fill")).toMap();
+    for (auto it = fill.constBegin(); it != fill.constEnd(); ++it)
+        meta.insert(it.key(), it.value());
+    slide.metaJson = metaToJson(meta);
     slide.blocks = blocksFromVariant(s.value(QStringLiteral("blocks")));
     // Seconds the slide stays up before the show moves on by itself (0 = it waits for you).
     if (s.contains(QStringLiteral("nextTimer")))
@@ -319,6 +364,14 @@ QVariantMap ShowConverter::toVariant(const bp::Presentation &p)
             { QStringLiteral("background"), qstr(s.background) },
             { QStringLiteral("categoryId"), qstr(s.categoryId) },
             { QStringLiteral("blocks"), blocksToVariant(s.blocks) },
+            // A SAVED SLIDE KEEPS ITS FILL. show slides whose content rode in
+            // the design's blocks (a table pick converted to a show) carry no
+            // line1/line2, so without these two keys reopening the show hands the
+            // engine a slide whose body and vocabulary are gone — and it guesses
+            // from block order instead (the outputs then draw the date code where
+            // the sermon text belongs). Read back by slideFromVariant.
+            { QStringLiteral("body"), qstr(s.text) },
+            { QStringLiteral("fill"), fillFromMeta(meta) },
             { QStringLiteral("nextTimer"), s.durationMs / 1000.0 },
             { QStringLiteral("hidden"), s.hidden },                                   // disabled: skipped when played
             { QStringLiteral("transitionKind"), transitionName(s.transitionIn) },

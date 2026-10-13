@@ -271,11 +271,19 @@ Item {
         property real pressMouseX: 0
         property real pressMouseY: 0
         property bool dragMoved: false
+        // A press is LIVE (cleared on release). Distinct from dragMoved, which
+        // LATCHES for the rest of the gesture to keep a drag from also reading
+        // as a click (onClicked/onDoubleClicked below) — using it for the
+        // cursor left the grab on screen after the button came up, the
+        // scenario's `released got=18 want=4` (a closed hand where the I-beam
+        // belongs). The grab is a function of "a press is down AND it became a
+        // drag", never of a latch.
+        property bool dragging: false
 
         anchors.fill: parent
         visible: !root.editing
         hoverEnabled: true
-        cursorShape: dragArea.dragMoved ? Qt.ClosedHandCursor : Qt.IBeamCursor
+        cursorShape: dragArea.dragging ? Qt.ClosedHandCursor : Qt.IBeamCursor
 
         // Cursor via the AppCursor override stack, not cursorShape alone:
         // the canvas sits under mCanvas's scale (zoom) transform, and
@@ -292,8 +300,13 @@ Item {
             // push outlived the pointer forever. `pressed` still covers the
             // active drag (the grab keeps press alive outside the item); on
             // release, AppCursor.hovered decides from where the pointer IS.
+            // `pressed` shows the GRAB straight away (a live drag owns the
+            // pointer — priorityPressed), instead of staying an I-beam until the
+            // 4px drag threshold tripped and then jumping: that jump mid-gesture
+            // was the "cursor transition" that read as a stutter.
             if (visible && (pressed || AppCursor.hovered(root)))
-                AppCursor.push(dragMoved ? Qt.ClosedHandCursor : Qt.IBeamCursor, dragArea)
+                AppCursor.push((pressed && dragging) ? Qt.ClosedHandCursor : Qt.IBeamCursor,
+                               dragArea, pressed ? AppCursor.priorityPressed : AppCursor.priorityHover)
             else
                 AppCursor.pop(dragArea)
         }
@@ -320,11 +333,12 @@ Item {
         Component.onDestruction: AppCursor.pop(dragArea)
 
         onPressed: (mouse) => {
+            dragging = true
+            dragMoved = false
             syncCursor()
             const g = mapToItem(null, mouse.x, mouse.y)
             pressMouseX = g.x
             pressMouseY = g.y
-            dragMoved = false
         }
         onPositionChanged: (mouse) => {
             if (!pressed)
@@ -341,6 +355,10 @@ Item {
             }
         }
         onReleased: {
+            // Clear the live-press flag BEFORE the re-claim, so the release
+            // lands on the I-beam in the same tick (the scenario reads the
+            // cursor right after releasing).
+            dragging = false
             syncCursor()
             root.dragEnded()
         }

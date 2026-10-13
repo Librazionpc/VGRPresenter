@@ -253,6 +253,30 @@ void TestDisplayNdi() {
     CHECK(ndi.FrameRate() == 30.0f);
     CHECK(ndi.Enumerate()[0].refreshRateHz == 30);
 
+    // THE RULE ITSELF, named and pinned: what a provider accepts as a cadence
+    // and what it falls back to. One home — the NDI send clock in the app asks
+    // this same call (`bps::display::AcceptedOutputFrameRate`) instead of
+    // keeping its own copy of the bound, and a clock and a provider that
+    // disagree about the accepted rate is a feed at the wrong cadence.
+    // Literals, not the constants: 30/240 are the CONTRACT an operator's
+    // refresh pick is measured against; the constants are just how it is
+    // written down. Pinning only the constants would let a changed cap pass.
+    CHECK(d::kDefaultOutputFrameRateHz == 30.0f);
+    CHECK(d::kMaxOutputFrameRateHz == 240.0f);
+    CHECK(d::AcceptedOutputFrameRate(60.0f) == 60.0f);
+    CHECK(d::AcceptedOutputFrameRate(240.0f) == 240.0f);
+    CHECK(d::AcceptedOutputFrameRate(0.0f) == 30.0f);      // blank/zero
+    CHECK(d::AcceptedOutputFrameRate(-1.0f) == 30.0f);     // negative
+    CHECK(d::AcceptedOutputFrameRate(480.0f) == 30.0f);    // over the cap
+    // …and the provider really is that rule, not a second copy of it.
+    ndi.SetFrameRate(480.0f);
+    CHECK(ndi.FrameRate() == 30.0f);
+    ndi.SetFrameRate(d::kMaxOutputFrameRateHz);
+    CHECK(ndi.FrameRate() == 240.0f);
+    ndi.SetFrameRate(24.0f);
+    CHECK(ndi.FrameRate() == 24.0f);
+    CHECK(ndi.Enumerate()[0].refreshRateHz == 24);
+
     // Registered in the DisplayEngine by default (Initialize registers it).
     auto& eng = d::DisplayEngine::Instance();
     if (!eng.Initialize().ok()) { /* engine may already be initialized */ }

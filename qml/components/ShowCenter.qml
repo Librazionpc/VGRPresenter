@@ -217,7 +217,7 @@ Item {
                         // the picture: 16:9
                         Rectangle {
                             id: thumb
-                            width: parent.width; height: Math.round(width * 428 / 754)
+                            width: parent.width; height: StageGrid.heightForWidth(width)
                             color: "#000000"; clip: true
                             DesignPreview {
                                 width: parent.width
@@ -232,7 +232,7 @@ Item {
                                 visible: (cell.modelData.nextTimer ?? 0) > 0
                                 anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 4
                                 width: timerLabel.width + 8; height: 16; radius: 3; color: "#cc0b0b14"
-                                Text { id: timerLabel; anchors.centerIn: parent; text: root.formatTime(cell.modelData.nextTimer ?? 0); color: "#ff8a7e"; font.family: root.mono; font.pixelSize: 12 }
+                                Text { id: timerLabel; anchors.centerIn: parent; text: root.formatTime(cell.modelData.nextTimer ?? 0); color: Theme.dangerLight; font.family: root.mono; font.pixelSize: 12 }
                             }
                         }
                         // the label: the number, the group's name, a line in the group's colour under it
@@ -301,7 +301,7 @@ Item {
                     // (see cSecondary above).
                     border.color: selected ? Theme.accent : "#1d1f2a"
                     Rectangle {
-                        x: 10; y: 10; width: 106; height: Math.round(width * 428 / 754); color: "#000"; radius: 3; clip: true
+                        x: 10; y: 10; width: 106; height: StageGrid.heightForWidth(width); color: "#000"; radius: 3; clip: true
                         DesignPreview {
                             width: parent.width
                             showBindPlaceholders: false
@@ -541,7 +541,7 @@ Item {
                             Row {
                                 anchors.centerIn: parent; spacing: 8
                                 Text { text: root.timerApplied ? qsTr("Reset") : qsTr("To all slides"); color: "#ffffff"; font.family: Theme.fontFamily; font.pixelSize: 15; font.weight: Font.DemiBold }
-                                Text { visible: !root.timerApplied && root.timerSeconds > 0; text: root.formatTime(root.timerSeconds * root.slides.length); color: "#ffb4ab"; font.family: Theme.fontFamily; font.pixelSize: 14 }
+                                Text { visible: !root.timerApplied && root.timerSeconds > 0; text: root.formatTime(root.timerSeconds * root.slides.length); color: Theme.dangerLight; font.family: Theme.fontFamily; font.pixelSize: 14 }
                             }
                             HoverHandler { id: applyHover; cursorShape: parent.usable ? Qt.PointingHandCursor : Qt.ArrowCursor }
                             TapHandler { enabled: parent.usable; onTapped: root.applyTimer() }
@@ -641,7 +641,7 @@ Item {
         visible: root.type === "show" && root.show === null
         anchors.centerIn: parent
         text: root.loaded && root.loaded.error ? qsTr("This show could not be read: %1").arg(root.loaded.error) : ""
-        color: "#ff6b61"; font.family: "Segoe UI"; font.pixelSize: 15
+        color: Theme.dangerLight; font.family: "Segoe UI"; font.pixelSize: 15
     }
 
     // ---- a picture ----
@@ -660,7 +660,7 @@ Item {
         readonly property var design: root.type === "overlay" ? OverlayLibraryService.design(root.item.ref) : ({})
         Rectangle {
             anchors.centerIn: parent
-            width: Math.min(parent.width, parent.height * 754 / 428); height: Math.round(width * 428 / 754)
+            width: Math.min(parent.width, StageGrid.widthForHeight(parent.height)); height: StageGrid.heightForWidth(width)
             color: "#000"; clip: true
             DesignPreview {
                 anchors.fill: parent
@@ -682,7 +682,7 @@ Item {
         }
         Rectangle {
             anchors.centerIn: parent
-            width: Math.min(parent.width, parent.height * 754 / 428); height: Math.round(width * 428 / 754)
+            width: Math.min(parent.width, StageGrid.widthForHeight(parent.height)); height: StageGrid.heightForWidth(width)
             color: "#000"; clip: true
             DesignPreview {
                 anchors.fill: parent
@@ -831,7 +831,7 @@ Item {
 
                 Rectangle {
                     width: 34; height: 34; radius: 17
-                    color: mediaView.onAir ? "#c8321e" : "#232530"
+                    color: mediaView.onAir ? Theme.liveBg : "#232530"
                     Behavior on color { ColorAnimation { duration: 120 } }
                     IconGlyph {
                         anchors.centerIn: parent
@@ -873,7 +873,7 @@ Item {
                     IconGlyph {
                         anchors.centerIn: parent
                         name: LiveOutputService.mediaMuted ? "close" : "volume2"
-                        color: LiveOutputService.mediaMuted ? "#ff6b61" : "#e2e8f0"
+                        color: LiveOutputService.mediaMuted ? Theme.dangerLight : "#e2e8f0"
                         fit: true; width: 15; height: 15
                     }
                     PositionHoverArea {

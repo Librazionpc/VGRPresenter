@@ -38,7 +38,8 @@ void EventBus::publish(const QString &topic, const QVariantMap &payload)
 }
 
 void EventBus::notify(const QString &message, const QString &level,
-                      const QString &title, const QString &topic)
+                      const QString &title, const QString &topic, const QVariant &crux,
+                      const QVariant &action)
 {
     // UI-originated, standard-shaped: same payload convention as the engine
     // relay (level/title/message), plus origin="ui" so any subscriber — and
@@ -52,5 +53,13 @@ void EventBus::notify(const QString &message, const QString &level,
         {QStringLiteral("message"), message},
         {QStringLiteral("origin"), QStringLiteral("ui")},
     };
+    // Only carried when there IS one: a notice without a crux must stay exactly
+    // the payload it was before this key existed (see the header).
+    if (crux.isValid())
+        payload.insert(QStringLiteral("crux"), crux);
+    // Same for the action — the label/id map NotificationCenter hands the card,
+    // which turns it into the notice's one button.
+    if (action.isValid())
+        payload.insert(QStringLiteral("action"), action);
     publish(topic.isEmpty() ? QStringLiteral("ui.notification") : topic, payload);
 }

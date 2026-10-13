@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import VGRPresenterUI
 
 // Reusable modal card: dim scrim + centered card with title/subtitle/close-X
@@ -39,7 +40,15 @@ Item {
     // content Flickable always reserves exactly the right amount of room
     // instead of a manually-passed number silently drifting from FooterBar's
     // actual size.
-    readonly property real footerHeight: root.showFooter ? footerBar.implicitHeight : 0
+    // NaN-proof: a NaN here propagates into flick.height and collapses the whole
+    // card to zero height with no QML error (the footer is created last, and a
+    // read that lands mid-construction must never take the dialog down with it).
+    readonly property real footerHeight: {
+        if (!root.showFooter || !footerBar)
+            return 0
+        const h = footerBar.implicitHeight
+        return isFinite(h) && h > 0 ? h : 0
+    }
 
     default property alias contentData: contentCol.data
 
@@ -47,6 +56,14 @@ Item {
     // Fired by the footer's Save button.
     signal accepted()
 
+    // The dialog belongs to the WINDOW, not to the pane that declares it. A modal
+    // declared inside a settings page (every Add / Edit dialog in Settings) must dim
+    // the whole app, not just that page's content column: parented in place its scrim
+    // covered one side of the settings card, so the dialog read as half-modal (user
+    // report: "the black box doesn't cover the whole settings modal, only one side").
+    // Reparented to the window overlay, this component has no scaled ancestor to
+    // inherit a scale from, so its CARD applies the app scale itself (see AppScale.qml).
+    parent: Overlay.overlay
     anchors.fill: parent
     visible: opacity > 0
     enabled: opacity > 0
@@ -97,11 +114,38 @@ Item {
     }
 
     Rectangle {
+        id: card
+        // Hook for the modal-fit scenario: the modal ROOT always fills the
+        // window, so only the card can show that a dialog overflows. A dialog
+        // that carries an objectName gets its card measurable as
+        // "<objectName>_card" (the scenario measures the card against the
+        // window at the smallest size the window allows).
+        objectName: root.objectName === "" ? "" : root.objectName + "_card"
+        // The app's one scale is applied to the CARD, never to the scrim above it:
+        // the dim backdrop has to keep covering the whole window it is dimming, or
+        // the dialog loses the black box that gives it its modal feel. AppScale
+        // (AppScale.qml) also subtracts whatever scale an ancestor already applies
+        // (a screen, the Settings card), so a dialog opened inside one of those is
+        // never scaled twice.
+        scale: AppScale.cardScale(card)
+        transformOrigin: Item.Center
         // Capped against the available area too — same safety margin as
         // the height clamp below, so a wide cardWidth can't push the card
         // past the window's own edges on a smaller settings window.
-        width: Math.min(root.cardWidth, root.width - 80)
-        height: Math.min(root.height - 80,
+        // The room this card may use, in DESIGN units. The root's own size is in
+        // WINDOW pixels — this dialog's root fills the window — while cardWidth,
+        // the header and the footer are design values, so the root's size is
+        // divided by the card's own scale before the two are compared. Without
+        // that, a dialog over a scaled-down window capped itself at roughly half
+        // the height it actually had.
+        readonly property real roomWidth: root.width / (scale > 0 ? scale : 1) - 80
+        readonly property real roomHeight: root.height / (scale > 0 ? scale : 1) - 80
+        // The margin the Flickable keeps under the footer, on top of the 40px
+        // margins roomHeight already removed — named so the height chain reads as
+        // header + viewport + footer + gutter instead of a bare literal.
+        readonly property real bottomGutter: 40
+        width: Math.min(root.cardWidth, roomWidth)
+        height: Math.min(roomHeight,
                          Theme.space6 * 2 + headerItem.height + Theme.space4
                          + flick.height + root.footerHeight)
         anchors.centerIn: parent
@@ -171,8 +215,24 @@ Item {
             // left a visible dead gap between the scrollbar and the card's
             // actual edge.
             width: parent.width - 2 * Theme.space6
-            height: Math.min(contentCol.height,
-                             root.height - 120 - root.footerHeight - y)
+            // The viewport's own room: roomHeight (the window's height in design
+            // units, already minus the card's outer 40px top and bottom margins)
+            // less the bottom gutter, the footer and the header offset above this
+            // Flickable. Floored at 0 and never NaN — the card's height derives
+            // from this, so one bad number here is a BLANK dialog, not a short one.
+            //
+            // card.roomHeight, not a bare roomHeight: this binding hangs off the
+            // Flickable, and QML only resolves an unqualified name against the
+            // object the binding sits on plus the component's root — never a
+            // SIBLING's custom properties. Unqualified it threw
+            // "ReferenceError: roomHeight is not defined", the whole expression
+            // went NaN, the Flickable collapsed to height 0 and every dialog's
+            // content vanished ("add source has cleared it").
+            readonly property real room: {
+                const h = card.roomHeight - card.bottomGutter - root.footerHeight - y
+                return isFinite(h) ? Math.max(0, h) : 0
+            }
+            height: Math.min(contentCol.height, room)
             contentWidth: width
             contentHeight: contentCol.height
             clip: true
@@ -205,6 +265,9 @@ Item {
         // property) reserves exactly this much room for flick above.
         FooterBar {
             id: footerBar
+            // Names the footer's buttons "<objectName>_save"/"_cancel" for a
+            // dialog this card gives a name (see FooterBar.hookName).
+            hookName: root.objectName
             visible: root.showFooter
             anchors.left: parent.left
             anchors.right: parent.right

@@ -81,15 +81,15 @@ ModalCard {
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
                 width: 74; height: 30; radius: Theme.radiusMd
-                color: root.autoRoute ? "#3574f0" : Theme.inset
+                color: root.autoRoute ? Theme.accent : Theme.inset
                 border.width: 1
-                border.color: root.autoRoute ? "#3574f0" : Theme.border
+                border.color: root.autoRoute ? Theme.accent : Theme.border
                 Behavior on color { ColorAnimation { duration: 110 } }
 
                 Text {
                     anchors.centerIn: parent
                     text: qsTr("Auto")
-                    color: root.autoRoute ? "#ffffff" : Theme.textPrimary
+                    color: root.autoRoute ? Theme.controlInk : Theme.textPrimary
                     font.family: Theme.fontFamily
                     font.pixelSize: Theme.textSm
                 }
@@ -218,9 +218,9 @@ ModalCard {
                                     width: 40
                                     height: 34
                                     radius: 2
-                                    color: cell.patched ? "#4da3ff" : Theme.inset
+                                    color: cell.patched ? Theme.info : Theme.inset
                                     border.width: 1
-                                    border.color: root.autoRoute ? "#3a3d48" : Theme.border
+                                    border.color: root.autoRoute ? Theme.borderSubtle : Theme.border
                                     opacity: root.autoRoute ? 0.65 : 1
                                     Behavior on color { ColorAnimation { duration: 100 } }
 

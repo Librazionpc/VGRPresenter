@@ -27,6 +27,11 @@ public:
     Result<void> Write(std::string_view path, std::string_view data) override;
     Result<void> WriteBinary(std::string_view path, const std::vector<uint8_t>& data) override;
     Result<void> Append(std::string_view path, std::string_view data) override;
+    Result<void> WriteAtomic(std::string_view path, std::string_view data) override;
+    Result<void> WriteBinaryAtomic(std::string_view path,
+                                   const std::vector<uint8_t>& data) override;
+    Result<void> CopyAtomic(std::string_view from, std::string_view to) override;
+    Result<void> RenameRetry(std::string_view from, std::string_view to) override;
 
     Result<void> CreateDirectory(std::string_view path) override;
     Result<void> CreateDirectories(std::string_view path) override;
@@ -54,6 +59,10 @@ public:
     Result<void> CancelWatch(WatchToken token) override;
 
 private:
+    // The shared body of WriteAtomic/WriteBinaryAtomic (text and binary differ
+    // only in how the caller hands the bytes over).
+    Result<void> ReplaceAtomic(std::string_view path, const void* bytes, size_t size);
+
     void PollLoop();
 
     struct WatchEntry {

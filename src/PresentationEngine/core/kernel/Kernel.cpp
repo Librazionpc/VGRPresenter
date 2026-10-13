@@ -47,6 +47,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <thread>
 
@@ -121,6 +122,7 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         bootLog_.clear();
+        degraded_.clear();   // per-boot state: a previous session's holes are not this one's
     }
 
     (void)TransitionState(KernelState::Booting);
@@ -128,23 +130,24 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     // ---- 1. Logger (02) — first system, everything logs through it ----
     auto& logger = Logger::Instance();
     logger.SetGlobalLevel(options.logLevel);
-    if (auto r = logger.Initialize(); !r.ok()) {
-        state_.store(KernelState::Stopped);
-        return r;
+    if (BootStep("Logger", [&] { return logger.Initialize(); })) {
+        logger.Info("Kernel v" + kEngineVersion.ToString() + " booting...", "Kernel");
+        AppendBootLog("Logger");
     }
-    logger.Info("Kernel v" + kEngineVersion.ToString() + " booting...", "Kernel");
-    AppendBootLog("Logger");
+    // (Logger::Log falls back to stderr when its pump never started, so a boot
+    // that had to degrade the logger is still observable.)
 
     // ---- 2. ConfigurationManager (03) ----
     auto& config = ConfigurationManager::Instance();
-    if (auto r = config.Initialize(EngineDefaults(), options.configPath); !r.ok())
-        return FailBoot(r.error());
-    if (!options.profileDir.empty()) {
-        (void)config.SetProfileDir(options.profileDir);
-        if (!options.profile.empty()) (void)config.ApplyProfile(options.profile);
+    if (BootStep("ConfigurationManager",
+                 [&] { return config.Initialize(EngineDefaults(), options.configPath); })) {
+        if (!options.profileDir.empty()) {
+            (void)config.SetProfileDir(options.profileDir);
+            if (!options.profile.empty()) (void)config.ApplyProfile(options.profile);
+        }
+        logger.Info("ConfigurationManager ready", "Kernel");
+        AppendBootLog("ConfigurationManager");
     }
-    logger.Info("ConfigurationManager ready", "Kernel");
-    AppendBootLog("ConfigurationManager");
 
     // ---- 3. ServiceManager (04) — DI registration of the core systems ----
     auto& services = ServiceManager::Instance();
@@ -159,24 +162,25 @@ Result<void> Kernel::Boot(const BootOptions& options) {
 
     // ---- 5. ThreadPool (06) ----
     auto& pool = ThreadPool::Instance();
-    if (auto r = pool.Initialize(options.threadCount); !r.ok()) return FailBoot(r.error());
-    AppendBootLog("ThreadPool");
+    if (BootStep("ThreadPool", [&] { return pool.Initialize(options.threadCount); }))
+        AppendBootLog("ThreadPool");
 
     // ---- 6. TaskScheduler (07) ----
     auto& sched = TaskScheduler::Instance();
-    if (auto r = sched.Initialize(); !r.ok()) return FailBoot(r.error());
-    AppendBootLog("TaskScheduler");
+    if (BootStep("TaskScheduler", [&] { return sched.Initialize(); }))
+        AppendBootLog("TaskScheduler");
 
     // ---- 7. ResourceManager (10) ----
     auto& res = ResourceManager::Instance();
-    if (auto r = res.Initialize(); !r.ok()) return FailBoot(r.error());
-    if (auto r = res.SetMode(options.resourceMode); !r.ok()) return FailBoot(r.error());
-    AppendBootLog("ResourceManager");
+    if (BootStep("ResourceManager", [&] { return res.Initialize(); })) {
+        (void)BootStep("ResourceManager mode", [&] { return res.SetMode(options.resourceMode); });
+        AppendBootLog("ResourceManager");
+    }
 
     // ---- 8. MemoryManager (11) ----
     auto& mem = MemoryManager::Instance();
-    if (auto r = mem.Initialize(); !r.ok()) return FailBoot(r.error());
-    AppendBootLog("MemoryManager");
+    if (BootStep("MemoryManager", [&] { return mem.Initialize(); }))
+        AppendBootLog("MemoryManager");
 
     // ---- 9. PluginManager (09) ----
     auto& plugins = PluginManager::Instance();
@@ -270,50 +274,56 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     AppendBootLog("Platform");
 
     auto& assets = AssetManager::Instance();
-    if (auto r = assets.Initialize(); !r.ok()) return FailBoot(r.error());
-    (void)services.Register<AssetManager>(&assets);
+    if (BootStep("AssetManager", [&] { return assets.Initialize(); }))
+        (void)services.Register<AssetManager>(&assets);
 
     auto& drivers = DriverManager::Instance();
-    if (auto r = drivers.Initialize(); !r.ok()) return FailBoot(r.error());
-    (void)services.Register<DriverManager>(&drivers);
+    if (BootStep("DriverManager", [&] { return drivers.Initialize(); }))
+        (void)services.Register<DriverManager>(&drivers);
 
     auto& db = DatabaseManager::Instance();
     // Open() takes a FILE path; dataDir is a directory. Name the database
     // inside it (an empty dataDir stays in-memory). Passing the bare dir
     // used to collide with the UI's own "enginedata" directory of the same
     // path, making every persist fail silently.
+    //
+    // THIS is the step whose failure started the whole story: an unreadable
+    // kernel.json answered Config_ParseFailed, Boot aborted, the UI never saw a
+    // Running kernel, and every write for the rest of the session answered "the
+    // engine is not running yet". Open() quarantines a damaged file now, and a
+    // failure here degrades a session that is missing its persistence — loudly,
+    // in the log and in EngineContext — instead of stopping the engine.
     const std::string dbFile =
         options.dataDir.empty() ? std::string{} : options.dataDir + "/kernel.json";
-    if (auto r = db.Open(dbFile); !r.ok()) return FailBoot(r.error());
-    (void)services.Register<DatabaseManager>(&db);
+    if (BootStep("Database", [&] { return db.Open(dbFile); }))
+        (void)services.Register<DatabaseManager>(&db);
 
     // ---- 13. Content & Asset Management (Phase 3, docs/specs/13) ----
     // CAMS boots after the Database (metadata persistence) and the PAL
     // (all file I/O through the VFS). It is the single public API for content.
     auto& content = content::ContentManager::Instance();
-    if (auto r = content.Initialize(); !r.ok()) return FailBoot(r.error());
-    (void)services.Register<content::ContentManager>(&content);
+    if (BootStep("Content", [&] { return content.Initialize(); }))
+        (void)services.Register<content::ContentManager>(&content);
     // Scan any configured library root for unindexed files, then start the
     // watcher heartbeat.
     {
         auto roots = config.GetString("cams.roots", "");
         if (!roots.empty()) {
             if (auto r = content.MountDisk("lib", roots); !r.ok())
-                logger.Warning("ContentManager mount '" + roots + "': " + r.error().message,
-                               "Kernel");
+                Degrade("ContentManager mount", r.error());
         }
         if (auto s = content.Start(); !s.ok())
-            logger.Warning("ContentManager start: " + s.error().message, "Kernel");
+            Degrade("ContentManager start", s.error());
     }
     AppendBootLog("Content");
 
     auto& displays = DisplayManager::Instance();
-    if (auto r = displays.Initialize(); !r.ok()) return FailBoot(r.error());
-    (void)services.Register<DisplayManager>(&displays);
+    if (BootStep("DisplayManager", [&] { return displays.Initialize(); }))
+        (void)services.Register<DisplayManager>(&displays);
 
     auto& renderer = RendererManager::Instance();
-    if (auto r = renderer.Initialize(); !r.ok()) return FailBoot(r.error());
-    (void)services.Register<RendererManager>(&renderer);
+    if (BootStep("RendererManager", [&] { return renderer.Initialize(); }))
+        (void)services.Register<RendererManager>(&renderer);
 
     AppendBootLog("Assets");
     AppendBootLog("Drivers");
@@ -330,11 +340,11 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         auto& notify = notification::NotificationService::Instance();
         if (auto r = notify.Initialize(); !r.ok()) {
-            logger.Warning("NotificationService init: " + r.error().message, "Kernel");
+            Degrade("NotificationService", r.error());
         } else {
             (void)services.Register<notification::NotificationService>(&notify);
             if (auto s = notify.Start(); !s.ok())
-                logger.Warning("NotificationService start: " + s.error().message, "Kernel");
+                Degrade("NotificationService start", s.error());
             AppendBootLog("Notifications");
         }
     }
@@ -345,11 +355,11 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         auto& data = project::DataManager::Instance();
         if (auto r = data.Initialize(); !r.ok()) {
-            logger.Warning("DataManager init: " + r.error().message, "Kernel");
+            Degrade("DataManager", r.error());
         } else {
             (void)services.Register<project::DataManager>(&data);
             if (auto s = data.Start(); !s.ok())
-                logger.Warning("DataManager start: " + s.error().message, "Kernel");
+                Degrade("DataManager start", s.error());
             AppendBootLog("Projects");
         }
     }
@@ -361,11 +371,11 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         auto& runtime = adaptive::AdaptiveRuntime::Instance();
         if (auto r = runtime.Initialize(); !r.ok()) {
-            logger.Warning("AdaptiveRuntime init: " + r.error().message, "Kernel");
+            Degrade("AdaptiveRuntime", r.error());
         } else {
             (void)services.Register<adaptive::AdaptiveRuntime>(&runtime);
             if (auto s = runtime.Start(); !s.ok())
-                logger.Warning("AdaptiveRuntime start: " + s.error().message, "Kernel");
+                Degrade("AdaptiveRuntime start", s.error());
             AppendBootLog("Adaptive");
         }
     }
@@ -377,7 +387,7 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         auto& tel = settings::Telemetry::Instance();
         if (auto r = tel.Initialize(); !r.ok())
-            logger.Warning("Telemetry init: " + r.error().message, "Kernel");
+            Degrade("Telemetry", r.error());
         else
             (void)services.Register<settings::Telemetry>(&tel);
     }
@@ -390,11 +400,11 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         auto& render = rendering::RenderEngine::Instance();
         if (auto r = render.Initialize(); !r.ok()) {
-            logger.Warning("RenderEngine init: " + r.error().message, "Kernel");
+            Degrade("RenderEngine", r.error());
         } else {
             (void)services.Register<rendering::RenderEngine>(&render);
             if (auto s = render.Start(); !s.ok())
-                logger.Warning("RenderEngine start: " + s.error().message, "Kernel");
+                Degrade("RenderEngine start", s.error());
             AppendBootLog("RenderEngine");
         }
     }
@@ -406,11 +416,11 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         auto& disp = display::DisplayEngine::Instance();
         if (auto r = disp.Initialize(); !r.ok()) {
-            logger.Warning("DisplayEngine init: " + r.error().message, "Kernel");
+            Degrade("DisplayEngine", r.error());
         } else {
             (void)services.Register<display::DisplayEngine>(&disp);
             if (auto s = disp.Start(); !s.ok())
-                logger.Warning("DisplayEngine start: " + s.error().message, "Kernel");
+                Degrade("DisplayEngine start", s.error());
             AppendBootLog("DisplayEngine");
         }
     }
@@ -422,11 +432,11 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         auto& pres = presentation::PresentationEngine::Instance();
         if (auto r = pres.Initialize(); !r.ok()) {
-            logger.Warning("PresentationEngine init: " + r.error().message, "Kernel");
+            Degrade("PresentationEngine", r.error());
         } else {
             (void)services.Register<presentation::PresentationEngine>(&pres);
             if (auto s = pres.Start(); !s.ok())
-                logger.Warning("PresentationEngine start: " + s.error().message, "Kernel");
+                Degrade("PresentationEngine start", s.error());
             AppendBootLog("PresentationEngine");
         }
     }
@@ -440,7 +450,7 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         auto& live = live::LiveOutputController::Instance();
         if (auto r = live.Initialize(); !r.ok()) {
-            logger.Warning("LiveOutputController init: " + r.error().message, "Kernel");
+            Degrade("LiveOutputController", r.error());
         } else {
             (void)services.Register<live::LiveOutputController>(&live);
             AppendBootLog("LiveOutputController");
@@ -454,11 +464,11 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         auto& search = search::SearchEngine::Instance();
         if (auto r = search.Initialize(); !r.ok()) {
-            logger.Warning("SearchEngine init: " + r.error().message, "Kernel");
+            Degrade("SearchEngine", r.error());
         } else {
             (void)services.Register<search::SearchEngine>(&search);
             if (auto s = search.Start(); !s.ok())
-                logger.Warning("SearchEngine start: " + s.error().message, "Kernel");
+                Degrade("SearchEngine start", s.error());
             AppendBootLog("SearchEngine");
         }
     }
@@ -470,11 +480,11 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         auto& media = media::MediaEngine::Instance();
         if (auto r = media.Initialize(); !r.ok()) {
-            logger.Warning("MediaEngine init: " + r.error().message, "Kernel");
+            Degrade("MediaEngine", r.error());
         } else {
             (void)services.Register<media::MediaEngine>(&media);
             if (auto s = media.Start(); !s.ok())
-                logger.Warning("MediaEngine start: " + s.error().message, "Kernel");
+                Degrade("MediaEngine start", s.error());
             AppendBootLog("MediaEngine");
         }
     }
@@ -494,11 +504,11 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         auto& sce = scene::SceneCompositionEngine::Instance();
         if (auto r = sce.Initialize(); !r.ok()) {
-            logger.Warning("SceneCompositionEngine init: " + r.error().message, "Kernel");
+            Degrade("SceneCompositionEngine", r.error());
         } else {
             (void)services.Register<scene::SceneCompositionEngine>(&sce);
             if (auto s = sce.Start(); !s.ok())
-                logger.Warning("SceneCompositionEngine start: " + s.error().message, "Kernel");
+                Degrade("SceneCompositionEngine start", s.error());
             AppendBootLog("SceneEngine");
         }
     }
@@ -514,11 +524,11 @@ Result<void> Kernel::Boot(const BootOptions& options) {
         if (!options.dataDir.empty())
             bible.SetStorePath(options.dataDir + "/bibles.json");
         if (auto r = bible.Initialize(); !r.ok()) {
-            logger.Warning("BibleEngine init: " + r.error().message, "Kernel");
+            Degrade("BibleEngine", r.error());
         } else {
             (void)services.Register<bible::BibleEngine>(&bible);
             if (auto s = bible.Start(); !s.ok())
-                logger.Warning("BibleEngine start: " + s.error().message, "Kernel");
+                Degrade("BibleEngine start", s.error());
             AppendBootLog("BibleEngine");
         }
     }
@@ -530,11 +540,11 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         auto& songs = song::SongEngine::Instance();
         if (auto r = songs.Initialize(); !r.ok()) {
-            logger.Warning("SongEngine init: " + r.error().message, "Kernel");
+            Degrade("SongEngine", r.error());
         } else {
             (void)services.Register<song::SongEngine>(&songs);
             if (auto s = songs.Start(); !s.ok())
-                logger.Warning("SongEngine start: " + s.error().message, "Kernel");
+                Degrade("SongEngine start", s.error());
             AppendBootLog("SongEngine");
         }
     }
@@ -548,11 +558,11 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         auto& flow = automation::FlowEngine::Instance();
         if (auto r = flow.Initialize(); !r.ok()) {
-            logger.Warning("FlowEngine init: " + r.error().message, "Kernel");
+            Degrade("FlowEngine", r.error());
         } else {
             (void)services.Register<automation::FlowEngine>(&flow);
             if (auto s = flow.Start(); !s.ok())
-                logger.Warning("FlowEngine start: " + s.error().message, "Kernel");
+                Degrade("FlowEngine start", s.error());
             AppendBootLog("FlowEngine");
         }
     }
@@ -565,11 +575,11 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         auto& prod = production::ProductionEngine::Instance();
         if (auto r = prod.Initialize(); !r.ok()) {
-            logger.Warning("ProductionEngine init: " + r.error().message, "Kernel");
+            Degrade("ProductionEngine", r.error());
         } else {
             (void)services.Register<production::ProductionEngine>(&prod);
             if (auto s = prod.Start(); !s.ok())
-                logger.Warning("ProductionEngine start: " + s.error().message, "Kernel");
+                Degrade("ProductionEngine start", s.error());
             AppendBootLog("ProductionEngine");
         }
     }
@@ -584,11 +594,11 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         auto& rec = recording::RecordingEngine::Instance();
         if (auto r = rec.Initialize(); !r.ok()) {
-            logger.Warning("RecordingEngine init: " + r.error().message, "Kernel");
+            Degrade("RecordingEngine", r.error());
         } else {
             (void)services.Register<recording::RecordingEngine>(&rec);
             if (auto s = rec.Start(); !s.ok())
-                logger.Warning("RecordingEngine start: " + s.error().message, "Kernel");
+                Degrade("RecordingEngine start", s.error());
             AppendBootLog("RecordingEngine");
         }
     }
@@ -601,11 +611,11 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     {
         auto& bc = broadcast::BroadcastEngine::Instance();
         if (auto r = bc.Initialize(); !r.ok()) {
-            logger.Warning("BroadcastEngine init: " + r.error().message, "Kernel");
+            Degrade("BroadcastEngine", r.error());
         } else {
             (void)services.Register<broadcast::BroadcastEngine>(&bc);
             if (auto s = bc.Start(); !s.ok())
-                logger.Warning("BroadcastEngine start: " + s.error().message, "Kernel");
+                Degrade("BroadcastEngine start", s.error());
             AppendBootLog("BroadcastEngine");
         }
     }
@@ -614,7 +624,7 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     if (options.ipcPort > 0) {
         auto& ipc = IpcServer::Instance();
         if (auto r = ipc.Start(options.ipcPort); !r.ok()) {
-            logger.Warning("IPC server failed to start: " + r.error().message, "Kernel");
+            Degrade("IPC server", r.error());
         } else {
             auto reg = [&](std::string method, IpcServer::Handler h) {
                 if (auto r = ipc.RegisterHandler(std::move(method), std::move(h)); !r.ok())
@@ -663,22 +673,63 @@ Result<void> Kernel::Boot(const BootOptions& options) {
 
     auto bootTime = std::chrono::duration_cast<std::chrono::microseconds>(EngineClock::now() - bootBegin);
     (void)bus.Publish(events::EngineBooted{bootTime});
-    logger.Info(std::format("Kernel ready in {} ms — state=Running",
-                             static_cast<double>(bootTime.count()) / 1000.0),
+    const auto degraded = Degraded();
+    logger.Info(std::format("Kernel ready in {} ms — state=Running{}",
+                             static_cast<double>(bootTime.count()) / 1000.0,
+                             degraded.empty()
+                                 ? std::string()
+                                 : std::format(" with {} degraded subsystem(s)", degraded.size())),
                 "Kernel");
+    // One summary line so a degraded boot is obvious without reading every
+    // step, and reachable from EngineContext.degraded for the UI to surface.
+    for (const auto& d : degraded)
+        logger.Warning(std::format("degraded: {} [{}] {}", d.system, d.code, d.message), "Kernel");
     return Ok();
 }
 
-Result<void> Kernel::FailBoot(const Error& cause) {
-    auto& logger = Logger::Instance();
-    logger.Fatal(std::format("Boot failed: [{}] {}", cause.code, cause.message), "Kernel");
+bool Kernel::BootStep(std::string_view system, const std::function<Result<void>()>& step) {
+    Result<void> r = Ok();
+    try {
+        r = step();
+    } catch (const std::exception& e) {
+        Degrade(system, Error::Make(Err::Kernel_BootFailed, std::string(system),
+                                    std::string("threw: ") + e.what()));
+        return false;
+    } catch (...) {
+        Degrade(system, Error::Make(Err::Kernel_BootFailed, std::string(system),
+                                    "threw a non-std exception"));
+        return false;
+    }
+    if (!r.ok()) {
+        Degrade(system, r.error());
+        return false;
+    }
+    return true;
+}
+
+void Kernel::Degrade(std::string_view system, const Error& cause) {
+    DegradedSubsystem d;
+    d.system = std::string(system);
+    d.code = cause.code;
+    d.message = cause.message;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        lastError_ = cause.message;
+        degraded_.push_back(d);
+        lastError_ = d.system + ": " + d.message;
     }
-    (void)ShutdownSystems();
-    state_.store(KernelState::Stopped);
-    return cause;
+    // Warning, not Fatal: the engine comes up without this system. The message
+    // names the hole so a log reader can tell a degraded boot from a clean one,
+    // and the operator's own data is what the UI should point at.
+    Logger::Instance().Warning(
+        std::format("{} unavailable this session: [{}] {} (engine continues)", d.system,
+                    d.code, d.message),
+        "Kernel");
+    (void)EventBus::Instance().Publish(events::SubsystemDegraded(d.system, d.code, d.message));
+}
+
+std::vector<DegradedSubsystem> Kernel::Degraded() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return degraded_;
 }
 
 std::vector<std::string> Kernel::BootLog() const {
@@ -717,7 +768,19 @@ Result<void> Kernel::ShutdownSystems() {
     // The Project & Data system and the Notification service shut down before
     // CAMS (their events and metadata consumers must stop first); CAMS before
     // the Database (persisted metadata must flush first).
-    // Phase 14 (26) stops first: it was booted last, so it tears down first.
+    // The PRODUCTION backbone (27) stops before everything it feeds, and
+    // critically before DatabaseManager::Shutdown() at the bottom of this
+    // method — ProductionEngine::Shutdown() takes the final graph save, which
+    // is only durable if the database flushes AFTER it. It never used to be
+    // called at all (its own comment claimed the kernel tears production down
+    // before the database, and this list simply did not include it), so the
+    // last edits of a session lived in the in-memory store and were written
+    // only because DatabaseManager::Shutdown happens to flush everything —
+    // with nothing guaranteeing production got its say first. See
+    // ProductionEngine::RequestPersist for the in-session counterpart.
+    (void)production::ProductionEngine::Instance().Shutdown();
+    // Phase 14 (26) stops next: it was booted after the rest of the engines, so
+    // it tears down before them.
     (void)automation::FlowEngine::Instance().Shutdown();
     // Phase 13 (25) and Phase 12 (24) stop before Scene (23): they were booted
     // after it, so they tear down in reverse order.
@@ -855,16 +918,21 @@ EngineContext Kernel::Context() const {
     c.runtime = GetRuntimeInfo();
     c.options = options_;
     c.bootLog = BootLog();
+    c.degraded = Degraded();
     c.health = GetHealth();
     return c;
 }
 
 HealthReport Kernel::GetHealth() const {
     HealthReport r;
-    r.state = state_.load() == KernelState::Running ? HealthState::Healthy : HealthState::Degraded;
-    r.detail = std::format("state={} uptime={}ms systems={}", ToString(state_.load()),
-                           Uptime().count() / 1000, BootLog().size());
     std::lock_guard<std::mutex> lock(mutex_);
+    const bool running = state_.load() == KernelState::Running;
+    // A running kernel with a hole in it is Degraded, not Healthy: the state
+    // string used to be the only signal, and "Running" on a session that lost
+    // its database is exactly the kind of half-truth this reports against.
+    r.state = (running && degraded_.empty()) ? HealthState::Healthy : HealthState::Degraded;
+    r.detail = std::format("state={} uptime={}ms systems={} degraded={}", ToString(state_.load()),
+                           Uptime().count() / 1000, bootLog_.size(), degraded_.size());
     r.lastError = lastError_;
     return r;
 }

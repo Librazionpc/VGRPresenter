@@ -335,21 +335,20 @@ bool ProductionGraph::CanConnect(std::string_view from, std::string_view to,
         return false;
     if (tit != nodes_.end() && tit->second.signalType != type)
         return false;
+    if (type == SignalType::Video && tit != nodes_.end()
+        && tit->second.kind == NodeKind::Bus) {
+        const auto busType = tit->second.meta.find("uiBusType");
+        if (busType != tit->second.meta.end() && busType->second == "audio")
+            return false;
+    }
     // A node that doesn't exist yet has no edges, so it cannot be part of a
     // cycle — only check when both sides are already real.
     if (fit != nodes_.end() && tit != nodes_.end() && WouldCreateCycle(from, to))
         return false;
-    // The video 1:1 policy, the graph-side half: a VIDEO BUS with a video
-    // source already feeding it is full — except when the tested edge IS
-    // that source (the existing route). Audio buses fan in freely. (Buses
-    // are always created up front with both planes — AddBus() in
-    // BusListModel::createBusRow — so `to` missing here is only a
-    // theoretical/defensive case, not one the UI can actually reach.)
-    if (type == SignalType::Video && tit != nodes_.end() && tit->second.kind == NodeKind::Bus) {
-        const auto sit = edges_.find(std::string(to));
-        if (sit != edges_.end() && !sit->second.empty() && !sit->second.count(std::string(from)))
-            return false;
-    }
+    // No capacity rule: a bus takes any number of sources and a source feeds
+    // any number of buses. A video bus used to hold exactly one provider, and
+    // that refusal was invisible on the board — the second video source's drag
+    // simply did not connect, with nothing saying why.
     return true;
 }
 
@@ -366,6 +365,18 @@ Result<void> ProductionGraph::Connect(std::string_view from, std::string_view to
         return Error::Make(Err::Production_SignalMismatch, "ProductionGraph",
                            "signal type mismatch on " + std::string(from) + " -> " +
                                std::string(to));
+    // The ONLY bus rule left: an audio-only bus has no video plane to feed.
+    // A bus otherwise takes as many sources as the user routes into it (see
+    // CanConnect) — the mixer sums their audio and the video side shows the
+    // first one routed, so a second video source is a usable route, not an
+    // error.
+    const NodeInfo &destination = nodes_.at(std::string(to));
+    if (type == SignalType::Video && destination.kind == NodeKind::Bus) {
+        const auto busType = destination.meta.find("uiBusType");
+        if (busType != destination.meta.end() && busType->second == "audio")
+            return Error::Make(Err::Production_SignalMismatch, "ProductionGraph",
+                               "audio-only bus cannot accept a video source");
+    }
     edges_[std::string(from)].insert(std::string(to));
     reverse_[std::string(to)].insert(std::string(from));
     QueuePersist();

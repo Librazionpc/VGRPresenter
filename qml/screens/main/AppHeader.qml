@@ -29,6 +29,11 @@ import VGRPresenterUI
 // fixed in CMakeLists.txt (QT_QML_SINGLETON_TYPE), not an AOT/nesting limit.
 Rectangle {
     id: root
+    // Named for the header/caption-clearance scenario (tools/selftest/
+    // run_header_clear_test.sh): the tiles it measures are anchored in this
+    // item's own design space, so the scenario maps them against the caption
+    // cluster here rather than re-deriving the arithmetic.
+    objectName: "selfTestAppHeader"
 
     // Title row + tab row. Main.qml's headerHeight must match (it pushes
     // the screens down by the difference from the original 48 px).
@@ -83,12 +88,22 @@ Rectangle {
     // (below) — was icon-left/text-right, the odd one out in the row.
     Item {
         id: goLiveButton
-        // The end of the row is the live switch's now, so this is the item
-        // PAIRED with parent.right and Settings chains off it. (Anchoring each
-        // to the other's left is a binding loop — neither would have a fixed
-        // edge to resolve from.)
+        objectName: "selfTestGoLive"
+        // The end of the row is the live switch's, and Settings chains off it
+        // (anchoring each to the other's left is a binding loop — neither would
+        // have a fixed edge to resolve from). It sits at the window's own right
+        // edge, in the same right-hand column as the caption buttons above it —
+        // that IS the design (user call: the tabs own the middle, GO LIVE owns
+        // the end).
+        //
+        // (It briefly reserved the caption column instead, to keep the two rows
+        // from reading as one stacked block at small window scales. That traded
+        // the wrong thing away: it moved the tiles off the right end they are
+        // supposed to hold. What actually stole input in that corner was never
+        // the tile position — it was the window's UNSCALED resize strips lying
+        // over the scaled buttons, which is fixed at the frame (see
+        // WindowResizeHandles and captionClusterWidth below), not here.)
         anchors.right: parent.right
-        anchors.rightMargin: 12
         y: root.titleRowHeight + (root.tabRowHeight - height) / 2
         width: Math.max(goLiveLabel.implicitWidth, pillGoLive.width) + 12
         height: 52
@@ -105,7 +120,7 @@ Rectangle {
             width: 60
             height: 30
             radius: 8
-            color: goLiveArea.containsMouse ? Qt.lighter(goLiveButton.baseColor(), 1.15)
+            color: goLiveArea.hovered ? Qt.lighter(goLiveButton.baseColor(), 1.15)
                                             : goLiveButton.baseColor()
             Behavior on color { ColorAnimation { duration: 120 } }
 
@@ -222,9 +237,17 @@ Rectangle {
 
     WindowControls {
         id: windowButtons
+        objectName: "selfTestCaptionButtons"
         anchors.right: parent.right
         anchors.top: parent.top
     }
+
+    // The caption cluster's own size, in DESIGN units — published so the window's
+    // resize grips (Main.qml, which are deliberately unscaled) can keep their
+    // strips off the buttons. Nothing inside the header needs it: it is the one
+    // rect the header cannot claim and the frame has to leave alone.
+    readonly property real captionClusterWidth: windowButtons.width
+    readonly property real captionClusterHeight: windowButtons.height
 
     HeaderStatus {
         id: status
@@ -239,6 +262,7 @@ Rectangle {
     // Settings dialog (Main.qml owns the dialog).
     Item {
         id: settingsButton
+        objectName: "selfTestSettingsTile"
         anchors.right: goLiveButton.left
         anchors.rightMargin: 18
         y: root.titleRowHeight + (root.tabRowHeight - height) / 2

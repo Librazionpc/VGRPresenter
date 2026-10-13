@@ -48,6 +48,49 @@ Item {
     width: contentHolder.childrenRect.width
     height: contentHolder.childrenRect.height
 
+    // ---- the resize affordance stays INSIDE the edit canvas ------------------
+    // mCanvas clips (EditScreen: clip: true), and the dots straddle the item's
+    // edge by convention — half in, half out. An item that touches, or overflows,
+    // the canvas edge therefore had half (or all) of its dots clipped away and its
+    // edge strips (which reach edgeMargin OUTSIDE the item) hidden outright, so
+    // the adjustment points were simply not on the canvas the user was looking at
+    // (report: "the adjustment point of edit are not in the edit canvas"). Each
+    // dot now straddles the edge while the canvas leaves room for it and slides
+    // fully INSIDE the item when it does not, and every strip is clamped to the
+    // room left; nothing on this item is ever drawn past the canvas again.
+    readonly property real handleDotSize: 7
+    readonly property real handleHalf: root.handleDotSize / 2
+    // How far OUTSIDE one side of the item still lies inside the canvas: 0 when
+    // the item is flush with (or past) that side, edgeMargin when it is well in.
+    function roomFor(side) {
+        const p = root.parent
+        if (!p || p.width === undefined || p.width <= 0)
+            return root.edgeMargin
+        if (side === "left")   return Math.max(0, Math.min(root.edgeMargin, root.x))
+        if (side === "right")  return Math.max(0, Math.min(root.edgeMargin, p.width - (root.x + root.width)))
+        if (side === "top")    return Math.max(0, Math.min(root.edgeMargin, root.y))
+        return Math.max(0, Math.min(root.edgeMargin, p.height - (root.y + root.height)))
+    }
+    readonly property real roomLeft: root.roomFor("left")
+    readonly property real roomRight: root.roomFor("right")
+    readonly property real roomTop: root.roomFor("top")
+    readonly property real roomBottom: root.roomFor("bottom")
+    // The dot's own coordinate on each side: straddling the edge (the FreeShow
+    // convention, so it reads as sitting ON the outline) while at least the dot's
+    // half fits outside, else tucked fully inside the item — where it is still
+    // drawn, still grabbable, and still says "resize".
+    readonly property real dotAtLeft: root.roomLeft >= root.handleHalf ? -root.handleHalf : 0
+    readonly property real dotAtRight: root.roomRight >= root.handleHalf ? root.width - root.handleHalf
+                                                                        : root.width - root.handleDotSize
+    readonly property real dotAtTop: root.roomTop >= root.handleHalf ? -root.handleHalf : 0
+    readonly property real dotAtBottom: root.roomBottom >= root.handleHalf ? root.height - root.handleHalf
+                                                                          : root.height - root.handleDotSize
+    // The Repeater delegate in EditScreen names the item ("canvasItem_<key>");
+    // every handle and dot hangs its own name off that, so a scenario (or a
+    // cursor probe) can address THIS item's affordances rather than another
+    // item's — findItem returns the first name match in the tree.
+    readonly property string handleSuffix: root.objectName !== "" ? "_" + root.objectName : ""
+
     // Local shorthands so every consumer below reads one name instead of
     // re-testing for a null style object.
     readonly property real stylePadding: style ? style.padding : 0
@@ -148,7 +191,7 @@ Item {
         anchors.fill: parent
         border.color: Theme.accent
         border.width: 2
-        color: "#146c5ce7"
+        color: Qt.alpha(Theme.accent, 0.08)
         radius: root.styleCornerRadius
         opacity: root.selected ? 1 : 0
         visible: opacity > 0.01
@@ -200,8 +243,16 @@ Item {
             // besides `pressed`: containsMouse latches in this build
             // (hover-exit never delivers — KNOWN_ISSUES.md), so gating on it
             // left the size cursor stuck after leaving the handle.
+            //
+            // priorityHandle/priorityPressed — NOT the default hover claim: the
+            // content area under this dot (the label's I-beam, a camera's
+            // pointing hand) is hovered at the same moment and re-pushes on the
+            // same pointer events, so push order alone decided the winner and the
+            // I-beam won on every corner. A hovered dot is the finer target, and
+            // a pressed one owns the pointer outright.
             if (visible && enabled && (pressed || AppCursor.hovered(handle)))
-                AppCursor.push(handle.targetShape(), handle)
+                AppCursor.push(handle.targetShape(), handle,
+                               pressed ? AppCursor.priorityPressed : AppCursor.priorityHandle)
             else
                 AppCursor.pop(handle)
         }
@@ -304,10 +355,33 @@ Item {
         }
     }
 
-    ResizeHandle { resizeTop: true;    x: -root.edgeMargin; y: -root.edgeMargin; width: root.width + root.edgeMargin * 2; height: root.edgeMargin }
-    ResizeHandle { resizeBottom: true; x: -root.edgeMargin; y: root.height;      width: root.width + root.edgeMargin * 2; height: root.edgeMargin }
-    ResizeHandle { resizeLeft: true;   x: -root.edgeMargin; y: 0; width: root.edgeMargin; height: root.height }
-    ResizeHandle { resizeRight: true;  x: root.width;       y: 0; width: root.edgeMargin; height: root.height }
+    // The strips reach edgeMargin OUTSIDE the item; each is clamped to the room
+    // the canvas actually leaves (see roomFor), so a flush item never has a strip
+    // drawn past the canvas — where the dot's own grab area carries that edge.
+    ResizeHandle {
+        objectName: "canvasHandleEdgeTop" + root.handleSuffix
+        resizeTop: true
+        x: -root.roomLeft; y: -root.roomTop
+        width: root.width + root.roomLeft + root.roomRight; height: root.roomTop
+    }
+    ResizeHandle {
+        objectName: "canvasHandleEdgeBottom" + root.handleSuffix
+        resizeBottom: true
+        x: -root.roomLeft; y: root.height
+        width: root.width + root.roomLeft + root.roomRight; height: root.roomBottom
+    }
+    ResizeHandle {
+        objectName: "canvasHandleEdgeLeft" + root.handleSuffix
+        resizeLeft: true
+        x: -root.roomLeft; y: -root.roomTop
+        width: root.roomLeft; height: root.height + root.roomTop + root.roomBottom
+    }
+    ResizeHandle {
+        objectName: "canvasHandleEdgeRight" + root.handleSuffix
+        resizeRight: true
+        x: root.width; y: -root.roomTop
+        width: root.roomRight; height: root.height + root.roomTop + root.roomBottom
+    }
 
     // Dots straddle the true corner (FreeShow convention); ResizeHandle hit
     // area is enlarged past the dot for an easier grab.
@@ -319,14 +393,16 @@ Item {
             readonly property bool isRight: index % 2 === 1
             readonly property bool isBottom: index >= 2
 
-            width: 7
-            height: 7
+            objectName: "canvasDotCorner" + index + root.handleSuffix
+            width: root.handleDotSize
+            height: root.handleDotSize
             radius: 1
             color: "#ffffff"
             border.color: Theme.accent
             border.width: 1
-            x: (isRight ? root.width : 0) - width / 2
-            y: (isBottom ? root.height : 0) - height / 2
+            // Clamped to the canvas (dotAt* — nothing here is ever clipped away).
+            x: isRight ? root.dotAtRight : root.dotAtLeft
+            y: isBottom ? root.dotAtBottom : root.dotAtTop
             scale: root.selected ? 1 : 0.4
             opacity: root.selected ? 1 : 0
             visible: opacity > 0.01
@@ -355,14 +431,15 @@ Item {
             readonly property bool isBottom: index === 2
             readonly property bool isLeft: index === 3
 
-            width: 7
-            height: 7
+            objectName: "canvasDotEdge" + index + root.handleSuffix
+            width: root.handleDotSize
+            height: root.handleDotSize
             radius: 1
             color: "#ffffff"
             border.color: Theme.accent
             border.width: 1
-            x: (isLeft ? 0 : isRight ? root.width : root.width / 2) - width / 2
-            y: (isTop ? 0 : isBottom ? root.height : root.height / 2) - height / 2
+            x: isLeft ? root.dotAtLeft : isRight ? root.dotAtRight : root.width / 2 - width / 2
+            y: isTop ? root.dotAtTop : isBottom ? root.dotAtBottom : root.height / 2 - height / 2
             scale: root.selected ? 1 : 0.4
             opacity: root.selected ? 1 : 0
             visible: opacity > 0.01

@@ -18,8 +18,16 @@ Rectangle {
     signal cancelRequested()
     signal saveRequested()
 
+    // The design size of the card.
     implicitWidth: 1080
     implicitHeight: 640
+    // The card keeps its design size and does NOT scale itself: it lives inside a
+    // layer the window already scales (Main.qml's uiScale — the whole app is drawn
+    // at 1440x900 and scaled to the window), so applying a second scale here would
+    // shrink the Settings card twice and break the proportion with the screens
+    // behind it. Anything that needs to move with the window reads that one scale.
+    width: implicitWidth
+    height: implicitHeight
     radius: Theme.radiusXl
     color: Theme.surface
     border.color: Theme.border

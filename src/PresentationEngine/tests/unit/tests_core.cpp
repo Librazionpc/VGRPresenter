@@ -3,9 +3,17 @@
 //   ./bps_unit_tests core
 #include "TestHarness.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <fstream>
+#include <iostream>
+#include <memory>
+#include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 void TestResult() {
     Result<int> ok(42);
@@ -129,6 +137,31 @@ void TestLogger() {
     CHECK(sawRemote);
 
     CHECK(logger.GetHealth().IsHealthy() || logger.GetHealth().state == HealthState::Healthy);
+
+    // ---- which Qt messages reach the user as a notice (core/logging/QtMessagePolicy.hpp) ----
+    // main.cpp's handler toasts what this says is user-facing and only logs the
+    // rest. The case that put the rule there: Qt's Windows clipboard retrying while
+    // another process holds the clipboard (normal on Windows) arrived as an amber
+    // "Application - Retrying to obtain clipboard." notice about nothing the user did.
+    // (A plain lambda: `Qt` is already the Qt namespace, so it cannot be aliased.)
+    const auto userFacing = [](bool isQml, const char* category, std::string_view message) {
+        return bps::logging::QtMessageIsUserFacing(isQml, category, message);
+    };
+    CHECK(!userFacing(false, "qt.qpa.clipboard", "Retrying to obtain clipboard."));
+    CHECK(!userFacing(false, "qt.qpa.window", "QWindowsWindow::setGeometry: Unable to set geometry 100x100"));
+    CHECK(!userFacing(false, "qt.qpa.fonts", "CreateFontFaceFromHDC() failed"));
+    // One Qt line with no category at all: its Windows font backend probing a
+    // legacy system font while resolving a monospace hint (harmless).
+    CHECK(!userFacing(false, nullptr, "DirectWrite: CreateFontFaceFromHDC() failed for font 'Fixedsys'"));
+    // The user's business, always: a QML warning is the app's bug, and the app's own
+    // qWarning() lines are what make the notification area worth looking at.
+    CHECK(userFacing(true, "qml", "<qrc:/Main.qml:12>: ReferenceError: foo is not defined"));
+    CHECK(userFacing(false, nullptr, "NDI SendFrame FAILED"));
+    CHECK(userFacing(false, "", "TypeError: Cannot read property 'x' of undefined"));
+    CHECK(userFacing(false, "vgr.media", "media player error: the file could not be opened"));
+    CHECK(userFacing(false, nullptr, "QObject::connect: Cannot queue arguments of type 'Foo'"));
+    // ...and a category that merely LOOKS like Qt's is not (only the "qt." prefix is).
+    CHECK(userFacing(false, "vgr.qt.thing", "the app's own line"));
 }
 void TestConfig() {
     auto& config = ConfigurationManager::Instance();
@@ -541,6 +574,117 @@ void TestResource() {
 
     CHECK(res.Shutdown().ok());
 }
+
+namespace {
+
+// A PAL that forwards everything to the real backend but reports the machine's
+// RAM as fully used, so a ResourceManager sample crosses the memory-pressure
+// latch (High at 90% used) on demand instead of waiting for this machine to
+// actually come under pressure.
+struct FullyUsedRamPlatform final : bps::platform::IPlatform {
+    FullyUsedRamPlatform() : real_(bps::platform::CreatePlatform()) {}
+
+    const char* Name() const noexcept override { return "FullyUsedRamPlatform"; }
+    bps::platform::SystemInfo Info() override { return real_->Info(); }
+    std::string OsName() const override { return real_->OsName(); }
+    std::string OsVersion() const override { return real_->OsVersion(); }
+    std::string Arch() const override { return real_->Arch(); }
+    bps::platform::IFilesystem& Filesystem() override { return real_->Filesystem(); }
+    bps::platform::IPaths& Paths() override { return real_->Paths(); }
+    bps::platform::ITimer& Timer() override { return real_->Timer(); }
+    bps::platform::IThreading& Threading() override { return real_->Threading(); }
+    bps::platform::IProcess& Process() override { return real_->Process(); }
+    bps::platform::ILibrary& Library() override { return real_->Library(); }
+    bps::platform::IMonitor& Monitor() override { return real_->Monitor(); }
+    bps::platform::IAudio& Audio() override { return real_->Audio(); }
+    bps::platform::IVideo& Video() override { return real_->Video(); }
+    bps::platform::INetwork& Network() override { return real_->Network(); }
+    bps::platform::IPower& Power() override { return real_->Power(); }
+    bps::platform::IClipboard& Clipboard() override { return real_->Clipboard(); }
+    bps::platform::IEnvironment& Environment() override { return real_->Environment(); }
+    bps::platform::ILocale& Locale() override { return real_->Locale(); }
+    bps::platform::ISocketFactory& Sockets() override { return real_->Sockets(); }
+    bps::platform::IInput& Input() override { return real_->Input(); }
+    bps::platform::IDialogs& Dialogs() override { return real_->Dialogs(); }
+    bps::platform::INotifications& Notifications() override { return real_->Notifications(); }
+    bps::platform::Snapshot Sample() override {
+        auto s = real_->Sample();
+        s.availableRamBytes = 0;   // used == total -> ratio 1.0 -> Critical >= High
+        return s;
+    }
+
+private:
+    std::unique_ptr<bps::platform::IPlatform> real_;
+};
+
+} // namespace
+
+// The pressure notice a sample publishes must go out with the manager's lock
+// RELEASED. Its subscriber re-enters the manager (AdaptiveRuntime::OnPressure ->
+// ApplyOptimization -> MemoryPressure() -> Telemetry()), and mutex_ is not
+// recursive, so a dispatch under the lock deadlocks the sampling thread while it
+// owns AdaptiveRuntime's applyMutex_ — which a settings write on the GUI thread
+// (SettingsService -> ApplyToEngine -> SetPreference -> ApplyOptimization) then
+// waits on forever. That is a frozen UI from one toggle in the Reference pane,
+// not a slow sample.
+void TestResourceDispatchOutsideLock() {
+    auto& res = ResourceManager::Instance();
+    res.SetPlatform(std::make_shared<FullyUsedRamPlatform>());
+    // Deliberately no Initialize(): the pump below is what drives the latch, so
+    // the test does not depend on the sampling heartbeat's scheduler — an earlier
+    // phase (the Kernel suite) may already have torn it down.
+
+    std::atomic<bool> inHandler{false};
+    std::atomic<bool> otherThreadDone{false};
+    std::atomic<bool> reachedWhileParked{false};
+    // The subscriber PARKS inside the dispatch, and the park is bounded on
+    // purpose: the flag it waits for is set by another thread (this dispatch is
+    // synchronous), so an unbounded spin could only be released from the thread
+    // that is parked here — the failure mode has to be a failed CHECK, never a
+    // wedged suite.
+    Subscription sub = EventBus::Instance().Subscribe<events::ResourcePressureChanged>(
+        [&](const events::ResourcePressureChanged&) {
+            inHandler.store(true);
+            for (int i = 0; i < 3000 && !otherThreadDone.load(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            // Did the other thread get through the manager's own lock while this
+            // dispatch was still in flight?
+            reachedWhileParked.store(otherThreadDone.load());
+            // Re-enter only once it demonstrably could: with the lock held across
+            // the dispatch this call would deadlock the sampling thread (the
+            // suite's own thread) and take the whole run with it.
+            if (otherThreadDone.load()) (void)res.Telemetry();
+        },
+        0);
+
+    std::thread other([&] {
+        for (int i = 0; i < 20000 && !inHandler.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!inHandler.load()) return;   // the dispatch never happened
+        (void)res.Telemetry();           // every one of these takes the manager's lock
+        (void)res.MemoryPressure();
+        (void)res.LastAutoActions(4);
+        otherThreadDone.store(true);
+    });
+
+    // The latch needs a High memory reading to hold for 3 s (10 §7 Smart
+    // rules), so pump samples until the raise lands; the periodic sampler does
+    // the same from its own thread. The budget is bounded and the CHECKs below
+    // name a miss, so a scenario that never raised cannot read as a pass.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (!inHandler.load() && std::chrono::steady_clock::now() < deadline) {
+        res.Sample();
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    other.join();
+
+    CHECK(inHandler.load());                     // the pressure notice really was dispatched
+    CHECK(reachedWhileParked.load());            // ...with mutex_ released
+    CHECK(res.LastAutoActions(4).size() >= 1);   // and the raise recorded as a decision
+
+    (void)EventBus::Instance().Unsubscribe(sub);
+    res.SetPlatform(bps::platform::CreatePlatform());   // leave the real backend behind
+}
 void TestPlatform() {
     auto platform = bps::platform::CreatePlatform();
     CHECK(platform != nullptr);
@@ -908,6 +1052,95 @@ void TestPal() {
         }
     }
 
+    // --- STREAM taps (audio that is not a capture device — see IAudio's
+    // "STREAM taps" section): the carrier a media file's or an NDI stream's own
+    // audio rides, and what the app's video cards and dialogs meter with. A
+    // synthesized WAV is decoded BY THE BACKEND (kind "media"), so the whole
+    // chain is exercised with a file this test creates itself: tap opens → real
+    // decoded samples arrive → the meter publishes non-zero peaks → the FIFO the
+    // mixer drains yields frames → stop releases the tap. A backend without
+    // stream taps answers Unsupported, which this section reports as "not
+    // supported here" (the same honesty rule the device taps follow) rather than
+    // failing a platform that legitimately has no such producer.
+    {
+        auto& a = audio;
+        const uint32_t tapId = p::IAudio::kStreamTapBase + 3;   // inside the stream range
+        const std::string wav = "C:/tmp/bps_stream_tap_test.wav";
+        // 0.5 s of a loud 440 Hz stereo tone, 16-bit PCM @ 48 kHz.
+        bool wrote = false;
+        if (std::ofstream out(wav, std::ios::binary); out) {
+            const int rate = 48000, chans = 2, frames = rate / 2;
+            const int dataBytes = frames * chans * 2;
+            auto u32 = [&](int v) { for (int i = 0; i < 4; ++i) out.put(char((v >> (8 * i)) & 0xFF)); };
+            auto u16 = [&](int v) { for (int i = 0; i < 2; ++i) out.put(char((v >> (8 * i)) & 0xFF)); };
+            out.write("RIFF", 4); u32(36 + dataBytes); out.write("WAVE", 4);
+            out.write("fmt ", 4); u32(16); u16(1); u16(chans); u32(rate);
+            u32(rate * chans * 2); u16(chans * 2); u16(16);
+            out.write("data", 4); u32(dataBytes);
+            for (int f = 0; f < frames; ++f) {
+                const double s = std::sin(2.0 * 3.14159265358979 * 440.0 * f / rate) * 0.7;
+                for (int c = 0; c < chans; ++c)
+                    u16(static_cast<int>(s * 32767.0));
+            }
+            wrote = out.good();
+        }
+        CHECK(wrote);
+
+        // An id OUTSIDE the stream range is refused by every backend: the two id
+        // spaces must never be confusable (one id goes to TapFormat /
+        // ReadTapAudio / InputLevels with no ambiguity).
+        CHECK(!a.StartStreamTap(7, wav, "media").ok());
+        // ...and so is a producer kind nobody implements.
+        CHECK(!a.StartStreamTap(tapId, wav, "telepathy").ok());
+
+        auto started = a.StartStreamTap(tapId, wav, "media");
+        if (started.ok()) {
+            // Pump the tap briefly: the decoder is paced by the samples'
+            // timestamps, so a couple of 50 ms windows is a real-time wait.
+            p::IAudio::InputMeterLevels lv;
+            for (int ms = 0; ms < 2000; ms += 50) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                lv = a.InputLevels(tapId);
+                if (lv.channelCount > 0 && lv.peaks[0] > 0.0005f)
+                    break;
+            }
+            if (lv.channelCount > 0) {
+                CHECK(lv.layout != p::IAudio::ChannelLayout::None);
+                CHECK(lv.sampleRateHz > 0);
+                CHECK(lv.peaks[0] > 0.0005f);   // a DECODED tone, not a placeholder
+                for (int c = 0; c < lv.channelCount; ++c)
+                    CHECK(lv.peaks[c] >= 0.f && lv.peaks[c] <= 1.f);
+                // The mixer's carrier is the same tap: real frames drain, and the
+                // tap's own format is what SumSource resamples against.
+                const auto fmt = a.TapFormat(tapId);
+                CHECK(fmt.channels >= 1 && fmt.sampleRateHz > 0);
+                std::vector<float> fifo(4096, 0.f);
+                CHECK(a.ReadTapAudio(tapId, fifo.data(), 512) > 0);
+                // One greppable verdict line, the same shape the device taps'
+                // runs print (this is what makes "the media meter is dead"
+                // answerable from a log alone).
+                std::cout << "[stream-tap] decoded " << int(lv.channelCount)
+                          << " ch @ " << int(lv.sampleRateHz) << " Hz peak="
+                          << lv.peaks[0] << std::endl;
+            } else {
+                std::cout << "[stream-tap] no decoded frames (media decode "
+                             "unavailable on this host)" << std::endl;
+                // The decoder could not open the file on this host (no Media
+                // Foundation WAVE handler): the honest shape is "no signal", and
+                // the app shows exactly that rather than a fabricated level.
+                CHECK(a.InputLevels(tapId).channelCount == 0);
+            }
+            CHECK(a.StopStreamTap(tapId).ok());
+            CHECK(a.InputLevels(tapId).channelCount == 0);   // tap released
+            // A media tap on a file that is not there is refused up front (so a
+            // row can never live on as a decoder that will never sound).
+            CHECK(!a.StartStreamTap(tapId, "C:/tmp/bps_no_such_media_file.mp4", "media").ok());
+        } else {
+            CHECK(started.error().code == Err::Unsupported);
+        }
+        std::remove(wav.c_str());
+    }
+
     // --- Video preview tap (IAudio-style contract on IVideo): THE PER-
     // DEVICE VERDICT RUN. Every enumerated camera gets its own tap, a poll
     // window, and a one-line verdict. This is the ground truth the UI
@@ -1079,6 +1312,31 @@ void TestPal() {
         CHECK(clipW.error().code == Err::Unsupported || clipW.error().code == Err::IoError);
         auto files = clip.GetFiles();
         CHECK(!files.ok() || files.value().empty());
+    }
+
+    // BITMAPS (the clipboard after a screenshot: Win+Shift+S posts a DIB and no
+    // text at all). WriteImage → ReadImage must round-trip the pixels; a
+    // platform with no image target must say Unsupported rather than fail
+    // silently or hand back garbage.
+    bps::platform::ClipboardImage shot;
+    shot.width = 2;
+    shot.height = 2;
+    shot.rgba = { 255, 0, 0, 255,   0, 255, 0, 255,
+                  0, 0, 255, 255,   255, 255, 255, 255 };
+    auto shotW = clip.WriteImage(shot);
+    if (shotW.ok()) {
+        auto shotR = clip.ReadImage();
+        CHECK(shotR.ok());
+        if (shotR.ok()) {
+            CHECK(shotR.value().width == shot.width);
+            CHECK(shotR.value().height == shot.height);
+            CHECK(shotR.value().rgba == shot.rgba);
+        }
+    } else {
+        CHECK(shotW.error().code == Err::Unsupported || shotW.error().code == Err::IoError);
+        auto none = clip.ReadImage();
+        CHECK(!none.ok());
+        CHECK(none.error().code == Err::Unsupported || none.error().code == Err::NotFound);
     }
 
     // --- Environment + Locale (DoD §14/§15) ---
@@ -1337,6 +1595,44 @@ void TestDatabase() {
     CHECK(std::string(db.Get("settings", "theme").value().asString()) == "dark");
     CHECK(db.Remove("settings", "theme").ok());
     CHECK(db.DocumentCount() == 2);
+
+    // ---- a DAMAGED file must not take the engine's boot down --------------
+    // Seen in the wild: an interrupted flush left <dataDir>/kernel.json as pure
+    // NULs, Open() answered Config_ParseFailed, Kernel::Boot aborted the boot,
+    // and every QML write for the rest of the session answered "the engine is
+    // not running yet". Open() now sets the damaged file aside and starts a
+    // fresh database at the SAME path, so the session runs and persistence is
+    // intact immediately (no restart, no lost settings round-trip).
+    {
+        const fs::path damaged = fs::temp_directory_path() / "bps_db_corrupt_unit_test.json";
+        const std::string damagedPath = damaged.string();
+        fs::remove(damaged, ec);
+        // The exact shape observed: the file exists, is non-empty, and holds NULs.
+        CHECK(platform::PlatformAccessor::Get().Filesystem()
+                  .Write(damagedPath, std::string(64, '\0'))
+                  .ok());
+        CHECK(db.Open(damagedPath).ok());   // boot continues
+        CHECK(db.DocumentCount() == 0);     // nothing was loadable
+        CHECK(db.Put("settings", "theme", json::Value::String("light")).ok());
+        CHECK(db.Flush().ok());             // the path was adopted: saving works again
+        CHECK(db.Open(damagedPath).ok());   // and the file it wrote is readable
+        CHECK(db.DocumentCount() == 1);
+        CHECK(std::string(db.Get("settings", "theme").value().asString()) == "light");
+        // The unavailable bytes were PRESERVED beside it, not deleted under the
+        // operator's feet (a corrupt file is evidence, and may be salvageable).
+        bool quarantined = false;
+        for (const auto& entry : fs::directory_iterator(damaged.parent_path())) {
+            const std::string name = entry.path().filename().string();
+            if (name.rfind("bps_db_corrupt_unit_test.json.corrupt-", 0) != 0) continue;
+            quarantined = true;
+            CHECK(fs::file_size(entry.path(), ec) == 64);
+            fs::remove(entry.path(), ec);
+        }
+        CHECK(quarantined);
+        fs::remove(damaged, ec);
+        fs::remove(fs::path(damagedPath + ".tmp"), ec);
+    }
+
     CHECK(db.Open("").ok());             // back to in-memory
     CHECK(db.DocumentCount() == 0);
     fs::remove(path, ec);
@@ -1575,6 +1871,60 @@ void TestKernel() {
     CHECK(kernel.Shutdown().ok());
     CHECK(kernel.State() == KernelState::Stopped);
 }
+// ---------------------------------------------------------------------------
+// Kernel::Boot degradation (01 §3).
+//
+// The failure this prevents: one subsystem that cannot initialize used to abort
+// the whole boot, so a single unreadable data file left a kernel that never
+// reached Running and a UI where every screen answered "the engine is not
+// running yet". Boot must now come up with a hole in it, name the hole in
+// Degraded()/EngineContext.degraded, publish it on the bus, and report Degraded
+// health — never go dark.
+// ---------------------------------------------------------------------------
+void TestKernelDegrade() {
+    auto& kernel = Kernel::Instance();
+    CHECK(kernel.State() == KernelState::Stopped);
+
+    std::vector<events::SubsystemDegraded> seen;
+    Subscription sub = EventBus::Instance().Subscribe<events::SubsystemDegraded>(
+        [&](const events::SubsystemDegraded& e) { seen.push_back(e); }, 0);
+
+    // A global config file that cannot be opened: this step FAILED the boot
+    // before the change (Load answered IoError and Boot returned it).
+    BootOptions options;
+    options.configPath = "/tmp/bps_kernel_degrade/absent-config.json";
+    auto boot = kernel.Boot(options);
+    CHECK(boot.ok());   // the engine comes up regardless of the bad subsystem
+    CHECK(kernel.State() == KernelState::Running);
+    CHECK(kernel.BootLog().front() == "Logger");   // the walk kept going
+
+    const auto degraded = kernel.Degraded();
+    CHECK(!degraded.empty());
+    bool sawConfig = false;
+    for (const auto& d : degraded)
+        if (d.system == "ConfigurationManager") {
+            sawConfig = true;
+            CHECK(!d.message.empty());   // the reason travels with the record
+        }
+    CHECK(sawConfig);
+    CHECK(kernel.Context().degraded.size() == degraded.size());
+    CHECK(kernel.GetHealth().state == HealthState::Degraded);   // not a false "Healthy"
+
+    bool eventSeen = false;
+    for (const auto& e : seen)
+        if (e.system == "ConfigurationManager") eventSeen = true;
+    CHECK(eventSeen);   // the bus carries it for the UI to surface
+
+    (void)EventBus::Instance().Unsubscribe(sub);
+    CHECK(kernel.Shutdown().ok());
+
+    // The degraded list is per-boot state, not a permanent scar: a clean boot on
+    // the same kernel instance reports nothing degraded and full health.
+    CHECK(kernel.Boot(BootOptions{}).ok());
+    CHECK(kernel.Degraded().empty());
+    CHECK(kernel.GetHealth().state == HealthState::Healthy);
+    CHECK(kernel.Shutdown().ok());
+}
 void TestAutoplay() {
     auto& modules = ModuleManager::Instance();
     auto mod = modules::PresentationModule::Create();
@@ -1780,4 +2130,98 @@ void TestPressureLatch() {
         CHECK(l.Update(PressureLevel::High, at(0ms)) == T::None);
         CHECK(l.Update(PressureLevel::High, at(3000ms)) == T::Raised);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Atomic saves: the PAL's WriteAtomic / WriteBinaryAtomic / CopyAtomic.
+//
+// The failure these prevent is concrete: an in-place save interrupted by a crash
+// left <dataDir>/kernel.json as pure NULs, and the next boot failed on the file
+// it had just corrupted. The contract asserted here is the one every internal
+// document now relies on — the target holds a COMPLETE file at every instant, the
+// parent directory is created for the caller, and a failed save leaves the
+// previous file untouched with no .tmp debris beside it.
+// ---------------------------------------------------------------------------
+void TestAtomicWrite() {
+    using namespace bps;
+    auto& fs = platform::PlatformAccessor::Get().Filesystem();
+    const std::string root = "/tmp/bps_atomic_write";
+    (void)fs.RemoveAll(root);
+
+    // 1. A fresh path: parent directories created, exact bytes on disk, no debris.
+    const std::string nested = root + "/state/settings.json";
+    const std::string first = R"({"version":1,"settings":{"a":1}})";
+    CHECK(fs.WriteAtomic(nested, first).ok());
+    CHECK(fs.IsRegularFile(nested));
+    CHECK(fs.ReadText(nested).value() == first);
+    CHECK(fs.FileSize(nested).value() == first.size());
+    CHECK(!fs.Exists(nested + ".tmp"));
+
+    // 2. Replacing an EXISTING file — the case an in-place write corrupts, and the
+    //    case a bare std::filesystem::rename does not cover without replace.
+    const std::string second = R"({"version":1,"settings":{"a":2}})";
+    CHECK(fs.WriteAtomic(nested, second).ok());
+    CHECK(fs.ReadText(nested).value() == second);
+    CHECK(!fs.Exists(nested + ".tmp"));
+    // A SHORTER replacement must not leave the tail of the longer file behind.
+    CHECK(fs.WriteAtomic(nested, "x").ok() && fs.ReadText(nested).value() == "x");
+
+    // 3. A failed swap changes nothing and leaves no debris. A directory sitting
+    //    at the target makes the rename fail while the temp write succeeds.
+    const std::string blocked = root + "/blocked.json";
+    CHECK(fs.WriteAtomic(blocked, "kept").ok());
+    CHECK(fs.Remove(blocked).ok());
+    CHECK(fs.CreateDirectory(blocked).ok());
+    CHECK(!fs.WriteAtomic(blocked, "replacement").ok());   // the swap must fail...
+    CHECK(fs.IsDirectory(blocked));                        // ...and change nothing...
+    CHECK(!fs.Exists(blocked + ".tmp"));                   // ...and leave no debris.
+
+    // 4. The binary form carries the same contract.
+    const std::string blobPath = root + "/cache/thumb.png";
+    const std::vector<uint8_t> png{0x89, 'P', 'N', 'G', 0x00, 0xFF};
+    CHECK(fs.WriteBinaryAtomic(blobPath, png).ok());
+    auto back = fs.ReadBinary(blobPath);
+    CHECK(back.ok() && back.value() == png);
+    CHECK(!fs.Exists(blobPath + ".tmp"));
+
+    // 5. CopyAtomic: a whole-file copy, and a missing source creates nothing.
+    const std::string copyTo = root + "/backups/settings-1.json";
+    CHECK(fs.CopyAtomic(blobPath, copyTo).ok());
+    auto copied = fs.ReadBinary(copyTo);
+    CHECK(copied.ok() && copied.value() == png);
+    CHECK(!fs.Exists(copyTo + ".tmp"));
+    const std::string missing = root + "/backups/absent.json";
+    CHECK(!fs.CopyAtomic(root + "/nope.json", missing).ok());
+    CHECK(!fs.Exists(missing));
+    CHECK(!fs.Exists(missing + ".tmp"));
+
+    // 6. A payload spanning many read-back chunks (the content check compares
+    //    the temp against the buffer 64 KiB at a time), including the exact
+    //    chunk boundary and a zero-length document, and the empty one.
+    for (size_t size : {size_t{1}, size_t{64 * 1024 - 1}, size_t{64 * 1024}, size_t{64 * 1024 + 1},
+                        size_t{3 * 1024 * 1024 + 7}}) {
+        std::string big(size, '\0');
+        for (size_t i = 0; i < size; ++i)
+            big[i] = static_cast<char>((i * 31 + i / 251) & 0xFF);   // a non-repeating pattern
+        const std::string bigPath = root + "/state/big.json";
+        CHECK(fs.WriteAtomic(bigPath, big).ok());
+        auto readBack = fs.ReadText(bigPath);
+        CHECK(readBack.ok() && readBack.value() == big);
+        CHECK(fs.FileSize(bigPath).value() == size);
+        CHECK(!fs.Exists(bigPath + ".tmp"));
+    }
+    // An empty document is a complete document: the file exists and is empty.
+    const std::string emptyPath = root + "/state/empty.json";
+    CHECK(fs.WriteAtomic(emptyPath, "").ok());
+    CHECK(fs.IsRegularFile(emptyPath) && fs.ReadText(emptyPath).value().empty());
+    CHECK(!fs.Exists(emptyPath + ".tmp"));
+
+    // 7. A stale temp left by a killed process is neither read nor trusted: the
+    //    next save overwrites it and the target keeps only the new document.
+    CHECK(fs.Write(emptyPath + ".tmp", "half a docu").ok());
+    CHECK(fs.WriteAtomic(emptyPath, "new").ok());
+    CHECK(fs.ReadText(emptyPath).value() == "new");
+    CHECK(!fs.Exists(emptyPath + ".tmp"));
+
+    (void)fs.RemoveAll(root);
 }

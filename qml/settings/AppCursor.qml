@@ -16,14 +16,16 @@ import QtQuick
 // non-empty, nothing under the pointer can override the pushed shape.
 //
 // Contract:
-//   AppCursor.push(shape, owner)   — owner-scoped; re-pushing the same
-//                                    owner replaces its entry (no dupes)
+//   AppCursor.push(shape, owner, priority) — owner-scoped; re-pushing the same
+//                                    owner replaces its entry (no dupes); the
+//                                    highest priority wins (ties: later push)
 //   AppCursor.pop(owner)           — remove just this owner's entry
 // Owners are any stable object (the MouseArea/item driving the gesture) —
 // they exist precisely to make pop() idempotent and leak-proof: forgetting
 // to pop on one path can't poison the stack for everyone else.
-//
-// SELF-HEALING: every push() first validates the WHOLE stack and drops any
+//    // (Priorities: a non-empty stack's winner is _top above.)
+    //
+    // SELF-HEALING: every push() first validates the WHOLE stack and drops any
 // entry whose owner is no longer cursor-eligible — hidden, disabled, or
 // parented under something hidden/disabled. An invisible/disabled MouseArea
 // stops receiving hover events (the trap behind the "stuck I-beam" bug), so
@@ -40,8 +42,27 @@ import QtQuick
 QtObject {
     id: root
 
-    // [{ shape: int, owner: QtObject }] — bottom-to-top; last entry wins.
+    // [{ shape: int, owner: QtObject, priority: int }] — push order, but the
+    // WINNER is the highest priority (ties: the later push). See push().
     property var _stack: []
+
+    // ---- push priorities -----------------------------------------------------
+    // Push ORDER alone was never enough, because every pusher re-pushes on each
+    // pointer move: an item's content area (I-beam / pointing hand) and the
+    // resize dot sitting on top of it are BOTH hovered at the same time, and
+    // which one won came down to the order their Connections were created in —
+    // which left the I-beam winning over the resize arrow on every corner dot
+    // (user report: "the cursor doesn't change when moving or resize"). The
+    // claim is explicit now:
+    //   PRESSED  — a live drag owns the pointer outright.
+    //   HANDLE   — a resize dot is the finer target than the body under it.
+    //   HOVER    — content/bodies, pointing hands, the I-beam over a field.
+    //   FALLBACK — a bare panel/canvas asserting the plain arrow over empty
+    //              space, which must never shadow a real affordance.
+    readonly property int priorityPressed: 2
+    readonly property int priorityHandle: 1
+    readonly property int priorityHover: 0
+    readonly property int priorityFallback: -1
 
     // Flip to true (e.g. from a probe or a temporary edit) to trace every
     // push/pop/validate live on stderr — the tool for the next "cursor got
@@ -174,7 +195,18 @@ QtObject {
         }
     }
 
-    readonly property int shape: _stack.length > 0 ? _stack[_stack.length - 1].shape : Qt.ArrowCursor
+    // The winning entry: highest priority, and among equals the LATER push.
+    readonly property var _top: {
+        let best = null
+        for (let i = 0; i < _stack.length; ++i) {
+            const e = _stack[i]
+            const p = e.priority === undefined ? 0 : e.priority
+            if (best === null || p >= (best.priority === undefined ? 0 : best.priority))
+                best = e
+        }
+        return best
+    }
+    readonly property int shape: _top ? _top.shape : Qt.ArrowCursor
     readonly property bool active: _stack.length > 0
 
     // An owner can only legitimately hold the cursor while it (and every
@@ -214,15 +246,31 @@ QtObject {
         }
     }
 
-    function push(shape, owner) {
+    // `priority` defaults to priorityHover — a plain hover claim. See the
+    // priority block above for who should pass what.
+    function push(shape, owner, priority) {
         if (!owner)
             return
         _validate()
+        // A CLAIM FROM UNDER AN OPEN POPUP IS NOT A CLAIM. pushBlocker() marks the
+        // popups that own the pointer (see blocked()), and while such a popup
+        // covers an item the pointer is not on that item however its geometry
+        // reads — so its cursor claim is dropped here, once, instead of every
+        // hover site having to remember to ask. This is the general form of the
+        // metadata palette report: the canvas object beneath the palette kept
+        // pushing the I-beam (EditableCanvasLabel pushes from hovered() pure
+        // geometry, and its area has no idea something is painted over it), so
+        // the palette's own pointing hand never showed and the panel read as
+        // "not really lifted above the canvas".
+        if (blocked(owner))
+            return
         const kept = _stack.filter((e) => e.owner !== owner)
-        kept.push({ shape: shape, owner: owner })
+        kept.push({ shape: shape, owner: owner,
+                    priority: priority === undefined ? root.priorityHover : priority })
         _stack = kept
         if (root.debug)
-            console.log("[AppCursor] push", shape, "depth", _stack.length, "owner", owner, "stack=", _stack.map((e) => e.owner))
+            console.log("[AppCursor] push", shape, "prio", priority === undefined ? 0 : priority,
+                        "depth", _stack.length, "owner", owner, "stack=", _stack.map((e) => e.owner))
     }
 
     function pop(owner) {

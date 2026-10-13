@@ -128,6 +128,7 @@ Snapshot LinuxPlatform::Sample() {
         std::string statusStr;
         st >> statusStr;
         s.onBattery = (statusStr == "Discharging");
+        s.batteryCharging = (statusStr == "Charging");
         break;
     }
 

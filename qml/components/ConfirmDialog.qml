@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import VGRPresenterUI
 
 // Reusable confirm dialog: dim scrim + centered card, one decision slot.
@@ -19,6 +20,13 @@ Item {
     signal confirmed()
     signal dismissed()
 
+    // Same as NameDialog: window-level, so a card that cannot fit the pane that
+    // declares it still stays inside the window (see the modal-fit scenario in
+    // qml/Main.qml and tools/selftest/run_modal_fit_test.sh).
+    parent: Overlay.overlay
+    // The scrim below is NOT scaled (see AppScale.qml): it IS the dialog's black
+    // box, and a scale on this root shrinks it away from the window's own edges.
+    // The app scale goes on the CARD instead (same as NameDialog).
     anchors.fill: parent
     visible: opacity > 0
     enabled: opacity > 0
@@ -41,6 +49,13 @@ Item {
     }
 
     Rectangle {
+        id: card
+        // Hook for the modal-fit scenario — same convention as ModalCard's card.
+        objectName: root.objectName === "" ? "" : root.objectName + "_card"
+        // The app's one scale, on the card (see AppScale.qml) — never on the root,
+        // whose scrim has to stay window-sized.
+        scale: AppScale.cardScale(card)
+        transformOrigin: Item.Center
         width: 380
         height: dialogCol.implicitHeight + 2 * Theme.space6
         anchors.centerIn: parent
