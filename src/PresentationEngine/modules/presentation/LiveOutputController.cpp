@@ -117,6 +117,8 @@ Result<void> LiveOutputController::Reset() {
     (void)StopLive();
     StopIdlePreview();
     frames_.store(0);
+    previewFrames_.store(0);
+    replaceStampMs_.store(0);
     return Ok();
 }
 
@@ -329,6 +331,10 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
     // previous verse's last frame.
     lastRenderedScene_.clear();
     lastStyleRevision_ = 0;
+    // Start the operator-visible clock: the loop reports how long this replace
+    // took to reach the preview (see the publish in RenderOnce).
+    replaceStampMs_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch()).count());
     Logger::Instance().Info(
         std::format("live output replaced with content: '{}' ({} slides)", liveContent_.name,
                     liveContent_.slides.size()),
@@ -657,6 +663,36 @@ Result<void> LiveOutputController::RenderOnce() {
     // failing to rasterize is retried on the heartbeat, not every frame.
     lastRaster_ = std::chrono::steady_clock::now();
 
+    // TWO-PHASE PUBLISH. The live preview (and every output the main pass
+    // distributes to) is on the wire NOW — bump before the per-output passes
+    // so the operator sees a clicked paragraph immediately instead of waiting
+    // out the heavier per-output work below (reported live: "when I click a
+    // paragraph it delays before it updates on the monitor preview").
+    //
+    // Safe to publish early OR LATE, because the two write different buffers:
+    // a per-output-pass buffer turns AcceptsDistributedFrames() OFF, so the
+    // main pass never touches it (see OutputManager::Distribute) — nothing the
+    // per-output passes own can be fetched half-written here. Their own bump
+    // below is what tells the per-output tiles to refetch once their styled
+    // frame has landed (that race is why the late bump has to keep existing:
+    // a tile that fetched before its pass ran would otherwise sit on a 1x1
+    // placeholder until the NEXT content change).
+    if (frame.ok()) {
+        previewFrames_.fetch_add(1);
+        // ...and report the click-to-preview latency ONCE per replace. This is
+        // the number to read when the operator says the preview lags: it is
+        // measured from the UI-thread replace to the frame being on the wire,
+        // so it excludes the poll's own (bounded, 100 ms) tick.
+        const int64_t stamp = replaceStampMs_.exchange(0);
+        if (stamp > 0) {
+            const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::steady_clock::now().time_since_epoch()).count();
+            Logger::Instance().Info(
+                std::format("live preview published {} ms after the content replace",
+                            nowMs - stamp),
+                "LiveOutputController");
+        }
+    }
     // THE OTHER LIVE OUTPUTS: one gated pass per entry of the engine's
     // live-output style set (best-effort — a failure in one pass never
     // kills the main deck's frame).

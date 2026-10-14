@@ -83,6 +83,14 @@ public:
         return liveContentReplacementPending_.load();
     }
     uint64_t FramesSent() const noexcept { return frames_.load(); }
+    // The EARLY publish: the same loop, one step earlier. FramesSent() moves
+    // only after the whole iteration (main pass + every per-output pass) has
+    // written its buffers — right for a per-output tile, wrong for the LIVE
+    // PREVIEW, which the main pass has already written. The UI polls this one
+    // so a clicked paragraph appears on the monitor preview without waiting
+    // out the (heavier) per-output passes. See the two-phase publish in
+    // RenderOnce().
+    uint64_t PreviewFrames() const noexcept { return previewFrames_.load(); }
 
     // --- Idle preview (a show is open but nothing is on air) ---------------
     // Renders the open show's first slide at a light cadence with
@@ -143,6 +151,16 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> initialized_{false};
     std::atomic<uint64_t> frames_{0};
+    // Bumped by the MAIN pass, before the per-output passes run (see
+    // PreviewFrames()). Never used as a frame count — it is a "the preview is
+    // one step newer" signal for the UI's image refetch.
+    std::atomic<uint64_t> previewFrames_{0};
+    // Steady-clock ms of the last live content REPLACE (0 = none waiting to be
+    // reported). Written by the GUI thread that swapped the content, read by
+    // the loop, reported once — it is the operator-visible latency the click
+    // pays ("it delays before it updates on the monitor preview"), measured
+    // instead of guessed.
+    std::atomic<int64_t> replaceStampMs_{0};
     std::thread worker_;
     std::mutex control_;   // start/stop vs. the loop's document sync
     // START/STOP LIFECYCLE GATE: every entry (StartFrom*, StopLive) holds

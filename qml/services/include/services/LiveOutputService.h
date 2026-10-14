@@ -25,6 +25,12 @@
 #include <mutex>
 #include <memory>
 
+// The feed's two engine-side anchors, needed by value in NdiSendPlan below:
+// the display provider that owns the NDI sender, and the render output the
+// live loop fills with the picture it feeds.
+#include "modules/display/Providers.hpp"       // NdiDisplayProvider
+#include "modules/rendering/RenderOutputs.hpp" // FrameBufferOutput
+
 class LivePreviewProvider;
 class LiveMediaFrameProvider;
 class QTimer;
@@ -199,14 +205,14 @@ public:
     qulonglong ndiFramesSent() const;
     bool ndiWarming() const;
     QString ndiWarmingOutputName() const;
-    // The worker's job: take an immutable latest-frame snapshot, sender-create
-    // + force-alpha + SDK send. Static; the shared frame keeps pixels alive
-    // without copying them on the GUI thread.
-    // Provider is a raw pointer (the caller resolved it on the GUI thread);
-    // the provider itself is internally mutex'd and thread-safe.
-    static void ndiWorkerSendFrame(QObject *worker, void *provider,
+    // The feed thread's send: sender-create (lazy) + the SDK send, from an
+    // immutable latest-frame snapshot. Static; the shared frame keeps the
+    // pixels alive without copying them on the GUI thread. Provider is a raw
+    // pointer, resolved on the GUI thread when the plan was published; the
+    // provider itself is internally mutex'd and thread-safe.
+    static void ndiWorkerSendFrame(void *provider,
                                    std::shared_ptr<const bps::rendering::Frame> frame,
-                                   QString senderName, float fps, qint64 sendId);
+                                   QString senderName, float fps);
     QVariantList cardPreviewsList() const
     {
         QVariantList out;
@@ -461,6 +467,11 @@ private:
     bool live_ = false;
     qulonglong frameRev_ = 0;
     qulonglong framesSent_ = 0;
+    // The engine's EARLY publish — the live preview is already on the wire
+    // while the engine's per-output passes are still running (see the two
+    // counters in pollTick: that is the difference between a monitor preview
+    // that follows a click and one that queues behind the whole frame).
+    qulonglong previewFrames_ = 0;
     QString onAirTitle_;
     int onAirIndex_ = -1;
     int onAirTotal_ = 0;
@@ -562,9 +573,11 @@ private:
     QImage lastMediaFrame_;
 
     // ---- NDI program sender (see the properties above) --------------------
-    // ndiSending_/ndiSendingOutput_/ndiFramesSent_ are written BY THE WORKER
-    // THREAD now; the GUI reads them for the pill. Guarded by ndiStateMutex_
-    // (a plain mutex, never held across the send itself).
+    // The pill's state: ndiSending_/ndiSendingOutput_ are written by the GUI
+    // thread (there IS something to feed from the moment a plan with a frame
+    // is published), ndiFramesSent_ by the FEED thread (the provider's own
+    // counter). All three are read from QML bindings, so all three sit under
+    // ndiStateMutex_ — a plain mutex, never held across a send.
     bool ndiSending_ = false;
     QString ndiSendingOutput_;   // roster name of the row being fed while sending
     // See ndiWarming: true between "an NDI row wants feeding" and "first
@@ -578,11 +591,21 @@ private:
     qulonglong ndiFramesSent_ = 0;   // provider's own counter, worker-refreshed
     // mutable: the const property readers lock it (QML reads from bindings).
     mutable std::mutex ndiStateMutex_;
-    // In-flight send sequencing: the GUI stamps every queued frame; the
-    // worker reports back with the same id, so stale results (a slow send
-    // from an earlier tick landing after the state changed) can be dropped.
-    qint64 ndiSendSeq_ = 0;
-    qint64 ndiSendDone_ = 0;
+    // ---- The published plan (GUI writes, feed thread reads) ----------------
+    // A plain value copy — never a pointer into the roster or the model — so
+    // the feed thread holds nothing the GUI thread can invalidate under it.
+    // The buffer is a shared_ptr (the render registry owns the real one), so a
+    // plan outliving its output cannot leave the feed thread reading freed
+    // pixels.
+    struct NdiSendPlan {
+        bool want = false;
+        bps::display::NdiDisplayProvider *provider = nullptr;
+        std::shared_ptr<bps::rendering::FrameBufferOutput> buffer;
+        QString senderName;
+        float fps = 30.0f;
+    };
+    NdiSendPlan ndiPlan_;
+    std::mutex ndiPlanMutex_;
     // One-shot send diagnostics (moved onto the worker with the send): the
     // gate warning, the first SendFrame failure, and the "frames flowing,
     // monitor discovering" note — each logs once per outage, not per tick.
@@ -590,36 +613,39 @@ private:
     bool ndiSendFailedLogged_ = false;
     bool ndiFirstFrameLogged_ = false;
     bool ndiWaitLogged_ = false;   // "waiting for buffer/frame" warm-up note
-    // FreeShow-style send backpressure — now measured ON THE WORKER: the
-    // worker clocks each send and reports slow ones back to the GUI, which
-    // skips the NEXT tick (half rate) when told. No UI stall is possible:
-    // even a 500 ms send only delays the feed, never the interface.
+    // Backpressure is the feed thread's own pacing now: it clocks each send
+    // (feed-thread only, and only ever touched there) and refuses a tick that
+    // arrives inside the previous interval, so a slow send lowers the real rate
+    // without ever lying about the advertised one — and without touching the
+    // GUI thread at all.
     QElapsedTimer ndiSendClock_;
-    bool ndiClockStarted_ = false;
-    bool ndiBackoff_ = false;      // skip the tick after a reported-slow send
     bool ndiSlowLogged_ = false;   // "send is slow" once per incident
     int ndiFastStreak_ = 0;        // consecutive fast sends; ≥30 re-arms the slow-send log (toast-spam guard)
-    // ---- The NDI feed's own clock ------------------------------------------
-    // pushNdiFrame used to ride the 10 Hz GUI poll — the feed ran at the
-    // poll's rate no matter what the output's Refresh rate select said. It
-    // now runs on its OWN timer paced at that rate (the poll stays at 10 Hz
-    // for slide titles + the preview), so Settings · Outputs · Refresh rate
-    // reaches the wire: the timer's interval IS the setting, and the sender
-    // advertises it in every frame's metadata.
-    // THE SEND IS OFF THE GUI THREAD (the "GO LIVE freezes the app with an
-    // NDI main output" report — and the AppHangB1s): ndiSendTick() only
-    // RESOLVES what to send (roster lookup, buffer read, geometry) on the
-    // GUI thread and hands the pixels to ndiWorker_, a dedicated QThread
-    // running its own event loop, which performs the 8 MB copy, the
-    // force-alpha pass, the SDK send and the (lazy) SENDER CREATION — the
-    // heaviest part of the first frame. The GUI thread never touches the
-    // SDK.
-    void ndiSendTick();                // GUI side: resolve + queue the frame
-    void startNdiSendClock();          // go-live: arm the clock at a provisional cadence
-    void stopNdiSendClock();           // off air: stop the clock
-    // The poll's cheap NDI-clock watch: (re)arm the send timer when a clock
-    // is wanted but absent (a row enabled mid-live, the blank-roster edge)
-    // — the timer's own tick handles cadence sync and shutdown.
+    // ---- The NDI feed: WHAT on the GUI thread, WHEN on the feed thread -----
+    // The feed's cadence lives on the FEED THREAD (ndiWorker_), never on the
+    // GUI thread. It used to be a QTimer on the GUI thread, so every late tick
+    // — one slow QML frame, a settings write, a dialog, a library scan — landed
+    // on the wire as a HOLE: NDI got a burst of nothing followed by two frames
+    // back to back, which is exactly what a receiver shows as dropped frames.
+    // A QTimer cannot catch up either, so the feed's real rate wandered below
+    // the setting.
+    //
+    // The split is now explicit and one-way:
+    //   * GUI thread (this, at the 10 Hz poll): resolve WHAT to send — the
+    //     enabled NDI row, its name, the display provider and the output's own
+    //     frame buffer — and PUBLISH it as a plain value (NdiSendPlan, copied
+    //     under its own mutex). The roster is a QML model and the engine
+    //     singletons are GUI-owned, so this half must stay here.
+    //   * Feed thread: owns WHEN. Its own PreciseTimer, its own interval (the
+    //     published rate), its own time-since-last-send guard, and it stops its
+    //     own clock when the published plan wants nothing. A slow send or a
+    //     busy machine can no longer move the cadence; a beat that misses its
+    //     slot is skipped, which is the ONLY frame that gets dropped.
+    void startNdiSendClock();          // go-live: bring the feed thread up + publish
+    void stopNdiSendClock();           // off air: clear the plan, stop its clock
+    // The poll's NDI watch — now simply "publish the current plan" (it runs
+    // while live, so the roster, the output's buffer and the configured rate
+    // all reach the feed within one poll of changing).
     void pollTickRecheckNdi();
     // ---- Output frame-rate drift watch ---------------------------------------
     // The NDI feed is the ONE output whose wire rate is meant to track its
@@ -654,16 +680,37 @@ private:
     // A row with an unusable/blank value feeds at the engine's 30 fps
     // default; 0 means NO enabled NDI row (the send clock stops).
     static float ndiConfiguredFps();
-    QTimer *ndiSendTimer_ = nullptr;   // while live: the paced NDI send clock
-    float ndiSendFps_ = 0.0f;          // fps the timer currently runs at (0 = unsynced)
+    // The feed's clock: created ON the feed thread (a QTimer belongs to its
+    // thread), owned by the worker object, armed from the feed thread itself —
+    // the GUI only publishes the plan the feed reads. Touch this ONLY from
+    // feed-thread code (ndiWorkerTick and the queued lambda in setNdiPlan).
+    QTimer *ndiSendTimer_ = nullptr;   // feed thread only
 
-    // ---- The NDI worker thread ----------------------------------------------
+    // ---- The NDI feed thread --------------------------------------------------
     // One QThread + one worker QObject moved to it, created lazily on the
     // first send and retired at quit (aboutToQuit → shutdownNdiWorker(),
     // which quits the loop and WAITS — the SDK must not be torn down under
-    // an in-flight send).
+    // an in-flight send). It owns the feed's clock and the SDK send.
     QThread *ndiThread_ = nullptr;
-    QObject *ndiWorker_ = nullptr;     // lives on ndiThread_; jobs queue on it
+    QObject *ndiWorker_ = nullptr;     // lives on ndiThread_
+    // GUI-side view of "the feed thread's clock is running". Set when the
+    // queued arm is sent, cleared with the plan — it exists only so the 10 Hz
+    // poll does not queue a redundant arm on every beat.
+    bool ndiClockArmed_ = false;
+    // Create the feed thread once (GUI side); the thread's own clock is
+    // created on it by setNdiPlan's first published frame.
+    void ensureNdiWorker();
+    // Publish a plan (GUI side). Only ever a value copy plus, when it wants
+    // frames and the clock is not up yet, the queued "arm the clock" — so the
+    // GUI never blocks on, or reaches into, the feed thread's own state.
+    void setNdiPlan(const NdiSendPlan &plan);
+    // Drop the plan (GUI side): an empty plan is what stops the feed thread's
+    // own clock on its next beat, so no cross-thread stop call is needed (and
+    // none could race the plan it is stopping).
+    void clearNdiPlan();
+    // One beat of the feed (FEED THREAD): read the plan, keep the clock's
+    // interval at the published rate, and send at most one frame per period.
+    void ndiWorkerTick();
 };
 
 // QQuickImageProvider over the engine preview output's last frame:
