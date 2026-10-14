@@ -15,6 +15,7 @@
 // last frame — the same frame the real outputs received.
 
 #include <QElapsedTimer>
+#include <QHash>
 #include <QImage>
 #include <QQuickImageProvider>
 #include <QSet>
@@ -383,6 +384,23 @@ public:
     // tile and the wall transport stayed on the previous passage.
     Q_INVOKABLE bool stagedIsOurs(const QString &title) const;
 
+    // ---- The wall transport's steppers -------------------------------------
+    // The wall's ‹ › change whatever is on the Main Output tile, and WHETHER a
+    // press can change it is TAB knowledge: a reference pane re-picks the
+    // neighbouring passage, the show pane steps the show's own slides. Every
+    // tab that owns the tile's content ANNOUNCES that here, so the wall can
+    // keep both arrows dim unless a press would really move something — the
+    // reported "an arrow is lit and does nothing" (a live blank, or a staged
+    // slide no tab owned: the arrows were gated on "something is on the tile",
+    // which is not the same question).
+    //
+    // The one case needing no announcer is the wall's own in-set navigation
+    // (a live set with more than one slide), which the toolbar derives from
+    // onAirTotal itself — see MonitorWall.qml's canStep.
+    Q_INVOKABLE void setWallStepper(const QString &id, bool active);
+    Q_PROPERTY(bool wallSteppable READ wallSteppable NOTIFY wallStepperChanged)
+    bool wallSteppable() const;
+
     // Any slide of the live set as design blocks (same shape as onAirSlide):
     // a thumbnail strip renders the whole presentation from this. Empty map
     // when not live or the index is out of range (hidden slides are skipped,
@@ -424,6 +442,9 @@ signals:
     // stepPassage() reached the edge of the on-air set: the tab whose content
     // IS on air should re-pick the neighbouring passage (direction -1/+1).
     void passageStepRequested(int direction);
+    // The set of tabs claiming they can step the tile's content changed (see
+    // setWallStepper): the wall's ‹ › relight themselves from this.
+    void wallStepperChanged();
 
 private:
     explicit LiveOutputService(QObject *parent = nullptr);
@@ -465,6 +486,10 @@ private:
     void goLiveBlank();
 
     bool live_ = false;
+    // Tab id -> "this tab owns the tile's content and can step it" (see
+    // setWallStepper). GUI thread only: every writer is a QML pane, and the
+    // property is read from QML bindings — no lock, and none is needed.
+    QHash<QString, bool> wallSteppers_;
     qulonglong frameRev_ = 0;
     qulonglong framesSent_ = 0;
     // The engine's EARLY publish — the live preview is already on the wire

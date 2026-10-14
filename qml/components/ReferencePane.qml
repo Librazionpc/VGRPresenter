@@ -1364,6 +1364,34 @@ Item {
             root.goLiveRequested(root.referenceText, [slide])
     }
 
+    // ---- The wall's ‹ ›: is THIS tab the one that can step the tile? --------
+    // The wall's transport answers the same question stepAndPlay does — is my
+    // content the one on the tile (on air or staged)? — and its arrows are lit
+    // only while some tab says yes (LiveOutputService.setWallStepper), so an
+    // arrow can never be enabled with nothing behind it. The pane ANNOUNCES on
+    // every change that can move the answer: its own reference text, and the
+    // tile's live/staged state.
+    property string wallStepperId: ""
+    function refreshWallStepper() {
+        const id = root.adapter && root.adapter.contentType ? root.adapter.contentType : ""
+        if (id === "" || !root.adapter.stagedIsOurs) {
+            if (root.wallStepperId !== "")
+                LiveOutputService.setWallStepper(root.wallStepperId, false)
+            return
+        }
+        root.wallStepperId = id
+        const ours = (root.adapter.liveIsOurs && root.adapter.liveIsOurs(root.referenceText))
+                  || (root.adapter.stagedIsOurs && root.adapter.stagedIsOurs(root.referenceText))
+        LiveOutputService.setWallStepper(id, ours)
+    }
+    onReferenceTextChanged: root.refreshWallStepper()
+    Connections {
+        target: LiveOutputService
+        function onLiveChanged() { root.refreshWallStepper() }
+        function onStagedChanged() { root.refreshWallStepper() }
+        function onOnAirChanged() { root.refreshWallStepper() }
+    }
+
     // ---- Bibles ----------------------------------------------------------------------------------------------------
     LibrarySidebar {
         id: sidebar

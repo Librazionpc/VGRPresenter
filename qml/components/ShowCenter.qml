@@ -20,7 +20,7 @@ Item {
     readonly property var show: loaded && loaded.ok ? loaded.show : null
     readonly property var slides: show ? show.slides : []
     property int selectedSlide: -1
-    onItemChanged: selectedSlide = -1
+    onItemChanged: { selectedSlide = -1; root.refreshWallStepper() }
 
     // The view (FreeShow's slidesOptions), kept by the engine's settings: how many slides across, and grid / list / lyrics.
     readonly property int columns: Math.max(2, Math.min(10, Number(SettingsService.values["session.slideColumns"] ?? 4)))
@@ -92,6 +92,59 @@ Item {
     function takeSlideLive(index, slide) {
         root.selectedSlide = index
         LiveOutputService.stageSlides(root.item ? root.item.name : "", [slide])
+    }
+
+    // ---- The wall's ‹ › while a SHOW slide is on the tile -------------------
+    // A staged show slide belongs to no reference tab, so the wall's arrows
+    // reached nobody: they were lit and dead ("no arrow on the wall is ever
+    // enabled while doing nothing"). A show IS steppable — its neighbouring
+    // slide, staged the same way a double-click stages this one — which is
+    // exactly the passage step a reference tab does for its own content. This
+    // pane therefore answers the wall's step request, and announces itself as
+    // the tile's stepper while its show is what the tile is showing.
+    function stepSlide(direction) {
+        const slides = root.slides
+        if (!root.item || slides.length === 0)
+            return false
+        const at = (root.selectedSlide >= 0 && root.selectedSlide < slides.length)
+                 ? root.selectedSlide : 0
+        const next = at + direction
+        if (next < 0 || next >= slides.length)
+            return false               // the show's first/last slide: nothing that way
+        takeSlideLive(next, slides[next])
+        return true
+    }
+
+    // Is THIS show's slide what the tile is showing? (staged, or on air — the
+    // same two-state ownership test the reference panes make against their own
+    // reference text.)
+    function ownsWallTile() {
+        if (!root.item)
+            return false
+        return LiveOutputService.stagedIsOurs(root.item.name)
+            || (LiveOutputService.live && LiveOutputService.onAirTitle === root.item.name)
+    }
+
+    // Announce (or withdraw) this pane as the tile's stepper. A ONE-slide show
+    // has nothing to step, so it withdraws too and the wall's arrows stay dim
+    // rather than lit-and-inert.
+    function refreshWallStepper() {
+        LiveOutputService.setWallStepper("show", root.ownsWallTile() && root.slides.length > 1)
+    }
+    onSlidesChanged: root.refreshWallStepper()
+    onSelectedSlideChanged: root.refreshWallStepper()
+    Component.onCompleted: root.refreshWallStepper()
+    Connections {
+        target: LiveOutputService
+        function onLiveChanged() { root.refreshWallStepper() }
+        function onStagedChanged() { root.refreshWallStepper() }
+        function onOnAirChanged() { root.refreshWallStepper() }
+        // The wall's ‹ › reached either end of the on-air set: if this show's
+        // slide is the one on the tile, step the SHOW (stage the neighbour).
+        function onPassageStepRequested(direction) {
+            if (root.ownsWallTile())
+                root.stepSlide(direction)
+        }
     }
 
     // The show on this page can be the one open in the editor: read it again when it changes, and when this page comes back into view.

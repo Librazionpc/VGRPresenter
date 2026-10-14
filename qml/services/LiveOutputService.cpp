@@ -1698,6 +1698,30 @@ bool LiveOutputService::stagedIsOurs(const QString &title) const
            && !title.isEmpty() && stagedName_ == title;
 }
 
+// A tab announcing (or withdrawing) itself as a stepper of the tile's content
+// — see the header. Only a TRANSITION of the aggregate is signalled, so the
+// wall's arrows are not relit on every tab's every announcement.
+void LiveOutputService::setWallStepper(const QString &id, bool active)
+{
+    if (id.isEmpty())
+        return;
+    const bool before = wallSteppable();
+    if (active)
+        wallSteppers_.insert(id, true);
+    else
+        wallSteppers_.remove(id);
+    if (wallSteppable() != before)
+        emit wallStepperChanged();
+}
+
+bool LiveOutputService::wallSteppable() const
+{
+    for (auto it = wallSteppers_.cbegin(); it != wallSteppers_.cend(); ++it)
+        if (it.value())
+            return true;
+    return false;
+}
+
 bool LiveOutputService::jumpTo(int index)
 {
     if (!live_ || index < 0)
