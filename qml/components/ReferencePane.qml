@@ -1292,9 +1292,76 @@ Item {
                                           && root.adapter.liveIsOurs(root.referenceText))
                                          || (root.adapter.stagedIsOurs
                                              && root.adapter.stagedIsOurs(root.referenceText)))
+        // THE PICK'S OWN SLIDES FIRST: a paragraph the engine split into several
+        // slides (4, 4-2, 4-3 — the same continuations the verse list shows as
+        // its own rows) is walked part by part, and only the step past its last
+        // part moves on to the neighbouring passage.
+        if (root.stepSlide(direction, wasOurs))
+            return
+        const before = root.referenceText
         root.step(direction)
+        if (root.referenceText === before)
+            return          // nothing that way (the first/last passage of them all)
+        // INTO THE NEIGHBOURING PASSAGE at the end the step came FROM: forward
+        // lands on its first slide, back on its last (walking out of 4-3 goes to
+        // 5; walking back out of 4 goes to 3's final part). The cursor is set
+        // rather than left wherever the previous passage left it, which used to
+        // show a part of the new passage that neither arrow had walked to.
+        if (root.previewSlides.length > 0)
+            root.previewSlideIndex = direction < 0 ? root.previewSlides.length - 1 : 0
         if (wasOurs)
-            root.playPicked()
+            root.playSlideAt(root.previewSlideIndex)
+    }
+
+    // ‹ › INSIDE the current pick: move the pane's preview to the neighbouring
+    // slide of the same passage, and — when the pick IS what the tile is showing
+    // (`publish`) — put that one slide on it. Returns false when there is no
+    // slide that way (a single-slide pick, or already at the end), which is what
+    // lets the caller fall through to the passage step in step().
+    //
+    // A step taken while this tab's content is NOT the one shown only moves the
+    // pane's own preview: browsing must never hijack the output.
+    function stepSlide(direction, publish) {
+        const slides = root.previewSlides
+        if (slides.length < 2)
+            return false                          // nothing to walk: one slide
+        const next = root.previewSlideIndex + direction
+        if (next < 0 || next >= slides.length)
+            return false                          // at this end of the pick
+        root.previewSlideIndex = next             // the pane's preview follows at once
+        if (publish)
+            root.playSlideAt(next)
+        return true
+    }
+
+    // The OUTPUT slide a preview slide stands for. Both lists name a
+    // continuation by the paragraph it belongs to plus its part, so that pair is
+    // the identity to match on (the same mapping selectSubpart makes).
+    function outputSlideAt(index) {
+        const slides = root.previewSlides
+        if (index < 0 || index >= slides.length)
+            return null
+        const parts = slides[index].parts || []
+        if (parts.length === 0)
+            return null
+        const number = parts[0].number
+        const partIndex = parts[0].partIndex ?? 0
+        const output = root.buildSlides()
+        for (const slide of output) {
+            if ((slide.parts || []).some((part) => part.number === number
+                                                   && (part.partIndex ?? 0) === partIndex))
+                return slide
+        }
+        return null
+    }
+
+    // ONE slide — exactly the pick a continuation row's click makes (see
+    // selectSubpart), so the pane's preview and the tile/air agree on which part
+    // of the passage is being shown rather than the tile sitting on part one.
+    function playSlideAt(index) {
+        const slide = root.outputSlideAt(index)
+        if (slide)
+            root.goLiveRequested(root.referenceText, [slide])
     }
 
     // ---- Bibles ----------------------------------------------------------------------------------------------------
