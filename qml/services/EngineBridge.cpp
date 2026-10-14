@@ -1194,9 +1194,12 @@ void EngineBridge::openNdiDownloadPage()
 void EngineBridge::refreshNdiConnections()
 {
     if (!booted()) return;
-    bool expected = false;
-    if (!ndiConnectionProbeBusy_.compare_exchange_strong(expected, true))
+    // Plain check-and-set: this runs on the poll's own thread, and the flag is
+    // only ever cleared by the callback this function posts BACK to that same
+    // thread (see the member's note) — so no interlock is involved.
+    if (ndiConnectionProbeBusy_)
         return; // the SDK query is still in flight; the next poll will retry
+    ndiConnectionProbeBusy_ = true;
 
     QPointer<EngineBridge> guard(this);
     QThreadPool::globalInstance()->start([guard]() {
@@ -1212,8 +1215,12 @@ void EngineBridge::refreshNdiConnections()
                                 .SenderConnectedReceivers(senderId);
         }
         QMetaObject::invokeMethod(guard, [guard, connected]() {
-            if (!guard) return;
+            // Check the POINTER WE DEREFERENCE, not only the QPointer that
+            // produced it: data() re-reads the weak reference, so the two are
+            // separate questions, and testing both is what the object-size
+            // pass needs before it will accept the writes below.
             EngineBridge *self = guard.data();
+            if (!self) return;
             self->ndiConnectionProbeBusy_ = false;
             if (connected != self->ndiConnectedReceivers_) {
                 self->ndiConnectedReceivers_ = connected;

@@ -489,6 +489,8 @@ public:
     bool ndiFirewallPrompted() const { return ndiFirewallPrompted_; }
     // Poll hook (LiveOutputService's 10 Hz poll calls this): re-reads the
     // SDK's connected-receiver count and emits on change. Cheap (1 Hz cap).
+    // GUI THREAD ONLY — the poll's thread, which is also the thread the
+    // probe's own completion is posted back to (see ndiConnectionProbeBusy_).
     void refreshNdiConnections();
     // Re-checks for the runtime right now (after the user installed it).
     Q_INVOKABLE void recheckNdi();
@@ -699,7 +701,19 @@ private:
     std::atomic<bool> ndiProbeBusy_{false};
     // The SDK's connected-receiver query can block while NDI is sending, so
     // the 1 Hz live telemetry refresh is coalesced onto the worker pool too.
-    std::atomic<bool> ndiConnectionProbeBusy_{false};
+    //
+    // GUI THREAD ONLY, and deliberately NOT atomic. Every touch of it is on
+    // the poll's own thread: refreshNdiConnections() arms it (the poll calls
+    // it), and the WORKER only ever clears it by POSTING BACK to that thread
+    // — QMetaObject::invokeMethod's context object lives here, so the
+    // callback runs here. Nothing on the pool thread reads or writes it, and
+    // the sibling below (ndiConnectedReceivers_) has always been a plain int
+    // written by that same callback. An atomic bought nothing and cost a
+    // Release warning: the store inside the queued lambda, inlined through
+    // Qt's functor plumbing, made GCC's object-size pass think a possibly-null
+    // pointer was being written through ('writing 1 byte into a region of size
+    // 0 overflows the destination [-Wstringop-overflow=]').
+    bool ndiConnectionProbeBusy_ = false;
     int ndiConnectedReceivers_ = -1;   // SDK connection count, poll-refreshed
     bool ndiFirewallPrompted_ = false;   // once per install (settings-backed)
     qint64 lastEnumerationMs_ = 0;   // throttles refreshDevices()
