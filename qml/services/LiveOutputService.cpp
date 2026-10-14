@@ -1645,11 +1645,25 @@ bool LiveOutputService::previous()
 // it, exactly like the preview pane's own ‹ › pills.
 void LiveOutputService::stepPassage(int direction)
 {
-    if (!live_)
+    if (!live_) {
+        // A STAGED pick is what the tile is showing and the wall's toolbar is
+        // on screen for it, so ‹ › must reach the tab that owns it — the step
+        // re-stages the neighbouring passage. Nothing staged: nothing to step.
+        if (!stagedSlidesRaw_.isEmpty())
+            emit passageStepRequested(direction);
         return;
+    }
     const bool moved = direction < 0 ? previous() : next();
     if (!moved)
         emit passageStepRequested(direction);
+}
+
+bool LiveOutputService::stagedIsOurs(const QString &title) const
+{
+    // Same title test liveIsOurs() makes, against the staged name — the pane
+    // stages its own referenceText as the pick's name, so the two agree.
+    return !live_ && !stagedSlidesRaw_.isEmpty()
+           && !title.isEmpty() && stagedName_ == title;
 }
 
 bool LiveOutputService::jumpTo(int index)

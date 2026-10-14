@@ -1282,8 +1282,16 @@ Item {
     // while the pane's selection walked on (the toolbar ‹ › and the pane's
     // own pills both died this way).
     function stepAndPlay(direction) {
-        const wasOurs = root.adapter && root.adapter.liveIsOurs
-                        && root.adapter.liveIsOurs(root.referenceText)
+        // OURS means on air OR STAGED on the Main Output tile: a double-click
+        // STAGES (GO LIVE is the only thing that commits), so counting only a
+        // live pick left the step walking the pane's selection while the tile —
+        // and the wall toolbar's own ‹ ›, which relays here — stayed on the
+        // previous passage. That is the reported "the ‹ › don't change the
+        // slide": the pick was staged, which is the normal state before GO LIVE.
+        const wasOurs = root.adapter && ((root.adapter.liveIsOurs
+                                          && root.adapter.liveIsOurs(root.referenceText))
+                                         || (root.adapter.stagedIsOurs
+                                             && root.adapter.stagedIsOurs(root.referenceText)))
         root.step(direction)
         if (wasOurs)
             root.playPicked()
@@ -2239,6 +2247,12 @@ Item {
                     delegate: Item {
                         id: stepBtn
                         required property var modelData
+                        // Named per tab, like the search padlocks beside it: BOTH
+                        // reference panes own this pair and a scenario (or a
+                        // test) must reach the one on the tab it means.
+                        objectName: "selfTestStep" + (stepBtn.modelData.dir > 0 ? "Next" : "Prev")
+                                    + (root.adapter && root.adapter.contentType
+                                       ? "-" + root.adapter.contentType : "")
                         width: 28; height: 26
                         Rectangle { anchors.fill: parent; radius: 13; color: stepHover.hovered ? "#22242e" : "transparent" }
                         IconGlyph {

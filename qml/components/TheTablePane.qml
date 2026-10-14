@@ -64,6 +64,10 @@ ReferencePane {
         readonly property var goLive: (name, slides) => LiveOutputService.stageSlides(name, slides)
         readonly property var liveIsOurs: (refText) => LiveOutputService.live
                                              && refText !== "" && LiveOutputService.onAirTitle === refText
+        // ...and its STAGED counterpart: the pick this tab double-clicked is on
+        // the Main Output tile (waiting for GO LIVE), which is what the pane's
+        // ‹ › steps and re-stages — see ReferencePane.stepAndPlay.
+        readonly property var stagedIsOurs: (refText) => LiveOutputService.stagedIsOurs(refText)
         readonly property var importNew: () => TheTableService.newSermon()
         // The bulk action: pick the sermons root once, every .pdf/.txt under
         // it lands in the library (worker thread, live progress, dedup on).

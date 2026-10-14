@@ -362,7 +362,20 @@ public:
     // air re-picks the neighbouring passage and replays it (the same path
     // its own pills take), so the toolbar behaves like the preview pane
     // instead of going dead on a one-slide passage.
+    //
+    // A STAGED pick (stageSlides() — what a slide double-click leaves on the
+    // tile before GO LIVE commits it) is content too: the wall's toolbar is on
+    // screen for it (anythingOnAir counts staged), so ‹ › steps the passage it
+    // came from exactly as it does once live. It used to require live_, which
+    // made both arrows do nothing in the state an operator is in most of the
+    // time ("fix the < > buttons so they work to change the slide").
     Q_INVOKABLE void stepPassage(int direction);
+
+    // Is the STAGED pick THIS title's own content? The pane's own ‹ › asks
+    // that of the pick it is stepping (stepAndPlay) — a double-click STAGES,
+    // so live-only ownership let a step walk the pane's selection while the
+    // tile and the wall transport stayed on the previous passage.
+    Q_INVOKABLE bool stagedIsOurs(const QString &title) const;
 
     // Any slide of the live set as design blocks (same shape as onAirSlide):
     // a thumbnail strip renders the whole presentation from this. Empty map

@@ -246,11 +246,19 @@ Item {
         readonly property bool atStart: LiveOutputService.onAirIndex <= 0
         readonly property bool atEnd: LiveOutputService.onAirTotal > 0 && LiveOutputService.onAirIndex >= LiveOutputService.onAirTotal - 1
         readonly property bool onAir: LiveOutputService.onAirTotal > 0
+        // What the ‹ › transport can step: the live set, OR the pick merely
+        // STAGED on the tile. The toolbar is on screen for either (anythingOnAir
+        // counts `staged`), and staged is the normal state before GO LIVE — so
+        // gating the arrows on onAirTotal alone left both of them dimmed and
+        // dead in exactly that state, which is the reported "fix the < > buttons
+        // so they work to change the slide". The step itself reaches the tab
+        // that owns the pick (LiveOutputService.stepPassage).
         // A single-slide pick (one verse) makes BOTH ends true — but the
         // ‹ › must stay live: at the ends they become PASSAGE steps (the
         // tab that owns the air re-picks the neighbouring passage), the
         // same way the preview pane's own pills advance it.
         readonly property bool multiSlide: LiveOutputService.onAirTotal > 1
+        readonly property bool hasSteppableContent: root.live || root.staged
 
         // A toolbar button — one glyph in a PILL (always-visible rounded
         // chip, like FreeShow's MaterialButton tiles) that brightens on
@@ -381,14 +389,16 @@ Item {
                     // Dead only mid-set with nowhere back (a multi-slide pick
                     // already on the first slide): a single-verse pick keeps
                     // the arrow (it passage-steps).
-                    enabled2: toolbar.onAir && !(toolbar.multiSlide && toolbar.atStart)
+                    enabled2: toolbar.hasSteppableContent && !(toolbar.multiSlide && toolbar.atStart)
                     onPicked: LiveOutputService.stepPassage(-1)
+                    objectName: "selfTestWallPrev"
                 }
                 ToolButton {
                     width: parent.btnW; height: 30
                     icon: "next"
-                    enabled2: toolbar.onAir && !(toolbar.multiSlide && toolbar.atEnd)
+                    enabled2: toolbar.hasSteppableContent && !(toolbar.multiSlide && toolbar.atEnd)
                     onPicked: LiveOutputService.stepPassage(1)
+                    objectName: "selfTestWallNext"
                 }
                 // Play: the explicit GO LIVE trigger while nothing is on
                 // air yet (commits whatever's staged — see

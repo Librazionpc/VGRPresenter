@@ -773,7 +773,15 @@ Rectangle {
                         Connections {
                             target: LiveOutputService
                             function onPassageStepRequested(direction) {
-                                if (scripturePane.visible && scripturePane.adapter.liveIsOurs(scripturePane.referenceText))
+                                // OWNERSHIP decides, not which tab is on screen: the
+                                // wall's toolbar sits on more than one screen (the
+                                // Show screen's dock and the Edit screen), so
+                                // requiring this pane to be VISIBLE made its ‹ ›
+                                // inert exactly where the operator was looking.
+                                // On air or staged on the tile — either is this
+                                // tab's content being stepped.
+                                if (scripturePane.adapter.liveIsOurs(scripturePane.referenceText)
+                                        || scripturePane.adapter.stagedIsOurs(scripturePane.referenceText))
                                     scripturePane.stepAndPlay(direction)
                             }
                         }
@@ -795,7 +803,10 @@ Rectangle {
                         Connections {
                             target: LiveOutputService
                             function onPassageStepRequested(direction) {
-                                if (tablePane.visible && tablePane.adapter.liveIsOurs(tablePane.referenceText))
+                                // Ownership, not visibility (see Scripture's own
+                                // relay above for why).
+                                if (tablePane.adapter.liveIsOurs(tablePane.referenceText)
+                                        || tablePane.adapter.stagedIsOurs(tablePane.referenceText))
                                     tablePane.stepAndPlay(direction)
                             }
                         }

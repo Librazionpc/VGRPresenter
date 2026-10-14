@@ -63,6 +63,10 @@ ReferencePane {
         // scripture pick IS the reference text, so a title match reads "ours".
         readonly property var liveIsOurs: (refText) => LiveOutputService.live
                                              && refText !== "" && LiveOutputService.onAirTitle === refText
+        // ...and its STAGED counterpart: the pick this tab double-clicked is on
+        // the Main Output tile (waiting for GO LIVE), which is what the pane's
+        // ‹ › steps and re-stages — see ReferencePane.stepAndPlay.
+        readonly property var stagedIsOurs: (refText) => LiveOutputService.stagedIsOurs(refText)
         readonly property var importNew: () => ScriptureService.importBible()
         // No bulk folder action on Scripture — Bibles install one JSON at a time.
         readonly property string addFolderLabel: ""
