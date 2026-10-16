@@ -24,6 +24,9 @@
 #include "platform/windows/WindowsDialogs.hpp"
 #include "platform/windows/WindowsNotifications.hpp"
 
+#include <chrono>
+#include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -60,6 +63,20 @@ public:
     Snapshot Sample() override;
     std::vector<OsEvent> PollChanges() override;
 
+    // This process's live thread count, refreshed at most every
+    // kThreadCountRefreshMs (see the definition: the Toolhelp walk it needs
+    // enumerates every thread on the machine and measured 60-115 ms).
+    uint64_t ThreadCount();
+    static constexpr int kThreadCountRefreshMs = 5000;
+
+    // The audio (WASAPI) and video (Media Foundation) device fingerprints the
+    // hot-plug check compares, WALKED at most every kDeviceFingerprintRefreshMs
+    // (see the definition: each is a full device enumeration, and the MF one
+    // opens a device-access handle per device path — polled every second for the
+    // life of the process, that walk is what the idle kernel-handle leak was).
+    void DeviceFingerprints(std::string& audioFp, std::string& videoFp);
+    static constexpr int kDeviceFingerprintRefreshMs = 5000;
+
 private:
     FilesystemImpl filesystem_;
     WindowsPaths paths_;
@@ -82,7 +99,21 @@ private:
 
     std::string lastMonitorIds_;
     std::optional<PowerInfo> lastPower_;
+    // The cached thread count (Sample() runs on more than one sampler thread).
+    std::mutex threadCountMutex_;
+    uint64_t threadCount_ = 0;
+    bool threadCountRead_ = false;
+    std::chrono::steady_clock::time_point threadCountAt_{};
+    // The cached device fingerprints (PollChanges is drained by the Kernel's
+    // scheduler thread; the lock is for a second caller, as with the thread count).
+    std::mutex deviceFpMutex_;
+    std::string audioFpCache_;
+    std::string videoFpCache_;
+    bool deviceFpRead_ = false;
+    std::chrono::steady_clock::time_point deviceFpAt_{};
     std::string lastResolutions_;
+    // The last fingerprints REPORTED to the caller (only a walked change moves
+    // these), which is what makes a cached walk report nothing between refreshes.
     std::string lastAudioFp_;
     std::string lastVideoFp_;
 };

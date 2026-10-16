@@ -324,7 +324,7 @@ if(WIN32)
     # need ole32; IPC needs ws2_32; MF video enumeration needs mfplat/mfuuid
     # + runtimeobject for the activation factory; the live health counters in
     # WindowsPlatform.cpp need pdh).
-    target_link_libraries(engine_core PUBLIC ws2_32 iphlpapi winmm shell32 user32 shcore ole32 mfplat mf mfuuid mfreadwrite runtimeobject gdi32 gdiplus dwmapi uuid windowscodecs pdh)
+    target_link_libraries(engine_core PUBLIC ws2_32 iphlpapi winmm shell32 user32 shcore ole32 mfplat mf mfuuid mfreadwrite runtimeobject gdi32 gdiplus dwmapi uuid windowscodecs pdh cfgmgr32)
     # The D3D11 backend's two system imports: d3d11 (the device; both DLLs ship
     # with Windows 10+) and d3dcompiler (the HLSL the backend compiles at device
     # creation). Nothing else in the engine links a graphics API.

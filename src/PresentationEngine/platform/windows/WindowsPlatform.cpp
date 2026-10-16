@@ -180,6 +180,96 @@ SystemInfo WindowsPlatform::Info() {
     return info;
 }
 
+// The process's live thread count. Toolhelp32 is fully documented (unlike
+// NtQuerySystemInformation), but it ENUMERATES THE WHOLE SYSTEM to answer this
+// one question, so the answer is kept for kThreadCountRefreshMs: re-walking on
+// every Sample() (2-4 times a second across the engine's samplers) measured
+// 60-115 ms per call on a ~6900-thread machine.
+//
+// The last known count covers the window, refreshed by whichever sampler gets
+// there first. 0 means "not measured yet" and the walk is then retried on the
+// next call rather than reporting a stale zero.
+uint64_t WindowsPlatform::ThreadCount() {
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(threadCountMutex_);
+        if (threadCountRead_ &&
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - threadCountAt_).count() <
+                kThreadCountRefreshMs)
+            return threadCount_;
+    }
+
+    // The walk itself runs with NO lock held: it is an OS call over thousands of
+    // threads, and a second sampler arriving meanwhile may simply walk too — the
+    // count is the same and the cost is bounded by the window, not by arrivals.
+    uint64_t count = 0;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+        THREADENTRY32 te{};
+        te.dwSize = sizeof(te);
+        const DWORD pid = GetCurrentProcessId();
+        if (Thread32First(snap, &te)) {
+            do {
+                if (te.th32OwnerProcessID == pid) ++count;
+            } while (Thread32Next(snap, &te));
+        }
+        CloseHandle(snap);
+    }
+
+    std::lock_guard<std::mutex> lock(threadCountMutex_);
+    if (count > 0) {   // a failed snapshot must not replace a known count with 0
+        threadCount_ = count;
+        threadCountAt_ = std::chrono::steady_clock::now();
+        threadCountRead_ = true;
+    }
+    return threadCount_;
+}
+
+// The audio + video device fingerprints the hot-plug check compares.
+//
+// WHY THIS IS CACHED: both "fingerprints" are FULL device enumerations, not
+// cheap reads — the audio one walks WASAPI endpoints and the video one walks
+// Media Foundation's device sources (WindowsVideo::Enumerate →
+// MFEnumDeviceSources → MFTEnumEx), which opens a device-access handle per
+// device path under the hood. PollChanges is drained by the Kernel's platform
+// watcher on a 1 s tick, so those walks ran a full enumeration EVERY SECOND for
+// the life of the process, and that is the app's idle kernel-handle leak: with
+// it on the stack, `probe_handles.exe` measured ~20 File + ~20
+// WaitCompletionPacket + ~130 Event handles accumulating per second on an idle
+// process (and WindowsVideo::Enumerate accounted for two thirds of the file
+// opens in a gdb trace of NtCreateFile). A device roster does not change faster
+// than a person can plug in a camera, so the walk is kept for
+// kDeviceFingerprintRefreshMs and answered from the cache in between — the same
+// trade the thread count above already documents, and hot-plug detection moves
+// from "within 1 s" to "within 5 s" because of it.
+void WindowsPlatform::DeviceFingerprints(std::string& audioFp, std::string& videoFp) {
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(deviceFpMutex_);
+        if (deviceFpRead_ &&
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - deviceFpAt_).count() <
+                kDeviceFingerprintRefreshMs) {
+            audioFp = audioFpCache_;
+            videoFp = videoFpCache_;
+            return;
+        }
+    }
+
+    // The walks themselves run with NO lock held: they are PAL/COM/MF calls that
+    // open devices, and a second caller arriving meanwhile may simply walk too —
+    // the answer is the same and the cost stays bounded by the window.
+    const std::string freshAudio = audio_.Fingerprint();
+    const std::string freshVideo = video_.Fingerprint();
+
+    std::lock_guard<std::mutex> lock(deviceFpMutex_);
+    audioFpCache_ = freshAudio;
+    videoFpCache_ = freshVideo;
+    deviceFpAt_ = std::chrono::steady_clock::now();
+    deviceFpRead_ = true;
+    audioFp = audioFpCache_;
+    videoFp = videoFpCache_;
+}
+
 Snapshot WindowsPlatform::Sample() {
     Snapshot s;
 
@@ -234,23 +324,17 @@ Snapshot WindowsPlatform::Sample() {
     GetNativeSystemInfo(&si);
     s.coreCount = si.dwNumberOfProcessors > 0 ? si.dwNumberOfProcessors : 1;
 
-    // Live thread count for this process — Toolhelp32 is fully documented
-    // (unlike NtQuerySystemInformation), just needed enumerating instead of
-    // a single API call the way Linux's /proc/self/status one-liner reads.
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snap != INVALID_HANDLE_VALUE) {
-        THREADENTRY32 te{};
-        te.dwSize = sizeof(te);
-        const DWORD pid = GetCurrentProcessId();
-        uint64_t count = 0;
-        if (Thread32First(snap, &te)) {
-            do {
-                if (te.th32OwnerProcessID == pid) ++count;
-            } while (Thread32Next(snap, &te));
-        }
-        s.threadCount = count;
-        CloseHandle(snap);
-    }
+    // Live thread count for this process, at most every kThreadCountRefreshMs
+    // (see ThreadCount()). This reading is NOT free: the snapshot enumerates
+    // every thread on the MACHINE to count the ones belonging to this process,
+    // and that walk measured 60-115 ms on a machine with ~6900 threads (a probe
+    // against the running app; the PDH counters this same Sample() reads cost
+    // ~1 ms). Sample() is called several times a second — the ResourceManager's
+    // sampler, the adaptive heartbeat and the interface's own health poll — so
+    // an unthrottled walk was a steady ~0.25 of a core of pure idle overhead,
+    // and catching it costs nothing worth having: a thread count only moves when
+    // a thread is created or destroyed.
+    s.threadCount = ThreadCount();
 
     // The main graphics adapter's own video memory, from DXGI (asked once; see WindowsGpu.cpp).
     s.gpuVramTotalBytes = win::PrimaryGpu().vramBytes;
@@ -307,9 +391,14 @@ std::vector<OsEvent> WindowsPlatform::PollChanges() {
     }
     lastPower_ = p;
 
-    // Audio device hot-plug (DoD §13): winmm IDs change when devices are
-    // added/removed.
-    std::string audioFp = audio_.Fingerprint();
+    // Audio device hot-plug (DoD §13): the endpoint roster's ids change when
+    // devices are added/removed. Both fingerprints come from DeviceFingerprints(),
+    // which re-walks them at most every kDeviceFingerprintRefreshMs — a cache hit
+    // returns the value last walked, which is also what lastAudioFp_/lastVideoFp_
+    // hold, so an unchanged roster reports nothing either way.
+    std::string audioFp, videoFp;
+    DeviceFingerprints(audioFp, videoFp);
+
     if (!lastAudioFp_.empty() && audioFp != lastAudioFp_) {
         events.push_back({OsEventType::DeviceConnected,
                           "audio device configuration changed"});
@@ -318,7 +407,6 @@ std::vector<OsEvent> WindowsPlatform::PollChanges() {
 
     // Video-capture hot-plug: same fingerprint convention as audio — the
     // MF device roster's ids change when a camera/capture card plugs in.
-    std::string videoFp = video_.Fingerprint();
     if (!lastVideoFp_.empty() && videoFp != lastVideoFp_) {
         events.push_back({OsEventType::DeviceConnected,
                           "video device configuration changed"});

@@ -473,6 +473,38 @@ void LiveOutputController::Loop() {
             telemetry.OnLiveSharedCopies(sharedOutputCopies_.load());
         }
 
+        // WHICH ELEMENT MADE THAT FRAME EXPENSIVE. The renderer accounts for the
+        // pixel work of every element it drew for that scene, so the composed
+        // frame can name its own heaviest layer instead of leaving the operator
+        // with a curve that only has a shape. Published on COMPOSED iterations
+        // only: a re-present draws nothing, so it has no cost of its own and
+        // re-reporting the last raster's culprit would blame the copy.
+        if (phase == static_cast<int>(Phase::Composed)) {
+            std::string scene;
+            {
+                std::lock_guard<std::mutex> lock(costMutex_);
+                scene = composedSceneForCost_;
+            }
+            if (!scene.empty()) {
+                const rendering::FrameCostProfile cost =
+                    rendering::RenderEngine::Instance().CostProfileFor(scene);
+                // The heaviest element the SCENE drew — the clear is the engine's
+                // own per-frame baseline and would otherwise be named in every
+                // second of every service (it is a whole frame's pixels before
+                // any layer draws). Its share still travels with the report, so
+                // a content share is not read as the whole story; a frame with
+                // nothing on it but its background falls back to naming that,
+                // because there its clear IS the cost.
+                const rendering::ElementCost* heaviest = cost.HeaviestContent();
+                if (!heaviest)
+                    heaviest = cost.Heaviest();
+                if (heaviest)
+                    telemetry.OnLiveCost(heaviest->Label(), heaviest->layerName,
+                                         heaviest->objectName, heaviest->sharePct,
+                                         heaviest->estimatedMs, cost.BackgroundSharePct());
+            }
+        }
+
         // Pace to the 60Hz target (RenderOnce cost is inside the sleep calc).
         const auto frameEnd = std::chrono::steady_clock::now();
         double spent = std::chrono::duration<double>(frameEnd - now).count();
@@ -497,6 +529,11 @@ void LiveOutputController::Loop() {
         lastComposedFrame_.reset();
         lastPhase_.store(static_cast<int>(Phase::Skipped));
         lastPhaseMs_.store(0.0);
+    }
+    {
+        // The scene the hotspot came from is over with the session.
+        std::lock_guard<std::mutex> lock(costMutex_);
+        composedSceneForCost_.clear();
     }
     telemetry.OnLiveStopped();
 }
@@ -724,6 +761,12 @@ Result<void> LiveOutputController::RenderOnce() {
     if (frame.ok()) {
         lastRenderedScene_ = sceneId;
         lastStyleRevision_ = styleRev;
+        // ...and which scene this compose was OF, for the loop's cost publish
+        // once RenderOnce has let go of control_ (see the member's comment).
+        {
+            std::lock_guard<std::mutex> lock(costMutex_);
+            composedSceneForCost_ = sceneId;
+        }
     }
     // Measured from the attempt (not only a success) so a scene that keeps
     // failing to rasterize is retried on the heartbeat, not every frame.

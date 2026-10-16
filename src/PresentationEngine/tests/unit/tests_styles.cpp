@@ -1139,6 +1139,29 @@ void TestGoLivePaths() {
                 // is why the delivered rate no longer divides by the output count.
                 CHECK(totals.frameMs > totals.representMs);
                 CHECK(quiet.sharedCopies >= 1);
+
+                // AND THE NAME BEHIND THE SHAPE. The same second also carries
+                // the heaviest LAYER of the frame the loop composed (the
+                // renderer's own cost profile, published by the loop), so a dip
+                // in the curve is attributable instead of merely visible. The
+                // whole chain is asserted here — RenderEngine's profile, the
+                // controller's publish, the per-second sample — and the silent
+                // failure mode it catches is the one that would leave the curve
+                // shapely but nameless.
+                std::fprintf(stderr,
+                             "[live] hotspot: %s — %.0f%% of the frame (%.1f ms), background %.0f%%\n",
+                             quiet.costElement.c_str(), quiet.costSharePct, quiet.costMs,
+                             quiet.costBackgroundPct);
+                CHECK(!quiet.costElement.empty());
+                CHECK(quiet.costSharePct > 0.0 && quiet.costSharePct <= 100.0);
+                CHECK(quiet.costMs > 0.0);
+                // The ENGINE'S OWN CLEAR IS NOT THE NAME: it is a full frame of
+                // pixels before any layer draws, so naming it would report
+                // "Background clear" in every second of every service. Its share
+                // travels alongside the named one instead (and here it is the
+                // bulk of the frame — a full-frame background behind text).
+                CHECK(quiet.costElement.find("Background clear") == std::string::npos);
+                CHECK(quiet.costBackgroundPct > 0.0);
             }
             CHECK(eng.SetLiveOutputStyles({}, {}).ok());
             CHECK(render.RemoveOutput(sharedBuf).ok());

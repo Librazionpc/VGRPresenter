@@ -785,6 +785,18 @@ Item {
                         font.family: Theme.fontFamily
                         font.pixelSize: Theme.textSub
                     }
+
+                    // The live loop's OWN rate over the last minute (see
+                    // LiveCurve.qml). The meters above say how busy the engine
+                    // is; this says whether the show is getting slower as the
+                    // service goes on — the shape the raw log used to have to be
+                    // mined for. It reads the same engine curve Telemetry keeps
+                    // and logs a summary line from, so the card and the log can
+                    // never tell two different stories.
+                    LiveCurve {
+                        width: parent.width
+                        topGap: 16
+                    }
                 }
             }
 

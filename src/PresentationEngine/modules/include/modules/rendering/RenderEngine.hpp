@@ -27,11 +27,72 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace bps::rendering {
 
 // Frame options (per render call).
+// WHERE A FRAME'S COST WENT — the answer to "the show is getting slower, what is
+// doing it?". The renderer already knows the command list it built and which
+// object each command was built for, so it can account for the PIXEL WORK every
+// element asked for (a fill or a blit is its destination area, a scaled blit its
+// sampled source area — see CommandWork) and hand back the elements heaviest
+// first. `sharePct` is that element's part of the frame's total work, and
+// `estimatedMs` is the share of the frame's MEASURED cost that the work implies
+// — an estimate by construction (the measurement is the frame, the split is the
+// work), which is exactly what "which layer made this frame expensive" needs,
+// and never a claim that a stopwatch ran per element.
+struct ElementCost {
+    std::string layerId;
+    std::string layerName;
+    std::string objectId;
+    std::string objectName;
+    uint64_t pixels = 0;      // pixel work attributed to this element
+    uint32_t commands = 0;    // how many draw commands it emitted
+    double sharePct = 0.0;    // pixels / the frame's total pixel work
+    double estimatedMs = 0.0; // sharePct of the frame's measured cost
+    // The scene's own clear, not a layer anyone authored. It is real work (a
+    // full-resolution fill) but it is the SAME work in every frame of a scene,
+    // so it belongs in the account (the shares have to add up) and must not be
+    // the element a slowdown report NAMES — see HeaviestContent().
+    bool isBackground = false;
+
+    // "Images · Announcement video" — what a human reads in a log or a caption.
+    std::string Label() const {
+        if (layerName.empty() && objectName.empty())
+            return objectId;
+        if (objectName.empty())
+            return layerName;
+        if (layerName.empty())
+            return objectName;
+        return layerName + " · " + objectName;
+    }
+};
+
+struct FrameCostProfile {
+    uint64_t frame = 0;         // which frame this profile describes
+    double frameMs = 0.0;       // the measured cost of that frame
+    uint64_t totalPixels = 0;   // the frame's whole pixel work
+    // Heaviest first, capped at kProfileItems (the ones worth naming; the rest
+    // are folded into nothing rather than listed as noise).
+    std::vector<ElementCost> items;
+
+    // The heaviest element of the frame (background clear included), when there
+    // is one.
+    const ElementCost* Heaviest() const { return items.empty() ? nullptr : &items.front(); }
+    // THE ONE TO NAME: the heaviest element that is not the scene's own clear.
+    // A full-frame clear outranks everything in a normal scene (it is a whole
+    // frame's worth of pixels before any layer draws), so naming Heaviest()
+    // would report "Background clear" in every second of every service — true
+    // and useless. Null for a frame that had nothing on it but its background.
+    const ElementCost* HeaviestContent() const;
+    // How much of the frame the background clear took, so a content share is not
+    // read as the whole story (0 when the frame had no clear of its own).
+    double BackgroundSharePct() const;
+    static constexpr size_t kProfileItems = 8;
+};
+
 struct RenderOptions {
     bool clearBefore = true;
     Color clearColor{0, 0, 0, 1};
@@ -61,6 +122,18 @@ public:
     Result<void> SetBackend(std::string_view name);
     const BackendCapabilities& BackendCaps() const;
     IGraphicsBackend* Backend() const { return backend_; }
+
+    // Where a frame's cost went (see FrameCostProfile). Both are copied out under
+    // the render lock, so a caller on another thread (the live loop publishes it
+    // to Telemetry) reads a whole profile and never a half-updated one.
+    //   CostProfileFor(sceneId) — the last frame of THAT scene, which is the one
+    //     the live loop wants: a per-output pass may have been the most recent
+    //     render of the frame, and the composed program scene is the expensive
+    //     one it is asking about.
+    //   LastCostProfile() — the most recent frame of any scene.
+    // Empty until a frame has been rendered.
+    FrameCostProfile CostProfileFor(std::string_view sceneId) const;
+    FrameCostProfile LastCostProfile() const;
 
     // --- Scenes ---
     Result<std::shared_ptr<Scene>> CreateScene(std::string_view id, std::string_view name,
@@ -188,6 +261,12 @@ private:
     FontManager fonts_;
     Animator animator_;
     TransitionEngine transitions_;
+
+    // The frame cost accounting (see FrameCostProfile): written by the render
+    // thread inside Render, read through the two accessors above under
+    // renderMutex_.
+    std::unordered_map<std::string, FrameCostProfile> costProfiles_;
+    FrameCostProfile costLast_;
 
     std::vector<Subscription> subscriptions_;
     std::atomic<uint64_t> frameCounter_{0};

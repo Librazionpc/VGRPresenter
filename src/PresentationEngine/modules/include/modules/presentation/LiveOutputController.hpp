@@ -223,6 +223,15 @@ private:
     // 60Hz burned a whole core and dragged the whole app down with it.
     std::string lastRenderedScene_;
     uint64_t lastStyleRevision_ = 0;
+    // WHICH SCENE THE LAST COMPOSE WAS OF, so the loop can ask the renderer for
+    // that scene's cost profile AFTER RenderOnce returns. The name is a small
+    // string under its own mutex on purpose: the loop must not call across the
+    // engine (RenderEngine::CostProfileFor) while holding control_ — the
+    // lock-scope guard exists for exactly that shape — and control_ is also the
+    // lock the GUI thread's stop/golive path waits on. A dedicated mutex keeps
+    // the profile fetch out of that path entirely.
+    std::string composedSceneForCost_;
+    std::mutex costMutex_;
     // LIGHT HEARTBEAT: the wall-clock moment of the last real raster. An
     // otherwise-static on-air scene would stop producing frames entirely — and
     // with them the render-path telemetry the Settings meters read (and the

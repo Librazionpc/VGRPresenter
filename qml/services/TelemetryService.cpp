@@ -235,24 +235,65 @@ void TelemetryService::publish(const Sample &s)
     if (!s.live.isEmpty()) {
         const double frameMs = s.live.value(QStringLiteral("frameMs")).toDouble();
         const double fps = s.live.value(QStringLiteral("composedFps")).toDouble();
-        if (frameMs > liveWorstFrameMs_)
+        // ONE line naming the show's hotspot, the first time there is one: the
+        // curve on the Settings card says WHICH second got slow, and this says
+        // WHAT made it slow — in the log, where a slowdown is read back after the
+        // service, and where the feature is verifiable without a screenshot
+        // (see LiveSample::costElement; the element comes from the renderer's own
+        // cost profile, so this is the engine's account of its own frame).
+        if (!liveCostLogged_) {
+            const QString element = s.live.value(QStringLiteral("costElement")).toString();
+            if (!element.isEmpty()) {
+                liveCostLogged_ = true;
+                EngineBridge::write(
+                    QStringLiteral("info"), QStringLiteral("Telemetry"),
+                    QStringLiteral("live hotspot: %1 — %2% of the composed frame (≈%3 ms of it; the "
+                                   "scene's own background is %4% of that frame) — what the "
+                                   "slowing-down curve points at")
+                        .arg(element)
+                        .arg(s.live.value(QStringLiteral("costSharePct")).toDouble(), 0, 'f', 0)
+                        .arg(s.live.value(QStringLiteral("costMs")).toDouble(), 0, 'f', 1)
+                        .arg(s.live.value(QStringLiteral("costBackgroundPct")).toDouble(), 0, 'f', 0));
+            }
+        }
+        if (frameMs > liveWorstFrameMs_) {
             liveWorstFrameMs_ = frameMs;
+            // The element THAT frame's cost went into: the summary line below is
+            // the one place a slowdown is read back after the fact, so it has to
+            // end in a name rather than only in a number.
+            liveWorstElement_ = s.live.value(QStringLiteral("costElement")).toString();
+            liveWorstSharePct_ = s.live.value(QStringLiteral("costSharePct")).toDouble();
+        }
         if (fps > 0.0 && (liveMinComposedFps_ == 0.0 || fps < liveMinComposedFps_))
             liveMinComposedFps_ = fps;
         liveWasActive_ = true;
     } else if (liveWasActive_) {
         liveWasActive_ = false;
+        liveCostLogged_ = false;   // the next go-live names its own hotspot
         const double worst = liveWorstFrameMs_;
         const double slowest = liveMinComposedFps_;
+        const QString element = liveWorstElement_;
+        const double elementShare = liveWorstSharePct_;
         liveWorstFrameMs_ = 0.0;
         liveMinComposedFps_ = 0.0;
+        liveWorstElement_.clear();
+        liveWorstSharePct_ = 0.0;
+        // ...and WHICH ELEMENT that worst frame's cost went into, when the
+        // renderer named one: the summary is only actionable if the heaviest
+        // raster also says what it was made of (see LiveSample::costElement).
+        QString blame;
+        if (!element.isEmpty())
+            blame = QStringLiteral(" — worst element %1 (%2% of that frame)")
+                        .arg(element)
+                        .arg(elementShare, 0, 'f', 0);
         EngineBridge::write(
             QStringLiteral("info"), QStringLiteral("Telemetry"),
-            QStringLiteral("live session ended: slowest raster %1 ms, lowest composed rate %2 fps "
+            QStringLiteral("live session ended: slowest raster %1 ms, lowest composed rate %2 fps%3 "
                            "(the live curve in Telemetry.liveHistory; a rate that falls over a "
                            "session is a slowdown, not a busy engine)")
                 .arg(worst, 0, 'f', 1)
-                .arg(slowest, 0, 'f', 2));
+                .arg(slowest, 0, 'f', 2)
+                .arg(blame));
     }
 }
 
@@ -271,6 +312,17 @@ QVariantMap TelemetryService::sampleLive()
         { QStringLiteral("sharedCopies"), static_cast<qlonglong>(s.sharedCopies) },
         { QStringLiteral("composed"), static_cast<qlonglong>(s.composed) },
         { QStringLiteral("represented"), static_cast<qlonglong>(s.represented) },
+        // WHICH ELEMENT MADE THE FRAME EXPENSIVE (see LiveSample::costElement):
+        // the composed frame's own heaviest layer/element, so the curve's caption
+        // can name a cause instead of only showing a shape. costBackgroundPct is
+        // how much of the same frame the scene's own background clear took —
+        // context for the named share, not a second culprit.
+        { QStringLiteral("costElement"), QString::fromStdString(s.costElement) },
+        { QStringLiteral("costLayer"), QString::fromStdString(s.costLayer) },
+        { QStringLiteral("costObject"), QString::fromStdString(s.costObject) },
+        { QStringLiteral("costSharePct"), s.costSharePct },
+        { QStringLiteral("costMs"), s.costMs },
+        { QStringLiteral("costBackgroundPct"), s.costBackgroundPct },
     };
 }
 
@@ -290,6 +342,12 @@ QVariantList TelemetryService::sampleLiveHistory()
             { QStringLiteral("frameMs"), sample.frameMs },
             { QStringLiteral("representMs"), sample.representMs },
             { QStringLiteral("sharedCopies"), static_cast<qlonglong>(sample.sharedCopies) },
+            { QStringLiteral("costElement"), QString::fromStdString(sample.costElement) },
+            { QStringLiteral("costLayer"), QString::fromStdString(sample.costLayer) },
+            { QStringLiteral("costObject"), QString::fromStdString(sample.costObject) },
+            { QStringLiteral("costSharePct"), sample.costSharePct },
+            { QStringLiteral("costMs"), sample.costMs },
+            { QStringLiteral("costBackgroundPct"), sample.costBackgroundPct },
         });
     }
     return out;

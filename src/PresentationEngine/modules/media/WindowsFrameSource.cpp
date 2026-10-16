@@ -43,20 +43,42 @@ private:
 
 // COM and Media Foundation are per-thread/per-process state; the cache calls from its
 // own worker threads, so each request sets them up and tears them down again.
+//
+// WITH ONE EXCEPTION, and it is load-bearing: Media Foundation is started ONCE for
+// the process and never shut down from here — the same rule WindowsAudio.cpp
+// documents for its own reader. MFShutdown is process-wide, so a shutter must never
+// tear the platform out from under a video path that is decoding; and cycling it per
+// request turned out to LEAK. Measured in isolation (build/probe_mfcycle.cpp, which
+// reproduces this exact shape): 20 requests of "MFStartup + source reader + one frame
+// + MFShutdown" leaked ~17 kernel handles PER REQUEST — 7.7 WaitCompletionPacket,
+// 5 Event, 2 IRTimer, 1 TpWorkerFactory, 1 IoCompletion — because each cycle spun up
+// and dropped a fresh real-time work queue (Rtwq). The same cycle with MF started
+// once and left running costs ~2 handles per request (build/probe_mf.cpp), and those
+// are the two long-lived ones the process keeps anyway. Every thumbnail and preview
+// frame the UI asks for comes through here, so the old shape leaked for the life of
+// the process.
 class ComScope {
 public:
     ComScope() {
         const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         // S_OK / S_FALSE need a matching CoUninitialize; RPC_E_CHANGED_MODE does not.
         coBalanced_ = SUCCEEDED(co);
-        mfStarted_ = SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE));
+        mfStarted_ = StartMediaFoundationOnce();
     }
     ~ComScope() {
-        if (mfStarted_) MFShutdown();
+        // No MFShutdown: see above. COM is per-thread, so its pairing stays.
         if (coBalanced_) CoUninitialize();
     }
     bool mediaFoundation() const { return mfStarted_; }
+
 private:
+    // Started once, result remembered — including failure, so a machine where MF
+    // cannot start does not retry the init on every single request. The function-local
+    // static is thread-safe (C++11), and this runs on the cache's worker threads.
+    static bool StartMediaFoundationOnce() {
+        static const bool started = SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE));
+        return started;
+    }
     bool coBalanced_ = false;
     bool mfStarted_ = false;
 };

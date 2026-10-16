@@ -173,6 +173,16 @@ private:
     // is actually made of).
     double liveWorstFrameMs_ = 0.0;
     double liveMinComposedFps_ = 0.0;
+    // ...and the element that worst raster's cost went into (the renderer's cost
+    // profile, carried on the same sample), so the session-end line names what
+    // made the show heavy instead of only how heavy it got.
+    QString liveWorstElement_;
+    double liveWorstSharePct_ = 0.0;
+    // Interface-thread only: whether this session's hotspot has been named in the
+    // log yet (ONE line per go-live, the first time the renderer has an element to
+    // report — a line per poll would be a stream nobody can read back, and the
+    // element is a property of the scene rather than a per-second figure).
+    bool liveCostLogged_ = false;
 
     // ---- sampler-thread state, touched by no other thread ----
     // The adaptive runtime's own snapshot is heavier than the PAL sample (it copies the

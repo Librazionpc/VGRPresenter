@@ -207,6 +207,43 @@ Result<void> RenderEngine::SetBackend(std::string_view name) {
     return SelectBackend(name);
 }
 
+// The last frame's cost split by element, for the scene the caller names (the
+// live loop asks for the scene it composed, not for whichever pass rendered
+// last — a per-output pass may have been the most recent render).
+FrameCostProfile RenderEngine::CostProfileFor(std::string_view sceneId) const {
+    std::lock_guard<std::mutex> lock(renderMutex_);
+    const auto it = costProfiles_.find(std::string(sceneId));
+    // A scene with no frame of its own reports NOTHING rather than another
+    // scene's last profile: the caller is asking which element made THIS scene's
+    // frame expensive (the live loop naming its on-air hotspot), and a plausible
+    // name borrowed from a different scene is worse than no name at all.
+    // LastCostProfile() is the deliberate way to ask for "any scene's last".
+    if (it != costProfiles_.end())
+        return it->second;
+    return FrameCostProfile{};
+}
+
+const ElementCost* FrameCostProfile::HeaviestContent() const {
+    // items are sorted heaviest-first, so the first non-background entry is the
+    // heaviest element the scene itself drew.
+    for (const ElementCost& c : items)
+        if (!c.isBackground)
+            return &c;
+    return nullptr;
+}
+
+double FrameCostProfile::BackgroundSharePct() const {
+    for (const ElementCost& c : items)
+        if (c.isBackground)
+            return c.sharePct;
+    return 0.0;
+}
+
+FrameCostProfile RenderEngine::LastCostProfile() const {
+    std::lock_guard<std::mutex> lock(renderMutex_);
+    return costLast_;
+}
+
 const BackendCapabilities& RenderEngine::BackendCaps() const {
     return backend_ ? backend_->Capabilities()
                     : softwareBackend_ ? softwareBackend_->Capabilities()
@@ -699,6 +736,56 @@ void CompositeOverCheckerboard(RgbaImage& img) {
 // Render
 // ---------------------------------------------------------------------------
 
+namespace {
+// THE CURRENCY OF THE COST PROFILE (see FrameCostProfile): the pixel work one
+// command asks for. The rasterizer's cost is dominated by the pixels a command
+// touches, so that is what an element is charged for:
+//  - a clear, fill or shape pays for the area it covers (clipped to the frame);
+//  - a blit or a glyph pays the LARGER of the destination it fills and the
+//    source it samples — a minified draw goes through the filter's box taps and
+//    pays for the source area, which is why a 4K picture shown small is not
+//    cheap;
+//  - an effect region pays for its region, and a blur/glow for its region times
+//    its radius (the taps are the expensive part).
+// The numbers are a SHARE, not a stopwatch: the frame's measured cost is split
+// by work, and each element's estimatedMs says so outright.
+uint64_t ClippedArea(const Rect& r, int frameW, int frameH) {
+    const float x0 = std::clamp(r.x, 0.0f, static_cast<float>(frameW));
+    const float y0 = std::clamp(r.y, 0.0f, static_cast<float>(frameH));
+    const float x1 = std::clamp(r.Right(), 0.0f, static_cast<float>(frameW));
+    const float y1 = std::clamp(r.Bottom(), 0.0f, static_cast<float>(frameH));
+    if (x1 <= x0 || y1 <= y0)
+        return 0;
+    return static_cast<uint64_t>((x1 - x0) * (y1 - y0));
+}
+
+uint64_t CommandWork(const DrawCommand& cmd, int frameW, int frameH) {
+    switch (cmd.type) {
+        case DrawCommand::Type::Clear:
+            return static_cast<uint64_t>(frameW) * static_cast<uint64_t>(frameH);
+        case DrawCommand::Type::FillRect:
+        case DrawCommand::Type::DrawShape:
+            return ClippedArea(cmd.rect, frameW, frameH);
+        case DrawCommand::Type::BlitImage:
+        case DrawCommand::Type::DrawGlyph: {
+            const uint64_t dest = ClippedArea(cmd.rect, frameW, frameH);
+            const uint64_t src = ClippedArea(cmd.srcRect, frameW, frameH);
+            return src > dest ? src : dest;
+        }
+        case DrawCommand::Type::PushEffect:
+        case DrawCommand::Type::PopEffect: {
+            const uint64_t region = ClippedArea(cmd.rect, frameW, frameH);
+            const double radius = std::max(1.0, static_cast<double>(cmd.effectParam));
+            const double taps = (cmd.effect == 0 || cmd.effect == 1) ? radius * radius : 1.0;
+            return static_cast<uint64_t>(static_cast<double>(region) * taps);
+        }
+        case DrawCommand::Type::SetBlend:
+            return 0;
+    }
+    return 0;
+}
+} // namespace
+
 Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOptions& opts) {
     if (!backend_) return Error::Make(Err::Render_BackendUnavailable, "Render", "no backend");
     auto scene = scenes_.GetScene(sceneId);
@@ -751,10 +838,43 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
     // owns the animator, modules own the schedule.
     auto objects = CollectObjects(sceneId);
     const auto layers = scene.value()->LayersSorted();
+    // WHERE THE FRAME'S WORK WENT (see FrameCostProfile): the pipeline hands the
+    // objects over one at a time, so the commands an object appended are exactly
+    // its own and the range between them is what it is charged for.
+    std::vector<ElementCost> costs;
+    uint64_t totalWork = 0;
+    // The clear is the scene's own background, and it is real work — charged to
+    // a named element so the shares add up to the whole frame.
+    if (!cmds.empty() && cmds.front().type == DrawCommand::Type::Clear)
+        totalWork += CommandWork(cmds.front(), w, h);
+    auto layerNameFor = [&layers](const std::string& id) -> std::string {
+        for (const auto& l : layers)
+            if (l.id == id)
+                return l.name;
+        return id;
+    };
+    // THE PASSES ARE BUILT FROM THE OBJECT LIST FIRST: Execute only draws what
+    // Distribute put into them, so dropping this call is not "one less step" —
+    // it renders an empty pipeline (the frame is the clear alone) and every
+    // content assertion downstream reads a black output.
     pipeline_.Distribute(objects, layers);
     pipeline_.Execute([&](PassId pass, const std::vector<RenderObject*>& objs) {
         (void)pass;
-        for (auto* obj : objs) DrawObject(obj, cmds);
+        for (auto* obj : objs) {
+            const size_t before = cmds.size();
+            DrawObject(obj, cmds);
+            ElementCost cost;
+            cost.layerId = obj->LayerId();
+            cost.layerName = layerNameFor(cost.layerId);
+            cost.objectId = obj->Id();
+            cost.objectName = obj->Name();
+            for (size_t i = before; i < cmds.size(); ++i) {
+                cost.pixels += CommandWork(cmds[i], w, h);
+                ++cost.commands;
+            }
+            totalWork += cost.pixels;
+            costs.push_back(std::move(cost));
+        }
     });
 
     // ONE-SHOT PER SCENE PER STATE: what this render actually had to draw. A
@@ -836,6 +956,39 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
     const auto frameEnd = std::chrono::steady_clock::now();
     lastFrameMs_ = std::chrono::duration<double, std::milli>(frameEnd - frameStart).count();
     frameMs = lastFrameMs_;
+
+    // The cost profile: the frame's work split between the elements that asked
+    // for it, heaviest first, each carrying its part of the MEASURED cost. The
+    // scene's clear is charged as its own element so a frame whose cost is its
+    // background says so instead of looking empty.
+    {
+        if (!cmds.empty() && cmds.front().type == DrawCommand::Type::Clear) {
+            ElementCost clear;
+            clear.objectId = "scene:background";
+            clear.objectName = "Background clear";
+            clear.isBackground = true;   // accounted for, never the one NAMED
+            clear.pixels = CommandWork(cmds.front(), w, h);
+            clear.commands = 1;
+            costs.push_back(std::move(clear));
+        }
+        std::sort(costs.begin(), costs.end(),
+                  [](const ElementCost& a, const ElementCost& b) { return a.pixels > b.pixels; });
+        if (costs.size() > FrameCostProfile::kProfileItems)
+            costs.resize(FrameCostProfile::kProfileItems);
+        for (ElementCost& c : costs) {
+            c.sharePct = totalWork > 0 ? 100.0 * static_cast<double>(c.pixels)
+                                             / static_cast<double>(totalWork)
+                                       : 0.0;
+            c.estimatedMs = frameMs * c.sharePct / 100.0;
+        }
+        FrameCostProfile profile;
+        profile.frame = frameNumber;
+        profile.frameMs = frameMs;
+        profile.totalPixels = totalWork;
+        profile.items = std::move(costs);
+        costProfiles_[std::string(sceneId)] = profile;
+        costLast_ = profile;
+    }
     dropped = frameMs > 16.67;
     if (dropped) ++frameDrops_;
     uploader_.Pump();

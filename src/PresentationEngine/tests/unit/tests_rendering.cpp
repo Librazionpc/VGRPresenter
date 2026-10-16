@@ -943,6 +943,66 @@ void TestRenderEngine() {
         CHECK(bright > 0);
     }
 
+    // WHERE THE FRAME'S COST WENT (FrameCostProfile, and with it the element the
+    // live curve NAMES when the show slows down). The currency is pixel work:
+    // each element is charged for the area its own commands touch, the scene's
+    // own clear is charged as an element of its own so the shares add up to the
+    // whole frame, and each share is turned into a part of the frame's MEASURED
+    // cost. Asserted here because the profile is what a slowdown report is read
+    // from — a silent zero would leave the curve shapely and nameless.
+    {
+        const r::FrameCostProfile cost = engine.CostProfileFor("s1");
+        CHECK(cost.frame > 0);                // the frame it describes
+        CHECK(cost.frameMs > 0.0);            // the measured cost it splits
+        CHECK(cost.totalPixels >= 64ull * 64ull);
+        CHECK(cost.items.size() >= 2);        // the 64x64 background + the rest
+        CHECK(cost.Heaviest() == &cost.items.front());   // heaviest first
+        if (!cost.items.empty()) {
+            // The scene is a full-frame background, so the top element is at
+            // least a whole frame's work however the equal-sized clear /
+            // background pair happens to sort (both are exactly the frame's
+            // area).
+            CHECK(cost.items.front().pixels >= 64ull * 64ull);
+            CHECK(!cost.items.front().Label().empty());   // a name to report
+        }
+        double lastShare = 200.0;
+        uint64_t lastPixels = ~0ull;
+        for (const r::ElementCost& c : cost.items) {
+            CHECK(c.pixels <= lastPixels);                    // descending
+            CHECK(c.sharePct <= lastShare);                   // shares follow
+            CHECK(c.sharePct >= 0.0 && c.sharePct <= 100.0);
+            // estimatedMs is that share of the frame's real cost.
+            CHECK(std::abs(c.estimatedMs - cost.frameMs * c.sharePct / 100.0) < 1e-9);
+            if (c.pixels > 0)
+                CHECK(c.commands > 0);   // work came from commands, not from nowhere
+            lastShare = c.sharePct;
+            lastPixels = c.pixels;
+        }
+        // The scene's own clear is one of the accounted elements (not a hidden
+        // overhead the shares silently omit) — but it is flagged, so the element
+        // a slowdown report NAMES (HeaviestContent) is a layer the scene drew.
+        // Without that flag a report would name "Background clear" every single
+        // time: a full frame's pixels outrank everything before any layer draws.
+        const r::ElementCost* background = nullptr;
+        for (const r::ElementCost& c : cost.items)
+            if (c.objectId == "scene:background") background = &c;
+        CHECK(background != nullptr);
+        CHECK(background != nullptr && background->isBackground);
+        CHECK(cost.BackgroundSharePct() > 0.0);
+        CHECK(cost.HeaviestContent() != nullptr);
+        CHECK(cost.HeaviestContent() != background);   // never the engine's clear
+        CHECK(!cost.HeaviestContent()->isBackground);
+        // The scene drew an image, a shape and text, so the content it names is
+        // one of those layers.
+        CHECK(cost.HeaviestContent()->commands > 0);
+        CHECK(cost.HeaviestContent()->sharePct <= 100.0);
+        // LastCostProfile() is the same account for the most recent frame of
+        // ANY scene (what a caller with no scene id in hand reads).
+        CHECK(engine.LastCostProfile().frame == cost.frame);
+        // An unknown scene has no cost to report — empty, not a stale copy.
+        CHECK(engine.CostProfileFor("never-rendered").items.empty());
+    }
+
     // Offscreen + thumbnail rendering.
     auto small = engine.RenderOffscreen("s1", r::Size(32, 32));
     CHECK(small.ok() && small.value().width == 32);

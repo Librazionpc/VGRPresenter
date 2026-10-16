@@ -125,6 +125,24 @@ void TestTelemetry() {
         tel.OnLiveSharedCopies(3);
         CHECK(tel.LiveSnapshot().sharedCopies == 3);
 
+        // WHICH ELEMENT MADE THE FRAME EXPENSIVE: the composed frame's own cost
+        // profile (RenderEngine's — the pixel work each layer/element asked for)
+        // is published beside the iteration, published on the snapshot for the
+        // caption, and CARRIED into each whole-second sample rather than counted
+        // — a hotspot is a property of the scene, so a second with no raster of
+        // its own (a copy) still names what the frame it copied was made of.
+        tel.OnLiveCost("Images · Announcement video", "Images", "Announcement video", 71.0, 85.2,
+                       41.0);
+        s = tel.LiveSnapshot();
+        CHECK(s.costElement == "Images · Announcement video");
+        CHECK(s.costLayer == "Images");
+        CHECK(s.costObject == "Announcement video");
+        CHECK(s.costSharePct == 71.0);
+        CHECK(s.costMs == 85.2);
+        // ...and the part of the same frame the scene's own background took, so
+        // a content share is not read as the whole picture.
+        CHECK(s.costBackgroundPct == 41.0);
+
         // The CURVE: one sample per whole second of loop, closed out by the
         // first iteration after that second ends. The clock is the loop's own
         // (see OnLiveFrame) — a loop held off while the machine was busy must
@@ -139,6 +157,11 @@ void TestTelemetry() {
             CHECK(history[0].frameMs == 120.0);
             CHECK(history[0].representMs == 9.0);
             CHECK(history[0].sharedCopies == 3);
+            CHECK(history[0].costElement == "Images · Announcement video");
+            CHECK(history[0].costLayer == "Images");
+            CHECK(history[0].costSharePct == 71.0);
+            CHECK(history[0].costMs == 85.2);
+            CHECK(history[0].costBackgroundPct == 41.0);
         }
 
         // STOP clears the session: the next go-live must not open on the last
@@ -147,6 +170,11 @@ void TestTelemetry() {
         CHECK(tel.LiveSnapshot().composed == 0);
         CHECK(tel.LiveSnapshot().represented == 0);
         CHECK(tel.LiveHistory().empty());
+        // ...and with it the hotspot: naming a scene element after the session
+        // that was showing it has ended would blame a show that is off air.
+        CHECK(tel.LiveSnapshot().costElement.empty());
+        CHECK(tel.LiveSnapshot().costMs == 0.0);
+        CHECK(tel.LiveSnapshot().costBackgroundPct == 0.0);
     }
 
     // Real path check: OutputManager::Distribute feeds the meter per Present.

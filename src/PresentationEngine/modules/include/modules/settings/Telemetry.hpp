@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace bps::settings {
@@ -63,6 +64,23 @@ struct LiveSample {
     double frameMs = 0.0;
     double representMs = 0.0;
     uint64_t sharedCopies = 0;   // per-output rasters replaced by a copy
+
+    // WHICH ELEMENT MADE THE FRAME EXPENSIVE — the shape of a slowdown is not
+    // enough to act on, so the composed frame's own cost profile (see
+    // RenderEngine's FrameCostProfile) names the heaviest layer/element and how
+    // much of the frame's work it asked for. Strings on purpose: "Images ·
+    // Announcement video" is the report; a number alone would need the scene to
+    // be reopened to be useful.
+    std::string costElement;     // "Layer · Object", "" when nothing is composed
+    std::string costLayer;
+    std::string costObject;
+    double costSharePct = 0.0;   // its share of the frame's pixel work
+    double costMs = 0.0;         // that share of the frame's MEASURED cost
+    // How much of the same frame the scene's own background clear took. It is
+    // the engine's per-frame baseline rather than a layer anyone authored, so it
+    // is not the element NAMED above — but a content share read without it looks
+    // like the whole story when a full-frame background is where the pixels went.
+    double costBackgroundPct = 0.0;
 };
 
 struct LiveStats : LiveSample {
@@ -111,6 +129,13 @@ public:
     // why its frame rate stopped falling with the output count. A total rather
     // than a per-copy call, because the loop reports it outside its own lock.
     void OnLiveSharedCopies(uint64_t total);
+    // The heaviest element of the frame just composed (RenderEngine's cost
+    // profile): what the frame's cost went into, named, plus the share the
+    // scene's own background clear took. Published on composed iterations only,
+    // because a re-present draws nothing and would otherwise re-report the
+    // previous frame's culprit as if it were the copy's.
+    void OnLiveCost(std::string element, std::string layer, std::string object, double sharePct,
+                    double ms, double backgroundPct);
     // The live loop stopped: totals and the curve belong to that session, so the
     // next one starts from zero (a curve that keeps climbing after STOP reads as
     // a load that is still there).
@@ -146,6 +171,10 @@ private:
     uint64_t secondRepresented_ = 0;
     uint64_t secondShared_ = 0;
     std::chrono::steady_clock::time_point secondStart_{};
+    // The last hotspot reported (see OnLiveCost). Carried into each whole-second
+    // sample, so the curve keeps which element was expensive at the time rather
+    // than only what the last frame happened to be.
+    LiveSample lastCost_;
     std::vector<LiveSample> history_;   // oldest first, at most kLiveHistory
     mutable std::mutex liveMutex_;
 };

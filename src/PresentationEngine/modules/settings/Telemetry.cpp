@@ -82,6 +82,16 @@ void Telemetry::OnLiveFrame(double ms, bool composed) {
     sample.frameMs = lastComposedMs_.load();
     sample.representMs = lastRepresentMs_.load();
     sample.sharedCopies = secondShared_;
+    // Which element made THIS second's frames expensive. The hotspot is a
+    // property of the scene, not of the second, so it is carried rather than
+    // counted: a service that opens with a heavy slide reads that slide's name
+    // on every bar until the scene changes.
+    sample.costElement = lastCost_.costElement;
+    sample.costLayer = lastCost_.costLayer;
+    sample.costObject = lastCost_.costObject;
+    sample.costSharePct = lastCost_.costSharePct;
+    sample.costMs = lastCost_.costMs;
+    sample.costBackgroundPct = lastCost_.costBackgroundPct;
     if (history_.size() >= kLiveHistory)
         history_.erase(history_.begin());
     history_.push_back(sample);
@@ -100,6 +110,17 @@ void Telemetry::OnLiveSharedCopies(uint64_t total) {
     lastSharedSeen_ = total;
 }
 
+void Telemetry::OnLiveCost(std::string element, std::string layer, std::string object, double sharePct,
+                          double ms, double backgroundPct) {
+    std::lock_guard<std::mutex> lock(liveMutex_);
+    lastCost_.costElement = std::move(element);
+    lastCost_.costLayer = std::move(layer);
+    lastCost_.costObject = std::move(object);
+    lastCost_.costSharePct = sharePct;
+    lastCost_.costMs = ms;
+    lastCost_.costBackgroundPct = backgroundPct;
+}
+
 void Telemetry::OnLiveStopped() {
     std::lock_guard<std::mutex> lock(liveMutex_);
     history_.clear();
@@ -113,6 +134,9 @@ void Telemetry::OnLiveStopped() {
     lastSharedSeen_ = 0;
     lastComposedMs_.store(0.0);
     lastRepresentMs_.store(0.0);
+    // The hotspot belonged to the scene that session was showing; naming it
+    // after STOP would blame a show that is no longer on air.
+    lastCost_ = LiveSample{};
 }
 
 LiveStats Telemetry::LiveSnapshot() const {
@@ -124,6 +148,12 @@ LiveStats Telemetry::LiveSnapshot() const {
     s.representMs = lastRepresentMs_.load();
     {
         std::lock_guard<std::mutex> lock(liveMutex_);
+        s.costElement = lastCost_.costElement;
+        s.costLayer = lastCost_.costLayer;
+        s.costObject = lastCost_.costObject;
+        s.costSharePct = lastCost_.costSharePct;
+        s.costMs = lastCost_.costMs;
+        s.costBackgroundPct = lastCost_.costBackgroundPct;
         if (!history_.empty()) {
             const LiveSample& last = history_.back();
             s.composedFps = last.composedFps;

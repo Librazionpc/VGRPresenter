@@ -14,6 +14,8 @@
 #include "platform/windows/WinUtil.hpp"
 
 #include <windows.h>
+#include <cfgmgr32.h>   // CM_Get_Device_Interface_List: the cheap camera roster
+#include <cwchar>
 #include <dwmapi.h>
 #include <mfapi.h>
 #include <mfidl.h>
@@ -33,6 +35,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -271,8 +274,69 @@ std::vector<WindowInfo> WindowsVideo::EnumerateWindows() const
     return ctx.out;
 }
 
+namespace {
+
+// The capture-device interface classes: cameras (KSCATEGORY_VIDEO_CAMERA) and
+// capture hardware that is not a camera (KSCATEGORY_CAPTURE). The values are
+// fixed by the Windows SDK (ks.h/ksmedia.h); spelled out here so this file does
+// not have to pull in the DirectShow headers for two GUIDs.
+constexpr GUID kCameraInterfaceClass = {
+    0xE5323777, 0xF976, 0x4f5b, {0x9b, 0x55, 0xb9, 0x46, 0x99, 0xc4, 0x6e, 0x44}};
+constexpr GUID kCaptureInterfaceClass = {
+    0x65E8773D, 0x8F56, 0x11D0, {0xa3, 0xb9, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96}};
+
+// The capture roster's IDs from the Plug-and-Play DEVICE-INTERFACE LIST, which
+// answers "which capture devices exist right now" without opening one.
+//
+// WHY NOT Enumerate(): a fingerprint only has to notice that the roster changed,
+// and WindowsVideo::Enumerate does far more than list devices — it activates
+// every device through Media Foundation (MFEnumDeviceSources/MFTEnumEx, which
+// reaches deviceaccess.dll and opens a device-access handle per path) and then
+// walks every device's media types. Polled on the kernel's 1 s tick it was the
+// app's idle kernel-handle leak: measured with probe_handles.exe at ~20 File +
+// ~20 WaitCompletionPacket + ~130 Event handles accumulated per SECOND, with
+// WindowsVideo::Enumerate on the stack of two thirds of the file opens in a gdb
+// trace of NtCreateFile. CM_Get_Device_Interface_List asks the config manager for
+// the interface paths and opens nothing, so the hot-plug check can stay frequent.
+//
+// Returns std::nullopt ONLY when the config-manager API itself failed; the caller
+// then falls back to the MF walk, so a machine where this cannot answer keeps the
+// detection it has today.
+std::optional<std::string> CheapCaptureFingerprint()
+{
+    std::vector<std::string> paths;
+    for (const GUID &cls : {kCameraInterfaceClass, kCaptureInterfaceClass}) {
+        ULONG len = 0;
+        if (CM_Get_Device_Interface_List_SizeW(&len, const_cast<GUID *>(&cls), nullptr,
+                                               CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS)
+            return std::nullopt;
+        if (len == 0)
+            continue;
+        std::wstring list(len, L'\0');
+        if (CM_Get_Device_Interface_ListW(const_cast<GUID *>(&cls), nullptr, list.data(), len,
+                                          CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS)
+            return std::nullopt;
+        for (const wchar_t *p = list.c_str(); *p; p += std::wcslen(p) + 1)
+            paths.push_back(win::Utf8(p));
+    }
+    // SORTED AND DEDUPED: the two classes can both list the same interface, and
+    // the config manager's own order is not part of the answer — only the SET of
+    // devices is, so an unchanged roster must fingerprint the same either way.
+    std::sort(paths.begin(), paths.end());
+    paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+    std::string fp;
+    for (const auto &p : paths)
+        fp += p + ";";
+    return fp;
+}
+
+} // namespace
+
 std::string WindowsVideo::Fingerprint() const
 {
+    if (auto cheap = CheapCaptureFingerprint(); cheap.has_value())
+        return *cheap;
+    // The config manager could not answer: the MF roster (and its cost) stays.
     std::string fp;
     for (const auto &d : Enumerate())
         fp += d.id + ";";
