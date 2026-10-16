@@ -175,7 +175,24 @@ public:
 
     bool live() const { return live_; }
     qulonglong frameRev() const { return frameRev_; }
+    // The 10Hz poll's CACHED copy (see pollTick): right for a preview refresh,
+    // too coarse to time anything against. Use the *Now() pair below to measure.
     qulonglong framesSent() const { return framesSent_; }
+    // The engine's frame counters read AT THE MOMENT OF THE CALL — two atomic
+    // loads (the live loop's own publish points), no lock, no PAL, no device, so
+    // a binding or a test timer may call them (tools/check_gui_thread_blocks.mjs:
+    // a lone singleton acquire, and nothing blocking behind it). They exist for
+    // tools/selftest/run_live_latency_test.sh, which times GO LIVE -> first frame
+    // and the live cadence as slides/blocks grow: framesSent() lags those
+    // measurements by up to a poll (100 ms), which is a fifth of the budget it is
+    // asked to police.
+    //
+    // Two counters because the loop publishes twice per iteration: PREVIEW moves
+    // the moment the main pass has written the live preview (the earliest thing
+    // the operator can SEE — the first frame), FRAMES only after every per-output
+    // pass has landed too (the whole iteration — the cadence).
+    Q_INVOKABLE qulonglong previewFramesNow() const;
+    Q_INVOKABLE qulonglong framesSentNow() const;
     QString onAirTitle() const { return onAirTitle_; }
     int onAirIndex() const { return onAirIndex_; }
     int onAirTotal() const { return onAirTotal_; }

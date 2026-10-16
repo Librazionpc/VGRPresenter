@@ -26,6 +26,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <vector>
@@ -36,6 +37,37 @@ struct Utilization {
     int rendering = 0;   // % of the 60Hz frame budget, last frame
     int encoding = 0;    // busiest active encoder's load, 0 when none
     int output = 0;      // enabled-output presents in the window, % of target
+};
+
+// --- The LIVE LOOP, as a rate rather than a percentage ----------------------
+// The three meters above answer "how busy is the engine"; none of them answers
+// "is the show getting slower as the service goes on", because a live loop that
+// composes one frame a second reads as a 2% rendering meter next to a preview
+// that repaints at 60Hz. The live controller reports every iteration it takes,
+// and there are exactly two kinds:
+//
+//   COMPOSED     a real raster — the on-air scene or its style changed
+//   RE-PRESENTED the last composed frame copied to the outputs (nothing changed)
+//
+// so the pair (composedFps, presentFps) is what an operator feels as the show
+// runs: composedFps falling with the load is the slowdown, and presentFps
+// falling means the outputs stopped receiving frames at all. frameMs is the
+// cost of the raster itself (the number that grows when a scene gets heavier),
+// representMs the cost of the copy that replaced the old per-second re-raster.
+// LiveHistory() turns that into a CURVE — one sample per whole second — so a
+// slowdown over a service is visible while it happens instead of being mined
+// out of the log afterwards.
+struct LiveSample {
+    double composedFps = 0.0;
+    double presentFps = 0.0;
+    double frameMs = 0.0;
+    double representMs = 0.0;
+    uint64_t sharedCopies = 0;   // per-output rasters replaced by a copy
+};
+
+struct LiveStats : LiveSample {
+    uint64_t composed = 0;       // totals since the live loop started
+    uint64_t represented = 0;
 };
 
 class Telemetry final : public IService {
@@ -49,6 +81,15 @@ public:
 
     // --- Reads (thread-safe; a small copy under the ring mutex) ---
     Utilization Snapshot() const;
+    // The live loop's own counters (see LiveSample): the current second's rates
+    // plus the running totals.
+    LiveStats LiveSnapshot() const;
+    // The curve: one sample per whole second of live loop, oldest first, at most
+    // kLiveHistory of them. Empty until the loop has run a whole second.
+    std::vector<LiveSample> LiveHistory() const;
+    // How many whole-second samples LiveHistory() can hold before the oldest is
+    // dropped (60 s of curve).
+    static constexpr size_t kLiveHistory = 60;
 
     // Window shape: the output-rate window is kWindow recent frames
     // (128 ≈ 2.1s at the 60Hz target the % is measured against). The ring is
@@ -60,6 +101,20 @@ public:
     // Inlet for the one feed that has no event: OutputManager::Distribute
     // reports how many enabled outputs just received a frame.
     void OnOutputPresented(int count);
+
+    // --- Inlets for the live loop (called on the render/loop thread) ---
+    // One call per iteration: `composed` true for a raster, false for a
+    // re-present of the last composed frame. `ms` is what that iteration cost.
+    void OnLiveFrame(double ms, bool composed);
+    // The live loop's RUNNING TOTAL of per-output rasters it skipped because the
+    // output's scene was the composed one (same style, same size) — the copy is
+    // why its frame rate stopped falling with the output count. A total rather
+    // than a per-copy call, because the loop reports it outside its own lock.
+    void OnLiveSharedCopies(uint64_t total);
+    // The live loop stopped: totals and the curve belong to that session, so the
+    // next one starts from zero (a curve that keeps climbing after STOP reads as
+    // a load that is still there).
+    void OnLiveStopped();
 
 private:
     Telemetry() = default;
@@ -77,6 +132,22 @@ private:
     std::array<uint32_t, kRing> ring_{};
     uint64_t framesSeen_ = 0;          // render-thread owned
     mutable std::mutex ringMutex_;     // guards ring_ + framesSeen_ for Snapshot
+
+    // --- Live loop (the loop thread writes; Snapshot reads under liveMutex_) --
+    std::atomic<double> lastComposedMs_{0.0};
+    std::atomic<double> lastRepresentMs_{0.0};
+    std::atomic<uint64_t> liveComposed_{0};
+    std::atomic<uint64_t> liveRepresented_{0};
+    std::atomic<uint64_t> liveSharedCopies_{0};      // running total (the inlet's source)
+    uint64_t lastSharedSeen_ = 0;                    // guarded by liveMutex_
+    // The second being measured, closed out by the first live frame after it
+    // ends. Loop-thread owned; liveMutex_ guards it for the readers.
+    uint64_t secondComposed_ = 0;
+    uint64_t secondRepresented_ = 0;
+    uint64_t secondShared_ = 0;
+    std::chrono::steady_clock::time_point secondStart_{};
+    std::vector<LiveSample> history_;   // oldest first, at most kLiveHistory
+    mutable std::mutex liveMutex_;
 };
 
 } // namespace bps::settings

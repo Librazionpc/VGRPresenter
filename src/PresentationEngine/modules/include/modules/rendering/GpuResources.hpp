@@ -21,7 +21,12 @@ namespace bps::rendering {
 class GPUResourceManager {
 public:
     GPUResourceManager() = default;
-    void BindBackend(IGraphicsBackend* backend) { backend_ = backend; }
+    // Installs the active backend. A REAL switch also drops everything the
+    // registry holds for the old one — its TextureIds belong to the backend that
+    // created them, so carrying them across would leave every cached texture an
+    // id the new backend does not hold (the blit draws nothing and the scene
+    // comes out background-only). See the definition in GpuResources.cpp.
+    void BindBackend(IGraphicsBackend* backend);
 
     // Texture registry (dedup by name; reuse when unchanged).
     Result<TextureId> AcquireTexture(std::string_view name, const RgbaImage& image);

@@ -13,6 +13,7 @@
 #include "modules/project/OutputStore.hpp"
 #include "modules/project/StyleStore.hpp"
 #include "modules/rendering/PngCodec.hpp"
+#include "modules/settings/Telemetry.hpp"
 #include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
@@ -23,6 +24,7 @@
 #include <thread>
 
 #include <cstdint>
+#include <cstdio>
 #include <vector>
 
 namespace l = bps::live;
@@ -1013,6 +1015,133 @@ void TestGoLivePaths() {
             }
             CHECK(eng.SetLiveOutputStyles({}, {}).ok());   // leave the set empty again
             CHECK(render.RemoveOutput(outBuffer).ok());
+        }
+
+        // 3c. THE TWO HALVES OF "do not pay twice for a frame that is already
+        //     composed": an output whose own scene IS the composed one takes a
+        //     COPY of it, and a static scene is RE-PRESENTED on the heartbeat
+        //     instead of being rasterized again. Both are what stopped the live
+        //     rate from falling with every enabled output (measured in the
+        //     running app before this: two more outputs halved the delivered
+        //     frame rate — see tools/selftest/run_live_latency_test.sh).
+        {
+            const std::string sharedBuf = "__out_shared_test__";
+            // The SAME spec as the on-air style, and no pushed size (so the
+            // gated build uses the engine's own 1080p default — the size the
+            // compiled scene is built at). The scene id is the fingerprint of
+            // (slide, style, size), so this lands on the COMPOSED id.
+            CHECK(eng.SetLiveOutputStyles({eng.ActiveOutputStyle()}, {sharedBuf}).ok());
+
+            r::FrameBufferOutput *fb = nullptr;
+            for (int i = 0; i < 200 && !fb; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                auto registered = render.GetOutput(sharedBuf);
+                if (!registered.ok()) continue;
+                auto *candidate = dynamic_cast<r::FrameBufferOutput *>(registered.value().get());
+                if (!candidate) continue;
+                auto snapshot = candidate->LastFrameSnapshot();
+                if (candidate->AcceptsDistributedFrames() && snapshot && !snapshot->empty())
+                    fb = candidate;
+            }
+            CHECK(fb != nullptr);
+            // A per-output raster was replaced by the copy (the count only moves
+            // on the sharing path — see RenderPerOutputPasses).
+            CHECK(live.SharedOutputCopies() >= 1);
+            if (fb) {
+                // THE COPY IS THE COMPOSED FRAME: same target size, identical
+                // pixels to what the preview feed received — not a re-drawn
+                // scene that happens to look the same.
+                auto previewReg = render.GetOutput(l::LiveOutputController::kPreviewName);
+                CHECK(previewReg.ok());
+                auto *pv = previewReg.ok()
+                               ? dynamic_cast<r::FrameBufferOutput *>(previewReg.value().get())
+                               : nullptr;
+                auto shot = fb->LastFrameSnapshot();
+                auto feed = pv ? pv->LastFrameSnapshot() : nullptr;
+                CHECK(shot && feed);
+                if (shot && feed) {
+                    CHECK(shot->width == feed->width);
+                    CHECK(shot->height == feed->height);
+                    CHECK(shot->pixels == feed->pixels);
+                }
+
+                // The dirty-frame path: with the scene unchanged, the outputs
+                // keep receiving frames (the buffer's own count moves) while the
+                // raster count does NOT — the heartbeat is a copy now.
+                const uint64_t rastersThen = render.Stats().frames;
+                const uint64_t representedThen = live.RepresentedFrames();
+                const uint64_t receivedThen = fb->FramesReceived();
+                bool represented = false;
+                for (int i = 0; i < 120 && !represented; ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                    represented = live.RepresentedFrames() > representedThen
+                                  && fb->FramesReceived() > receivedThen;
+                }
+                CHECK(represented);
+                CHECK(render.Stats().frames == rastersThen);   // a copy, not a raster
+
+                // --- THE MEASUREMENT THE CHANGE WAS MADE FOR -----------------
+                // "Each extra enabled output halved the delivered frame rate" was
+                // measured in the app BEFORE this (tools/selftest/run_live_latency_test.sh's
+                // rungs: 1.43-1.45 fps on the plain ladder, 0.81 fps with two more
+                // outputs enabled) and the reason was structural: for a scene that
+                // had not changed, the heartbeat re-rasterised ONE FULL FRAME PER
+                // OUTPUT once a second, so a fixed per-frame budget bought fewer
+                // and fewer frames as outputs were enabled. The engine's own live
+                // section is the AFTER number in the loop's own units, and this is
+                // the whole of it in one SECOND OF STATIC SHOW: frameMs is what a
+                // raster + the per-output passes cost (now ONE raster however many
+                // outputs share the composed scene), representMs is what the copy
+                // that replaced each of those rasters costs, and the pair
+                // (composedFps, presentFps) is how many real rasters a second of
+                // show needed against how often the outputs were FED.
+                //
+                // The sample is taken from the closed CURVE rather than from the
+                // open second: LiveSnapshot's rates divide the second so far, so a
+                // reading taken 20 ms into a second reports one frame as 50 fps.
+                bps::settings::LiveSample quiet;
+                bool measured = false;
+                for (int i = 0; i < 300 && !measured; ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                    const std::vector<bps::settings::LiveSample> curve =
+                        bps::settings::Telemetry::Instance().LiveHistory();
+                    if (curve.empty())
+                        continue;
+                    const bps::settings::LiveSample& last = curve.back();
+                    // A second with NO raster at all is the claim: a fully static
+                    // scene costs the loop nothing to draw and still feeds the
+                    // outputs (and the per-output rasters became copies).
+                    if (last.composedFps == 0.0 && last.presentFps > 0.0 && last.sharedCopies >= 1) {
+                        quiet = last;
+                        measured = true;
+                    }
+                }
+                const bps::settings::LiveStats totals =
+                    bps::settings::Telemetry::Instance().LiveSnapshot();
+                std::fprintf(stderr,
+                             "[live] static second: composedFps=%.2f presentFps=%.2f "
+                             "sharedCopies=%llu | raster(report) frameMs=%.1f ms vs "
+                             "copy(report) representMs=%.1f ms | session composed=%llu "
+                             "represented=%llu\n",
+                             quiet.composedFps, quiet.presentFps,
+                             static_cast<unsigned long long>(quiet.sharedCopies),
+                             totals.frameMs, totals.representMs,
+                             static_cast<unsigned long long>(totals.composed),
+                             static_cast<unsigned long long>(totals.represented));
+                CHECK(measured);
+                // Nothing was re-drawn for that second, and the outputs were fed
+                // anyway: the dirty-frame path, and the rate it delivers when the
+                // scene is not moving.
+                CHECK(quiet.composedFps == 0.0);
+                CHECK(quiet.presentFps > 0.0);
+                // The copy is the cheap half — a raster plus every per-output pass
+                // costs multiples of handing the composed frame over again, which
+                // is why the delivered rate no longer divides by the output count.
+                CHECK(totals.frameMs > totals.representMs);
+                CHECK(quiet.sharedCopies >= 1);
+            }
+            CHECK(eng.SetLiveOutputStyles({}, {}).ok());
+            CHECK(render.RemoveOutput(sharedBuf).ok());
         }
 
         CHECK(live.StopLive().ok());

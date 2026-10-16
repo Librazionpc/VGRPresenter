@@ -5,6 +5,9 @@
 #include "modules/rendering/ImageScale.hpp"
 #include "modules/rendering/PngCodec.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <fstream>
 
 // Glyph-atlas TEXTURE identity. Two styles whose pixel sizes collide under a
@@ -1451,4 +1454,167 @@ void TestImageScale() {
     r::FrameBufferOutput untouched(r::OutputKind::Audience, "scale-same", r::Size(2, 1));
     CHECK(untouched.Present(f).ok());
     CHECK(untouched.LastFrame().pixels == f.pixels);
+}
+
+// ---------------------------------------------------------------------------
+// The D3D11 backend (docs/specs/17 §Backends): the GPU rasterizer sits behind the
+// same IGraphicsBackend seam the CPU one implements, so this test drives it with
+// the SAME scene and compares the FRAME the two produce, pixel for pixel. That
+// comparison is the whole claim — "live frames are drawn on the GPU" is only
+// true if what comes back is the picture the CPU path would have drawn.
+//
+// It also pins the FALLBACK: asking for the GPU must never fail the boot. On a
+// machine whose device cannot be made the engine keeps the software rasterizer
+// and says so, and this test asserts that shape instead of skipping.
+void TestD3D11Backend() {
+    auto& engine = r::RenderEngine::Instance();
+    CHECK(engine.Initialize().ok());
+    CHECK(engine.Start().ok());
+
+    // The live loop's own command mix: an opaque background, a scaled image blit,
+    // text through the glyph atlas, and an alpha-blended shape.
+    const std::string sceneId = "gpu_backend_probe";
+    (void)engine.DestroyScene(sceneId);
+    CHECK(engine.CreateScene(sceneId, "GPU probe", r::Size(64, 64)).ok());
+    CHECK(engine.AddLayer(sceneId, r::Layer("bg", "Background", r::LayerKind::Background, 0)).ok());
+    CHECK(engine.AddLayer(sceneId, r::Layer("img", "Images", r::LayerKind::Image, 1)).ok());
+    CHECK(engine.AddLayer(sceneId, r::Layer("txt", "Text", r::LayerKind::Text, 2)).ok());
+
+    auto bg = std::make_shared<r::BackgroundObject>("g_bg", "Background", r::Color(0.1f, 0.2f, 0.6f));
+    bg->SetBounds(r::Rect(0, 0, 64, 64));
+    CHECK(engine.AddObject(sceneId, bg, "bg").ok());
+
+    r::RgbaImage green;
+    green.width = 8;
+    green.height = 8;
+    green.pixels.assign(64, r::Color::Green().Pack());
+    auto img = std::make_shared<r::ImageObject>("g_img", "Image");
+    img->SetImage(green, "gpu-probe-asset");
+    img->SetBounds(r::Rect(8, 8, 16, 16));   // scaled blit: 8x8 -> 16x16
+    CHECK(engine.AddObject(sceneId, img, "img").ok());
+
+    auto text = std::make_shared<r::TextObject>("g_txt", "Title", "HELLO");
+    text->SetBounds(r::Rect(2, 40, 60, 20));
+    text->AddComponent(r::MakeTextStyle(r::TextStyle{}));
+    CHECK(engine.AddObject(sceneId, text, "txt").ok());
+
+    auto shape = std::make_shared<r::ShapeObject>("g_shp", "Shape");
+    shape->SetRectangle(r::Color(1.0f, 1.0f, 1.0f, 0.5f));   // alpha, so the blend is exercised
+    shape->SetBounds(r::Rect(40, 8, 16, 16));
+    CHECK(engine.AddObject(sceneId, shape, "img").ok());
+
+    r::RenderOptions opts;
+    opts.distribute = false;
+    opts.capture = true;
+
+    // --- The reference: the CPU rasterizer -------------------------------
+    CHECK(engine.SetBackend("software").ok());
+    CHECK(std::string(engine.BackendCaps().name) == "software");
+    CHECK(!engine.BackendCaps().gpuAccelerated);
+    auto soft = engine.Render(sceneId, opts);
+    CHECK(soft.ok());
+    CHECK(soft.value().width == 64 && soft.value().height == 64);
+    CHECK(!soft.value().empty());
+
+    // --- The GPU ----------------------------------------------------------
+    // "directx11" asks for the D3D11 device; "auto" (the engine's default) asks
+    // for "the GPU when there is one". Both must SUCCEED — a machine without a
+    // device falls back to software with a log line, never an error.
+    CHECK(engine.SetBackend("directx11").ok());
+    const bool gpu = engine.BackendCaps().gpuAccelerated;
+    const std::string active = engine.BackendCaps().name;
+    std::fprintf(stderr, "[d3d11] requested=directx11 active=%s gpu=%d\n", active.c_str(),
+                 gpu ? 1 : 0);
+    if (!gpu) {
+        // The documented fallback, asserted rather than skipped: the software
+        // rasterizer is what renders, and it still renders.
+        CHECK(active == "software");
+        auto fallback = engine.Render(sceneId, opts);
+        CHECK(fallback.ok());
+        CHECK(fallback.value().pixels == soft.value().pixels);
+        CHECK(engine.SetBackend("auto").ok());
+        CHECK(!engine.BackendCaps().gpuAccelerated);   // same machine, same answer
+        CHECK(engine.SetBackend("software").ok());
+        return;
+    }
+    CHECK(active == "directx11");
+    CHECK(engine.BackendCaps().maxTextureSize >= 8192);
+
+    auto gpuFrame = engine.Render(sceneId, opts);
+    CHECK(gpuFrame.ok());
+    CHECK(gpuFrame.value().width == soft.value().width);
+    CHECK(gpuFrame.value().height == soft.value().height);
+    CHECK(gpuFrame.value().pixels.size() == soft.value().pixels.size());
+
+    // THE COMPARISON. A hardware blend quantizes at 8 bits per draw where the CPU
+    // path keeps floats until the end, so the two are compared with a tolerance
+    // and REPORTED as a distribution: what matters is that the picture is the
+    // same (every pixel close) rather than that every byte is identical.
+    size_t exact = 0;
+    size_t within3 = 0;
+    int worst = 0;
+    if (gpuFrame.value().pixels.size() == soft.value().pixels.size()) {
+        for (size_t i = 0; i < soft.value().pixels.size(); ++i) {
+            const uint32_t a = soft.value().pixels[i];
+            const uint32_t b = gpuFrame.value().pixels[i];
+            int delta = 0;
+            for (int shift = 0; shift < 32; shift += 8) {
+                const int da = static_cast<int>((a >> shift) & 0xFF) - static_cast<int>((b >> shift) & 0xFF);
+                delta = std::max(delta, std::abs(da));
+            }
+            if (delta == 0) ++exact;
+            if (delta <= 3) ++within3;
+            worst = std::max(worst, delta);
+        }
+    }
+    const size_t total = soft.value().pixels.size();
+    std::fprintf(stderr,
+                 "[d3d11] frame match: %zu/%zu pixels exact, %zu within +-3, worst channel delta %d\n",
+                 exact, total, within3, worst);
+    // WHERE the two disagree, when they do: the bounding box of the pixels more
+    // than 8 apart, so a mismatch names the region that produced it (the glyph
+    // area, the scaled blit, the blended shape) instead of only a count.
+    if (gpuFrame.value().pixels.size() == soft.value().pixels.size() && within3 != total) {
+        int x0 = 1 << 30, y0 = 1 << 30, x1 = -1, y1 = -1;
+        size_t shown = 0;
+        for (int y = 0; y < soft.value().height; ++y)
+            for (int x = 0; x < soft.value().width; ++x) {
+                const size_t i = static_cast<size_t>(y) * soft.value().width + x;
+                const uint32_t a = soft.value().pixels[i];
+                const uint32_t b = gpuFrame.value().pixels[i];
+                int delta = 0;
+                for (int shift = 0; shift < 32; shift += 8)
+                    delta = std::max(delta, std::abs(static_cast<int>((a >> shift) & 0xFF) -
+                                                     static_cast<int>((b >> shift) & 0xFF)));
+                if (delta <= 8)
+                    continue;
+                x0 = std::min(x0, x);
+                y0 = std::min(y0, y);
+                x1 = std::max(x1, x);
+                y1 = std::max(y1, y);
+                if (shown < 4) {
+                    ++shown;
+                    std::fprintf(stderr,
+                                 "[d3d11]   at (%d,%d): cpu=0x%08x gpu=0x%08x delta=%d\n", x, y, a,
+                                 b, delta);
+                }
+            }
+        std::fprintf(stderr, "[d3d11] mismatching pixels bounding box: (%d,%d)..(%d,%d)\n", x0, y0,
+                     x1, y1);
+    }
+    // The frame is the same picture: every pixel within the blend/rounding
+    // tolerance of the CPU path (and in practice nearly all of them exact).
+    CHECK(within3 == total);
+
+    // And it really is the GPU backend doing the drawing: the capabilities the
+    // rest of the engine reads (AdaptiveRuntime's budgets, RenderEngine's health
+    // line) say so.
+    CHECK(engine.GetHealth().state == HealthState::Healthy);
+    CHECK(engine.BackendCaps().supportsShaders);
+
+    // Back to the CPU rasterizer for the suites that follow in this phase.
+    CHECK(engine.SetBackend("software").ok());
+    CHECK(engine.SetBackend("auto").ok());
+    CHECK(engine.SetBackend("software").ok());
+    (void)engine.DestroyScene(sceneId);
 }

@@ -98,6 +98,9 @@ void TestRenderGpu();
 void TestRenderOutputs();
 void TestVideoLayerFrameRefresh();
 void TestRenderEngine();
+// The D3D11 GPU backend behind the same IGraphicsBackend seam: the CPU frame and
+// the GPU frame of one scene compared, plus the software fallback's contract.
+void TestD3D11Backend();
 void TestRenderStress();
 void TestPngCodec();
 void TestDisplayProviders();

@@ -8,6 +8,7 @@
 #include "modules/presentation/SceneBuilder.hpp"
 #include "modules/rendering/RenderEngine.hpp"
 #include "modules/rendering/RenderTypes.hpp"
+#include "modules/settings/Telemetry.hpp"   // the live rate/frame-cost curve
 
 #include <algorithm>
 #include <chrono>
@@ -429,6 +430,10 @@ Result<void> LiveOutputController::StopLiveTail() {
 // The loop
 // ---------------------------------------------------------------------------
 void LiveOutputController::Loop() {
+    // Hoisted: a plain singleton getter, fetched once per live session rather
+    // than per frame, and never called while control_ is held (see the publish
+    // site at the bottom of the loop).
+    auto& telemetry = settings::Telemetry::Instance();
     auto last = std::chrono::steady_clock::now();
     double syncAccum = 0.0;
     uint64_t styleRevision = pres_ ? pres_->Runtime().StyleRevision() : 0;
@@ -458,6 +463,16 @@ void LiveOutputController::Loop() {
 
         (void)RenderOnce();
 
+        // Report the iteration to Telemetry OUT HERE, not inside RenderOnce:
+        // RenderOnce holds control_ for its whole body, and calling across the
+        // engine under a module lock is the pattern the lock-scope guard exists
+        // to catch. What the iteration did is published as a phase + its cost.
+        const int phase = lastPhase_.load();
+        if (phase != static_cast<int>(Phase::Skipped)) {
+            telemetry.OnLiveFrame(lastPhaseMs_.load(), phase == static_cast<int>(Phase::Composed));
+            telemetry.OnLiveSharedCopies(sharedOutputCopies_.load());
+        }
+
         // Pace to the 60Hz target (RenderOnce cost is inside the sleep calc).
         const auto frameEnd = std::chrono::steady_clock::now();
         double spent = std::chrono::duration<double>(frameEnd - now).count();
@@ -467,6 +482,23 @@ void LiveOutputController::Loop() {
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::duration<double>(sleep)));
     }
+
+    // The session's totals and its curve belong to the session: cleared here, by
+    // the thread that ran it, so the next go-live starts from zero instead of
+    // from the last service's numbers (and the Settings meters stop drawing a
+    // load that is no longer there). control_ guards the one non-atomic member
+    // (the kept composed frame) against a concurrent tear-down; the telemetry
+    // call stays OUTSIDE the lock (never call across the engine under one).
+    {
+        std::lock_guard<std::mutex> lock(control_);
+        composedFrames_.store(0);
+        representedFrames_.store(0);
+        sharedOutputCopies_.store(0);
+        lastComposedFrame_.reset();
+        lastPhase_.store(static_cast<int>(Phase::Skipped));
+        lastPhaseMs_.store(0.0);
+    }
+    telemetry.OnLiveStopped();
 }
 
 void LiveOutputController::ApplyPendingLiveContent() {
@@ -650,14 +682,42 @@ Result<void> LiveOutputController::RenderOnce() {
         // ...but a LIGHT HEARTBEAT: a fully static scene would otherwise stop
         // producing frames, so the render-path telemetry the Settings meters
         // read never advances (they sit at their last value, or at 0 if the
-        // engine has not rasterized once since boot). At most one extra frame
-        // per kHeartbeatMs keeps the numbers honest without the 60Hz re-raster
-        // that starved the GUI thread.
+        // engine has not rasterized once since boot).
         if (std::chrono::steady_clock::now() - lastRaster_
             < std::chrono::milliseconds(kHeartbeatMs))
             return Ok();
+        // ---- DIRTY-FRAME SKIP: RE-PRESENT, DO NOT RE-RASTERISE ---------------
+        // The heartbeat used to buy those frames with a full raster of every
+        // output, once a second, for a picture that had NOT CHANGED — pure waste
+        // that scaled with the output count. The composed frame is handed to the
+        // outputs again instead: a scale/copy per output, pixel-identical because
+        // nothing that went into it moved, and roughly an order of magnitude
+        // cheaper than the raster it replaces. That is why the heartbeat gate now
+        // feeds a copy rather than a re-draw.
+        const auto presentStart = std::chrono::steady_clock::now();
+        if (RepresentLastFrame(render)) {
+            // ...but the PER-OUTPUT passes still run. They are the only thing that
+            // CREATES a freshly configured output's buffer, and they serve an
+            // output whose own style/resolution is not the composed one — work the
+            // heartbeat used to get for free by falling through to a full raster.
+            // With the copy above already done, the shared outputs cost one
+            // Distribute each rather than a 1080p raster apiece, which is the whole
+            // point; this call is what keeps a newly enabled screen from never
+            // appearing at all while the on-air scene sits still.
+            RenderPerOutputPasses();   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
+            const double ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - presentStart).count();
+            representedFrames_.fetch_add(1);
+            lastRaster_ = presentStart;   // the outputs are fed: that is what this gate times
+            lastPhaseMs_.store(ms);
+            lastPhase_.store(static_cast<int>(Phase::Represented));
+            return Ok();
+        }
+        // Nothing composed yet this session: fall through and compose (the gate
+        // above is the only thing standing between here and the first frame).
     }
 
+    const auto composeStart = std::chrono::steady_clock::now();
     rendering::RenderOptions opts;
     opts.distribute = true;   // -> every enabled output -> Telemetry output meter
     auto frame = render.Render(sceneId, opts);
@@ -685,6 +745,20 @@ Result<void> LiveOutputController::RenderOnce() {
     // placeholder until the NEXT content change).
     if (frame.ok()) {
         previewFrames_.fetch_add(1);
+        // KEEP THE COMPOSED FRAME: the dirty-frame path re-presents it, and a
+        // per-output buffer that has just been switched to the shared composed
+        // frame takes this copy immediately (see RenderPerOutputPasses).
+        {
+            auto composed = std::make_shared<rendering::Frame>();
+            composed->sceneId = sceneId;
+            composed->frame = frames_.load();
+            composed->width = frame.value().width;
+            composed->height = frame.value().height;
+            composed->pixels = frame.value().pixels;   // the readback this pass already paid for
+            composed->timestampMs = std::chrono::duration<double, std::milli>(
+                                        std::chrono::system_clock::now().time_since_epoch()).count();
+            lastComposedFrame_ = std::move(composed);
+        }
         // ...and report the click-to-preview latency ONCE per replace. This is
         // the number to read when the operator says the preview lags: it is
         // measured from the UI-thread replace to the frame being on the wire,
@@ -724,9 +798,24 @@ Result<void> LiveOutputController::RenderOnce() {
     // while lighter content occasionally won the race and looked fine.
     // Bumping it here, after every per-output buffer for this frame has
     // ALSO landed, closes that window.
-    if (frame.ok())
+    if (frame.ok()) {
         frames_.fetch_add(1);
+        composedFrames_.fetch_add(1);
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - composeStart).count();
+        lastPhaseMs_.store(ms);
+        lastPhase_.store(static_cast<int>(Phase::Composed));
+    }
     return Ok();
+}
+
+// See the header: the copy that replaced the heartbeat's per-second re-raster.
+bool LiveOutputController::RepresentLastFrame(rendering::RenderEngine& render) {
+    const std::shared_ptr<const rendering::Frame> frame = lastComposedFrame_;
+    if (!frame || frame->empty())
+        return false;
+    render.Distribute(*frame);
+    return true;
 }
 
 void LiveOutputController::RenderPerOutputPasses() {
@@ -803,6 +892,30 @@ void LiveOutputController::RenderPerOutputPasses() {
             // main pass's program frame feed this buffer again, so the output
             // shows the program feed instead of freezing on its last frame.
             fb->SetAcceptsDistributedFrames(true);
+            continue;
+        }
+        // ---- SHARED COMPOSED FRAME: COPY, DO NOT RASTERIZE AGAIN -----------
+        // The scene id is the fingerprint of (slide, style, size — see
+        // StyledSceneIdFor), so when the gated build lands on the SAME id the
+        // main pass just composed, this output's picture is pixel-identical to
+        // the program frame and drawing it again is pure waste: one full 1080p
+        // pass per output per frame, which is why every extra enabled output
+        // used to take a bite out of the delivered frame rate (measured: two
+        // more outputs halved it). The output is switched to the program feed
+        // instead — Distribute copies the composed frame into it, scaled to its
+        // own target size by Present — and it takes THAT copy this frame rather
+        // than next, so the switch cannot show a stale picture for one beat.
+        //
+        // A different style, a different content gate or a different configured
+        // resolution means a different id, and such an output keeps its own
+        // natively-laid-out raster (the `@size:` in the id is exactly what keeps
+        // a 4K output from being silently served a resampled 1080p frame).
+        if (sceneId.value() == lastRenderedScene_) {
+            const bool ownedByItsOwnPass = !fb->AcceptsDistributedFrames();
+            fb->SetAcceptsDistributedFrames(true);
+            if (ownedByItsOwnPass && lastComposedFrame_ && !lastComposedFrame_->empty())
+                (void)fb->Present(*lastComposedFrame_);
+            sharedOutputCopies_.fetch_add(1);
             continue;
         }
         // THIS PASS OWNS THIS BUFFER. The main pass distributes its scene to

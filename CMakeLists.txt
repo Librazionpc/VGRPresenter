@@ -116,6 +116,10 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/adaptive/AdaptiveRuntime.cpp
     # Rendering Engine (Phase 6, docs/specs/17)
     ${BPS_ROOT}/modules/rendering/GraphicsBackends.cpp
+    # The D3D11 backend: the GPU rasterizer behind the same IGraphicsBackend seam
+    # (the whole file is _WIN32-gated; elsewhere the factory returns nullptr and the
+    # engine keeps the software backend). Links d3d11 + d3dcompiler on Windows only.
+    ${BPS_ROOT}/modules/rendering/D3D11Backend.cpp
     # The scale filter both picture paths share (ImageScale.hpp): the rasterizer's
     # scaled blits and the per-output frame resize.
     ${BPS_ROOT}/modules/rendering/ImageScale.cpp
@@ -321,6 +325,10 @@ if(WIN32)
     # + runtimeobject for the activation factory; the live health counters in
     # WindowsPlatform.cpp need pdh).
     target_link_libraries(engine_core PUBLIC ws2_32 iphlpapi winmm shell32 user32 shcore ole32 mfplat mf mfuuid mfreadwrite runtimeobject gdi32 gdiplus dwmapi uuid windowscodecs pdh)
+    # The D3D11 backend's two system imports: d3d11 (the device; both DLLs ship
+    # with Windows 10+) and d3dcompiler (the HLSL the backend compiles at device
+    # creation). Nothing else in the engine links a graphics API.
+    target_link_libraries(engine_core PUBLIC d3d11 d3dcompiler)
     # _WIN32_WINNT/WINVER gate which Win32 APIs <windows.h> and friends
     # actually declare — left undefined, MinGW's headers default to an old
     # baseline and silently omit Vista+ APIs the Windows PAL backends use

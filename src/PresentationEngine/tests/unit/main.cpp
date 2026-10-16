@@ -133,6 +133,7 @@ static const Suite kSuites[] = {
     {"rendering", "imgscale", TestImageScale},
     {"rendering", "vframe", TestVideoLayerFrameRefresh},
     {"rendering", "rengine", TestRenderEngine},
+    {"rendering", "d3d11-backend", TestD3D11Backend},
     {"rendering", "rstress", TestRenderStress},
     {"rendering", "png", TestPngCodec},
     {"display", "display", TestDisplayProviders},

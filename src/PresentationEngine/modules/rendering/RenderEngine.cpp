@@ -6,6 +6,7 @@
 #include "core/resources/ResourceManager.hpp"
 #include "modules/adaptive/AdaptiveRuntime.hpp"
 #include "modules/content/ContentManager.hpp"
+#include "modules/rendering/D3D11Backend.hpp"   // the GPU backend's factory (no D3D11 type in it)
 
 #include <algorithm>
 #include <cmath>
@@ -29,16 +30,20 @@ Result<void> RenderEngine::Initialize() {
 
     fonts_.RegisterBuiltin();
 
-    // Backends: software is the default; null for headless.
+    // Backends: the GPU when there is one, software otherwise, null for headless
+    // (see SelectBackend for the contract and the fallback order).
     softwareBackend_ = std::make_unique<SoftwareGraphicsBackend>();
     nullBackend_ = std::make_unique<NullGraphicsBackend>();
 
     auto& config = ConfigurationManager::Instance();
-    const std::string backendName = config.GetString("render.backend", "software");
-    if (backendName == "null")
-        backend_ = nullBackend_.get();
-    else
-        backend_ = softwareBackend_.get();
+    // "auto" is the default: a machine with a D3D11 device draws its frames on
+    // the GPU (the live loop's whole point — one composed frame rasterised once,
+    // then scaled/copied to every output, the preview and the NDI feed), and a
+    // machine without one runs the software rasterizer, which is what this
+    // engine did before the GPU backend existed. The name is logged either way,
+    // so which one a given run used is never a guess.
+    const std::string backendName = config.GetString("render.backend", "auto");
+    SelectBackend(backendName);
 
     gpu_.BindBackend(backend_);
     uploader_.BindGpu(&gpu_);
@@ -75,24 +80,24 @@ Result<void> RenderEngine::Shutdown() {
     scenes_.Clear();
     if (backend_) (void)backend_->Shutdown();
     backend_ = nullptr;
+    // The D3D11 device goes with it: a shutdown that left the device alive would
+    // hand the next Initialize a stale one (and keep the GPU's memory booked).
+    d3d11Backend_.reset();
     softwareBackend_.reset();
     nullBackend_.reset();
+    loggedBackendOnce_ = false;
+    loggedBackend_.clear();
     initialized_.store(false);
     return Ok();
 }
 
 Result<void> RenderEngine::Reload() {
+    // Reload re-reads the setting (a profile that switches backends applies with
+    // a reload) and re-installs whatever it names — the same selection the boot
+    // ran, so a switch to the GPU and a switch back are one code path.
     auto& config = ConfigurationManager::Instance();
-    const std::string backendName = config.GetString("render.backend", "software");
-    if (backendName == "null" && backend_ != nullBackend_.get()) {
-        backend_ = nullBackend_.get();
-        gpu_.BindBackend(backend_);
-        uploader_.BindGpu(&gpu_);
-    } else if (backendName != "null" && backend_ != softwareBackend_.get()) {
-        backend_ = softwareBackend_.get();
-        gpu_.BindBackend(backend_);
-        uploader_.BindGpu(&gpu_);
-    }
+    const std::string backendName = config.GetString("render.backend", "auto");
+    (void)SelectBackend(backendName);
     gpu_.SetTextureBudget(adaptive::AdaptiveRuntime::Instance().GetTextureBudget());
     return Ok();
 }
@@ -133,19 +138,73 @@ Metrics RenderEngine::MetricsSnapshot() const {
 // Backend
 // ---------------------------------------------------------------------------
 
-Result<void> RenderEngine::SetBackend(std::string_view name) {
-    if (!initialized_.load()) return Error::Make(Err::InvalidState, "Render", "not initialized");
-    if (name == "null")
+// The engine's backend contract, in one place (the live loop, the unit tests
+// and the app all go through it):
+//
+//   "null"            headless accounting (CI, servers, tests)
+//   "software"        the CPU rasterizer — always available
+//   "directx11"       the GPU rasterizer; if no device can be made the engine
+//                     runs the software one and SAYS SO (a machine that cannot
+//                     do D3D11 is a fallback case, not an error the app dies on)
+//   "auto" (default)  the GPU when a device can be made, software otherwise
+//   anything else     Render_BackendUnavailable, as before
+Result<void> RenderEngine::SelectBackend(std::string_view requested) {
+    const std::string name(requested.empty() ? "auto" : requested);
+    const bool gpuWanted = (name == kD3D11BackendName || name == "d3d11" || name == "auto");
+    IGraphicsBackend* const before = backend_;
+
+    if (gpuWanted && !d3d11Backend_) {
+        std::string why;
+        d3d11Backend_ = CreateD3D11Backend(&why);
+        if (!d3d11Backend_)
+            Logger::Instance().Info(
+                std::format("no D3D11 device ({}): frames are drawn by the software rasterizer",
+                            why.empty() ? "unavailable" : why),
+                "RenderEngine");
+    }
+
+    if (name == "null") {
         backend_ = nullBackend_.get();
-    else if (name == "software")
+    } else if (name == "software") {
         backend_ = softwareBackend_.get();
-    else
+    } else if (gpuWanted && d3d11Backend_) {
+        backend_ = d3d11Backend_.get();
+    } else if (gpuWanted) {
+        // The GPU was asked for (explicitly or by "auto") and this machine has
+        // none: the software rasterizer is the fallback, never a failed boot.
+        backend_ = softwareBackend_.get();
+    } else {
         return Error::Make(Err::Render_BackendUnavailable, "Render",
-                           "backend '" + std::string(name) + "' unavailable");
+                           "backend '" + name + "' unavailable");
+    }
+
     gpu_.BindBackend(backend_);
     uploader_.BindGpu(&gpu_);
     gpu_.SetTextureBudget(adaptive::AdaptiveRuntime::Instance().GetTextureBudget());
+    if (before != backend_) {
+        // The glyph atlases and layouts the render cache holds carry TextureIds
+        // from the backend that created them, so a REAL switch drops them; the
+        // registry's own textures are released inside BindBackend above. Both
+        // are no-ops on the boot path (there is nothing cached yet).
+        cache_.Clear();
+    }
+    // ONE line, on the real switch only: which backend this process is drawing
+    // with, so "the live frames are on the GPU" is a fact in the log rather
+    // than an assumption about the setting.
+    if (loggedBackend_ != name || !loggedBackendOnce_) {
+        loggedBackend_ = name;
+        loggedBackendOnce_ = true;
+        Logger::Instance().Info(
+            std::format("render backend: requested '{}' -> active '{}'", name,
+                        backend_->Capabilities().name),
+            "RenderEngine");
+    }
     return Ok();
+}
+
+Result<void> RenderEngine::SetBackend(std::string_view name) {
+    if (!initialized_.load()) return Error::Make(Err::InvalidState, "Render", "not initialized");
+    return SelectBackend(name);
 }
 
 const BackendCapabilities& RenderEngine::BackendCaps() const {

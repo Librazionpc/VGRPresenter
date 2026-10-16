@@ -19,6 +19,7 @@
 #include "core/common/Common.hpp"
 #include "core/services/ServiceManager.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
+#include "modules/rendering/RenderOutputs.hpp"   // rendering::Frame (the re-present copy)
 
 #include <atomic>
 #include <chrono>
@@ -35,6 +36,7 @@ class Presentation;   // full type comes from PresentationTypes.hpp above
 }
 namespace bps::rendering {
 class FrameBufferOutput;
+class RenderEngine;
 }
 
 namespace bps::live {
@@ -79,6 +81,19 @@ public:
     void StopLiveAsync();
 
     bool IsLive() const noexcept { return running_.load(); }
+
+    // --- What the loop actually did (the live-rate accounting) --------------
+    // COMPOSED: a real raster — the on-air scene or its style changed.
+    // REPRESENTED: the last composed frame copied to the outputs because nothing
+    // changed (the dirty-frame skip; see RenderOnce and RepresentLastFrame).
+    // SHARED: a per-output raster that was replaced by a copy of the composed
+    // frame, because that output's own scene id WAS the composed one (same
+    // style, same size) — the reason the delivered rate stopped falling with
+    // every enabled output. Telemetry's live section reports all three; the
+    // unit tests assert them without a window (see tests_styles.cpp).
+    uint64_t ComposedFrames() const noexcept { return composedFrames_.load(); }
+    uint64_t RepresentedFrames() const noexcept { return representedFrames_.load(); }
+    uint64_t SharedOutputCopies() const noexcept { return sharedOutputCopies_.load(); }
     bool IsLiveContentReplacementPending() const noexcept {
         return liveContentReplacementPending_.load();
     }
@@ -130,6 +145,10 @@ private:
     LiveOutputController() = default;
 
     void Loop();
+    // The dirty-frame path's second half: hand the last COMPOSED frame to the
+    // outputs again (a scaled copy per output, no raster). False when nothing has
+    // been composed yet, which is the caller's cue to compose instead.
+    bool RepresentLastFrame(rendering::RenderEngine& render);
     void ApplyPendingLiveContent();
     // The shared off-air cleanup both stop paths run (unbind the runtime,
     // clear per-session state). Caller holds lifecycle_.
@@ -151,6 +170,19 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> initialized_{false};
     std::atomic<uint64_t> frames_{0};
+    // See ComposedFrames()/RepresentedFrames()/SharedOutputCopies().
+    std::atomic<uint64_t> composedFrames_{0};
+    std::atomic<uint64_t> representedFrames_{0};
+    std::atomic<uint64_t> sharedOutputCopies_{0};
+    // The last COMPOSED frame: re-presented on the dirty-frame path, and handed
+    // once to a per-output buffer that has just been switched to the shared
+    // composed frame (so it takes the copy THIS frame instead of next).
+    std::shared_ptr<const rendering::Frame> lastComposedFrame_;
+    // What the last iteration did and what it cost, published to Telemetry by
+    // Loop() — OUTSIDE control_ (never call across the engine under this lock).
+    enum class Phase : int { Skipped = 0, Composed = 1, Represented = 2 };
+    std::atomic<int> lastPhase_{static_cast<int>(Phase::Skipped)};
+    std::atomic<double> lastPhaseMs_{0.0};
     // Bumped by the MAIN pass, before the per-output passes run (see
     // PreviewFrames()). Never used as a frame count — it is a "the preview is
     // one step newer" signal for the UI's image refetch.

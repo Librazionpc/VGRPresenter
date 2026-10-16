@@ -931,10 +931,22 @@ int main(int argc, char *argv[])
         QVariant(qEnvironmentVariableIsSet("VGR_QUIT_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     // The go-live latency ladder: it drives live sessions of growing size (slides
-    // x blocks per rung) and quits, so run_live_latency_test.sh can measure the
+    // x blocks per slide) and quits, so run_live_latency_test.sh can measure the
     // first frame and the live cadence against a budget — its own env var like the
     // rest, because a plain VGR_SELFTEST=1 run must never put an output on air on
-    // its own. VGR_LIVELAT_LADDER overrides the rungs ("slides:blocks," repeats).
+    // its own. Three knobs, all optional:
+    //   VGR_LIVELAT_LADDER    the rungs, "slides:blocks:outputs," repeats
+    //                         (default below)
+    //   VGR_LIVELAT_DRIVE_MS  how often a change is asked for while measuring
+    //                         (default 150 — see the scenario's own note on why a
+    //                         static ladder would measure only the heartbeat)
+    //   VGR_LIVELAT_WINDOW_MS how long each rung is measured for (default 8000 —
+    //                         a window wide enough to hold several frames: each
+    //                         live iteration is a 1080p raster PER OUTPUT, so the
+    //                         cadence is single-digit frames a second, and a short
+    //                         window would report whole-frame noise as a trend)
+    // The default rungs each carry at least TWO slides: the driver advances the
+    // on-air slide, and a one-slide rung has nothing to advance.
     engine.rootContext()->setContextProperty(
         QStringLiteral("SelfTestLiveLat"),
         QVariant(qEnvironmentVariableIsSet("VGR_LIVELAT_TEST")
@@ -942,7 +954,14 @@ int main(int argc, char *argv[])
     const QString liveLatLadder = qEnvironmentVariable("VGR_LIVELAT_LADDER");
     engine.rootContext()->setContextProperty(
         QStringLiteral("SelfTestLiveLatLadder"),
-        QVariant(liveLatLadder.isEmpty() ? QStringLiteral("1:2,7:3,20:5") : liveLatLadder));
+        QVariant(liveLatLadder.isEmpty() ? QStringLiteral("2:2:1,8:3:1,20:5:1,20:5:4")
+                                         : liveLatLadder));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestLiveLatDriveMs"),
+        QVariant(qEnvironmentVariable("VGR_LIVELAT_DRIVE_MS", "150")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestLiveLatWindowMs"),
+        QVariant(qEnvironmentVariable("VGR_LIVELAT_WINDOW_MS", "8000")));
     // The scripture-corpus scenario: it opens the Scripture tab, prints what the
     // pane's columns hold and what the service answers for the same Bible, then
     // re-asks once and prints again — its own env var like the rest (a plain

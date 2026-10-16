@@ -12,6 +12,9 @@
 #include "modules/rendering/RenderOutputs.hpp"
 #include "modules/settings/Telemetry.hpp"
 
+#include <chrono>
+#include <thread>
+
 namespace {
 
 namespace pr = bps::production;
@@ -93,6 +96,58 @@ void TestTelemetry() {
     for (uint64_t i = 0; i < st::Telemetry::kWindow; ++i)
         (void)EventBus::Instance().Publish(events::RenderFrameRendered{"s", i, 8.33, 1});
     CHECK(tel.Snapshot().output == 0);
+
+    // --- The LIVE LOOP: rate, cost and the curve -----------------------------
+    // The three meters above are percentages of the 60Hz target, which is the
+    // wrong shape for a live show: a loop composing one frame a second reads as
+    // ~2% next to a preview repainting at 60Hz, so "it gets slower as the
+    // service goes on" had no number and had to be mined out of the log. The
+    // loop reports each iteration as COMPOSED (a raster) or REPRESENTED (the
+    // last composed frame copied to the outputs because nothing changed), and
+    // this section pins both, the per-second sample they close out, and the
+    // stop that clears the session.
+    {
+        tel.OnLiveStopped();                      // start from a known session
+        tel.OnLiveFrame(120.0, true);             // a composed frame, and what it cost
+        st::LiveStats s = tel.LiveSnapshot();
+        CHECK(s.composed == 1);
+        CHECK(s.represented == 0);
+        CHECK(s.frameMs == 120.0);
+        CHECK(s.sharedCopies == 0);
+
+        // ...and the copy that replaced the old per-second re-raster is cheap.
+        tel.OnLiveFrame(8.0, false);
+        s = tel.LiveSnapshot();
+        CHECK(s.represented == 1);
+        CHECK(s.representMs == 8.0);
+        // Per-output rasters replaced by that copy, reported as a RUNNING TOTAL
+        // (the loop publishes it outside its own lock).
+        tel.OnLiveSharedCopies(3);
+        CHECK(tel.LiveSnapshot().sharedCopies == 3);
+
+        // The CURVE: one sample per whole second of loop, closed out by the
+        // first iteration after that second ends. The clock is the loop's own
+        // (see OnLiveFrame) — a loop held off while the machine was busy must
+        // not read as a slow loop — so the test waits real time for it.
+        std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+        tel.OnLiveFrame(9.0, false);              // closes the second that just ended
+        auto history = tel.LiveHistory();
+        CHECK(history.size() == 1);
+        if (!history.empty()) {
+            CHECK(history[0].composedFps > 0.0);                    // 1 raster in the second
+            CHECK(history[0].presentFps > history[0].composedFps);  // plus the copies
+            CHECK(history[0].frameMs == 120.0);
+            CHECK(history[0].representMs == 9.0);
+            CHECK(history[0].sharedCopies == 3);
+        }
+
+        // STOP clears the session: the next go-live must not open on the last
+        // service's curve (a load that is no longer there reads as a fault).
+        tel.OnLiveStopped();
+        CHECK(tel.LiveSnapshot().composed == 0);
+        CHECK(tel.LiveSnapshot().represented == 0);
+        CHECK(tel.LiveHistory().empty());
+    }
 
     // Real path check: OutputManager::Distribute feeds the meter per Present.
     {

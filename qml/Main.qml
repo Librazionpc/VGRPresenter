@@ -4671,41 +4671,188 @@ ApplicationWindow {
     // ---- GO LIVE latency as the load grows -----------------------------------
     // (VGR_LIVELAT_TEST=1 only.) "Going live takes a few seconds, and it gets worse
     // as the service goes on" is a latency report with a SHAPE: what matters is not
-    // one go-live but the trend as slides, blocks and outputs pile up. So this drives
-    // a LADDER of live sessions, each bigger than the last, and prints when each one
-    // started; run_live_latency_test.sh reads the engine's own frame lines against
-    // those to get the two numbers that describe the shape:
-    //   first frame  `live output started` -> the first frame distributed
-    //   cadence      frames per second while that session was live
-    // ...and fails when either crosses the budget it was given (the ladder default
-    // is 1 slide/2 blocks, then 7/3, then 20/5 — big enough that a per-frame cost
-    // that grows with the work shows up as a trend instead of noise).
-    property var liveLat: ({ step: 0 })
+    // one go-live but the trend as slides and the per-slide blocks pile up. So this
+    // drives a LADDER of live sessions, each bigger than the last, and measures each
+    // one the way the operator pays for it:
+    //
+    //   first frame  GO LIVE -> the live preview's first new frame (that is the
+    //                moment something is on the monitor; the LOOP's own publish is
+    //                what is read, so this is the machine's time, not a timer's)
+    //   cadence      frames the live loop DELIVERS per second while the on-air
+    //                slide is being advanced on a fixed beat
+    //
+    // Three dimensions grow, because all three cost the loop per frame: SLIDES and
+    // the per-slide LAYERS (SceneBuilder composites every block), and the OUTPUTS
+    // (the loop renders one extra pass per enabled roster row — a rung asking for
+    // more enabled screens than the roster has adds them, and the ladder puts the
+    // operator's roster back when it is done).
+    //
+    // The measure has to be read from the engine, not from the log: the loop only
+    // rasterizes when the on-air scene CHANGES (a static verse re-rendered at 60Hz
+    // burned a core — see LiveOutputController's change-driven note), a static scene
+    // is served by a 1Hz heartbeat, and the log's own frame line is emitted on state
+    // CHANGE rather than per frame. That is MEASURED, not assumed: driving the same
+    // ladder with a 3 s beat delivered 7-8 frames per 8 s window — the heartbeat,
+    // with the two changes it was asked for buried in it — while a 150 ms beat
+    // delivered the same count, i.e. the iterations the loop actually completed.
+    // Hence the window's own mode (see liveLatTakeOverlay): an OVERLAY on air
+    // bypasses both the skip and the heartbeat, so the loop rasterizes every
+    // iteration it can and the delivered rate IS the loop's throughput. The
+    // slide-advance fallback asks for changes far faster than the loop can serve, so
+    // the frames that come back are again the iterations it completed. Either way
+    // the number is the rate that falls when a frame costs more to build (more
+    // blocks to composite, more outputs to render).
+    //
+    // run_live_latency_test.sh reads the `measured` lines below and fails when the
+    // worst first frame or the lowest cadence crosses its budget.
+    property var liveLat: ({ step: 0, firstFrameMs: -1 })
     function liveLatLog(step, text) { console.log("[SELFTEST-LIVELAT] step=" + step + " " + text) }
+    // The knobs sit in main.cpp beside the rest of the scenario switches:
+    // VGR_LIVELAT_LADDER ("slides:blocks:outputs," repeats), VGR_LIVELAT_DRIVE_MS
+    // (how often a change is asked for while measuring), VGR_LIVELAT_WINDOW_MS (how
+    // long each rung is measured for).
+    function liveLatDriveMs() {
+        const v = typeof SelfTestLiveLatDriveMs !== "undefined"
+                ? parseInt(String(SelfTestLiveLatDriveMs), 10) : 0
+        return v > 0 ? v : 150
+    }
+    function liveLatWindowMs() {
+        const v = typeof SelfTestLiveLatWindowMs !== "undefined"
+                ? parseInt(String(SelfTestLiveLatWindowMs), 10) : 0
+        return v > 0 ? v : 8000
+    }
     function liveLatLadder() {
         const raw = String(typeof SelfTestLiveLatLadder !== "undefined" ? SelfTestLiveLatLadder : "")
         const rungs = []
         raw.split(",").forEach((part) => {
             const bits = part.split(":")
             const slides = parseInt(bits[0], 10)
-            if (slides > 0)
-                rungs.push({ slides: slides, blocks: parseInt(bits[1], 10) || 1 })
+            if (slides > 1)   // a one-slide rung has nothing to advance (see below)
+                rungs.push({ slides: slides, blocks: parseInt(bits[1], 10) || 1,
+                             outputs: parseInt(bits[2], 10) || 1 })
+            else if (slides > 0)
+                console.log("[SELFTEST-LIVELAT] skip rung " + part
+                            + " — a one-slide rung cannot be advanced, so its cadence"
+                            + " would read as the static heartbeat, not the loop's cost")
         })
         return rungs.length > 0 ? rungs
-                                : [ { slides: 1, blocks: 2 }, { slides: 7, blocks: 3 }, { slides: 20, blocks: 5 } ]
+                                : [ { slides: 2, blocks: 2, outputs: 1 },
+                                    { slides: 8, blocks: 3, outputs: 1 },
+                                    { slides: 20, blocks: 5, outputs: 1 },
+                                    { slides: 20, blocks: 5, outputs: 4 } ]
+    }
+    // ---- the OUTPUT dimension: the roster is the operator's, not this run's -----
+    // What an output COSTS the loop is ONE MORE RENDER PASS PER FRAME, and the
+    // engine only renders a pass for an ENABLED, STYLED row
+    // (OutputListModel::pushEngineStyle pushes exactly those). So the count that
+    // matters is enabled+styled, and a row is added here by DUPLICATING a styled
+    // one — the copy carries that style and starts enabled and off air (no window
+    // opens, nothing is sent). This is not a detail: the first version of this
+    // scenario added plain rows, which are styled with nothing, so the "more
+    // outputs" rung measured the identical work as the rung below it and its
+    // flat result would have read as "outputs are free".
+    function liveLatStyledRows() {
+        let n = 0
+        for (let i = 0; i < OutputListModel.rowCount(); ++i) {
+            const row = OutputListModel.getOutput(i)
+            if (row.isEnabled === true && String(row.styleId).length > 0)
+                ++n
+        }
+        return n
+    }
+    function liveLatStyleSource() {
+        for (let i = 0; i < OutputListModel.rowCount(); ++i) {
+            const row = OutputListModel.getOutput(i)
+            if (row.isEnabled === true && String(row.styleId).length > 0)
+                return i
+        }
+        return -1
+    }
+    function liveLatEnsureOutputs(want) {
+        const st = window.liveLat
+        if (st.baseRows === undefined) {
+            st.baseRows = OutputListModel.rowCount()
+            st.added = []
+        }
+        // Drop this run's own rows FIRST when the rung asks for fewer than a
+        // previous rung left behind: `outputs=` is then the rung's own number
+        // rather than an accumulation (a two-rung probe with the outputs rung
+        // first reported 4 for both, which would have hidden the comparison).
+        while (st.added.length > 0 && window.liveLatStyledRows() > want)
+            window.liveLatDropAdded()
+        while (want > 1 && window.liveLatStyledRows() < want && st.added.length < 8) {
+            const src = window.liveLatStyleSource()
+            if (src < 0)
+                break   // no styled row to copy: an added row would render nothing
+            OutputListModel.duplicateOutput(src)
+            // The copy lands right after its source (not at the end), so it is named
+            // here: that name is what this run owns and what it drops by, and it can
+            // never collide with a row the operator made.
+            const name = "LiveLat out " + (st.added.length + 1)
+            OutputListModel.renameOutput(src + 1, name)
+            st.added.push(name)
+        }
+        return window.liveLatStyledRows()
+    }
+    function liveLatDropAdded() {
+        const st = window.liveLat
+        const name = st.added.pop()
+        if (name === undefined)
+            return
+        for (let i = OutputListModel.rowCount() - 1; i >= 0; --i) {
+            if (OutputListModel.getOutput(i).name === name) {
+                OutputListModel.removeOutput(i)
+                return
+            }
+        }
+    }
+    function liveLatRestoreOutputs() {
+        const st = window.liveLat
+        if (st.baseRows === undefined)
+            return
+        // THE ROSTER PERSISTS (OutputListModel::saveRoster writes the store), so a
+        // selftest that grows it has to shrink it back: exactly the rows this run
+        // added come out, and the operator's own roster is what the next launch
+        // reads.
+        while (st.added.length > 0)
+            window.liveLatDropAdded()
+        while (OutputListModel.rowCount() > st.baseRows)   // belt and braces
+            OutputListModel.removeOutput(OutputListModel.rowCount() - 1)
+        window.liveLatLog("restored", "rows=" + OutputListModel.rowCount()
+                          + " styled=" + window.liveLatStyledRows())
     }
     function liveLatRun() {
-        window.liveLat.step++
+        const st = window.liveLat
+        // The engine has to be up before a document can be built or put on air:
+        // wait for the boot rather than guessing a delay (this scenario is the one
+        // that runs LAST in a harness, but a cold start can still be slower than
+        // any fixed interval).
+        if (!EngineBridge.booted && st.step === 0) {
+            window.liveLatLog("wait", "the engine has not finished booting")
+            selfTestLiveLat.restart()
+            return
+        }
         const rungs = window.liveLatLadder()
-        if (window.liveLat.step > rungs.length) {
+        if (st.planned === undefined) {
+            // The ladder it is actually going to drive (the harness reads this
+            // count rather than parsing the env string it may have been given).
+            st.planned = true
+            window.liveLatLog("plan", "rungs=" + rungs.length
+                              + " driveMs=" + window.liveLatDriveMs()
+                              + " windowMs=" + window.liveLatWindowMs())
+        }
+        if (st.step >= rungs.length) {
+            window.liveLatRestoreOutputs()
             window.liveLatLog("done", "cycles=" + rungs.length)
             selfTestLiveLatQuit.restart()
             return
         }
-        const rung = rungs[window.liveLat.step - 1]
-        // A fresh document at this rung's size, and the BLOCKS matter: they are the
-        // per-frame work (SceneBuilder composites every one of them), so the ladder
-        // grows the thing the render loop pays for, not just the slide count.
+        const rung = rungs[st.step]
+        st.step++
+        // A fresh document at this rung's size, and the BLOCKS matter: they are
+        // the per-frame work (SceneBuilder composites every one of them), so the
+        // ladder grows the thing the render loop pays for, not just the slide
+        // count.
         ShowService.newShowDocument("LiveLat " + rung.slides)
         for (let i = 0; i < rung.slides; ++i) {
             const slideId = ShowService.addSlide({ title: "Lat " + (i + 1) })
@@ -4715,15 +4862,119 @@ ApplicationWindow {
                                                 width: 700, height: 90 })
             }
         }
-        const t0 = Date.now()
+        st.slides = rung.slides
+        st.blocks = rung.slides * rung.blocks
+        const liveOuts = window.liveLatEnsureOutputs(rung.outputs)
+        st.outputs = liveOuts
+        // A rung that never gets a frame is reported as measured (firstFrameMs=-1),
+        // not skipped: "it never went live" is the worst case of the number this
+        // harness polices, and a rung that silently disappeared would read as a
+        // pass with one fewer line.
+        st.timeoutMs = 5000 + rung.slides * 500
+        st.firstFrameMs = -1
+        st.frames = 0
+        st.changes = 0
+        st.basePreview = LiveOutputService.previewFramesNow()
+        st.t0 = Date.now()
         LiveOutputService.goLive()
-        const press = Date.now() - t0
-        window.liveLatLog("cycle", "n=" + window.liveLat.step + " slides=" + rung.slides
-                          + " blocks=" + (rung.slides * rung.blocks)
+        const press = Date.now() - st.t0
+        window.liveLatLog("cycle", "n=" + st.step + " slides=" + st.slides
+                          + " blocks=" + st.blocks + " outputs=" + st.outputs
+                          + " driveMs=" + window.liveLatDriveMs()
+                          + " windowMs=" + window.liveLatWindowMs()
                           + " goLiveCall=" + press + "ms live=" + LiveOutputService.live)
-        selfTestLiveLatStop.restart()
+        selfTestLiveLatPoll.start()
+    }
+    function liveLatPoll() {
+        const st = window.liveLat
+        if (LiveOutputService.previewFramesNow() > st.basePreview) {
+            window.liveLatFirstFrame()
+            return
+        }
+        if (Date.now() - st.t0 > st.timeoutMs) {
+            selfTestLiveLatPoll.stop()
+            window.liveLatLog("noframe", "n=" + st.step + " slides=" + st.slides
+                              + " blocks=" + st.blocks + " outputs=" + st.outputs
+                              + " waitedMs=" + (Date.now() - st.t0)
+                              + " live=" + LiveOutputService.live
+                              + " frames=" + LiveOutputService.framesSentNow())
+            window.liveLatLog("measured", "n=" + st.step + " slides=" + st.slides
+                              + " blocks=" + st.blocks + " outputs=" + st.outputs
+                              + " firstFrameMs=-1 frames=0"
+                              + " changes=0 windowMs=0 fps=0.00 live=" + LiveOutputService.live
+                              + " mode=none")
+            window.liveLatStop()
+        }
+    }
+    // THE WINDOW NEEDS THE LOOP TO HAVE WORK, and an overlay does that perfectly:
+    // the live loop's change-driven skip and its 1Hz heartbeat are BOTH bypassed
+    // while the compositor has live content (a taken input, media on air, or an
+    // active overlay — see LiveOutputController::RenderOnce), so with one overlay on
+    // air the loop rasterizes every iteration it can and the delivered rate IS the
+    // loop's throughput. The slide-advance driver below only reaches the same thing
+    // indirectly (it asks for changes faster than the loop serves them), so it is
+    // the fallback for a machine whose overlay library is empty. Which one was used
+    // is printed (`mode=`) and travels with the numbers, because the two do not
+    // mean quite the same thing.
+    function liveLatTakeOverlay() {
+        const designs = OverlayLibraryService.designs()
+        for (let i = 0; i < designs.length; ++i) {
+            const d = designs[i]
+            const id = String(d.id !== undefined ? d.id : (d.ref !== undefined ? d.ref : ""))
+            if (id.length > 0) {
+                LiveOutputService.takeOverlay(id, String(d.name !== undefined ? d.name : ""))
+                return id
+            }
+        }
+        return ""
+    }
+    function liveLatFirstFrame() {
+        const st = window.liveLat
+        selfTestLiveLatPoll.stop()
+        st.firstFrameMs = Date.now() - st.t0
+        st.overlayId = window.liveLatTakeOverlay()
+        st.mode = st.overlayId.length > 0 ? "overlay" : "slides"
+        st.baseFrames = LiveOutputService.framesSentNow()
+        st.sampleStart = Date.now()
+        st.changes = 0
+        window.liveLatLog("firstframe", "n=" + st.step + " firstFrameMs=" + st.firstFrameMs)
+        window.liveLatLog("mode", "n=" + st.step + " mode=" + st.mode
+                          + (st.mode === "overlay" ? " overlay='" + st.overlayId + "'"
+                                                    : " (no overlay design to take)"))
+        if (st.mode === "slides") {
+            selfTestLiveLatDrive.interval = window.liveLatDriveMs()
+            selfTestLiveLatDrive.start()
+        }
+        selfTestLiveLatWindow.interval = window.liveLatWindowMs()
+        selfTestLiveLatWindow.start()
+    }
+    function liveLatDrive() {
+        const st = window.liveLat
+        ++st.changes
+        if (!LiveOutputService.next())
+            LiveOutputService.jumpTo(0)
+    }
+    function liveLatWindow() {
+        const st = window.liveLat
+        selfTestLiveLatDrive.stop()
+        const elapsed = Math.max(1, Date.now() - st.sampleStart)
+        const frames = LiveOutputService.framesSentNow() - st.baseFrames
+        st.frames = frames
+        window.liveLatLog("measured", "n=" + st.step + " slides=" + st.slides
+                          + " blocks=" + st.blocks + " outputs=" + st.outputs
+                          + " firstFrameMs=" + Math.round(st.firstFrameMs)
+                          + " frames=" + frames + " changes=" + st.changes
+                          + " windowMs=" + elapsed
+                          + " fps=" + (frames * 1000 / elapsed).toFixed(2)
+                          + " live=" + LiveOutputService.live
+                          + " mode=" + (st.mode !== undefined ? st.mode : "none"))
+        window.liveLatStop()
     }
     function liveLatStop() {
+        selfTestLiveLatPoll.stop()
+        selfTestLiveLatDrive.stop()
+        selfTestLiveLatWindow.stop()
+        LiveOutputService.clearAllOverlays()   // this run took it; this run takes it back
         LiveOutputService.stop()
         window.liveLatLog("stopped", "n=" + window.liveLat.step)
         selfTestLiveLatNext.restart()
@@ -4734,7 +4985,9 @@ ApplicationWindow {
         interval: 18000   // boot, then the engine's stores
         onTriggered: window.liveLatRun()
     }
-    Timer { id: selfTestLiveLatStop; interval: 4000; onTriggered: window.liveLatStop() }
+    Timer { id: selfTestLiveLatPoll; interval: 25; repeat: true; onTriggered: window.liveLatPoll() }
+    Timer { id: selfTestLiveLatDrive; repeat: true; onTriggered: window.liveLatDrive() }
+    Timer { id: selfTestLiveLatWindow; onTriggered: window.liveLatWindow() }
     Timer { id: selfTestLiveLatNext; interval: 800; onTriggered: window.liveLatRun() }
     Timer { id: selfTestLiveLatQuit; interval: 500; onTriggered: SelfTest.quit() }
 

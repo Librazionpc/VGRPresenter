@@ -108,6 +108,15 @@ public:
     Result<std::shared_ptr<IRenderOutput>> GetOutput(std::string_view name) const;
     Result<void> RemoveOutput(std::string_view name);
     size_t OutputCount() const;
+    // Hands an ALREADY COMPOSED frame to the outputs (scaled to each one's own
+    // target size by Present) WITHOUT rasterizing anything again. This is the
+    // cheap half of the live loop's dirty-frame path: when the on-air scene has
+    // not changed there is nothing to rasterize, but the outputs, the NDI
+    // sender, the recorders and the output meter all read presents — so the
+    // composed frame is handed over again instead of being re-drawn per output.
+    // Goes through the same OutputManager::Distribute the render path uses, so
+    // the telemetry output meter counts these presents exactly as it always has.
+    void Distribute(const Frame& frame) { outputs_.Distribute(frame); }
 
     // --- Resources (async) ---
     Result<TextureId> UploadTexture(std::string_view name, const RgbaImage& image);
@@ -149,9 +158,24 @@ private:
     void DrawObject(RenderObject* obj, std::vector<DrawCommand>& cmds);
     void DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmds);
 
+    // Installs the backend named by `render.backend` ("auto" = the GPU when one
+    // can really be made, software otherwise; see the .cpp for the contract,
+    // including the fallback and the log line that says which one is live).
+    Result<void> SelectBackend(std::string_view requested);
+
+    // The backends, in the order the engine prefers them: the D3D11 GPU one
+    // exists only when a device could really be made, and stays null on a
+    // build/machine that has none — so such a machine runs the software
+    // rasterizer exactly as it did before. The unique_ptr<IGraphicsBackend>
+    // form is what keeps <d3d11.h> out of this header.
     IGraphicsBackend* backend_ = nullptr;
+    std::unique_ptr<IGraphicsBackend> d3d11Backend_;
     std::unique_ptr<NullGraphicsBackend> nullBackend_;
     std::unique_ptr<SoftwareGraphicsBackend> softwareBackend_;
+    // The one line that says which backend this process selected, and on which
+    // request (see SelectBackend) — logged once per distinct answer.
+    bool loggedBackendOnce_ = false;
+    std::string loggedBackend_;
 
     SceneGraph scenes_;
     RenderPipeline pipeline_;

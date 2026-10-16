@@ -2082,6 +2082,18 @@ QVariantMap LiveOutputService::previewWithStyle(const QVariantMap &slide,
 // ---------------------------------------------------------------------------
 // Poll (onAir titles + frame counter while live)
 // ---------------------------------------------------------------------------
+// See the header: the two publish points of the live loop, read synchronously
+// (atomics only), so a measurement is not quantized to the 10Hz poll.
+qulonglong LiveOutputService::previewFramesNow() const
+{
+    return bps::live::LiveOutputController::Instance().PreviewFrames();
+}
+
+qulonglong LiveOutputService::framesSentNow() const
+{
+    return bps::live::LiveOutputController::Instance().FramesSent();
+}
+
 void LiveOutputService::pollTick()
 {
     if (!live_)

@@ -36,6 +36,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QVariantList>
 #include <QVariantMap>
 #include <QtQml/qqmlregistration.h>
 
@@ -67,6 +68,22 @@ class TelemetryService : public QObject
     // — what the engine's adaptive runtime is currently DOING with the machine
     // (its second slow-changing half is asked at 1/4 the poll cadence).
     Q_PROPERTY(QVariantMap engine READ engine NOTIFY engineChanged)
+    // { composedFps, presentFps, frameMs, representMs, sharedCopies, composed,
+    //   represented } — the LIVE LOOP's own rate and per-frame cost, plus the
+    // running totals of the two kinds of iteration (see the engine's LiveSample).
+    // The three percentages above say how BUSY the engine is; none of them says
+    // whether the show is getting slower as the service goes on, because a live
+    // loop that composes one frame a second reads as ~2% rendering next to a
+    // preview repainting at 60Hz. This is that missing number — and the same one
+    // the engine logs at the end of a session, so a slowdown has a curve to look
+    // at instead of a log to mine.
+    Q_PROPERTY(QVariantMap live READ live NOTIFY liveChanged)
+    // The curve behind `live`: one sample per whole second of the live loop,
+    // oldest first, up to 60 s, each shaped like the map above. Empty when
+    // nothing has been live (and cleared with the engine's own when a session
+    // ends — a curve that kept drawing a load that is no longer there would be
+    // the same lie the meters were fixed for).
+    Q_PROPERTY(QVariantList liveHistory READ liveHistory NOTIFY liveHistoryChanged)
 
 public:
     static TelemetryService &instance();
@@ -75,6 +92,8 @@ public:
     QVariantMap utilization() const { return utilization_; }
     QVariantMap health() const { return health_; }
     QVariantMap engine() const { return engine_; }
+    QVariantMap live() const { return live_; }
+    QVariantList liveHistory() const { return liveHistory_; }
 
     // aboutToQuit, BEFORE EngineBridge::shutdown (main.cpp): stop the sampler and join it,
     // so no PAL or engine read can be in flight while those are torn down under it — the
@@ -92,6 +111,8 @@ signals:
     void utilizationChanged();
     void healthChanged();
     void engineChanged();
+    void liveChanged();
+    void liveHistoryChanged();
 
 private:
     // ONE PASS OF READING, done on the sampler thread: the PAL sample, the engine's
@@ -103,6 +124,8 @@ private:
         QVariantMap health;
         bool tookEngine = false;
         QVariantMap engine;
+        QVariantMap live;
+        QVariantList liveHistory;
     };
 
     Sample measure();
@@ -110,6 +133,12 @@ private:
     QVariantMap sampleHealth();
     // The adaptive runtime's snapshot -> the engine map (see `engine`).
     QVariantMap sampleEngine();
+    // The live loop's own counters -> the `live` map, and its per-second samples ->
+    // the `liveHistory` curve (see both properties). Read on the sampler thread, like
+    // every other reading here: the engine's LiveSnapshot/LiveHistory take the module's
+    // own small lock and touch no device.
+    QVariantMap sampleLive();
+    QVariantList sampleLiveHistory();
     // The interface thread's half: compare against what QML already has and emit only the
     // maps that changed (unchanged maps must not re-lay-out a card at the poll cadence).
     void publish(const Sample &s);
@@ -127,10 +156,23 @@ private:
     QVariantMap utilization_;
     QVariantMap health_;
     QVariantMap engine_;
+    QVariantMap live_;
+    QVariantList liveHistory_;
     // Interface-thread only: the two one-shot diagnostics publish() writes — the thread ids
     // that say where the sampling happens, and the first pass with something measured on it.
     bool threadingLogged_ = false;
     bool readingsLogged_ = false;
+    // Interface-thread only: the live session the last published sample belonged to. A
+    // session that ENDED gets its curve and its totals logged once (a show's own
+    // numbers, at the moment they are final), and the curve is cleared with the
+    // engine's — so a slowdown over a service is a shape in the log's one summary
+    // line rather than a per-second stream nobody can read back.
+    bool liveWasActive_ = false;
+    // The session's own worst readings, for that one line: the slowest raster and the
+    // lowest composed rate the curve held (the two numbers a report about a slowdown
+    // is actually made of).
+    double liveWorstFrameMs_ = 0.0;
+    double liveMinComposedFps_ = 0.0;
 
     // ---- sampler-thread state, touched by no other thread ----
     // The adaptive runtime's own snapshot is heavier than the PAL sample (it copies the

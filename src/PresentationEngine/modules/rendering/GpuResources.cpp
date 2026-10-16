@@ -126,6 +126,40 @@ void GPUResourceManager::Clear() {
     textures_.clear();
 }
 
+void GPUResourceManager::BindBackend(IGraphicsBackend* backend) {
+    if (backend_ == backend)
+        return;
+    // THE IDS BELONG TO THE BACKEND THAT MADE THEM. A switch — the engine's
+    // Initialize, or a Reload/SetBackend that moved a session from the CPU
+    // rasterizer to the GPU or back — has to destroy the old backend's textures
+    // and forget the names, so the next AcquireTexture uploads into the backend
+    // that is actually drawing. Skipped, the new backend is asked to blit ids it
+    // never created: it draws nothing, and a fully composed scene arrives on the
+    // outputs as background-only pixels.
+    std::vector<TextureId> stale;
+    IGraphicsBackend* previous = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (backend_ == backend)
+            return;   // another thread got here first
+        previous = backend_;
+        stale.reserve(textures_.size());
+        for (const auto& [name, e] : textures_) {
+            (void)name;
+            stale.push_back(e.id);
+        }
+        textures_.clear();
+        backend_ = backend;
+    }
+    // Released OUTSIDE the registry lock: destroying a texture is the backend's
+    // own device work, and holding the registry mutex across a call into a device
+    // is exactly the pattern the lock-scope guard exists to catch.
+    if (previous) {
+        for (TextureId id : stale)
+            (void)previous->DestroyTexture(id);
+    }
+}
+
 // ===========================================================================
 // RenderCache
 // ===========================================================================

@@ -1362,3 +1362,104 @@ closing runs `AppBehaviors.cleanExit()`, which abandons the queued READS
 operator asked for to finish its write — the two halves of `bps::JobTicket`
 (`Abandon` vs `WithdrawVerdict`), whose semantics the `job-cancel` unit suite pins
 down (`./build/bps_unit_tests job-cancel`).
+
+## GO LIVE latency: the first frame, and the live frame rate as the load grows
+
+`run_live_latency_test.sh` covers the two numbers behind every "going live takes a
+few seconds, and it gets worse as the show grows" report — and it covers them as a
+TREND: the app drives a ladder of live sessions, each bigger than the last, and
+measures each one itself.
+
+```bash
+bash tools/selftest/run_live_latency_test.sh          # the default ladder
+LIVELAT_MAX_FIRST_FRAME_MS=1200 bash tools/selftest/run_live_latency_test.sh
+```
+
+```
+== the ladder the app drove ==
+[SELFTEST-LIVELAT] step=plan rungs=4 driveMs=150 windowMs=8000
+[SELFTEST-LIVELAT] step=cycle n=1 slides=2 blocks=4 outputs=2 driveMs=150 windowMs=8000 goLiveCall=74ms live=true
+[SELFTEST-LIVELAT] step=firstframe n=1 firstFrameMs=1455
+[SELFTEST-LIVELAT] step=mode n=1 mode=overlay overlay='clock'
+[SELFTEST-LIVELAT] step=measured n=1 slides=2 blocks=4 outputs=2 firstFrameMs=1455 frames=10 changes=0 windowMs=8433 fps=1.19 live=true mode=overlay
+...
+== per-rung measurement (the app's own counters) ==
+rung  slides  blocks  outputs  firstFrameMs  frames/reps  windowMs  fps       mode      comment
+1     2       4       2        1455          10/0        8433      1.19      overlay
+2     8       24      2        429           11/0        8611      1.28      overlay
+3     20      100     2        331           10/0        8527      1.17      overlay
+4     20      100     4        378           6/0         8796      0.68      overlay
+LIVELAT: PASS rungs=4 worstFirstFrame=1455ms minFps=0.68 maxFps=1.28 drop=46.9% budget=2000ms/0.5fps/60%
+LIVELAT: FAIL launch | FAIL missing | FAIL cycles | FAIL firstframe
+        | FAIL nomove | FAIL fps | FAIL fpsdrop | FAIL roster
+```
+
+**The app measures, the script judges — and neither number can come from the log.**
+The log's own frame line (`output frame sanity`) is written when the presented state
+CHANGES, not per frame, and the live loop only rasterizes when the on-air scene
+changes at all (change-driven rendering with a 1Hz heartbeat for a static scene): a
+static session has no frame rate to degrade, and counting log lines would count state
+changes. So the scenario reads the loop's two publish points instead —
+`LiveOutputService.previewFramesNow()` (the main pass: the first thing the operator
+can see, which is what the first frame is timed on) and `framesSentNow()` (the whole
+iteration, once every per-output pass has landed, which is what the cadence is
+counted on).
+
+**The window is loaded on purpose, and the app says which way.** The first version of
+this scenario advanced the on-air slide every 150 ms and called the result a frame
+rate. It was not: MEASURED, the loop delivered the same 7-8 frames per 8 s window at a
+150 ms beat and at a 3 s beat, i.e. the 1Hz heartbeat and not its own throughput — an
+average of the policy, insensitive to the load the harness exists to test. The window
+now takes an **overlay on air** first: the change-driven skip and the heartbeat are
+both bypassed while the compositor has live content
+(`LiveOutputController::RenderOnce`), so the loop rasterizes every iteration it can
+and the delivered rate IS its throughput. `mode=` travels with every row because the
+fallback (`slides` — the overlay library was empty, so the scenario advances the
+on-air slide far faster than the loop can serve) does not mean quite the same thing.
+Either mode is a state an operator can really be in; nothing synthetic is taken on
+air, and the overlay is released before the session stops.
+
+| line | what it proves |
+|---|---|
+| `plan` | how many rungs this run will drive, and the beat — the harness reads the count from here rather than parsing its own env string |
+| `cycle` | the rung's document is built and GO LIVE was asked for; `goLiveCall=` is what the CALL cost the interface thread (a different thing from the first frame, which lands later, on the loop) |
+| `firstframe` | the loop's own publish moved: something is on the monitor |
+| `mode` | which load was applied to the window, and the overlay it took when it took one |
+| `measured` | this rung's numbers, `live=true`, and its mode — a rung measured after the live session had already dropped reads as a pass otherwise |
+| `noframe` | the rung waited out its whole deadline without a frame, and it is still reported as `measured` (`firstFrameMs=-1`): never going live is the worst case of the number this harness polices, so it must not be a missing row |
+| `restored` | the output roster the ladder grew is back to what the operator had |
+| `done` | every rung ran |
+
+The ladder's default is `2:2:1`, `8:3:1`, `20:5:1`, `20:5:4` — SLIDES, LAYERS PER
+SLIDE and ENABLED OUTPUTS: the three things the loop pays for per frame (`SceneBuilder`
+composites every block; the loop renders one extra pass per enabled, styled roster
+row). The last rung holds the content still and grows only the outputs, so a cost that
+arrives with outputs is not read as a cost of content. `VGR_LIVELAT_LADDER`,
+`VGR_LIVELAT_DRIVE_MS` and `VGR_LIVELAT_WINDOW_MS` override the ladder, the beat and
+the window; a rung asking for one slide is skipped with a line saying so (the slides
+mode has nothing to advance on it).
+
+**What the load actually costs here (one run, this machine).** The last rung's two
+extra outputs took the cadence from 1.28 fps to 0.68 — a 47% throughput loss for two
+more 1080p passes per frame, and the load-shape half of the verdict is built on
+numbers like that. Slides and blocks, at 2 → 8 → 20 slides and 4 → 100 blocks, moved
+the same number by nothing measurable (1.19 → 1.28 → 1.17, i.e. run-to-run noise): on
+this machine the iteration is dominated by the fixed per-output raster cost, not by
+the scene's block count. That is the harness reporting what is there rather than a
+target it wants to see, and it is why the outputs rung exists at all.
+
+**The roster is the operator's, not the harness's.** A rung asking for more enabled
+screens than the roster has DUPLICATES a styled row, and the run names what it adds
+so it can remove exactly those before it quits (`OutputListModel::saveRoster`
+persists, so a selftest must not leave junk outputs behind). Duplicating rather than
+adding, because the engine only renders a per-output pass for an ENABLED, STYLED row
+— a bare added row measured as "outputs are free" in the first version of this
+scenario, which is exactly the kind of thing a load harness must not get wrong.
+`FAIL roster` fires if the `restored` line never lands.
+
+The budgets are a regression gate set from the measured runs, not a target — three
+runs on this machine, and the gate has to survive the spread they show. The worst
+first frame may not exceed 2000 ms (measured 998–1455, and the worst rung is always
+the FIRST: a cold first raster, which is also why it varies most), the slowest rung
+may not fall under 0.5 fps (measured 0.68–0.81), and no rung may sit more than 60%
+under the fastest (measured 44–47%, which the outputs rung spends by design).

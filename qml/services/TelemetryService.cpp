@@ -155,6 +155,12 @@ TelemetryService::Sample TelemetryService::measure()
         {QStringLiteral("output"), u.output},
     };
     s.health = sampleHealth();
+    // The live loop's own rate and frame cost, and the per-second curve behind
+    // them. Cheap (the module's counters and a small vector copy) and it is the
+    // one reading here that can go stale the moment a show starts, so it is read
+    // on EVERY pass.
+    s.live = sampleLive();
+    s.liveHistory = sampleLiveHistory();
     // What the engine is DOING with the machine. Slow-changing (and heavier to
     // read), so one pass in four is plenty.
     if (++pollCount_ % kEnginePollEvery == 0) {
@@ -209,6 +215,84 @@ void TelemetryService::publish(const Sample &s)
         engine_ = s.engine;
         emit engineChanged();
     }
+    // The live loop's numbers and its curve. Both change while a show runs and go
+    // quiet when it stops — the engine clears its own on stop, so the change is
+    // seen here too, which is what makes the session-end summary below fire.
+    if (s.live != live_) {
+        live_ = s.live;
+        emit liveChanged();
+    }
+    if (s.liveHistory != liveHistory_) {
+        liveHistory_ = s.liveHistory;
+        emit liveHistoryChanged();
+    }
+    // ONE LINE PER LIVE SESSION, written when it ends and carrying its shape. The
+    // curve exists so a slowdown is looked at rather than mined out of the log —
+    // but a session's slowest raster and its lowest composed rate are the two
+    // numbers the next report is actually made of, and they are only final once
+    // the loop has stopped (the engine clears the counters with the curve, which
+    // is exactly the edge this reads).
+    if (!s.live.isEmpty()) {
+        const double frameMs = s.live.value(QStringLiteral("frameMs")).toDouble();
+        const double fps = s.live.value(QStringLiteral("composedFps")).toDouble();
+        if (frameMs > liveWorstFrameMs_)
+            liveWorstFrameMs_ = frameMs;
+        if (fps > 0.0 && (liveMinComposedFps_ == 0.0 || fps < liveMinComposedFps_))
+            liveMinComposedFps_ = fps;
+        liveWasActive_ = true;
+    } else if (liveWasActive_) {
+        liveWasActive_ = false;
+        const double worst = liveWorstFrameMs_;
+        const double slowest = liveMinComposedFps_;
+        liveWorstFrameMs_ = 0.0;
+        liveMinComposedFps_ = 0.0;
+        EngineBridge::write(
+            QStringLiteral("info"), QStringLiteral("Telemetry"),
+            QStringLiteral("live session ended: slowest raster %1 ms, lowest composed rate %2 fps "
+                           "(the live curve in Telemetry.liveHistory; a rate that falls over a "
+                           "session is a slowdown, not a busy engine)")
+                .arg(worst, 0, 'f', 1)
+                .arg(slowest, 0, 'f', 2));
+    }
+}
+
+// The live loop's own counters (see LiveSample in the engine's Telemetry): the
+// current second's rates and costs plus the running totals, so QML can show a
+// number that moves WITH the show instead of a percentage of the 60Hz target
+// that a slow live loop cannot even fill.
+QVariantMap TelemetryService::sampleLive()
+{
+    const bps::settings::LiveStats s = bps::settings::Telemetry::Instance().LiveSnapshot();
+    return {
+        { QStringLiteral("composedFps"), s.composedFps },
+        { QStringLiteral("presentFps"), s.presentFps },
+        { QStringLiteral("frameMs"), s.frameMs },
+        { QStringLiteral("representMs"), s.representMs },
+        { QStringLiteral("sharedCopies"), static_cast<qlonglong>(s.sharedCopies) },
+        { QStringLiteral("composed"), static_cast<qlonglong>(s.composed) },
+        { QStringLiteral("represented"), static_cast<qlonglong>(s.represented) },
+    };
+}
+
+// The curve: one map per whole second of live loop, oldest first (the engine
+// keeps at most 60 s and drops the oldest). Same shape as `live`, so a card can
+// plot either without a second parse path.
+QVariantList TelemetryService::sampleLiveHistory()
+{
+    QVariantList out;
+    const std::vector<bps::settings::LiveSample> history =
+        bps::settings::Telemetry::Instance().LiveHistory();
+    out.reserve(static_cast<int>(history.size()));
+    for (const auto& sample : history) {
+        out.append(QVariantMap{
+            { QStringLiteral("composedFps"), sample.composedFps },
+            { QStringLiteral("presentFps"), sample.presentFps },
+            { QStringLiteral("frameMs"), sample.frameMs },
+            { QStringLiteral("representMs"), sample.representMs },
+            { QStringLiteral("sharedCopies"), static_cast<qlonglong>(sample.sharedCopies) },
+        });
+    }
+    return out;
 }
 
 // The adaptive runtime's own view: which mode/layer/quality it settled on, how
