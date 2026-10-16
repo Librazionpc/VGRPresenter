@@ -339,6 +339,49 @@ How it fits together:
 - **Waits 15s before its first step** so the rosters' own restore cannot land
   between the scenario's add and its cleanup.
 
+## The Scripture tab: do its columns fill?
+
+`run_scripture_test.sh` guards the report "scripture is not showing" — the
+Scripture tab listing the installed Bible in its first column while the books,
+chapters and verses columns stayed blank and the preview said "Pick a verse",
+with nothing in the log, because an empty column is the same pixels whether the
+outline read is still in flight, was declined, or came back empty.
+
+```bash
+bash tools/selftest/run_scripture_test.sh 70
+# ... SCRIPTURE: PASS sources=1 bookRows=66 verses=31 serviceBooks=66
+#     SCRIPTURE: FAIL launch | FAIL missing | FAIL empty | FAIL noread
+```
+
+**What it caught.** `ScriptureService`'s corpus reads are PUBLISHED (a miss
+queues the read on a worker and answers EMPTY — see its header). The pane's
+`syncSources` had an early return, `if (root.currentSource) return`, meaning "a
+source is already open, nothing to choose". The FIRST `openSource` can land right
+in that gap: it set `sourceId`, took an empty outline and left no book open — and
+every later notify then returned at that guard, so the outline that landed a
+third of a second later (66 books, `ScriptureCorpus` says so in the engine log)
+was never consumed. The pane now re-asks an empty outline instead of returning on
+it, which is cheap: a read already in flight is not queued twice. The run's own
+trace shows the repair (`books 'ENGLISHK21': read queued` → `66 answered` →
+`openBook` → `openChapter rows=31`).
+
+How it fits together:
+
+- **The scenario** is the `selfTestScripture` block in `qml/Main.qml`, gated on
+  the `SelfTestScripture` context property (BOTH `VGR_SELFTEST=1` and
+  `VGR_SCRIPTURE_TEST=1`). It shows the tab exactly as a click does
+  (`showScreen.showInLibrary("scripture", "")`) and prints the pane's own state
+  (`sources`, `sourceId`, `books`, `visibleBooks`, `chapterVerses`) beside what
+  the service answers for the same Bible id — twice, the second time after the
+  pane re-asks the way a tab switch makes it (`syncSources`).
+- **The pair is the point**: books on the second sample but not the first is a
+  notify that never reached the pane; none on either is the read itself.
+- **`ScriptureCorpus` in the engine log** (one line per COLD read: `read queued`,
+  `read DECLINED — the engine is not booted yet`, `<n> answered`) is what says
+  which of those it was. The harness reads it back from `build/logs/engine.log`
+  per launch, not from the app's stdout, where only `console.log` lands.
+- **Read-only**: it opens the tab, prints, and quits. Nothing is written.
+
 ## The bus status light: does it actually go green?
 
 `run_bus_light_test.sh` guards the report "i thought i said we should give the
@@ -361,9 +404,34 @@ all three lights read amber, and there were two independent reasons:
 ```bash
 bash tools/selftest/run_bus_light_test.sh 100
 # ... BUSLIGHT: PASS green=3/3 buses=3 pings=4
+#     BUSLIGHT: SKIP noaudio — the video half passed, but this SETUP has no
+#                audio-only bus with a routed input (exit 0)
 #     BUSLIGHT: FAIL launch | FAIL missing | FAIL norouted | FAIL status
 #                | FAIL noping | FAIL pinglabel | FAIL ghostalive | FAIL wrongkind
 ```
+
+**`SKIP noaudio` is the setup's verdict, not the app's.** The audio half is the
+run's positive case (a meter tap hands over levels — silence is data — so a held
+meter must read `ok` and its card `connected`), and whether such a bus EXISTS is
+something the scenario's own candidate search decides from the stored rosters
+(`BusListModel` + `AudioInputListModel`) — it touches no meter and no tap. On a
+machine with no audio-only bus carrying a routed input there is nothing to hold,
+so the run reports SKIP and prints the half that DID run beside it, by name:
+
+```
+BUSLIGHT: SKIP noaudio — video half PASSED (buses=2 pings=3 delivery=ok heldBus=1
+  heldStatus=connected green=1/2; not connected: The Table (video) reads offline)
+  but this setup has no audio-only bus with a routed input, ...
+```
+
+Two details there are deliberate. The **not-connected bus is named** because the
+run's own `status` verdict treats any routed-but-not-connected bus as a fault,
+while a screen bus whose screen is not on air reads `offline` by design — so the
+skip states which bus it was rather than leaving `green=1/2` to be misread as a
+light that failed. And **`norouted` is asked before the skip**, so a run with
+nothing routed at all can never take the skip path and pass off as "this setup's
+limit". To earn the audio half, route an audio input onto an audio-only bus
+(Audio / Video screen).
 
 How it fits together:
 
@@ -500,6 +568,129 @@ How it fits together:
 - **Screenshots to look at**: `build/panehl_pass1.png` (the user's query, rows
   and hint line), `build/panehl_pass2.png` (the misspelled query, correction
   shown) and `build/panehl_row0.png` (the first row alone).
+
+## The Table's result lists: a viewport of rows, not the whole model
+
+`run_pane_rows_test.sh` guards the ask that followed the paragraph list:
+
+> "Make the reference pane's search-results list virtualized as well, since a
+> two-character query can still build about a thousand rows at once."
+
+A row COUNT cannot answer that — a long list is fine, building it in one go is
+what parks the pointer — so the scenario measures the two things only a windowed
+list does, for each of the three lists this pane owns (the tab search's citation
+matches, the hover peek's sermon paragraphs, and the pill search's hits):
+
+- **built << rows.** With the query's rows on screen, the list has materialized a
+  viewport's worth of delegates (plus its cache buffer) instead of one per row.
+- **The tail is still reachable.** Scrolling to the END materializes the LAST row
+  (`lastRow=true`) while the total ever built stays below the row count — a
+  windowed list must reach its end, or the tail of a 641-match query would be
+  unreachable. A Column-and-Repeater passes neither test: it builds every row the
+  moment the model lands, which is exactly what the three lists used to be.
+
+```bash
+bash tools/selftest/run_pane_rows_test.sh 150   # boot + the sermon indexing
+# ... PANEROWS: PASS judged=3 skipped='' \
+#     match=641/21/32/true peek=277/5/8/true hit=60/20/30/true
+#     PANEROWS: FAIL launch | FAIL missing | FAIL whole | FAIL tail
+#               | FAIL lastrow | FAIL small | FAIL qml
+```
+
+The verdict line reads `<list>=<rows>/<built>/<scrolledBuilt>/<lastRow>` — the
+rows the model holds, the delegates ever built with those rows on screen, the
+total ever built after scrolling to the last row, and whether that last row is
+truly on screen. Measured on this machine's library (1,206 sermons), the user's
+own two characters ("th"):
+
+| list | rows | built | after scrolling to the end |
+|---|---|---|---|
+| the citation matches (the tab search) | 641 | 21 | 32, last row on screen |
+| the hover peek (that match's sermon) | 277 | 5 | 8, last row on screen |
+| the pill search's hits | 60 (the engine's cap) | 20 | 30, last row on screen |
+
+The two-character query's own worst case is the pair the user named: 641 rows
+built by the typing itself, and then 277 more in one go when the pointer opened
+ONE of them — 918 delegate builds for a single query, and 26 for the same query
+now.
+
+How it fits together:
+
+- **The scenario** is the `selfTestPaneRows*` Timer chain in `qml/Main.qml`,
+  gated on the `SelfTestPaneRows` context property (BOTH `VGR_SELFTEST=1` and
+  `VGR_PANEROWS_TEST=1`), so no other run drives the pane's search or its hover.
+- **The real path**: the query is TYPED into the tab bar's box
+  (`SelfTest.focusItem("selfTestSearchInput")` + `SelfTest.type`), whose provider
+  answers per keystroke; the peek is the pane's own `peekSuggestion()` on its
+  LONGEST matching sermon (the hover's worst case); the pill's field is set the
+  way the pane-highlight scenario sets it, since that field's own debounce runs
+  the search.
+- **Runnable item hooks**: `selfTestPaneMatchList`, `selfTestPaneHitList`,
+  `selfTestPanePeekList`, and the row names `selfTestMatchRow_<i>`,
+  `selfTestHitRow_<i>`, `selfTestPeekRow_<i>`. The pane's counters
+  (`matchRowBuilds`/`Drops`, `hitRowBuilds`/`Drops`, `peekRowBuilds`/`Drops`, the
+  same ones the layout probe reads) are what `built`/`scrolledBuilt` come from.
+- **itemVisible, not "exists"**: the last row is looked up by name and judged on
+  screen, because a RECYCLED row of the same name is one the user cannot see.
+- **Library-independent**: the two numbers are compared to each other, so a small
+  library still decides it. A list with fewer than 60 rows is reported as SKIP
+  rather than passed (there is nothing to measure), and the citation list — the
+  one the user's two characters drive — must be big enough to judge, so a run
+  whose search returned nothing fails as `FAIL small` instead of passing quietly.
+- **Screenshot to look at**: `build/panerows_pane.png`, the pane in the state it
+  measured (the matches list with the peek open).
+- **Still eager, deliberately out of scope**: the two sidebar columns
+  (`visibleBooks`, and a book's `chapters`) are still Flickable + Column +
+  Repeater. They are bounded by the LIBRARY rather than the query (a Bible's 66
+  books; The Table's year-books — a filter that matches no book name falls back
+  to the full list), so a two-character query does not grow them, but they do
+  rebuild per keystroke. The numbers to beat are in this scenario's log the day
+  someone takes them on.
+
+## A mark on a verse: what the click costs, on the operator's own store
+
+`run_mark_sidecar_test.sh` guards the note/highlight path — the one the operator
+uses mid-service, and the one that used to be a whole-corpus rewrite.
+
+`setNote`/`setHighlighted` are `Q_INVOKABLE` on a QML singleton, so their cost is
+the INTERFACE thread's, and the path used to read `bibles.json`, parse it and
+write it back — megabytes, under the engine lock every scripture read takes. The
+schema-3 split moved the user data into its own sidecar file
+(`bibles.userdata.json`), so a mark writes kilobytes and the corpus is not
+opened at all. The engine tests pin that (`bible-mark-sidecar`: the corpus must be
+byte-identical, not merely re-readable; `bible-mark-timing`: the two wall-clock
+figures side by side on a synthetic 6.78 MB corpus). What they cannot cover is the
+OPERATOR's store, through the pane's own handlers — so this drives the real app on
+it:
+
+```bash
+tools/dev_cycle.sh --build-only                 # the scenario drives the built app
+bash tools/selftest/run_mark_sidecar_test.sh 150
+```
+
+It snapshots both store files first (5.77 MB corpus here), then `VGR_MARK_TEST=1`
+opens the first Bible's first chapter and, on a verse that carries no mark at all,
+toggles the highlight ON and OFF again and adds and removes a note — through the
+star button's own `toggleHighlight` and the note editor's own `saveNoteDraft`,
+each timed with `Date.now()` around the call, because that is the operator's
+latency. Every mark is undone, so the store it leaves behind is the store it
+found: that is what makes it safe to run against a real library, and the script
+checks it byte for byte afterwards.
+
+The verdict counts the engine's own lines for THIS run (the log is appended
+to across runs, so only new lines count): sidecar writes must go UP with
+kilobytes, and `store written (corpus)` must stay at ZERO.
+
+```
+MARK: PASS verse=1 onMs=52 offMs=36 addMs=52 rmMs=35 sidecarWrites=4 \
+      sidecarMs=2-11 sidecarBytes=264 corpusWrites=0 corpusUnchanged=true \
+      sidecarUnchanged=true
+```
+
+A failure names the area: `FAIL corpuswrite` (a mark wrote the corpus),
+`FAIL corpuschanged`/`FAIL sidecarchanged` (the store did not come back to the
+state it was found in), `FAIL slow:ui` (a mark cost the interface thread more
+than 250 ms) and `FAIL restore` (the scenario did not undo its own marks).
 
 ## The cursor: does the OS actually show what the app asked for?
 
@@ -775,3 +966,399 @@ How it fits together:
   said what it was built from reports `FAIL nopremise`, rather than passing
   vacuously — the same trap the style-background scenario fell into when its
   tile and its model described two different outputs.
+
+## The startup-forensics verdict: said out loud, and only when it matters
+
+`run_forensics_test.sh` guards the report "the app says a crash was captured when
+nothing was written down" from the other end: at every launch the app proves the
+tooling it would capture a crash WITH actually runs on this machine (see
+`CrashHandler.h`'s `VerifyForensicsTooling`), and that verdict used to reach
+`engine.log` and nothing else — so the operator who most needed it, the one
+whose crash left no evidence, was the one who would never read it.
+
+```bash
+bash tools/selftest/run_forensics_test.sh   # ~80s: two launches, ~40s each
+# ... FORENSICS: PASS broken=Incomplete+noted healthy=Ready+quiet
+#     FORENSICS: FAIL launch | FAIL missing | FAIL verdict | FAIL row | FAIL note
+```
+
+How it fits together:
+
+- **Two cases, because a verdict that is always loud is as wrong as one that is
+  always quiet.** `VGR_FORENSICS_DIR` (the probe's own override) is pointed at a
+  scratch folder holding an EMPTY `analyze.bat` for the broken case — a
+  packaged-looking layout that cannot read a report — and at an empty folder for
+  the healthy one (a build that ships no capture tools, which is a WORKING
+  configuration: the text record and the minidump remain).
+- **The verdict travels through the real path**: the probe (worker) →
+  `EngineBridge.publishCrashTooling` (interface thread) → the two properties QML
+  binds, so nothing here reads a parallel copy of the state.
+- **The row is read as DRAWN**: the scenario looks the pill and the detail line up
+  in the live item tree (`selfTestCrashToolingPill` / `…Detail` on Settings ·
+  General's "Crash reports" card) and prints their own text, so a row bound to
+  the wrong property fails instead of passing on the raw value.
+- **The note needs a crash to ride**, and only a previous run that went down
+  produces one: the runner SEEDS one record into the app's own crash log
+  (`%APPDATA%/VGR/VGRPresenter/crashes/crash.log`) in the shape the handlers
+  write and `ConsumePendingCrashSummary()` parses. The launch under test consumes
+  it exactly as it would a real one (reported once, then rotated aside) — which
+  is why the script also prints that it seeded it.
+- **`inToast=`** is the user's half: the note must be in the notification centre,
+  which is where the notice is read from, not merely handed to `EventBus`.
+
+## The layout probe — a measurement, not a verdict
+
+`run_layout_probe.sh` answers "does this interaction park the interface thread, and
+does it throw the lists away while it does" for the two interactions the hang captures
+name: a filter applied to a library list, and a pane switch. It is the one harness here
+with no PASS/FAIL line — it prints numbers, because the question is "how much", not
+"is it right".
+
+```bash
+tools/dev_cycle.sh --build-only
+tools/selftest/run_layout_probe.sh        # ~40 s (the walk is 30 steps, one per second)
+```
+
+Each `LayoutProbe phase=<tag> …` line carries, for that step:
+
+- `stallMax` / `stallSum` — how long the interface thread was PARKED, measured by the
+  thread itself: a 16 ms heartbeat timer reports its own overshoot (under 8 ms of
+  overshoot is timer noise). This is the freeze, not the work behind it, so a
+  DirectWrite/relayout pile-up cannot hide from it.
+- `<list>Built` / `<list>Dropped` — the delegates the shows table, both design grids,
+  the media grid and the passage list built and THREW AWAY during the step. builds ==
+  drops is a list rebuilding itself; builds > 0 with drops == 0 is a list growing a new
+  tail.
+- `<list>Rows` — what each model holds after the step, so a rebuild of a 6-card library
+  cannot be read as one of a 680-row one.
+
+The same log carries the C++ `FrameProbe …` lines (`build/logs/engine.log`): the frame
+to frame time the render thread actually painted, 1/s, with >33/>50/>100 ms counts. The
+freeze and the frames are the same stall seen from two threads.
+
+The walk: a cold switch through every library tab; the SAME-WIDTH pane pairs against the
+WIDTH-CROSSING ones (a reference tab used to take the template column's whole width); a
+filter on the shows table and on both design grids; the passage pane's own filter and
+citation search; the scroll phase (below); then the pane walk again, warm.
+
+### The scroll phase — the cost paid per frame, not per settle
+
+Every step above is a SETTLE (a switch, a filter, one second). The lag the operator
+actually reports — "scripture, templates and the table are sluggish when I scroll" — is
+the other half: cost paid continuously while rows enter and leave the viewport. So the
+walk has a scroll phase: seven steps, each scrolling ONE named list through its whole
+content with a linear 700 ms animation (a fast wheel drag, no flick inertia, so two runs
+compare), and each writing its own `LayoutProbe phase=scroll-… scrollStart=1 …` record:
+
+- `frames` / `fps` / `avgFrameMs` / `worstFrameMs` / `jank33` / `jank50` — the frame times
+  the app produced DURING the scroll, from a `FrameAnimation` on the interface thread
+  (`frameTime` and `elapsedTime` are in seconds; the record converts). The first frame is
+  skipped: its `frameTime` is the idle gap since the last painted frame, not a scroll
+  cost. `wallMs` is the wall clock the same run took and `meterMs` the meter's own
+  window — so a scroll the app produced NO frames during (meterMs 0, wallMs 700) cannot
+  be read as an instant one.
+- `scrollBuilt` / `scrollDropped` / `scrollEvals` — the scrolled list's own delegates and
+  row binding evaluations over the scroll window. `scrollEvals` is the attribution: a
+  scroll with a large `scrollBuilt` and small `scrollEvals` is paying row construction,
+  one with evals scaling with the distance is paying bindings.
+- `contentPx` / `viewPx` / `scrollPx` / `listFound` — how far it actually moved. A short
+  list, an unlaid-out one and a missing objectName are each visibly different from a
+  cheap scroll (the armer retries a missing list a few times first — a pane mid-switch can
+  hide its children for a moment — and reports `listFound=0` only after that).
+
+The record is written when the scroll STOPS, not at the step timer's next tick: a step
+whose list is slow to draw overruns the 1 s cadence (measured: the templates grid's 37
+cards took 7.1 s of a 1 s step), and a record taken at the tick would be written before
+the scroll began. The row binding counts live in a plain JS accumulator, not a QML
+property — incrementing a QML property from inside a binding is reported as a binding
+loop (the first cut of this did exactly that, once per row in the pane).
+
+The lists it scrolls: the shows table, The Table's passage list, Scripture's passages,
+bible list and chapter list, and both design grids.
+
+#### What it measured (one run, this machine)
+
+Run-to-run numbers move with what else the machine is doing (this is a measurement, and
+the machine is the instrument), so read the columns against EACH OTHER, not against a
+millisecond someone quoted once:
+
+| list | rows it scrolls | scrolled | fps | worst frame | jank > 33 ms | built / dropped | evals |
+|---|---|---|---|---|---|---|---|
+| shows table (`reuseItems`) | 680 | 21 478 px | 46.5 | 22.2 ms | 0 | 22 / 0 | 617 |
+| The Table's passages | 945 | 32 831 px | 29.1 | 47.2 ms | 12 | 299 / 307 | 299 |
+| Scripture's passages | 31 | 872 px | 40.9 | 37.7 ms | 2 | 14 / 13 | 14 |
+| Scripture's bible list | 85 (1 856 px) | 1 539 px | 46.7 | 23.6 ms | 0 | 0 / 0 | 0 |
+| Scripture's chapter list | 56 (1 408 px) | 1 091 px | 44.6 | 22.8 ms | 0 | 0 / 0 | 0 |
+| templates grid | 37 | 2 174 px | 5.2 | 614.9 ms | 6 | 26 / 25 | 75 fit solves |
+| overlays grid | 6 (382 px) | 73 px (nothing else to scroll) | — | — | 0 | 0 / 0 | 0 |
+
+Read together, those columns say where the scroll lag is, and it is not the same cause in
+each list:
+
+- the SHOWS table is the shape to copy: `reuseItems` means a 680-row scroll built 22 rows
+  and threw away none, and the rows' bindings evaluated about once per row the scroll
+  passed (617 ≈ 21 478 px ÷ 32 px rows) — it holds ~47 fps.
+- The Table's PASSAGE list was the surprise: comparable distance, but ~300 rows built AND
+  ~300 thrown away, ~12 janky frames, ~29 fps — it had no `reuseItems`, so it re-created
+  every row it scrolled past. **Fixed** (see the after table): the rows the viewport
+  finishes with are pooled and re-bound now, so the same scroll builds ~18 and throws away
+  none, and the list holds ~45 fps with no frame over 33 ms.
+- the TEMPLATES grid could not scroll without stalling: ~26 of its 37 cards built and
+  ~25 dropped for a 2 174 px scroll, several frames over 33 ms and a worst frame of
+  several hundred ms (371-615 ms across runs; the whole animation stretched from 700 ms to
+  1.2-1.5 s because the thread was that busy). The `evals` column is the attribution:
+  those are the cards' fit solvers — an 11-step bisection re-measuring a hidden twin Text,
+  per text block of every card built — the same cost the `cardFitSolves` field of a filter
+  step shows. **Fixed, to the limit of what pooling can do** (after table): the grid now
+  keeps the cards it has built and throws away none (26/25 → 0/0), so it stops stalling —
+  the 614.9 ms frame becomes 84-108 ms and the animation keeps its own 831-857 ms. It is still
+  the slowest scroll in the app (~23 fps), because showing a different template in an
+  already-built card still re-makes that card's block delegates and re-runs their fit
+  solvers (`cardFitSolves` 75 → 83): that is content work the pool cannot remove, and it is
+  the next thing to fix.
+- the SCRIPTURE sidebar lists (bible, chapter) scroll free: a Repeater inside a Flickable
+  builds everything once and then costs nothing per frame — no builds, no evaluations,
+  ~46 fps. Scripture's own PASSAGE list behaves like The Table's (14 / 13 here) — its
+  chapter is simply shorter.
+
+So the report's "scripture, templates and the table" splits into three different causes:
+the scripture SIDEBAR is not the problem (it is already free), the passage lists rebuild
+rows they need not (a `reuseItems`-shaped fix, worth ~300 reconstructions per scroll in The
+Table), and the design grids rebuild whole cards on nearly every scroll — the filter-cost
+finding below, arriving through a scroll instead of a filter.
+
+#### The after table — the same phase, after the two fixes
+
+The two fixes are a `ListModel` the design grids are fed instead of a fresh array (it
+reports the rows a filter inserts and removes, where handing over the array was a model
+RESET that destroyed and rebuilt every card in view), and `reuseItems` on both the design
+grids and the passage list. The same probe, same machine, next run:
+
+The AFTER column is three runs (the same build, run back to back), given as a range where
+they differ — the churn columns are 0/0 every time, which is the part that matters. The
+BEFORE column is the one run in the table above.
+
+| list | scrolled | built / dropped BEFORE | built / dropped AFTER | fps BEFORE → AFTER | worst frame BEFORE → AFTER |
+|---|---|---|---|---|---|
+| shows table (`reuseItems` already) | 21 478 px | 22 / 0 | 22 / 0 | 46.5 → 46.4-46.9 | 22.2 → 22.8 ms |
+| The Table's passages | 32 831 px | 299 / 307 | **18 / 0** | 29.1 → **44.0-44.5** | 47.2 → **22.5-25.7 ms** |
+| Scripture's passages | 929 px | 14 / 13 | 11 / 0 | 40.9 → 36.6-40.8 | 37.7 → 41.0-46.2 ms |
+| Scripture's bible list | 1 539 px | 0 / 0 | 0 / 0 | 46.7 → 44.8-45.0 | 23.6 → 22.8-22.9 ms |
+| Scripture's chapter list | 1 091 px | 0 / 0 | 0 / 0 | 44.6 → 45.4-45.8 | 22.8 → 23.2-24.3 ms |
+| templates grid | 2 174 px | 26 / 25 | **0-1 / 0** | 5.2 → **22.1-22.9** | 614.9 → **83.7-108 ms** |
+| overlays grid | 73 px (fits the view) | 0 / 0 | 0 / 0 | — → 44.2-44.9 | — |
+
+The grids also check themselves now: after every sync each design grid logs
+`[DesignRows] <noun> rows=N want=M match=1` — its model against the service's own answer,
+row for row — and the probe prints the distinct lines and the mismatch count under the
+walk. Every after-run logged the same 18 checks (37/37 and 14/14 templates, 6/6 and 3/3
+overlays) with **0 mismatches**, which is what makes the churn columns mean what they say:
+a cheap filter that showed the WRONG cards would score exactly the same on built/dropped.
+
+What the columns say, and equally what they do NOT say:
+
+- the two lists that built AND threw away delegates — The Table's passages and the templates
+  grid — now build a pool-sized handful and throw away NONE. That is the whole of
+  `reuseItems`: the row an item view has finished with is re-bound to the next index instead
+  of destroyed. The Table's passages went from 299/307 to 18/0 at ~45 fps, and its ~300
+  reconstructions per scroll are gone (the 350 `refVerseEvals` are the re-bound rows' own
+  label bindings, not rebuilds).
+- the templates grid stops STALLING, not being slow: 26/25 → **0/0** and a 614.9 ms worst
+  frame → 84-108 ms, with the animation finishing in 831-857 ms instead of stretching 700 ms
+  of motion past 1.2-1.5 s. But it still spends ~40 ms on an average frame (22.9 fps, 12 of 19
+  frames over 33 ms) and its `cardFitSolves` barely moved (75 → 83 solves). **Those two
+  numbers are the honest limit of this fix**: pooling removes constructing and destroying a
+  card, and cannot remove the cost of putting a DIFFERENT design into a card that already
+  exists — the preview's block delegates are still re-created and every text block still
+  runs its 11-step fit solver. The grid is therefore the one list whose scroll is still
+  expensive, for content reasons, and that is the next thing to fix (a cheaper card at card
+  size — see the filter finding below for the same cost arriving through a filter).
+- Scripture's own passage list moved the same way (14/13 → 11/0) on a shorter scroll; its fps
+  reading moved the other way in the first after-run (40.9 → 36.6) and back in the second
+  (40.8), so it should not be read as a regression either way: a 929 px scroll is ~20 frames
+  and one slow frame swings it (46.2 ms in one run, 41.0 ms in the other). The lists that
+  build nothing (bible, chapter) are the controls here, and they did not move.
+- the shows table is the control that did not need the fix, and it did not change (22/0,
+  ~47 fps, both runs) — which is what makes the other rows readable as the fix and not as
+  the machine.
+
+Where the same reset showed up in the WALK (the filter steps, `stallMax` in ms, delegates
+built/dropped on the grid the step filters):
+
+| step | before | after |
+|---|---|---|
+| overlays filter: 6 → 3 cards | 130-281 ms; 3 built / 6 dropped | **59-141 ms; 0 / 0** |
+| overlays filter cleared: 3 → 6 cards | 250-392 ms; 6 built / 3 dropped | **116-176 ms; 0 / 0** |
+| templates filter: 37 → 14 cards | 502-694 ms; 13 built / 13 dropped | 621-694 ms; **10 built / 0 dropped** |
+
+The overlays grid is where the model earns its name: with only 6 cards the whole roster is
+in view, so a filter removes and re-inserts rows whose CARDS ARE THE SAME CARDS — and the
+first panel of this table started rebuilding all of them on every one of those steps (3
+built/6 dropped, then 6 built/3 dropped, each with a 130-390 ms stall). Now the same steps
+build and destroy nothing at all, and the stall is the pointer work: 59-176 ms.
+
+The templates filter is the same step one size up, and it is where the row model cannot
+help: filtering 37 templates down to 14 leaves a DIFFERENT ten designs on screen (the query
+matches a different set), so those cards genuinely have new content and their block
+delegates and fit solvers are re-made whatever the model does — `cardFitSolves` is 52-54 on
+both sides of the fix. What the model did remove is the destruction: 13 cards were thrown
+away before, none now. The 621-694 ms this step still costs is that content work, and it is
+the same cost the templates grid pays while scrolling; the fix for both is a card that is
+cheaper to re-fill, not a better model.
+
+### What it measured
+
+Aggregate over the whole walk (34-37 one-second windows):
+
+| run | worst frame gap | frames > 33 ms | > 50 ms | > 100 ms |
+|---|---|---|---|---|
+| before the layout work | 466.5 ms | 134 | 67 | 18 |
+| after                 | 356.6 ms |  35 | 11 |  5 |
+
+Per interaction — `stallMax` in ms, and the list churn in delegates built/dropped:
+
+| step | before | after |
+|---|---|---|
+| switch to/from a reference tab (the dock used to resize the whole pane stack) | 95-208 ms; 10-13 template cards churned while the pane was HIDDEN | 15-31 ms; 0 |
+| shows filter: 680 → 57 rows | 190 ms; 57 built / 680 dropped | 12 ms; 19 built / 19 dropped |
+| shows filter cleared: 57 → 680 rows | 399 ms; 680 built / 57 dropped | 23 ms; 19 built / 19 dropped |
+| overlays filter: 6 → 3 cards | 130-281 ms; 3 built / 6 dropped | 68-141 ms; 0 built / 0 dropped |
+| overlays filter cleared: 3 → 6 cards | 250-392 ms; 6 built / 3 dropped | 116-176 ms; 0 built / 0 dropped |
+| templates filter: 37 → 14 cards | 502-694 ms; 13 built / 13 dropped | 621-694 ms; 10 built / 0 dropped |
+| passage filter and citation search (945-row chapter) | 21-141 ms | 13-19 ms |
+| passage rows rebuilt, whole walk | 0 built / 0 dropped | 0 built / 0 dropped |
+
+The findings the numbers settled — each one is why the code reads the way it does now:
+
+- the shows table was a Flickable + Repeater over 680 rows (the engine's own log line:
+  `Show library scanned: 680 show(s)`): every row realized at boot, and every row
+  re-shaped through DirectWrite — the frames the hang captures show the interface thread
+  parked in — whenever the dock resized or the subtree was re-polished. It is a ListView
+  now: ≈15 rows instead of 680, and 19 built/dropped per filter instead of 737.
+- the dock used to resize the whole pane stack when a reference tab was selected
+  (Scripture/The Table took the template column's space), so the panes that were HIDDEN
+  re-laid-out, re-shaped their text and rebuilt their grids too. The panes state their
+  own width now, and a tab switch changes only which pane is visible.
+- the PASSAGE list is the one list that was already clean: 28 rows built once for a
+  945-row chapter and never dropped, through every filter, search and switch. It is
+  already a ListView, and with the dock no longer resizing under it, its text is not
+  re-shaped on a switch either (its own switches went 141 ms → 20 ms).
+- the design grids rebuilt every card on a filter change (~30 ms per card: 13 built / 13
+  dropped either way, 370-527 ms for one templates filter). Two cheap attempts were
+  measured and reverted: `reuseItems` alone changes nothing THERE (a model reset DESTROYS
+  the released cards rather than pooling them, so the previews are remade either way), and
+  `cacheBuffer: 0` bought only ~35 ms of that phase while moving card building into the
+  scroll. The fix is the one the app's other lists already use: a model that reports the
+  rows a filter removes and inserts instead of resetting. `DesignLibraryPane` now keeps a
+  `ListModel` and syncs it to the service's answer row by row — remove what is gone, move
+  what only changed places, insert what is new, and write a row again only when that row's
+  design actually changed (the row's JSON is its signature) — and both grids scroll with
+  `reuseItems`. Measured: the overlays grid's filter steps build and destroy nothing now
+  (3/6 and 6/3 → 0/0) and their stalls fall to 59-176 ms; the templates grid's filter no
+  longer destroys anything (13 dropped → 0) but still costs 621-694 ms, because the ten
+  designs the query leaves on screen are different designs — their block delegates and fit
+  solvers are genuinely remade (`cardFitSolves` 52-54 on both sides). The model removes
+  churn; it cannot remove that. Making the card cheaper to re-fill is the open item.
+
+## The show document's queued jobs: does the verdict actually arrive?
+
+`run_show_io_test.sh` guards the change that took `ShowService`'s document work off the
+interface thread (docs/gui_thread_audit.md §3.15): the ten operations a QML entry point
+used to drive `PresentationDocument` with — save, save-as, save-copy, open, peek, next
+timer, the slide edits, the two template calls and the text rewrite. They answer with a
+TOKEN now and the verdict arrives later, through `documentJobFinished`. That contract is
+invisible to a build and to a clean boot: a save whose verdict never comes back and a
+save that never writes its file produce exactly the same pixels, and so does a read that
+is still in flight when someone looks at it.
+
+```bash
+bash tools/selftest/run_show_io_test.sh 90   # boot + the engine's stores ~30s
+```
+
+It drives the chain end to end in the real app, against real files in `build/` that it
+deletes before the launch — so anything it finds afterwards is this run's own work — and
+checks both halves every step: what the verdict said AND what is on disk or in the
+published answer.
+
+| step | what it proves |
+|---|---|
+| save | the verdict arrives (not just the request), the file exists when it does, and the show reads back with its slides |
+| open | the same file opens back through the call the show screen uses, with the payload's slides |
+| peek1 | a show nobody has read yet answers `pending` — not "there is no such show", which is a different fact and blanks the centre page |
+| peek2 | the answer landed, and `peekRevision` MOVED — the centre page binds to it, so a "changed" signal whose value stays put is nothing to re-evaluate |
+| timer | the next timer applied, then read back out of the peek |
+| peek3 | the timer wrote the show, so the published answer is GONE — this read must be a fresh miss, never the old answer (the bug a published cache gets wrong) |
+| copy | the recovery copy, the one write nobody asked for: verdict and file |
+| quit | the app's loop RETURNED (`app event loop returned` in the log). A finished scenario in a still-running app reads like a pass otherwise, which is why it is checked |
+
+Two of those are in the table because they caught something. `peekRevision` never
+incremented before this harness existed — `publishPeek` only emitted the signal — so
+`revision=0` under `step=peek2` is a FAIL now (it reads 1). And a quit issued from inside
+the job-verdict handler does not take: with `SelfTest.quit()` called straight from that
+handler, engine.log's `UI event-loop heartbeat` kept ticking every 5 s for the ~80 s the
+probe watched after the verdict and `app event loop returned` never appeared, while the
+same call from a `Timer`'s own tick returns the loop within a second — which is how
+Main.qml's scenario quits. If you write a scenario of your own against a queued job,
+quit from its own tick and let the harness check for that line.
+
+```
+SHOWIO: PASS save=ok open=ok peek=ok timer=ok copy=ok steps=9
+SHOWIO: FAIL launch | missing | save | nosavefile | open | peek | pending | timer
+        | copy | nocopyfile | revision | quit
+```
+
+The harness force-kills the app after the loop returns rather than waiting the process
+out: the teardown behind a returned loop takes ~150 s on this machine (Qt's window/DXGI
+shutdown — the same slow exit `run_canvas_cursor_test.sh` documents), and it says so on
+the `==` line so a normal run is not read as a failure. What it does NOT do is wait for
+a verdict that never comes: the grace period is bounded, and a run that needed the kill
+after a missing `app event loop returned` fails on the quit check above.
+
+## The quit path: unsaved work, a live output, and what the teardown costs
+
+`run_quit_test.sh` covers the one user path that ends the process, and the one the
+exit path was never measured on: **closing the window with a show that has unsaved
+changes while an output is live.** Everything about it is invisible to a build.
+
+```bash
+bash tools/selftest/run_quit_test.sh 90 240   # scenario 90s, teardown measurement 240s
+```
+
+The scenario (Main.qml, `VGR_QUIT_TEST=1`) saves a two-slide show to a real file in
+`build/` first — so the close-time save needs no native save-path picker, which
+cannot be driven from here — makes it dirty again, calls `goLive()`, and then closes
+the window the way the title bar does. The steps it prints, and what each proves:
+
+| step | what it proves |
+|---|---|
+| seeded | the show has a file, so the close-time save is the one being judged |
+| armed | the show is DIRTY and an output is LIVE when the window is closed — the case every "it hangs when I close it" report is about |
+| close1 | the unsaved-changes guard REFUSED the close and the dialog came up. A close that went straight through loses the show silently |
+| answer | a real synthetic click on the dialog's Save. `saveButton=` is probed here, after the dialog's 130 ms fade, and not in `close1`: a card at opacity 0 is not a visible item, so probing it earlier read `false` on a dialog that was up and clickable |
+| saved | the queued save's VERDICT landed, `ok=true`, file on disk. That verdict is what sets `closeConfirmed` and closes the window |
+| quit | `app event loop returned` — the loop really returned. A finished dialog in a window that never closed reads like a pass otherwise |
+| teardown | the process is gone, and `QUIT: PASS … teardown=<s>s` carries how long it took |
+
+It reads two files on purpose: the `aboutToQuit` step timings come from
+`logs/engine.log` (only this run's lines — the line count is taken before the
+launch), while `main: leaving` and the post-routine marker come from the console
+log. Until `EngineBridge.shutdown` runs, a line goes to the engine's logger and not
+to the console; after it, the logger is gone and the same call reaches stdout only.
+Reading one file for both is what made the first fixed run report a marker that
+"never landed" while the line sat in the other file.
+
+Measured on this machine, three runs: **69–87 ms across all aboutToQuit steps**
+(largest `TheTableService.shutdownIndexing`, 56–69 ms), **~570 ms** from
+`main: leaving` to `QCoreApplication teardown reached` (the QML engine and the
+windows), and **1 s** from the loop returning to the process going. The ~150 s the
+audit recorded for `run_show_io_test.sh` does NOT reproduce here — with the load
+this harness applies (live output, dirty show), the exit is a second — which is why
+the step timings and the two tail markers exist: a recurrence names its own half
+instead of needing a stopwatch at the end. See `docs/gui_thread_audit.md` §8.
+
+The close path also exercises the cancellation entry points end to end: the window
+closing runs `AppBehaviors.cleanExit()`, which abandons the queued READS
+(`ShowService.cancelDocumentJobs(["open", "templateLoad"])`) and leaves a save the
+operator asked for to finish its write — the two halves of `bps::JobTicket`
+(`Abandon` vs `WithdrawVerdict`), whose semantics the `job-cancel` unit suite pins
+down (`./build/bps_unit_tests job-cancel`).

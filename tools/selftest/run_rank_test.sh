@@ -20,12 +20,25 @@
 #   * no row that carries only one of three-or-more typed words sits above one
 #     that carries more, and
 #   * the shown percentage never goes up as you read down the list (the rating
-#     IS the ranking key — a rising column would mean the number lies).
+#     IS the ranking key — a rising column would mean the number lies), and
+#   * the HOVER PREVIEW of a row is COMPLETE while the pointer stays on it: the
+#     preview asks a published read (SearchService.fullVerse answers "" until its
+#     worker read lands, and verseCached re-asks for it), so the row must show the
+#     whole verse and never fall back to its two-line snippet on a hover that never
+#     ends. The scenario parks a REAL cursor on a located VERSE row (kind=bible — a
+#     sermon paragraph previews through the library instead) and reads the preview
+#     twice with the pointer UNMOVED, so "filled" cannot be the pointer arriving
+#     late. The log also carries the row's own seed, because every verse row already
+#     carries its verse text: the check guards the preview's completeness, it does
+#     not claim to distinguish which of the two texts is on screen. If the cursor
+#     does not land on the dialog's row at all (it does not on this machine), this
+#     prints a NOTE rather than a pass or a fail — a check that could not run is
+#     reported as such, never as one that passed.
 #
 # VERDICT (last line, greppable):
 #   RANK: PASS top=<kind> (<carried>/<words>) match=<pct>% rows=<n>
 #   RANK: FAIL launch | FAIL missing | FAIL top=<carried>/<words> | FAIL order
-#   RANK: FAIL rating
+#   RANK: FAIL rating | FAIL hover
 #
 # Usage:  bash tools/selftest/run_rank_test.sh [wait-seconds]   (default 120)
 # ============================================================================
@@ -134,6 +147,25 @@ done <<< "$(grep -a "\[SELFTEST-RANK\] row" "$LOG" 2>/dev/null)"
 if [ -z "$PREV_PCT" ]; then
     echo "RANK: FAIL rating — no row logged a MATCH percentage"
     exit 8
+fi
+
+# THE HOVER PREVIEW (see the header): probe1 is read with the pointer still parked
+# on the row the scenario hovered, so an empty preview there is the trap — the row's
+# published read answered "" and nothing re-asked when the answer landed.
+# ...and it must be a VERSE row: a sermon paragraph previews through the library, so
+# a pass on one would prove nothing about the published read this check exists for.
+HOVER1="$(grep -a "\[SELFTEST-RANK\] hover probe1" "$LOG" 2>/dev/null | tail -1)"
+if ! echo "$HOVER1" | grep -q "landed=true"; then
+    # NOT a verdict: moving the OS cursor onto a row inside the search dialog does
+    # not land on this machine (measured twice, landed=false while the row was on
+    # screen), so the preview check could not run. Said out loud rather than
+    # silently passing — the ranking checks above are unaffected by it.
+    echo "RANK: NOTE hover — the cursor did not land on the dialog's row, so the preview check did not run (${HOVER1:-no probe line at all})"
+elif ! echo "$HOVER1" | grep -q "kind=bible"; then
+    echo "RANK: NOTE hover — the preview check needs a Bible verse row and this run hovered '${HOVER1}' (see the hover lines above)"
+elif ! echo "$HOVER1" | grep -q "filled=true"; then
+    echo "RANK: FAIL hover — the hovered verse row's full text never arrived ($HOVER1; the pointer never left the row)"
+    exit 9
 fi
 
 echo "RANK: PASS top=${TOP} (${CARRIED}/${WORDS}) match=${PREV_PCT}% rows=$(grep -ac "\[SELFTEST-RANK\] row" "$LOG" 2>/dev/null)"

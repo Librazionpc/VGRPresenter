@@ -133,7 +133,7 @@ public:
     // Native video-file picker (mp4/mov/mkv/...) for the Media-kind Select
     // Media picker's "Browse this PC..." option — see
     // AudioInputListModel::pickAudioFile.
-    Q_INVOKABLE QString pickVideoFile() const;
+    Q_INVOKABLE QString pickVideoFile() const;   // gui-ok: a modal native picker parks the interface thread on PURPOSE — the user is looking at the dialog, and its own event loop keeps the window painting; the work after the pick (import, scan, copy) already runs off the interface thread
     // Capture mode (OBS-style "1080p60"…) — the video dialogs' Resolution
     // picker; empty string = unset.
     Q_INVOKABLE void setMode(int index, const QString &mode);
@@ -162,7 +162,7 @@ public:
     static bool restoreDone();
 
     // REAL PUSH — this row's audio state onto its PRODUCTION GRAPH SOURCE NODE
-    // ("vsrc:<id>"), the same way AudioInputListModel::pushEffectsToGraph
+    // ("vsrc:<id>"), the same way AudioInputListModel::pushEffectsOffThread
     // writes an input row's. Level/mute become the node's VolumeControl and the
     // per-side trims its "uiChannelGain<n>" meta, which is exactly what the
     // playout mixer (AudioMixer::SumSource) reads when a bus sums this row.
@@ -173,8 +173,9 @@ public:
     // clicking its L/R pill changed nothing audible. No-op when the row is
     // unrouted (no node = nothing to feed) or the engine is not booted; the
     // route-creating call re-pushes, so a saved fader survives being patched
-    // later.
-    void pushAudioToGraph(int index);
+    // later. The graph work hops to the engine worker (see EngineWorker) — the
+    // same rule the input roster follows, since this runs on every fader tick.
+    void pushAudioOffThread(int index);
 
 private:
     static inline VideoSourceListModel *s_instance = nullptr;
@@ -187,6 +188,12 @@ private:
     // The single write of the trim list (the public faces above only decide WHEN
     // a trim is worth remembering). true when it changed anything.
     bool writeChannelTrim(int index, int channel, qreal trim);
+
+    // The single write of a side's GAIN, shared by setChannelGain and
+    // toggleChannelGain (each owns its own policy for WHAT the gain should be).
+    // true when it changed anything — i.e. exactly when the graph push that
+    // follows is worth making.
+    bool writeChannelGain(int index, int channel, qreal gain);
 
     // ---- Roster persistence (session.videoRoster via the settings store,
     // the SAME contract as AudioInputListModel's session.audioRoster): every

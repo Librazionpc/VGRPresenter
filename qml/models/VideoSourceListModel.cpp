@@ -3,6 +3,7 @@
 #include "BusListModel.h"
 #include "ChannelTrim.h"
 #include "EngineBridge.h"
+#include "EngineWorker.h"
 #include "SettingsService.h"
 #include "modules/production/ProductionEngine.hpp"
 #include "platform/PlatformAccessor.hpp"
@@ -208,7 +209,7 @@ int VideoSourceListModel::restoreRoster()
     // the graph again (the node survives a restart inside the production doc;
     // its VolumeControl is whatever the last push left — or unity).
     for (int row = 0; row < m_sources.size(); ++row)
-        pushAudioToGraph(row);
+        pushAudioOffThread(row);
     return m_sources.size();
 }
 
@@ -449,7 +450,7 @@ void VideoSourceListModel::setMuted(int index, bool muted)
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { MutedRole });
     scheduleSave();
-    pushAudioToGraph(index);   // mute IS the node's VolumeControl::mute
+    pushAudioOffThread(index);   // mute IS the node's VolumeControl::mute
 }
 
 void VideoSourceListModel::setLevel(int index, qreal level)
@@ -467,7 +468,7 @@ void VideoSourceListModel::setLevel(int index, qreal level)
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { LevelRole });
     scheduleSave();
-    pushAudioToGraph(index);   // the fader IS the graph's gainDb
+    pushAudioOffThread(index);   // the fader IS the graph's gainDb
 }
 
 // One side of the row's audio trim — the video card's L/R pill, and the same
@@ -479,12 +480,23 @@ void VideoSourceListModel::setChannelGain(int index, int channel, qreal gain)
 {
     if (index < 0 || index >= m_sources.size() || channel < 0 || channel >= 2)
         return;
+    if (writeChannelGain(index, channel, gain))
+        pushAudioOffThread(index);   // the per-side trim rides the node's meta
+}
+
+// The one write of a side's gain (the public faces above only decide WHAT it
+// should be). Returns true when it changed anything — i.e. exactly when the
+// graph push that follows is worth making.
+bool VideoSourceListModel::writeChannelGain(int index, int channel, qreal gain)
+{
+    if (index < 0 || index >= m_sources.size() || channel < 0 || channel >= 2)
+        return false;
     const qreal clamped = std::clamp(gain, 0.0, 1.0);
     QList<qreal> &gains = m_sources[index].channelGains;
     while (gains.size() <= channel)
         gains.append(1.0);   // absent = unity
     if (qFuzzyCompare(gains[channel], clamped))
-        return;
+        return false;
     gains[channel] = clamped;
     // Remember an OPEN level as this side's trim on the way past, so the pill
     // that closed it can hand it back (models/ChannelTrim.h). A close (gain 0)
@@ -494,16 +506,20 @@ void VideoSourceListModel::setChannelGain(int index, int channel, qreal gain)
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { ChannelGainsRole });
     scheduleSave();
-    pushAudioToGraph(index);   // the per-side trim rides the node's meta
+    return true;
 }
 
 void VideoSourceListModel::toggleChannelGain(int index, int channel)
 {
-    // One policy for the app, one call here (see BusListModel's twin).
-    if (channeltrim::isOff(channelGain(index, channel)))
-        setChannelGain(index, channel, channelTrim(index, channel));
-    else
-        setChannelGain(index, channel, channeltrim::closed());
+    // One policy for the app, one call here (see BusListModel's twin). It writes
+    // through writeChannelGain and then pushes HERE — the push is the part that
+    // must hop off the interface thread (see pushAudioOffThread), so this body
+    // names it rather than inheriting it from setChannelGain.
+    const qreal target = channeltrim::isOff(channelGain(index, channel))
+        ? channelTrim(index, channel)
+        : channeltrim::closed();
+    if (writeChannelGain(index, channel, target))
+        pushAudioOffThread(index);
 }
 
 qreal VideoSourceListModel::channelTrim(int index, int channel) const
@@ -537,11 +553,13 @@ bool VideoSourceListModel::writeChannelTrim(int index, int channel, qreal trim)
 }
 
 // ---------------------------------------------------------------------------
-// REAL PUSH — see the header. Mirrors AudioInputListModel::pushEffectsToGraph's
+// REAL PUSH — see the header. Mirrors AudioInputListModel::pushEffectsOffThread's
 // contract exactly (a no-op when the row is unrouted or the engine is not up)
 // so the two roster models can't drift on what "the row's audio state" means to
-// the engine.
-void VideoSourceListModel::pushAudioToGraph(int index)
+// the engine — and, like it, the graph work runs on the engine worker: this one
+// runs on every fader tick, and each graph mutator serializes and re-validates
+// the graph.
+void VideoSourceListModel::pushAudioOffThread(int index)
 {
     if (!m_active)
         return;   // never push a displaced roster's view onto the engine
@@ -553,40 +571,49 @@ void VideoSourceListModel::pushAudioToGraph(int index)
     const QString nodeQ = BusListModel::videoSourceNodeId(index);
     if (nodeQ.isEmpty())
         return;
-    const std::string node = nodeQ.toStdString();
 
-    auto &graph = bps::production::ProductionEngine::Instance().Graph();
-    // Unrouted row: its node is never created (nodes appear with the first
-    // route — BusListModel::toggleVideoRoute) — nothing to push.
-    if (!graph.HasNode(node))
-        return;
-
+    // The row's audio state, read HERE (the interface thread owns the roster)
+    // and captured by value — the worker must never reach back into this model.
     const VideoSourceItem &item = m_sources.at(index);
-    // One edit window around the whole push (VolumeControl + the trims): every
-    // graph mutator serializes and flushes the production doc, so without it
-    // this wrote the document three-plus times per fader tick.
-    const bool ownsEdit = graph.BeginEdit().ok();
+    const QString node = nodeQ;
+    const qreal level = item.level;
+    const bool muted = item.muted;
+    const QList<qreal> channelGains = item.channelGains;
 
-    // VolumeControl: the row's fader + mute, keeping anything else the node
-    // already carries (the bus plane's own controls are separate nodes).
-    bps::production::VolumeControl vol;
-    if (auto cur = graph.Volume(node); cur.ok())
-        vol = cur.value();
-    // UI 0..100 → engine gain, the SAME mapping the audio roster and a bus
-    // fader use (0 = −60 dB silence, 100 = unity).
-    vol.gainDb = -60.0 + (item.level / 100.0) * 60.0;
-    vol.mute = item.muted;
-    (void)graph.SetVolume(node, vol);
+    vgr::EngineWorker::instance().runOffThread([node, level, muted, channelGains] {
+        const std::string nodeStd = node.toStdString();
+        auto &graph = bps::production::ProductionEngine::Instance().Graph();
+        // Unrouted row: its node is never created (nodes appear with the first
+        // route — BusListModel::toggleVideoRoute) — nothing to push.
+        if (!graph.HasNode(nodeStd))
+            return;
 
-    // The per-side trims, on the same meta key the mixer's SumSource reads.
-    for (int channel = 0; channel < 8; ++channel) {
-        const qreal gain = channel < item.channelGains.size()
-            ? item.channelGains.at(channel) : 1.0;
-        (void)graph.SetMeta(node, "uiChannelGain" + std::to_string(channel),
-                            std::to_string(gain));
-    }
-    if (ownsEdit)
-        (void)graph.CommitEdit();
+        // One edit window around the whole push (VolumeControl + the trims): every
+        // graph mutator serializes and flushes the production doc, so without it
+        // this wrote the document three-plus times per fader tick.
+        const bool ownsEdit = graph.BeginEdit().ok();
+
+        // VolumeControl: the row's fader + mute, keeping anything else the node
+        // already carries (the bus plane's own controls are separate nodes).
+        bps::production::VolumeControl vol;
+        if (auto cur = graph.Volume(nodeStd); cur.ok())
+            vol = cur.value();
+        // UI 0..100 → engine gain, the SAME mapping the audio roster and a bus
+        // fader use (0 = −60 dB silence, 100 = unity).
+        vol.gainDb = -60.0 + (level / 100.0) * 60.0;
+        vol.mute = muted;
+        (void)graph.SetVolume(nodeStd, vol);
+
+        // The per-side trims, on the same meta key the mixer's SumSource reads.
+        for (int channel = 0; channel < 8; ++channel) {
+            const qreal gain = channel < channelGains.size()
+                ? channelGains.at(channel) : 1.0;
+            (void)graph.SetMeta(nodeStd, "uiChannelGain" + std::to_string(channel),
+                                std::to_string(gain));
+        }
+        if (ownsEdit)
+            (void)graph.CommitEdit();
+    });
 }
 
 qreal VideoSourceListModel::channelGain(int index, int channel) const

@@ -420,6 +420,8 @@ qt_add_executable(appVGRPresenterUI
     qml/services/CrashHandler.cpp
     qml/services/include/services/EngineBridge.h
     qml/services/EngineBridge.cpp
+    qml/services/include/services/EngineWorker.h
+    qml/services/EngineWorker.cpp
     qml/services/include/services/ShowConverter.h
     qml/services/ShowConverter.cpp
     qml/services/include/services/StyleSpecBuilder.h
@@ -648,11 +650,20 @@ if(BPS_ENABLE_LOCK_SCOPE_CHECK)
     set(BPS_LOCK_SCOPE_TARGET
         "${BPS_ROOT}/modules" "${BPS_ROOT}/core/resources" "${BPS_ROOT}/platform")
 
+    # Two commands, in this order, and the order is the point: the self-test
+    # proves the guard's two SILENT rules still fire (a locked line calling a
+    # helper that reaches a blocking call — in this file or another translation
+    # unit — and a locked method calling something that re-locks the same mutex),
+    # and only then is the scan on the real tree worth reading. A clean scan from
+    # a rule that no longer works looks exactly like a clean tree, so the
+    # fixtures in tools/lock_scope_fixtures are checked first and a broken rule
+    # fails the build here rather than passing silently forever.
     add_custom_target(lock_scope_check ALL
+        COMMAND "${BPS_NODE_EXE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_lock_scope.mjs" --self-test
         COMMAND "${BPS_NODE_EXE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_lock_scope.mjs"
                 ${BPS_LOCK_SCOPE_TARGET}
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        COMMENT "check_lock_scope: locks held across a blocking call or a dispatch"
+        COMMENT "check_lock_scope: its own rules (fixtures), then locks held across a blocking call or a dispatch"
         VERBATIM)
     # Named targets get the same gate, so `--target bps_unit_tests` or a release
     # build of the app cannot skip the guard by not building `all`.
@@ -674,5 +685,87 @@ if(BPS_ENABLE_LOCK_SCOPE_CHECK)
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
     set_tests_properties(lock_scope PROPERTIES
         LABELS "lock-scope"
+        TIMEOUT 120)
+    # The guard's own rules, as a test of their own (`ctest -R lock_scope_selftest`),
+    # so a rule that rots is named as such instead of showing up as "the scan
+    # passed". Cheap: it is the same scan over eight short fixtures.
+    add_test(NAME lock_scope_selftest
+        COMMAND "${BPS_NODE_EXE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_lock_scope.mjs" --self-test
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_tests_properties(lock_scope_selftest PROPERTIES
+        LABELS "lock-scope"
+        TIMEOUT 120)
+endif()
+
+# =============================================================================
+# GUI-thread blocking guard (tools/check_gui_thread_blocks.mjs) — default build
+# =============================================================================
+# The lock-scope guard above asks whether a lock is held across a blocking call.
+# This one asks the complementary question the hang dumps kept answering: can a
+# QML BINDING or signal handler — i.e. the interface thread — reach a call that
+# parks it? Recorded stalls name the cost: TelemetryService::poll ->
+# WindowsPlatform::Sample (GetIfTable2/GetSystemTimes), pumpMeterSnapshot ->
+# WindowsAudio::InputLevels (a contended mutex), SettingsService::setValue ->
+# ApplyToEngine -> AdaptiveRuntime::ApplyOptimization, EngineBridge::write ->
+# Logger::Log. Each is a Q_INVOKABLE or bound property, and each froze the
+# window until the call returned.
+#
+# The scan walks the QML-facing layer's headers for Q_INVOKABLE / Q_PROPERTY
+# READ getters, resolves each to its body (in the .cpp, or inline), and follows
+# private helpers transitively — the entry point is always the innocent-looking
+# one, and the parking happens three calls down. An entry point that hops off
+# the interface thread first (Qt::QueuedConnection, a worker thread) is exempt:
+# that is the fix pattern, and the guard rewards it.
+#
+# HARD findings (an unbounded wait in the body) fail the build — the OS, a
+# device, a file, a sleep — so a NEW one cannot reach main by accident. Existing
+# sites live in tools/gui_thread_baseline.json as known debt; shrink it as they
+# are fixed (`--update-baseline`). SOFT findings (a lock acquire, a cross-engine
+# singleton) are an inventory for the audit, printed on demand with `--all`, and
+# never fail a build on their own — most such sites are uncontended, and gating
+# on them would train everyone to ignore the guard. Waive a site with
+# `// gui-ok: <reason>` on its declaration; a stale waiver fails too.
+option(BPS_ENABLE_GUI_THREAD_CHECK
+    "Fail the build when a QML-exposed entry point can park the interface thread" ON)
+
+if(BPS_ENABLE_GUI_THREAD_CHECK)
+    if(NOT BPS_NODE_EXE)
+        # Declared by the lock-scope guard above; without it, find node here so
+        # either guard can be enabled on its own.
+        find_program(BPS_NODE_EXE
+            NAMES node node.exe
+            HINTS ENV NODE_BIN
+            DOC "node runtime used by the interface-thread guard")
+    endif()
+    if(NOT BPS_NODE_EXE)
+        message(FATAL_ERROR
+            "check_gui_thread_blocks needs node, which was not found on PATH. Install "
+            "node, pass -DBPS_NODE_EXE=/path/to/node (or set NODE_BIN), or build once "
+            "without the guard: -DBPS_ENABLE_GUI_THREAD_CHECK=OFF")
+    endif()
+
+    # The QML-facing layer: these are the functions a binding or handler can
+    # call, and therefore the only ones that can park the interface thread.
+    set(BPS_GUI_THREAD_TARGET "${CMAKE_CURRENT_SOURCE_DIR}/qml/services"
+                              "${CMAKE_CURRENT_SOURCE_DIR}/qml/models")
+
+    add_custom_target(gui_thread_check ALL
+        COMMAND "${BPS_NODE_EXE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_gui_thread_blocks.mjs"
+                ${BPS_GUI_THREAD_TARGET}
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "check_gui_thread_blocks: QML-reachable calls that park the interface thread"
+        VERBATIM)
+    add_dependencies(appVGRPresenterUI gui_thread_check)
+    add_dependencies(bps_unit_tests gui_thread_check)
+
+    # Also a CTest entry (`ctest -R gui_thread`), same ON/OFF switch as the
+    # build gate, and the same WORKING_DIRECTORY note as the lock-scope guard:
+    # the baseline ledger resolves relative to the current directory.
+    add_test(NAME gui_thread
+        COMMAND "${BPS_NODE_EXE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_gui_thread_blocks.mjs"
+                ${BPS_GUI_THREAD_TARGET}
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_tests_properties(gui_thread PROPERTIES
+        LABELS "gui-thread"
         TIMEOUT 120)
 endif()

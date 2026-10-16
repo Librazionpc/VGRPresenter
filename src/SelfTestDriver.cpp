@@ -41,12 +41,29 @@ QQuickItem *findItem(QQuickItem *root, const QString &name)
     return nullptr;
 }
 
+// A name can match MORE THAN ONE item, and the first match is not always the one
+// on screen. A VIRTUALIZED list (a ListView) keeps the rows it has finished with
+// in a REUSE POOL: they keep their objectName, they are still parented inside the
+// view, and they are INVISIBLE — so a first-match lookup hands back a recycled row
+// that is not on screen, and the click aimed at it lands on whatever is really at
+// that point instead (found the hard way: the pre-split scenario clicked a pooled
+// "selfTestVerseRow_2-1" from the sermon that had been open before it). Prefer the
+// match that is VISIBLE and laid out; fall back to the first match, which is what
+// a name with a single copy — every other case — has always been.
 QQuickItem *lookup(QQuickWindow *window, const QString &name)
 {
     if (!window)
         return nullptr;
-    if (auto *item = window->findChild<QQuickItem *>(name))
-        return item;
+    QQuickItem *first = nullptr;
+    const QList<QQuickItem *> matches = window->findChildren<QQuickItem *>(name);
+    for (QQuickItem *item : matches) {
+        if (item->isVisible() && item->width() > 0 && item->height() > 0)
+            return item;
+        if (first == nullptr)
+            first = item;
+    }
+    if (first != nullptr)
+        return first;
     return findItem(window->contentItem(), name);
 }
 

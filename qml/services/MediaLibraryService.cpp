@@ -237,7 +237,17 @@ void MediaLibraryService::removeFolder(const QString &path)
 {
     if (!library_)
         return;
-    const QString name = QFileInfo(path).fileName().isEmpty() ? path : QFileInfo(path).fileName();
+    // The name for the toast comes from the PATH — a pure string parse, NOT a
+    // filesystem question: a folder that is already gone must still leave the
+    // library, and QFileInfo would ask the disk about it. Last component, or the
+    // whole path when it ends in a separator.
+    QString name = path;
+    while (name.endsWith(QLatin1Char('/')) || name.endsWith(QLatin1Char('\\')))
+        name.chop(1);
+    name = name.mid(name.lastIndexOf(QLatin1Char('/')) + 1);
+    name = name.mid(name.lastIndexOf(QLatin1Char('\\')) + 1);
+    if (name.isEmpty())
+        name = path;
     // Its cached pictures stay in the cache: they are keyed by file, so they are reused if the
     // folder is added again, and the cache is not the library's to clean.
     if (auto removed = library_->RemoveFolder(path.toStdString()); !removed.ok()) {

@@ -40,6 +40,12 @@
 # is readable on the target PC with no dev toolchain. analyze.bat prints the
 # crash log tail and all thread backtraces; run it after any failure.
 #
+# The gdb bundle's DLLs come from a walk of gdb's IMPORT GRAPH (objdump), not
+# from a hand-written list — a list that goes stale ships a gdb that cannot load
+# its own runtime, which the app then reports as a modal SYSTEM ERROR dialog over
+# a hung UI. So the bundle is launched once on a scrubbed PATH before it ships
+# (see the GDB step); a gdb that cannot start fails the packaging instead.
+#
 # Machine paths can be overridden by env (same variables as dev_cycle.sh):
 #   CMAKE_BIN, MINGW_BIN (/c/msys64/ucrt64/bin), QT_BIN (/c/Qt/6.11.1/mingw_64/bin)
 #
@@ -205,18 +211,68 @@ if [ "$DO_GDB" = 1 ]; then
     GDB_DIR="$DIST/tools/gdb"
     mkdir -p "$GDB_DIR"
     cp "$GDB_SRC" "$GDB_DIR/"
-    # gdb's own runtime deps the app does NOT already ship beside the exe.
-    # (libgcc_s_seh-1 / libstdc++-6 / libwinpthread-1 / zlib1 are copied in the
-    # step above; these are gdb-only.)
-    for dll in libexpat-1.dll libgmp-10.dll libiconv-2.dll libintl-8.dll \
-               liblzma-5.dll libmpfr-6.dll libncursesw6.dll libpython3.12.dll \
-               libreadline8.dll libxxhash.dll libzstd.dll; do
-        if [ -f "$MINGW_BIN/$dll" ]; then
-            cp "$MINGW_BIN/$dll" "$GDB_DIR/"
-        else
-            echo "  warning: gdb dependency $dll not found in $MINGW_BIN"
-        fi
-    done
+    # gdb's runtime deps are DERIVED from its own import graph, never
+    # hand-listed. The hand-kept list this replaces is what shipped the bug: it
+    # named libreadline8.dll but not libtermcap-0.dll, which libreadline8
+    # imports, so the gdb inside every install could not load — and because the
+    # APP spawns that gdb from its crash handler, the failure surfaced as a
+    # modal "libtermcap-0.dll was not found" SYSTEM ERROR dialog on top of a
+    # hung UI, with a 0-byte hang capture behind it.
+    #
+    # Walk the graph instead: anything reachable that exists in $MINGW_BIN is
+    # gdb's to carry. A system DLL (KERNEL32, api-ms-win-crt-*) is NOT in
+    # $MINGW_BIN, so it is correctly skipped and left to Windows.
+    OBJDUMP_BIN="${OBJDUMP_BIN:-$MINGW_BIN/objdump.exe}"
+    if [ -f "$OBJDUMP_BIN" ]; then
+        pending="gdb.exe"
+        seen=" "
+        while [ -n "$pending" ]; do
+            next=""
+            for img in $pending; do
+                case "$seen" in *" $img "*) continue ;; esac
+                seen="$seen$img "
+                for dep in $(PATH="$MINGW_BIN:$PATH" "$OBJDUMP_BIN" -p "$GDB_DIR/$img" 2>/dev/null \
+                             | sed -n 's/.*DLL Name: *\([^ ]*\) *$/\1/p'); do
+                    [ -f "$MINGW_BIN/$dep" ] || continue   # system DLL: Windows' job
+                    if [ ! -f "$GDB_DIR/$dep" ]; then
+                        cp "$MINGW_BIN/$dep" "$GDB_DIR/"
+                        echo "  gdb dep: $dep (via $img)"
+                    fi
+                    next="$next $dep"
+                done
+            done
+            pending="$next"
+        done
+    else
+        # No objdump: the static list below must be kept complete BY HAND, which
+        # is exactly the failure mode the walk exists to end. Keep it correct if
+        # this path is ever used — libtermcap-0.dll is here on purpose.
+        echo "  warning: $OBJDUMP_BIN not found — falling back to the static gdb dependency list"
+        for dll in libexpat-1.dll libgmp-10.dll libiconv-2.dll libintl-8.dll \
+                   liblzma-5.dll libmpfr-6.dll libncursesw6.dll libpython3.12.dll \
+                   libreadline8.dll libtermcap-0.dll libxxhash.dll libzstd.dll; do
+            if [ -f "$MINGW_BIN/$dll" ]; then
+                cp "$MINGW_BIN/$dll" "$GDB_DIR/"
+            else
+                echo "  warning: gdb dependency $dll not found in $MINGW_BIN"
+            fi
+        done
+    fi
+
+    # The bundle must PROVE it loads before it ships. A gdb that cannot start is
+    # worse than no gdb at all: the app spawns it from inside the crash handler,
+    # so its failure lands as a modal dialog over the frozen UI it was meant to
+    # explain. PATH is scrubbed to the OS alone — the same resolution a customer
+    # install gets — so this fails HERE rather than there.
+    GDB_PROBE="$(PATH="/c/Windows/System32:/c/Windows" "$GDB_DIR/gdb.exe" \
+                     --batch -ex "show version" 2>&1)"
+    if ! printf '%s' "$GDB_PROBE" | grep -q "GNU gdb"; then
+        echo "bundled gdb CANNOT START — it would fail on a customer PC:"
+        printf '%s\n' "$GDB_PROBE" | head -5
+        echo "PORTABLE: FAIL gdb"
+        exit 1
+    fi
+    echo "  gdb OK — $(printf '%s' "$GDB_PROBE" | grep -m1 "GNU gdb")"
 
     # analyze.bat — what a customer double-clicks after a failure. It reads the
     # app's OWN artifacts: the crash log, and the gdb self-attach capture that

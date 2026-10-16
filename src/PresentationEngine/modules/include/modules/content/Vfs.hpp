@@ -138,7 +138,11 @@ private:
         uint16_t method = 0;
     };
 
-    Result<void> OpenLocked();   // requires mutex_
+    // "Make sure it is open." It takes mutex_ ITSELF, and only to look and to
+    // publish: the archive read (PAL) and the central-directory parse run with
+    // the lock RELEASED (they used to run inside it, so every entry read waited
+    // on the whole-file read).
+    Result<void> OpenLocked();
 
     mutable std::mutex mutex_;
     std::string name_;

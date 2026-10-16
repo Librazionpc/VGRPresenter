@@ -253,19 +253,28 @@ ZipVfs::ZipVfs(std::string name, std::string archivePath)
     : name_(std::move(name)), archive_(std::move(archivePath)) {}
 
 Result<void> ZipVfs::Open() {
-    std::lock_guard<std::mutex> lock(mutex_);
     return OpenLocked();
 }
 
+// Opening is the ONE thing here that reads the whole archive from disk, and it
+// used to do it with mutex_ held — so every entry read (and every reader) waited
+// on that read. The body now: look under the lock, read + parse with NO lock
+// held, publish the finished table under it. The name stays because every caller
+// wants "make sure it is open", not "take the lock and do it".
 Result<void> ZipVfs::OpenLocked() {
-    if (opened_) return Ok();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (opened_) return Ok();
+    }
+
+    // ---- the PAL read: no lock held ----
     auto& fs = platform::PlatformAccessor::Get().Filesystem();
     auto bytesR = fs.ReadBinary(archive_);
     if (!bytesR.ok()) return bytesR.error();
-    // Cache the archive bytes: entry reads then avoid re-reading the whole
-    // file from disk per access.
-    bytes_ = std::move(bytesR.value());
-    const auto& data = bytes_;
+    // The archive bytes are cached: entry reads then avoid re-reading the whole
+    // file from disk per access. Held in a LOCAL until the table is published.
+    std::vector<uint8_t> bytes = std::move(bytesR.value());
+    const auto& data = bytes;
 
     // Locate End Of Central Directory: scan backwards for PK\x05\x06.
     const uint8_t kEocdSig[4] = {0x50, 0x4B, 0x05, 0x06};
@@ -281,10 +290,12 @@ Result<void> ZipVfs::OpenLocked() {
     if (eocd == std::string::npos)
         return Error::Make(Err::ParseError, "CAMS", "not a ZIP archive: " + archive_);
 
+    // ---- the parse: pure, into LOCALS (no member is touched yet) ----
+    std::map<std::string, Entry> entries;
+    std::vector<std::string> names;
     uint16_t count = ReadLE16(&data[eocd + 10]);
     uint32_t cdOffset = ReadLE32(&data[eocd + 16]);
-    if (count == 0) { opened_ = true; return Ok(); }
-    if (cdOffset >= data.size())
+    if (cdOffset >= data.size() && count != 0)
         return Error::Make(Err::ParseError, "CAMS", "corrupt ZIP central directory");
 
     // Walk the central directory.
@@ -303,17 +314,25 @@ Result<void> ZipVfs::OpenLocked() {
         e.localOffset = ReadLE32(&data[pos + 42]);
         if (pos + 46 + nameLen > data.size()) break;
         std::string name(reinterpret_cast<const char*>(&data[pos + 46]), nameLen);
-        entries_[NormalizePath(name)] = e;
-        entryNames_.push_back(NormalizePath(name));
+        entries[NormalizePath(name)] = e;
+        names.push_back(NormalizePath(name));
         pos += 46 + nameLen + extraLen + commentLen;
     }
+
+    // ---- publish: the lock guards the member swaps only ----
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (opened_) return Ok();   // another thread finished the same open meanwhile
+    bytes_ = std::move(bytes);
+    entries_ = std::move(entries);
+    entryNames_ = std::move(names);
     opened_ = true;
     return Ok();
 }
 
 Result<std::vector<uint8_t>> ZipVfs::Read(std::string_view path) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Open BEFORE the lock: the PAL archive read must not run under it.
     if (auto r = const_cast<ZipVfs*>(this)->OpenLocked(); !r.ok()) return r.error();
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = entries_.find(NormalizePath(path));
     if (it == entries_.end())
         return Error::Make(Err::NotFound, "CAMS", "zip entry not found: " + std::string(path));
@@ -348,14 +367,14 @@ Result<std::string> ZipVfs::ReadText(std::string_view path) const {
 }
 
 Result<bool> ZipVfs::Exists(std::string_view path) const {
-    std::lock_guard<std::mutex> lock(mutex_);
     if (auto r = const_cast<ZipVfs*>(this)->OpenLocked(); !r.ok()) return r.error();
+    std::lock_guard<std::mutex> lock(mutex_);
     return Result<bool>{entries_.count(NormalizePath(path)) > 0};
 }
 
 Result<uint64_t> ZipVfs::Size(std::string_view path) const {
-    std::lock_guard<std::mutex> lock(mutex_);
     if (auto r = const_cast<ZipVfs*>(this)->OpenLocked(); !r.ok()) return r.error();
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = entries_.find(NormalizePath(path));
     if (it == entries_.end())
         return Error::Make(Err::NotFound, "CAMS", "zip entry not found: " + std::string(path));
@@ -363,8 +382,8 @@ Result<uint64_t> ZipVfs::Size(std::string_view path) const {
 }
 
 Result<std::vector<std::string>> ZipVfs::List(std::string_view dir) const {
-    std::lock_guard<std::mutex> lock(mutex_);
     if (auto r = const_cast<ZipVfs*>(this)->OpenLocked(); !r.ok()) return r.error();
+    std::lock_guard<std::mutex> lock(mutex_);
     std::string prefix = NormalizePath(dir);
     if (!prefix.empty()) prefix += "/";
     std::vector<std::string> out;

@@ -312,7 +312,7 @@ int BusListModel::rowForBusNumber(int busNumber)
 //
 // idForRow(), NOT stableIdForRow(): it HEALS a row that somehow has no id yet
 // instead of answering empty for it. An empty answer here is read by the whole
-// connect path (canConnect, connectAudioRoute, pushRoutingToGraph) as "this row
+// connect path (canConnect, connectAudioRoute, pushRoutingOffThread) as "this row
 // has nothing to route", so a row without an id was unroutable, permanently and
 // silently — a drop onto a bus just refused, which is exactly how "a new audio
 // source refuses to connect" reads from the board.
@@ -1051,7 +1051,7 @@ bool BusListModel::connectAudioRoute(int busIndex, int inputIndex)
     // otherwise it keeps ProductionGraph's unity defaults and the live
     // bus path disagrees with the source controls (including a 0 fader).
     if (AudioInputListModel *inputs = AudioInputListModel::Instance())
-        inputs->pushEffectsToGraph(inputIndex);
+        inputs->pushEffectsOffThread(inputIndex);
 
     pullRow(busIndex);
     emit dataChanged(changed, changed, { RoutedAudioInputsRole });

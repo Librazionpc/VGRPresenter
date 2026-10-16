@@ -160,10 +160,13 @@ Result<void> BroadcastEngine::Initialize() {
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (initialized_.load()) return Ok();
-        // The software loopback provider is always available — CI and rehearsal
-        // exercise the full contract without any SDK (docs/specs/29 §11).
-        (void)RegisterProviderLocked(std::make_shared<SoftwareProvider>());
     }
+    // The software loopback provider is always available — CI and rehearsal
+    // exercise the full contract without any SDK (docs/specs/29 §11). Registered
+    // through the PUBLIC entry point, with NO engine lock held: registration
+    // publishes 'provider registered' on the bus, and a subscriber that calls
+    // back in would otherwise wait on mutex_.
+    (void)RegisterProvider(std::make_shared<SoftwareProvider>());
     // NDI + SDI provider CONSTRUCTION resolves their SDKs at runtime
     // (LoadLibrary), so it runs OUTSIDE the engine lock — the same rule as
     // every other provider call here. Registration itself only takes the
@@ -175,20 +178,26 @@ Result<void> BroadcastEngine::Initialize() {
 }
 
 Result<void> BroadcastEngine::Start() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!initialized_.load())
-        return Error::Make(Err::Broadcast_InvalidState, kModule,
-                           "initialize before start");
-    running_.store(true);
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (!initialized_.load())
+            return Error::Make(Err::Broadcast_InvalidState, kModule,
+                               "initialize before start");
+        running_.store(true);
+    }
+    // Subscribing touches the EventBus — another singleton — so it runs with
+    // the engine lock RELEASED (it used to run inside it).
     WireEvents();
     return Ok();
 }
 
 Result<void> BroadcastEngine::Stop() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!running_.load()) return Ok();
-    running_.store(false);
-    UnwireEvents();
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (!running_.load()) return Ok();
+        running_.store(false);
+    }
+    UnwireEvents();   // bus work, no engine lock held
     return Ok();
 }
 
@@ -277,8 +286,18 @@ Metrics BroadcastEngine::MetricsSnapshot() const {
 // --- Provider registry --------------------------------------------------------
 
 Result<void> BroadcastEngine::RegisterProvider(std::shared_ptr<IBroadcastProvider> provider) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    return RegisterProviderLocked(std::move(provider));
+    if (!provider)
+        return Error::Make(Err::InvalidArgument, kModule, "null provider");
+    const std::string name = provider->Name();
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (auto r = RegisterProviderLocked(std::move(provider)); !r.ok()) return r;
+    }
+    // Published with the engine lock RELEASED: the registration itself is the
+    // registry insert above; telling the world about it is bus work, and a
+    // subscriber that re-enters this engine would otherwise wait on mutex_.
+    (void)EventBus::Instance().Publish(events::BroadcastProviderRegistered{name});
+    return Ok();
 }
 
 Result<void> BroadcastEngine::RegisterProviderLocked(std::shared_ptr<IBroadcastProvider> provider) {
@@ -292,7 +311,9 @@ Result<void> BroadcastEngine::RegisterProviderLocked(std::shared_ptr<IBroadcastP
                                "provider already registered: " + name);
         providers_[name] = std::move(provider);
     }
-    (void)EventBus::Instance().Publish(events::BroadcastProviderRegistered{name});
+    // The 'provider registered' event is NOT published here: this helper runs
+    // with the engine lock held, and publishing is bus work. RegisterProvider()
+    // publishes it after the lock is released (see there).
     return Ok();
 }
 

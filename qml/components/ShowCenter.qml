@@ -16,7 +16,11 @@ Item {
 
     readonly property string type: item ? (item.type ?? "") : ""
     property int reload: 0            // bumped when the show's file changed under us (the next timer), so it is read again
-    readonly property var loaded: { root.reload; return root.type === "show" ? ShowService.peekShow(item.ref) : null }
+    // The peeked show is a PUBLISHED read (see ShowService): peekShow asks for a
+    // file the centre page already knows and hands back what is known, so this
+    // binding carries `peekRevision` as its dependency — that is what re-evaluates
+    // it when a read lands, or when this app writes that show's file.
+    readonly property var loaded: { root.reload; ShowService.peekRevision; return root.type === "show" ? ShowService.peekShow(item.ref) : null }
     readonly property var show: loaded && loaded.ok ? loaded.show : null
     readonly property var slides: show ? show.slides : []
     property int selectedSlide: -1
@@ -66,11 +70,24 @@ Item {
         const m = Math.floor(n / 60), r = n % 60
         return r === 0 ? m + "m" : m + "m " + r + "s"
     }
+    // The token of the next-timer write in flight (0 = none): it rewrites the
+    // show's file on the engine worker, so the reload below hangs off its verdict.
+    property int _timerToken: 0
     function applyTimer() {
-        if (!root.item) return
+        if (!root.item)
+            return
         const seconds = root.timerApplied ? 0 : root.timerSeconds
-        if (ShowService.setNextTimer(root.item.ref, seconds)) {
-            root.reload++
+        root._timerToken = ShowService.setNextTimer(root.item.ref, seconds)
+    }
+    Connections {
+        target: ShowService
+        function onDocumentJobFinished(token, kind, ok) {
+            if (kind !== "timer" || token !== root._timerToken)
+                return
+            root._timerToken = 0
+            if (!ok)
+                return
+            root.reload++          // the file changed: the grid reads the show again
             root.timerOpen = false
         }
     }

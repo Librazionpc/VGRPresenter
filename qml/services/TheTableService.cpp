@@ -15,6 +15,7 @@
 #include "platform/PlatformAccessor.hpp"
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QJSEngine>
@@ -150,6 +151,19 @@ bool sourceFor(bl::TheTableLibrary *lib, const QString &bookId, int chapter,
 TheTableService::TheTableService(QObject *parent)
     : QObject(parent)
 {
+    // A sermon whose SPLIT is no longer the right one is cut again, in the background: the
+    // paragraph continuations the list shows ARE that cut's rows. Two things make it wrong
+    // — a key that moved (a template, an option), or the words under it (an import landed,
+    // the library was reopened, a template was edited in place): the second cannot be seen
+    // in the key, so libraryMoved says so. See ScriptureService's own handler for the full
+    // reasoning (same contract).
+    connect(this, &TheTableService::changed, this, [this] {
+        if (!cutKey_ || (!cutStale_ && chapterKey(cutBookId_, cutChapter_) == *cutKey_))
+            return;
+        cutStale_ = false;
+        SlideBuilder::dropWarm();   // what is held is not this sermon's cut any more
+        chapterAsync(cutBookId_, cutChapter_, cutToken_);
+    });
     // Boot may already have run (tests, reload) or may still be pending (the
     // singleton is created when QML first touches it) — build the library the
     // moment the platform layer exists, the same contract as the design
@@ -160,10 +174,29 @@ TheTableService::TheTableService(QObject *parent)
     });
     if (EngineBridge::instance().booted())
         loadLibrary();
-    // A template landed/changed or the tab's options moved: the preview,
-    // slides and template card re-derive from them (Scripture's contract).
-    connect(&TemplateLibraryService::instance(), &DesignLibraryService::changed, this, &TheTableService::changed);
+    // A template landed/changed: the preview, the slides and the template card re-derive
+    // from it (Scripture's contract) — and a template edited IN PLACE (same id, different
+    // blocks) is words the held cut no longer has, so libraryMoved says so first.
+    connect(&TemplateLibraryService::instance(), &DesignLibraryService::changed, this, [this] {
+        libraryMoved();
+    });
+    // The tab's own options moved: the pane re-derives (as it always did), and the cut is
+    // re-made only if the key really changed — see the handler above.
     connect(&SettingsService::instance(), &SettingsService::changed, this, &TheTableService::changed);
+}
+
+// THE WORDS MOVED (a sermon imported, the library reopened, a template edited in place):
+// the cut held for the open sermon was made from text or blocks that are no longer there,
+// so it goes — and the sermon on screen is cut again from what replaced it, because the
+// `changed` this emits is what the re-cut above hangs off. A SETTINGS write deliberately
+// does NOT come through here: the split's key carries everything the division depends on
+// and is compared at each use, so a write that leaves it alone (a highlight, a note, a
+// column dragged) keeps the cut and the next click stays a lookup.
+void TheTableService::libraryMoved()
+{
+    cutStale_ = true;
+    SlideBuilder::dropWarm();
+    emit changed();
 }
 
 TheTableService &TheTableService::instance()
@@ -198,7 +231,7 @@ void TheTableService::loadLibrary()
     // first paint never waits on the index — on the ONE joinable worker, so
     // quitting can always stop + join it before the engine tears down.
     startIndexing();
-    emit changed();
+    libraryMoved();   // the library was opened: the held cut is text that may have moved
 }
 
 bool TheTableService::loading() const
@@ -270,16 +303,201 @@ QVariantList TheTableService::chapter(const QString &bookId, int chapter) const
 
 void TheTableService::chapterAsync(const QString &bookId, int chapter, int token)
 {
-    auto *runner = QThread::create([this, bookId, chapter, token] {
-        const QVariantList rows = this->chapter(bookId, chapter);
-        QMetaObject::invokeMethod(this, [this, bookId, chapter, token, rows] {
-            if (token == latestChapterToken_)
-                emit chapterReady(token, bookId, chapter, rows);
+    // Read on the GUI thread before the worker starts (template + this tab's options):
+    // the key built here is the one the click will build, which is what lets the two
+    // meet. See ScriptureService::chapterAsync for the same contract.
+    const SlideBuilder::ChapterKey key = chapterKey(bookId, chapter);
+    const std::vector<pf::ContentBlock> templateBlocks = SlideBuilder::templateBlocks(key.templateId);
+    // The keys of the SERMONS either side of this one in the collection — the passages a
+    // step reaches next. Built here (see ScriptureService::chapterAsync: a worker thread
+    // is no place for the service state a key is read from), and built by the same
+    // chapterKey a step will use, so the read-ahead can actually be served.
+    std::vector<SlideBuilder::ChapterKey> neighbourKeys;
+    {
+        const int candidates[2] = { chapter - 1, chapter + 1 };
+        for (const int other : candidates)
+            if (other > 0)
+                neighbourKeys.push_back(chapterKey(bookId, other));
+    }
+    // The generation the read happens under (see SlideBuilder::WarmRequest).
+    const quint64 epoch = SlideBuilder::warmEpoch();
+    // What is on screen, and the key it was cut with (the guard the handler above asks).
+    cutBookId_ = bookId;
+    cutChapter_ = chapter;
+    cutToken_ = token;
+    cutKey_ = key;
+    auto *runner = QThread::create([this, bookId, chapter, token, key, templateBlocks, neighbourKeys, epoch] {
+        // READ AHEAD FIRST: a sermon a step already brought in is held whole (words and
+        // cut), so this load skips the engine read entirely — the read is what a step
+        // normally waits on (see ScriptureService::chapterAsync).
+        QVariantList rows = SlideBuilder::warmedRows(key);
+        const bool readAhead = !rows.isEmpty();
+        if (!readAhead)
+            rows = this->chapter(bookId, chapter);
+        // THE HEAD OF THE SERMON IS CUT BEFORE IT IS CLICKED: the paragraphs the list can
+        // paint, into their slides HERE, so picking one while presenting is a lookup rather
+        // than a fill on the interface thread. A sermon's paragraphs are long, so this is
+        // where the cut costs the most and buys the most (the chapter is read once for all
+        // of them).
+        //
+        // AND ONLY THE HEAD: the real library's sermons run 171 paragraphs at the median
+        // and 500 at the longest, and cutting all of one before it could be seen measured
+        // 0.2 ms per paragraph (64 ms for a 277-paragraph sermon) for a list that shows the
+        // first screenful. The rest is cut below, once these rows are on their way.
+        int warmed = 0;
+        qint64 warmMs = 0;
+        bool cut = false;
+        pf::BookSource all;
+        {
+            QElapsedTimer clock;
+            clock.start();
+            QVariantList numbers;
+            for (const QVariant &row : rows)
+                numbers.append(row.toMap().value(QStringLiteral("number")).toInt());
+            if (!numbers.isEmpty()
+                && sourceFor(tableLibrary(library_), bookId, chapter, numbers, all)) {
+                // Held already (the same key) means nothing is cut again: the same key is
+                // the same answer, and a step into a read-ahead sermon only moves the pin.
+                SlideBuilder::warmChapter(
+                    SlideBuilder::WarmRequest{ epoch, key, templateBlocks, all, rows });
+                warmed = SlideBuilder::warmedItemCount(key);
+                // The sermon's own rows carry that cut, so the paragraph list reaches the
+                // screen already divided (SlideBuilder::attachSplit).
+                SlideBuilder::attachSplit(rows, key);
+                cut = true;
+            }
+            warmMs = clock.elapsed();
+        }
+        QMetaObject::invokeMethod(this, [this, bookId, chapter, token, rows, warmed, warmMs, readAhead] {
+            if (token != latestChapterToken_)
+                return;
+            if (warmed > 0) {
+                // ONE line per sermon (see ScriptureService's for the pair this makes
+                // with warmFor's first-pick diagnostics). A sermon that arrived without a
+                // read says so: that is a step served from the read-ahead.
+                warmServeLogged_ = false;
+                warmMissLogged_ = false;
+                EngineBridge::write(QStringLiteral("info"), QStringLiteral("SlideWarm"),
+                                    readAhead
+                                        ? QStringLiteral("%1 %2: served from the sermon read and cut ahead of this step — no read and no fill for it (off the interface thread)")
+                                              .arg(bookId, QString::number(chapter))
+                                        : QStringLiteral("%1 %2: cut the first %3 paragraph(s) ahead of the click in %4 ms, so the list opens divided (the rest is cut with the rows already on screen)")
+                                              .arg(bookId, QString::number(chapter), QString::number(warmed),
+                                                   QString::number(warmMs)));
+            }
+            emit chapterReady(token, bookId, chapter, rows);
+        }, Qt::QueuedConnection);
+
+        // ---- THE REST OF THE SERMON, once those rows are on their way ---------
+        // Every paragraph below the head still has to be cut, because the list shows a long
+        // paragraph's continuations the moment the sermon is open (SlideBuilder::attachSplit)
+        // — that division is the reported bug, and a head-only list would bring it back for
+        // everything past the fold. So the remainder is cut HERE, in the same worker, and the
+        // rows are handed over a second time when it lands: the open never waits for it.
+        if (cut && latestChapterToken_.load() == token) {
+            const int headItems = warmed;
+            QElapsedTimer restClock;
+            restClock.start();
+            const bool more = SlideBuilder::warmChapterMore(
+                SlideBuilder::WarmRequest{ epoch, key, templateBlocks, all, rows });
+            const qint64 restMs = restClock.elapsed();
+            if (more && latestChapterToken_.load() == token) {
+                // The same rows, now carrying the cut of every paragraph in them.
+                SlideBuilder::attachSplit(rows, key);
+                const int wholeSermon = SlideBuilder::warmedItemCount(key);
+                QMetaObject::invokeMethod(this, [this, bookId, chapter, token, rows, restMs,
+                                                 wholeSermon, headItems] {
+                    if (token != latestChapterToken_)
+                        return;
+                    EngineBridge::write(QStringLiteral("info"), QStringLiteral("SlideWarm"),
+                                        QStringLiteral("%1 %2: the remaining %3 paragraph(s) cut in %4 ms, with the head's %5 already on screen")
+                                            .arg(bookId, QString::number(chapter))
+                                            .arg(QString::number(wholeSermon - headItems))
+                                            .arg(QString::number(restMs))
+                                            .arg(QString::number(headItems)));
+                    emit chapterReady(token, bookId, chapter, rows);
+                }, Qt::QueuedConnection);
+            }
+        }
+
+        // ---- AND THE SERMONS ON EITHER SIDE, so the next step is immediate ----
+        // See ScriptureService::chapterAsync for the whole reasoning: two at most, only
+        // ones that exist, and only while this is still the load the pane wants.
+        QElapsedTimer aheadClock;
+        aheadClock.start();
+        QStringList ahead;
+        for (const SlideBuilder::ChapterKey &otherKey : neighbourKeys) {
+            if (latestChapterToken_.load() != token)
+                return;
+            if (!SlideBuilder::warmedRows(otherKey).isEmpty())
+                continue;   // in hand already
+            const QVariantList otherRows = this->chapter(bookId, otherKey.chapter);
+            if (otherRows.isEmpty())
+                continue;   // no such sermon (the end of the collection)
+            QVariantList otherNumbers;
+            for (const QVariant &row : otherRows)
+                otherNumbers.append(row.toMap().value(QStringLiteral("number")).toInt());
+            pf::BookSource otherSource;
+            if (otherNumbers.isEmpty()
+                || !sourceFor(tableLibrary(library_), bookId, otherKey.chapter, otherNumbers, otherSource))
+                continue;
+            SlideBuilder::warmNeighbour(
+                SlideBuilder::WarmRequest{ epoch, otherKey, templateBlocks, otherSource, otherRows });
+            ahead.append(QString::number(otherKey.chapter));
+        }
+        const qint64 aheadMs = aheadClock.elapsed();
+        if (ahead.isEmpty() || latestChapterToken_.load() != token)
+            return;
+        QMetaObject::invokeMethod(this, [this, bookId, chapter, ahead, aheadMs, key] {
+            EngineBridge::write(QStringLiteral("info"), QStringLiteral("SlideWarm"),
+                                QStringLiteral("%1 %2: read %3 as well and cut each to its head, so the step to either one costs no read "
+                                               "(%4 ms, %5 passage(s) in hand, off the interface thread)")
+                                    .arg(bookId, QString::number(chapter), ahead.join(QLatin1Char(' ')),
+                                         QString::number(aheadMs))
+                                    .arg(SlideBuilder::warmedChapterCount(key.contentType)));
         }, Qt::QueuedConnection);
     });
     connect(runner, &QThread::finished, runner, &QObject::deleteLater);
     latestChapterToken_ = token;
     runner->start();
+}
+
+// The split identity of a sermon, as this tab asks for it. No source id: a sermon has
+// no Bible-file equivalent — the book (sermon) and the template are the whole identity,
+// and `contentType` keeps it apart from Scripture's keys.
+SlideBuilder::ChapterKey TheTableService::chapterKey(const QString &bookId, int chapter) const
+{
+    SlideBuilder::ChapterKey key;
+    key.contentType = QString::fromLatin1(kProfile.contentType);
+    key.templateId = templateId();
+    key.bookId = bookId;
+    key.chapter = chapter;
+    key.options = SettingsService::instance().theTableSettings();
+    return key;
+}
+
+std::optional<SlideBuilder::WarmSlides> TheTableService::warmFor(const QString &bookId, int chapter, int number) const
+{
+    const SlideBuilder::ChapterKey key = chapterKey(bookId, chapter);
+    SlideBuilder::WarmSlides warm = SlideBuilder::warmedItem(key, number);
+    if (!warm.found || warm.slides.empty()) {
+        // "Is anything held for this tab": this chapter NOT being held is exactly what
+        // just happened, so asking that would make the diagnostic never fire.
+        if (!warmMissLogged_ && SlideBuilder::warmedChapterCount(key.contentType) > 0) {
+            warmMissLogged_ = true;
+            EngineBridge::write(QStringLiteral("info"), QStringLiteral("SlideWarm"),
+                                QStringLiteral("%1 %2 paragraph %3 was not in the warmed split — filled on the click "
+                                               "(the template or the options changed since the sermon was cut)")
+                                    .arg(bookId, QString::number(chapter), QString::number(number)));
+        }
+        return std::nullopt;
+    }
+    if (!warmServeLogged_) {
+        warmServeLogged_ = true;
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("SlideWarm"),
+                            QStringLiteral("first paragraph served from the split cut ahead of time — no fill on the interface thread"));
+    }
+    return warm;
 }
 
 QString TheTableService::paragraphPair(const QString &bookId, int chapter, int verse, int count) const
@@ -559,6 +777,11 @@ QVariantMap TheTableService::resolveCitation(const QString &text) const
 
 QVariantMap TheTableService::preview(const QString &bookId, int chapter, const QVariantList &verses) const
 {
+    // A SINGLE PARAGRAPH IS ANSWERED FROM THE SPLIT ALREADY CUT FOR IT when there is
+    // one: this runs on the interface thread each time the operator picks a paragraph.
+    if (verses.size() == 1)
+        if (const auto warm = warmFor(bookId, chapter, verses.constFirst().toInt()))
+            return SlideBuilder::previewOf(warm->slides, warm->hasPlaceholders);
     pf::BookSource source;
     if (!library_ || !EngineBridge::instance().booted() || verses.isEmpty() || !sourceFor(tableLibrary(library_), bookId, chapter, verses, source))
         return SlideBuilder::preview(templateId(), {}, {});   // (nothing to show: the empty shape)
@@ -574,6 +797,9 @@ QVariantMap TheTableService::preview(const QString &bookId, int chapter, const Q
 
 QVariantList TheTableService::slides(const QString &bookId, int chapter, const QVariantList &verses) const
 {
+    if (verses.size() == 1)
+        if (const auto warm = warmFor(bookId, chapter, verses.constFirst().toInt()))
+            return SlideBuilder::slidesOf(warm->slides, QStringLiteral("table"));
     pf::BookSource source;
     if (!library_ || !EngineBridge::instance().booted() || verses.isEmpty() || !sourceFor(tableLibrary(library_), bookId, chapter, verses, source))
         return {};
@@ -711,7 +937,7 @@ bool TheTableService::importSermonFolder(const QString &root)
                 }
                 if (rep.imported > 0)
                     startIndexing();   // the new sermons into the app-wide search (coalesced)
-                emit changed();
+                libraryMoved();        // sermons landed: the words under the held cut may be theirs
             } else {
                 report(qstr(r.error().message), QStringLiteral("error"));
             }
@@ -783,7 +1009,7 @@ bool TheTableService::newSermon()
             }
             report(tr("Added %1 · %2").arg(name, added), QStringLiteral("success"));
             startIndexing();   // the new sermon into the app-wide search (coalesced)
-            emit changed();
+            libraryMoved();    // a sermon landed: the words under the held cut may be theirs
         }, Qt::QueuedConnection);
     });
     connect(worker, &QThread::finished, worker, &QObject::deleteLater);

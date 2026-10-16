@@ -35,6 +35,11 @@ Item {
     property bool started: false
     // A recovery copy of the open show was written this run, so it is ours to clear once the show is saved.
     property bool recoveryWritten: false
+    // The token of the recovery-copy write in flight (0 = none). The copy is a
+    // QUEUED document job — the engine writes it off the interface thread — so its
+    // verdict comes back through ShowService.documentJobFinished, not as a return
+    // value (see writeRecoveryCopy).
+    property int _recoveryToken: 0
     // The copy an unexpected exit left behind, OFFERED but not opened: null once
     // it has been taken up (or when there is nothing to offer). Held so the
     // notice's own click can do the work later — see recover().
@@ -83,13 +88,11 @@ Item {
         // — the home screen, normally) and carries the single click that opens
         // it; nothing is opened until you take it, and the copy stays put if you
         // do not.
-        const waiting = SettingsService.pendingRecovery()
-        if (waiting.path !== undefined) {
-            if (root.values["backups.crashRecovery"] === true)
-                root.offerRecovery(waiting)
-            else
-                SettingsService.clearRecovery()
-        }
+        // The crash-recovery offer, asked for OFF the interface thread: the
+        // answer reads the recovery store from disk, so the request goes out
+        // here and the offer is raised when it arrives (onPendingRecoveryReady
+        // below). Startup does not wait for it, and nothing is offered twice.
+        SettingsService.requestPendingRecovery()
 
         const restoring = root.values["preferences.restoreLastSession"] === true
         const wantsShow = root.values["startup.openLastProject"] === true || (restoring && lastView === "edit")
@@ -169,27 +172,64 @@ Item {
     // its own, now happening because someone clicked. Answers false only when the
     // copy cannot be opened, and says so rather than failing silently, because by
     // then the user has asked for it.
+    // The copy the recovery store is being asked for (restoreFinished answers by
+    // target path), and the name it will be opened as.
+    property string recoveryTarget: ""
     function openOfferedRecovery() {
         const waiting = root.pendingRecoveryOffer
         if (waiting === null)
             return false
         const target = ShowService.newLibraryShowPath("", qsTr("%1 (recovered)").arg(waiting.showName))
-        if (target === "" || !SettingsService.restoreRecovery(target)) {
+        if (target === "") {
             EventBus.notify(qsTr("The recovered copy of “%1” could not be opened any more.")
                                 .arg(waiting.showName),
                             "error", qsTr("Crash recovery"), "settings.recovery.failed")
             return false
         }
-        root.pendingRecoveryOffer = null
-        root.editScreen.openShowPath(target)
-        root.window.currentView = "edit"
-        EngineBridge.log("info", "Crash recovery",
-                         qsTr("Opened the recovered copy as \"%1\"")
-                             .arg(qsTr("%1 (recovered)").arg(waiting.showName)))
-        EventBus.notify(qsTr("“%1” was opened as “%2” — the recovered copy.")
-                            .arg(waiting.showName).arg(qsTr("%1 (recovered)").arg(waiting.showName)),
-                        "success", qsTr("Recovered"), "settings.recovery.restored")
+        // The copy run on a worker: the store is being READ here, and this opens
+        // the recovered show when the engine reports the copy is there (see
+        // onRestoreFinished below — a failure says so rather than opening
+        // nothing). `target` doubles as the request's identity.
+        root.recoveryTarget = target
+        SettingsService.restoreRecovery(target)
         return true
+    }
+
+    // The engine's answers, off the interface thread.
+    Connections {
+        target: SettingsService
+        // What a previous run left behind. `path` is undefined for a clean exit.
+        function onPendingRecoveryReady(info) {
+            if (info.path === undefined)
+                return
+            if (root.values["backups.crashRecovery"] === true)
+                root.offerRecovery(info)
+            else
+                SettingsService.clearRecovery()
+        }
+        // A recovery copy landed (or was refused): open what was asked for.
+        function onRestoreFinished(ok, what) {
+            if (root.recoveryTarget === "" || what !== root.recoveryTarget)
+                return
+            const target = root.recoveryTarget
+            root.recoveryTarget = ""
+            const waiting = root.pendingRecoveryOffer
+            const showName = waiting === null ? "" : String(waiting.showName)
+            if (!ok) {
+                EventBus.notify(qsTr("The recovered copy of “%1” could not be opened any more.").arg(showName),
+                                "error", qsTr("Crash recovery"), "settings.recovery.failed")
+                return
+            }
+            const label = qsTr("%1 (recovered)").arg(showName)
+            root.pendingRecoveryOffer = null
+            root.editScreen.openShowPath(target)
+            root.window.currentView = "edit"
+            EngineBridge.log("info", "Crash recovery",
+                             qsTr("Opened the recovered copy as \"%1\"").arg(label))
+            EventBus.notify(qsTr("“%1” was opened as “%2” — the recovered copy.")
+                                .arg(showName).arg(label),
+                            "success", qsTr("Recovered"), "settings.recovery.restored")
+        }
     }
 
     // ---- remembering where you were ----------------------------------------------------------------------------
@@ -223,6 +263,18 @@ Item {
     }
     Connections {
         target: ShowService
+        // The recovery copy landed: only now is it on disk, so only now is it
+        // recorded (a crash between the request and this line costs this run's
+        // copy, which is exactly what the next 15 s tick is for).
+        function onDocumentJobFinished(token, kind, ok) {
+            if (kind !== "saveCopy" || token !== root._recoveryToken)
+                return
+            root._recoveryToken = 0
+            if (!ok)
+                return
+            SettingsService.noteRecovery(ShowService.showName, ShowService.showPath)
+            root.recoveryWritten = true
+        }
         function onShowChanged() {
             if (root.started && ShowService.showPath !== "" && ShowService.showPath !== String(root.values["session.lastShowPath"]))
                 SettingsService.setValue("session.lastShowPath", ShowService.showPath)
@@ -284,10 +336,9 @@ Item {
 
     function writeRecoveryCopy() {
         root.session.flushAll()   // the engine holds what is on the canvas
-        if (ShowService.saveShowCopy(SettingsService.recoveryPath())) {
-            SettingsService.noteRecovery(ShowService.showName, ShowService.showPath)
-            root.recoveryWritten = true
-        }
+        // The write is queued (ShowService's document jobs) and its verdict lands
+        // in this file's Connections above: the copy is recorded there, not here.
+        root._recoveryToken = ShowService.saveShowCopy(SettingsService.recoveryPath())
     }
 
     // ---- closing ---------------------------------------------------------------------------------------------------
@@ -303,6 +354,13 @@ Item {
     // it, so it stays for the next launch's offer (the engine clears it as soon
     // as the recovered show is saved, by the normal rule).
     function cleanExit() {
+        // The app is going away, so a queued READ (a show being opened, a template
+        // being loaded) has nobody left to answer: it is abandoned rather than run
+        // ahead of the teardown — see ShowService's cancelDocumentJobs. A save the
+        // user asked for is NOT abandoned: that write is why they pressed Save, and
+        // it is queued on the same worker main.cpp's aboutToQuit drains before the
+        // engines are torn down, so it still reaches the file.
+        ShowService.cancelDocumentJobs(["open", "templateLoad"])
         if (root.pendingRecoveryOffer !== null)
             return
         SettingsService.clearRecovery()

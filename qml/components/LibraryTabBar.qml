@@ -46,10 +46,53 @@ Rectangle {
     // The Functions pane drives flows (no search over them yet); the coming-
     // soon tabs have nothing at all to search.
     readonly property bool canSearch: currentPane !== "soon" && currentPane !== "functions"
-    function setSearch(text) {
+    function setSearchFor(pane, text) {
+        if (pane === "")
+            return
         const next = Object.assign({}, root.searches)
-        next[root.currentPane] = text
+        next[pane] = text
         root.searches = next
+    }
+    function setSearch(text) {
+        root.setSearchFor(root.currentPane, text)
+    }
+
+    // ---- The typing beat, in ONE place ---------------------------------------
+    // Every pane reads its query as `searches.<pane>` and answers it with an
+    // ENGINE call: the shows tab searches the show library, media scans the
+    // media library, the design tabs scan theirs, scripture and The Table
+    // search the corpus. Pushing the query per keystroke therefore ran a whole
+    // library query on the INTERFACE THREAD for each character typed — the
+    // same freeze the searchAsync paths were built to avoid, in the boxes that
+    // route through a pane filter instead of a service. This is the one place
+    // all six share, so the beat lives here: 150 ms after the typing stops (the
+    // app's own typing interval — QuickSearchDialog debounces at 140 ms), while
+    // typing stays instant and the suggestion popup, which has its own
+    // provider, is untouched.
+    property string pendingSearch: ""
+    property string pendingPane: ""
+    function delayedSearch(value) {
+        root.pendingSearch = value
+        root.pendingPane = root.currentPane
+        filterDebounce.restart()
+    }
+    function flushSearch() {
+        if (!filterDebounce.running)
+            return
+        filterDebounce.stop()
+        // Landed on the tab it was TYPED on even if the user switched tabs
+        // inside the beat — each tab keeps its own query (that is what the
+        // per-pane map is for), so a switch must not lose or misplace it.
+        const pane = root.pendingPane
+        const text = root.pendingSearch
+        root.pendingSearch = ""
+        root.pendingPane = ""
+        root.setSearchFor(pane, text)
+    }
+    Timer {
+        id: filterDebounce
+        interval: 150
+        onTriggered: root.flushSearch()
     }
 
     // ---- Live autocomplete (Scripture / The Table) -------------------------------------
@@ -115,9 +158,17 @@ Rectangle {
         }
         Connections {
             target: root
-            function onCurrentPaneChanged() { searchBox.pushStored() }
+            function onCurrentPaneChanged() {
+                // A query typed a moment before the tab switch still belongs to
+                // the tab it was typed on, so it is pushed now rather than
+                // dropped with the timer.
+                root.flushSearch()
+                searchBox.pushStored()
+            }
         }
-        onEdited: (value) => root.setSearch(value)
+        // Debounced: see delayedSearch above (a per-keystroke push here is a
+        // per-keystroke engine query in the active pane).
+        onEdited: (value) => root.delayedSearch(value)
         // The active tab's live reference suggestions (null on plain-filter tabs).
         suggestions: root.suggestions
         // The Table's matches render IN THE PANE (matchesList) — the floating popup

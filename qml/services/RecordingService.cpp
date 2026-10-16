@@ -1,6 +1,7 @@
 #include "services/RecordingService.h"
 
 #include "services/EngineBridge.h"
+#include "services/EngineWorker.h"
 #include "services/EventBus.h"
 #include "services/SettingsService.h"
 
@@ -197,12 +198,14 @@ void RecordingService::saveConfig()
 // Graph seam — the master program bus
 // ---------------------------------------------------------------------------
 
+// The graph is the engine's, so this read belongs on the worker (startRecording
+// and applyStreamTarget both ask for it there — see their own workers). The
+// convention: bus plane nodes are "bus:<n>#a"/"#v" (BusListModel's), and the
+// audio plane of the FIRST bus is the program mix.
 QString RecordingService::masterBusNodeId() const
 {
     bps::production::ProductionGraph &g = bpr::ProductionEngine::Instance().Graph();
     for (const auto &id : g.NodeIds()) {
-        // Bus plane nodes are "bus:<n>#a"/"#v" (BusListModel's convention);
-        // the audio plane of the FIRST bus is the program mix.
         const std::string s = id;
         if (s.starts_with("bus:") && s.ends_with("#a"))
             return QString::fromStdString(s);
@@ -214,69 +217,87 @@ QString RecordingService::masterBusNodeId() const
 // Transport
 // ---------------------------------------------------------------------------
 
+// Every RECORD/STREAM gesture is ENGINE WORK, and all of it now runs on the
+// engine worker: the profile build, the session start, the metadata, the stop
+// and the pause all live in the engine (which takes its own locks and writes
+// the file), and the QML-visible flags/status are published here when the
+// worker's answer arrives. True from these calls means ACCEPTED — the outcome
+// (a session on this screen, or the refusal toast) follows a moment later.
 bool RecordingService::startRecording(const QVariantMap &settings)
 {
-    auto &rec = rr::RecordingEngine::Instance();
-
-    // The engine boots after the kernel; the UI can reach this before a
-    // Start() has run (e.g. a boot failure) — refuse honestly.
-    rr::RecordingProfile profile = profileFromSettings(settings);
+    const rr::RecordingProfile profile = profileFromSettings(settings);
     const QString pid = QStringLiteral("ui-program");
-    if (!rec.GetProfile(pid.toStdString()).ok()) {
-        if (auto r = rec.CreateProfile(profile); !r.ok()) {
-            toast(QStringLiteral("Recording refused: %1")
-                      .arg(QString::fromStdString(r.error().message)));
-            return false;
-        }
-        profileId_ = pid;
-    } else {
-        // Refresh the profile so changed settings take effect next take.
-        (void)rec.RemoveProfile(pid.toStdString());
-        if (auto r = rec.CreateProfile(profile); !r.ok()) {
-            toast(QStringLiteral("Recording refused: %1")
-                      .arg(QString::fromStdString(r.error().message)));
-            return false;
-        }
-        profileId_ = pid;
-    }
-
-    const QString bus = masterBusNodeId();
-    if (bus.isEmpty()) {
-        toast(QStringLiteral("No audio bus to record — create a bus on the Audio & Video board first."));
-        return false;
-    }
-
-    if (auto r = rec.StartRecording(pid.toStdString(), bus.toStdString(),
-                                    rr::TapPoint::PostProcessing);
-        !r.ok()) {
-        toast(QStringLiteral("Recording refused: %1")
-                  .arg(QString::fromStdString(r.error().message)));
-        return false;
-    } else {
-        recordingId_ = QString::fromStdString(r.value());
-    }
-
-    // Semantic metadata for the searchable recording later (docs/specs/28 §23).
     const QString stamp = QDateTime::currentDateTime().toString(Qt::ISODate);
-    (void)rec.SetMetadata(recordingId_.toStdString(), "event", "service");
-    (void)rec.SetMetadata(recordingId_.toStdString(), "date",
-                          stamp.left(10).toStdString());
-    (void)rec.SetMetadata(recordingId_.toStdString(), "time", stamp.mid(11, 8).toStdString());
-
     if (!pump_) {
+        // A QTimer belongs to the thread that made it: created here, started on
+        // the worker's answer (and by the pump itself from then on).
         pump_ = new QTimer(this);
         pump_->setInterval(1000);
         connect(pump_, &QTimer::timeout, this, &RecordingService::pumpTick);
     }
-    pump_->start();
-    refreshStatus();
-    refreshStorage();
-    qInfo("RecordingService: recording '%s' from bus %s (%s/%s, %dkbps)",
-          qUtf8Printable(recordingId_), qUtf8Printable(bus),
-          settings.value(QStringLiteral("container")).toString().toUtf8().constData(),
-          settings.value(QStringLiteral("resolution")).toString().toUtf8().constData(),
-          settings.value(QStringLiteral("videoBitrate")).toInt());
-    emit recordingChanged();
+    vgr::EngineWorker::instance().runOffThread(
+        [this, settings, profile, pid, stamp] {
+        auto &rec = rr::RecordingEngine::Instance();
+        const auto refuse = [this](const QString &message) {
+            vgr::EngineWorker::onInterfaceThread(this, [message] {
+                toast(QStringLiteral("Recording refused: %1").arg(message));
+            });
+        };
+        // The engine boots after the kernel; the UI can reach this before a
+        // Start() has run (e.g. a boot failure) — refuse honestly.
+        const bool existed = rec.GetProfile(pid.toStdString()).ok();
+        if (existed)
+            (void)rec.RemoveProfile(pid.toStdString());   // changed settings take effect next take
+        if (auto r = rec.CreateProfile(profile); !r.ok()) {
+            refuse(QString::fromStdString(r.error().message));
+            return;
+        }
+
+        // The master program bus: the FIRST bus plane node in the graph.
+        QString bus;
+        for (const auto &node : bpr::ProductionEngine::Instance().Graph().NodeIds()) {
+            const std::string s = node;
+            if (s.starts_with("bus:") && s.ends_with("#a")) {
+                bus = QString::fromStdString(s);
+                break;
+            }
+        }
+        if (bus.isEmpty()) {
+            vgr::EngineWorker::onInterfaceThread(this, [] {
+                toast(QStringLiteral("No audio bus to record — create a bus on the Audio & Video board first."));
+            });
+            return;
+        }
+
+        auto started = rec.StartRecording(pid.toStdString(), bus.toStdString(),
+                                          rr::TapPoint::PostProcessing);
+        if (!started.ok()) {
+            refuse(QString::fromStdString(started.error().message));
+            return;
+        }
+        const QString sessionId = QString::fromStdString(started.value());
+
+        // Semantic metadata for the searchable recording later (docs/specs/28 §23).
+        (void)rec.SetMetadata(sessionId.toStdString(), "event", "service");
+        (void)rec.SetMetadata(sessionId.toStdString(), "date", stamp.left(10).toStdString());
+        (void)rec.SetMetadata(sessionId.toStdString(), "time", stamp.mid(11, 8).toStdString());
+
+        const QString busLabel = bus;
+        vgr::EngineWorker::onInterfaceThread(this, [this, sessionId, busLabel, settings] {
+            recordingId_ = sessionId;
+            profileId_ = QStringLiteral("ui-program");
+            if (pump_ && !pump_->isActive())
+                pump_->start();
+            refreshStatus();
+            refreshStorage();
+            qInfo("RecordingService: recording '%s' from bus %s (%s/%s, %dkbps)",
+                  qUtf8Printable(recordingId_), qUtf8Printable(busLabel),
+                  settings.value(QStringLiteral("container")).toString().toUtf8().constData(),
+                  settings.value(QStringLiteral("resolution")).toString().toUtf8().constData(),
+                  settings.value(QStringLiteral("videoBitrate")).toInt());
+            emit recordingChanged();
+        });
+    });
     return true;
 }
 
@@ -284,44 +305,66 @@ void RecordingService::stopRecording()
 {
     if (!recording_)
         return;
-    auto &rec = rr::RecordingEngine::Instance();
-    if (auto r = rec.StopRecording(recordingId_.toStdString(),
-                                   QStringLiteral("operator").toStdString()); !r.ok())
-        toast(QStringLiteral("Stop failed: %1")
-                  .arg(QString::fromStdString(r.error().message)));
+    const QString id = recordingId_;
+    // The UI's own state turns over immediately — the button says stopped the
+    // moment it is pressed; the engine's finalize (the container writes its
+    // trailer) happens on the worker and the status is re-read from it after.
     recordingId_.clear();
-    pump_->stop();
-    refreshStatus();
-    refreshStorage();
+    if (pump_)
+        pump_->stop();
     emit recordingChanged();
+    vgr::EngineWorker::instance().runOffThread([this, id] {
+        auto &rec = rr::RecordingEngine::Instance();
+        auto r = rec.StopRecording(id.toStdString(), QStringLiteral("operator").toStdString());
+        vgr::EngineWorker::onInterfaceThread(this, [this, r] {
+            if (!r.ok())
+                toast(QStringLiteral("Stop failed: %1")
+                          .arg(QString::fromStdString(r.error().message)));
+            refreshStatus();
+            refreshStorage();
+            emit recordingChanged();
+        });
+    });
 }
 
 void RecordingService::togglePause()
 {
     if (!recording_)
         return;
-    auto &rec = rr::RecordingEngine::Instance();
-    auto r = paused_ ? rec.ResumeRecording(recordingId_.toStdString())
-                     : rec.PauseRecording(recordingId_.toStdString());
-    if (!r.ok()) {
-        toast(QStringLiteral("Pause failed: %1")
-                  .arg(QString::fromStdString(r.error().message)));
-        return;
-    }
-    refreshStatus();
-    emit recordingChanged();
+    const QString id = recordingId_;
+    const bool wasPaused = paused_;
+    vgr::EngineWorker::instance().runOffThread([this, id, wasPaused] {
+        auto &rec = rr::RecordingEngine::Instance();
+        auto r = wasPaused ? rec.ResumeRecording(id.toStdString())
+                           : rec.PauseRecording(id.toStdString());
+        vgr::EngineWorker::onInterfaceThread(this, [this, r] {
+            if (!r.ok()) {
+                toast(QStringLiteral("Pause failed: %1")
+                          .arg(QString::fromStdString(r.error().message)));
+                return;
+            }
+            refreshStatus();
+            emit recordingChanged();
+        });
+    });
 }
 
 void RecordingService::addMarker(const QString &label)
 {
     if (!recording_)
         return;
-    auto &rec = rr::RecordingEngine::Instance();
-    if (auto r = rec.AddMarker(recordingId_.toStdString(), label.toStdString()); !r.ok())
-        toast(QStringLiteral("Marker failed: %1")
-                  .arg(QString::fromStdString(r.error().message)));
-    else
-        refreshStatus();
+    const QString id = recordingId_;
+    vgr::EngineWorker::instance().runOffThread([this, id, label] {
+        auto &rec = rr::RecordingEngine::Instance();
+        auto r = rec.AddMarker(id.toStdString(), label.toStdString());
+        vgr::EngineWorker::onInterfaceThread(this, [this, r] {
+            if (!r.ok())
+                toast(QStringLiteral("Marker failed: %1")
+                          .arg(QString::fromStdString(r.error().message)));
+            else
+                refreshStatus();
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +373,11 @@ void RecordingService::addMarker(const QString &label)
 
 bool RecordingService::applyStreamTarget(const QString &serverUrl, const QString &streamKey)
 {
+    // The two things a user gets an inline answer for — a URL that is not RTMP
+    // and an empty key — are pure string checks: still answered HERE, so the
+    // dialog can refuse them without a round trip. Everything after them needs
+    // the graph, and that is engine work: refused on the worker with its toast,
+    // exactly as the engine's own refusal was.
     const QString url = serverUrl.trimmed();
     const QString key = streamKey.trimmed();
     if (!url.startsWith(QLatin1String("rtmp://")) && !url.startsWith(QLatin1String("rtmps://"))) {
@@ -341,51 +389,57 @@ bool RecordingService::applyStreamTarget(const QString &serverUrl, const QString
         return false;
     }
 
-    bps::production::ProductionGraph &g = bpr::ProductionEngine::Instance().Graph();
-    const QString audioBus = masterBusNodeId();
-    if (audioBus.isEmpty()) {
-        toast(QStringLiteral("No audio bus to stream — create a bus on the Audio & Video board first."));
-        return false;
-    }
-    const QString videoBus = QString(audioBus).replace(QStringLiteral("#a"), QStringLiteral("#v"));
+    vgr::EngineWorker::instance().runOffThread([this, url, key] {
+        bps::production::ProductionGraph &g = bpr::ProductionEngine::Instance().Graph();
+        const QString audioBus = masterBusNodeId();
+        if (audioBus.isEmpty()) {
+            vgr::EngineWorker::onInterfaceThread(this, [] {
+                toast(QStringLiteral("No audio bus to stream — create a bus on the Audio & Video board first."));
+            });
+            return;
+        }
+        const QString videoBus = QString(audioBus).replace(QStringLiteral("#a"), QStringLiteral("#v"));
 
-    rr::RecordingProfile unused;   // (naming clarity: OutputConfig below)
-    Q_UNUSED(unused)
+        bpr::OutputConfig cfg;
+        cfg.videoBusId = videoBus.toStdString();
+        cfg.audioBusId = audioBus.toStdString();
+        cfg.networkTarget = (url.endsWith(QLatin1Char('/')) ? url + key
+                                                            : url + QLatin1Char('/') + key)
+                                .toStdString();
+        cfg.group = "broadcast";
+        cfg.encoder = "software";
 
-    bpr::OutputConfig cfg;
-    cfg.videoBusId = videoBus.toStdString();
-    cfg.audioBusId = audioBus.toStdString();
-    cfg.networkTarget = (url.endsWith(QLatin1Char('/')) ? url + key
-                                                        : url + QLatin1Char('/') + key)
-                            .toStdString();
-    cfg.group = "broadcast";
-    cfg.encoder = "software";
-
-    // Re-adding refreshes the target; removal keeps the session count sane.
-    if (g.HasNode(kStreamNodeId))
-        (void)g.RemoveNode(kStreamNodeId);
-    if (auto r = g.AddOutput(kStreamNodeId, kStreamNodeName, bpr::SignalType::Video, cfg);
-        !r.ok()) {
-        toast(QStringLiteral("Stream refused: %1")
-                  .arg(QString::fromStdString(r.error().message)));
-        return false;
-    }
-
-    streaming_ = true;
-    refreshStatus();
-    emit recordingChanged();
-    toast(QStringLiteral("Stream destination set — %1").arg(url), QStringLiteral("success"));
+        // Re-adding refreshes the target; removal keeps the session count sane.
+        if (g.HasNode(kStreamNodeId))
+            (void)g.RemoveNode(kStreamNodeId);
+        auto added = g.AddOutput(kStreamNodeId, kStreamNodeName, bpr::SignalType::Video, cfg);
+        vgr::EngineWorker::onInterfaceThread(this, [this, added, url] {
+            if (!added.ok()) {
+                toast(QStringLiteral("Stream refused: %1")
+                          .arg(QString::fromStdString(added.error().message)));
+                return;
+            }
+            streaming_ = true;
+            refreshStatus();
+            emit recordingChanged();
+            toast(QStringLiteral("Stream destination set — %1").arg(url), QStringLiteral("success"));
+        });
+    });
     return true;
 }
 
 void RecordingService::clearStreamTarget()
 {
-    bps::production::ProductionGraph &g = bpr::ProductionEngine::Instance().Graph();
-    if (g.HasNode(kStreamNodeId))
-        (void)g.RemoveNode(kStreamNodeId);
-    streaming_ = false;
-    refreshStatus();
-    emit recordingChanged();
+    vgr::EngineWorker::instance().runOffThread([this] {
+        bps::production::ProductionGraph &g = bpr::ProductionEngine::Instance().Graph();
+        if (g.HasNode(kStreamNodeId))
+            (void)g.RemoveNode(kStreamNodeId);
+        vgr::EngineWorker::onInterfaceThread(this, [this] {
+            streaming_ = false;
+            refreshStatus();
+            emit recordingChanged();
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -394,80 +448,105 @@ void RecordingService::clearStreamTarget()
 
 void RecordingService::refreshStorage()
 {
-    auto info = rr::RecordingEngine::Instance().GetStorageInfo();
-    if (!info.ok())
-        return;
-    const QVariantMap next = storageToVariant(info.value());
-    if (next != storage_) {
-        storage_ = next;
-        emit storageChanged();
-    }
+    vgr::EngineWorker::instance().runOffThread([this] {
+        auto info = rr::RecordingEngine::Instance().GetStorageInfo();
+        if (!info.ok())
+            return;
+        const QVariantMap next = storageToVariant(info.value());
+        vgr::EngineWorker::onInterfaceThread(this, [this, next] {
+            if (next != storage_) {
+                storage_ = next;
+                emit storageChanged();
+            }
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------
 // Status + the 1 Hz pump
 // ---------------------------------------------------------------------------
 
+// The session state QML binds to, read and assembled ON THE WORKER and handed
+// back as a finished map. This runs at 1 Hz while a take is up (and on every
+// transport click) — a lock wait on the thread that draws is exactly what the
+// 1 Hz cadence would have turned into a visible hitch.
 void RecordingService::refreshStatus()
 {
-    auto &rec = rr::RecordingEngine::Instance();
+    const QString id = recordingId_;
+    vgr::EngineWorker::instance().runOffThread([this, id] {
+        auto &rec = rr::RecordingEngine::Instance();
+        bool active = false;
+        bool paused = false;
+        bool gone = false;
+        QVariantMap next;
 
-    recording_ = false;
-    paused_ = false;
-    QVariantMap next;
-
-    if (!recordingId_.isEmpty()) {
-        auto view = rec.GetStatus(recordingId_.toStdString());
-        if (view.ok()) {
-            const rr::RecordingStateView &v = view.value();
-            const bool active = v.state == rr::RecordingState::Recording
-                                || v.state == rr::RecordingState::Paused;
-            recording_ = active;
-            paused_ = v.state == rr::RecordingState::Paused;
-            next.insert(QStringLiteral("state"),
-                        QString::fromLatin1(rr::ToString(v.state)));
-            next.insert(QStringLiteral("durationMs"), qint64(v.durationMs));
-            next.insert(QStringLiteral("sizeMb"),
-                        qreal(v.sizeBytes) / (1024.0 * 1024.0));
-            next.insert(QStringLiteral("droppedFrames"), int(v.droppedFrames));
-            next.insert(QStringLiteral("encoder"),
-                        QString::fromStdString(v.encoder));
-            next.insert(QStringLiteral("filePath"),
-                        QString::fromStdString(v.filePath));
-            next.insert(QStringLiteral("diskHealthy"), v.diskHealthy);
-            QVariantList markers;
-            for (const rr::RecordingMarker &m : v.markers)
-                markers.append(QVariantMap{
-                    { QStringLiteral("timeMs"), qint64(m.timeMs) },
-                    { QStringLiteral("label"), QString::fromStdString(m.label) },
-                });
-            next.insert(QStringLiteral("markers"), markers);
-        } else {
-            recordingId_.clear();
+        if (!id.isEmpty()) {
+            auto view = rec.GetStatus(id.toStdString());
+            if (view.ok()) {
+                const rr::RecordingStateView &v = view.value();
+                active = v.state == rr::RecordingState::Recording
+                         || v.state == rr::RecordingState::Paused;
+                paused = v.state == rr::RecordingState::Paused;
+                next.insert(QStringLiteral("state"),
+                            QString::fromLatin1(rr::ToString(v.state)));
+                next.insert(QStringLiteral("durationMs"), qint64(v.durationMs));
+                next.insert(QStringLiteral("sizeMb"),
+                            qreal(v.sizeBytes) / (1024.0 * 1024.0));
+                next.insert(QStringLiteral("droppedFrames"), int(v.droppedFrames));
+                next.insert(QStringLiteral("encoder"),
+                            QString::fromStdString(v.encoder));
+                next.insert(QStringLiteral("filePath"),
+                            QString::fromStdString(v.filePath));
+                next.insert(QStringLiteral("diskHealthy"), v.diskHealthy);
+                QVariantList markers;
+                for (const rr::RecordingMarker &m : v.markers)
+                    markers.append(QVariantMap{
+                        { QStringLiteral("timeMs"), qint64(m.timeMs) },
+                        { QStringLiteral("label"), QString::fromStdString(m.label) },
+                    });
+                next.insert(QStringLiteral("markers"), markers);
+            } else {
+                gone = true;   // the session is gone (engine restart, policy stop)
+            }
         }
-    }
 
-    // Stream state from the graph (the node's existence IS the state).
-    bps::production::ProductionGraph &g = bpr::ProductionEngine::Instance().Graph();
-    streaming_ = g.HasNode(kStreamNodeId);
-    if (streaming_)
-        next.insert(QStringLiteral("streaming"), true);
+        // Stream state from the graph (the node's existence IS the state).
+        const bool streaming = bpr::ProductionEngine::Instance().Graph().HasNode(kStreamNodeId);
+        if (streaming)
+            next.insert(QStringLiteral("streaming"), true);
 
-    status_ = next;
+        vgr::EngineWorker::onInterfaceThread(this, [this, id, active, paused, gone, streaming, next] {
+            // The answer belongs to the session it was asked about: a stop whose
+            // status was still in flight must not resurrect it.
+            if (id != recordingId_)
+                return;
+            recording_ = active;
+            paused_ = paused;
+            streaming_ = streaming;
+            if (gone)
+                recordingId_.clear();
+            status_ = next;
+        });
+    });
 }
 
 void RecordingService::pumpTick()
 {
     // The engine is externally-clocked (Tick advances durations, segmentation
-    // and the disk monitor) — drive it at 1 Hz while a session runs.
-    (void)rr::RecordingEngine::Instance().Tick(1000);
-    refreshStatus();
-    refreshStorage();
-    // Recording can end engine-side (disk policy StopAll, a failed segment) —
-    // the pump stops itself when the session is gone.
-    if (!recording_)
-        pump_->stop();
-    emit recordingChanged();
+    // and the disk monitor) — driven at 1 Hz on the worker, with the status
+    // read that follows it there too.
+    vgr::EngineWorker::instance().runOffThread([this] {
+        (void)rr::RecordingEngine::Instance().Tick(1000);
+        vgr::EngineWorker::onInterfaceThread(this, [this] {
+            refreshStatus();
+            refreshStorage();
+            // Recording can end engine-side (disk policy StopAll, a failed
+            // segment) — the pump stops itself when the session is gone.
+            if (!recording_ && pump_)
+                pump_->stop();
+            emit recordingChanged();
+        });
+    });
 }
 
 void RecordingService::shutdown()

@@ -370,14 +370,19 @@ Result<std::shared_ptr<RuntimeAsset>> ContentManager::Load(const AssetMetadata& 
     auto r = assets_.Load(meta);
     auto dt = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - t0);
-    std::lock_guard<std::mutex> lock(mutex_);
-    ++operations_;
-    opLatencySum_ += dt;
-    if (!r.ok()) {
-        ++errorCount_;
-        lastError_ = r.error().message;
-        return r;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++operations_;
+        opLatencySum_ += dt;
+        if (!r.ok()) {
+            ++errorCount_;
+            lastError_ = r.error().message;
+        }
     }
+    if (!r.ok())
+        return r;
+    // Published with the lock RELEASED: the counter is already updated, and a
+    // subscriber is free to re-enter the manager (metadata sync, indexing).
     (void)EventBus::Instance().Publish(
         events::ContentAssetLoaded{meta.uuid.ToString(), meta.name, r.value()->bytes.size()});
     return r;

@@ -734,8 +734,19 @@ Rectangle {
                     // template column sits at the far right, the way
                     // FreeShow's does, instead of being squeezed in beside
                     // the clock. Every other pane leaves the clock its 400px.
-                    width: (media_tab_bar.currentPane === "scripture" || media_tab_bar.currentPane === "table")
-                           ? parent.width : parent.width - shows_template_sidebar.width
+                    // FULL width, whatever tab is showing — deliberately NOT
+                    // "the reference panes take the template column's place".
+                    // Widening the container for Scripture / The Table changed the
+                    // width of EVERY pane it holds, including the five that were
+                    // hidden at that moment: every realized Text in them re-shaped
+                    // (the captures' QWindowsFontEngineDirectWrite::stringToCMap
+                    // under QQuickText::geometryChange), every grid re-ran its
+                    // layout and built or released the cards the new cell size
+                    // called for — for a pane nobody was looking at. The panes now
+                    // state their OWN extent instead (the library panes reserve the
+                    // template column, the reference panes fill the dock), so a tab
+                    // switch changes only which pane is visible.
+                    width: parent.width
 
                     clip: true
                     color: "transparent"
@@ -838,7 +849,10 @@ Rectangle {
                         }
                         visible: media_tab_bar.currentPane === "media"
                         filter: media_tab_bar.searches.media !== undefined ? media_tab_bar.searches.media : ""
-                        width: parent.width; height: parent.height
+                        // Narrowed by the template column it shares the dock with: this
+                        // width no longer changes with the TAB, only with the column
+                        // itself being dragged (see media_table's own note).
+                        width: parent.width - shows_template_sidebar.width; height: parent.height
                     }
                     DesignLibraryPane {
                         objectName: "selfTestOverlaysPane"
@@ -862,7 +876,7 @@ Rectangle {
                         }
                         onDesignOpenRequested: (id) => vGRPresenter_Main_Screen.designEditRequested("overlay", id)
                         filter: media_tab_bar.searches.overlays !== undefined ? media_tab_bar.searches.overlays : ""
-                        width: parent.width; height: parent.height
+                        width: parent.width - shows_template_sidebar.width; height: parent.height
                     }
                     DesignLibraryPane {
                         objectName: "selfTestTemplatesPane"
@@ -871,12 +885,12 @@ Rectangle {
                         noun: "template"
                         onDesignOpenRequested: (id) => vGRPresenter_Main_Screen.designEditRequested("template", id)
                         filter: media_tab_bar.searches.templates !== undefined ? media_tab_bar.searches.templates : ""
-                        width: parent.width; height: parent.height
+                        width: parent.width - shows_template_sidebar.width; height: parent.height
                     }
                     LibraryComingSoonPane {
                         objectName: "selfTestSoonPane"
                         visible: media_tab_bar.currentPane === "soon"
-                        width: parent.width; height: parent.height
+                        width: parent.width - shows_template_sidebar.width; height: parent.height
                         title: media_tab_bar.tabs[media_tab_bar.currentTab].label
                         message: qsTr("This library is next on the roadmap.")
                         newLabel: qsTr("New ") + media_tab_bar.tabs[media_tab_bar.currentTab].label
@@ -890,7 +904,7 @@ Rectangle {
                     FunctionsPane {
                         objectName: "selfTestFunctionsPane"
                         visible: media_tab_bar.currentPane === "functions"
-                        width: parent.width; height: parent.height
+                        width: parent.width - shows_template_sidebar.width; height: parent.height
                     }
 
                     // ---- Categories sidebar (Shows tab) ---- the sample's
@@ -1441,7 +1455,7 @@ Rectangle {
                         y: 12
 
                         height: 21
-                        width: parent.width - categories_sidebar.width - 24
+                        width: parent.width - categories_sidebar.width - 24 - shows_template_sidebar.width
 
                         color: "transparent"
 
@@ -1486,6 +1500,25 @@ Rectangle {
                     }
                     Rectangle {
                         id: table_body
+                        objectName: "selfTestShowsRows"
+
+                        // LAYOUT PROBE (VGR_LAYOUT_TEST): the show rows are a Flickable + Repeater,
+                        // so every row the library holds is built whether or not it is on screen.
+                        // Counting the rows built and thrown away is how a filter change (which
+                        // re-renders the whole list) is told apart from a pane switch.
+                        property int showsRowBuilds: 0
+                        property int showsRowDrops: 0
+                        // The scroll-cost probe's per-row binding count for THIS list (see the
+                        // scroll phase in Main.qml's layout probe): how many times a show row's
+                        // own name binding evaluated. Builds say a row was made; this says how
+                        // much binding work each row cost — and a scroll with drops == builds and
+                        // evals == 0 is a scroll whose rows cost nothing but paint.
+                        //
+                        // A JS object field rather than a `property int`, deliberately: writing a
+                        // QML property from inside a binding is reported as a binding loop (see
+                        // ReferencePane.probeEvals). A JS field cannot notify, so it is free of
+                        // that, and the probe reads the total on demand.
+                        readonly property var probeEvals: ({ rows: 0 })
 
                         visible: media_tab_bar.currentPane === "shows"
                         x: categories_sidebar.width + 12
@@ -1498,7 +1531,7 @@ Rectangle {
                         // 61+31) left only ~2px of gap — the button visibly
                         // touching the last row.
                         height: parent.height - y
-                        width: parent.width - categories_sidebar.width - 24
+                        width: parent.width - categories_sidebar.width - 24 - shows_template_sidebar.width
 
                         clip: true
                         color: "transparent"
@@ -1519,37 +1552,62 @@ Rectangle {
                             return wanted.filter((s) => inScope[s.path] === true)
                         }
 
-                        // The rows live in a Flickable: the library outgrew
-                        // one pane's worth of rows long ago, so everything
-                        // below the header scrolls, with the shared
-                        // AppScrollBar on the right (same pattern as
-                        // ShowCenter's slide grid).
-                        Flickable {
+                        // The rows live in a LISTVIEW, not a Flickable + Repeater. The
+                        // library is 680 shows (the engine's own log line: "Show library
+                        // scanned: 680 show(s)"), and a Repeater realizes EVERY one of them
+                        // whether or not it is on screen: 680 rows × (mark + name + date +
+                        // hover surface + drag source), built at boot and then re-laid-out
+                        // and RE-SHAPED — DirectWrite frames (QWindowsFontEngineDirectWrite::
+                        // stringToCMap under QQuickText::geometryChange) are what the hang
+                        // captures show the interface thread parked in — every time the
+                        // dock's width changes or a tab switch re-polishes this subtree.
+                        // A ListView builds only what the viewport holds (≈15 rows here,
+                        // measured with the layout probe) plus its own small cache, reuses
+                        // those rows across a filter, and keeps the AppScrollBar contract
+                        // (it is still a Flickable). Same rows, same order, same delegate.
+                        // ---- Shows rows — ENGINE-FED -------------------
+                        // One view over ShowService.libraryShows (real .vgr files, newest
+                        // first); "All" lists every show, a selected category filters to its
+                        // sub-folder. Rows are click-to-open: the path goes up through
+                        // openShowRequested → Main.qml → the engine, with the unsaved-changes
+                        // guard. Hover = cursor-driven lift via a per-row PositionHoverArea
+                        // (the tabs' pattern — tracker-Math MouseAreas latch their
+                        // containsMouse in this build).
+                        ListView {
                             id: table_scroll
+                            // The scroll probe scrolls THIS, not the named container above it:
+                            // a Flickable's contentY is what moves, and only the ListView owns
+                            // one (selfTestShowsRows stays the container that carries the rows'
+                            // counters).
+                            objectName: "selfTestShowsList"
                             anchors.fill: parent
                             clip: true
                             boundsBehavior: Flickable.StopAtBounds
-                            contentHeight: table_body.shownShows.length * 32
-
-                        // ---- Shows rows — ENGINE-FED -------------------
-                        // One Repeater over ShowService.libraryShows (real
-                        // .vgr files, newest first); "All" lists every show,
-                        // a selected category filters to its sub-folder. Rows
-                        // are click-to-open: the path goes up through
-                        // openShowRequested → Main.qml → the engine, with the
-                        // unsaved-changes guard. Hover = cursor-driven lift
-                        // via a per-row PositionHoverArea (the tabs'
-                        // pattern — tracker-Math MouseAreas latch their
-                        // containsMouse in this build).
-                        Repeater {
+                            // Pool the rows a scroll leaves behind instead of destroying
+                            // them (a row is a mark, two texts, a hover surface and a
+                            // drag source). A FILTER change is still a model reset and
+                            // rebuilds the rows in view — the probe measured 19 built /
+                            // 19 dropped for the 680 → 57 filter, against 57 built /
+                            // 680 dropped before — so this is the scroll pool, not the
+                            // filter fix. (The old hand-computed contentHeight binding
+                            // is gone with the Flickable: a ListView measures its own
+                            // content, one less binding re-entering this polish.)
+                            reuseItems: true
                             model: table_body.shownShows
                             delegate: Rectangle {
                                 required property var modelData
                                 required property int index
 
-                                y: index * 32
-                                height: 31
-                                width: parent.width - 24
+                                // LAYOUT PROBE (VGR_LAYOUT_TEST).
+                                Component.onCompleted: table_body.showsRowBuilds++
+                                Component.onDestruction: table_body.showsRowDrops++
+
+                                height: 32
+                                // NOT parent.width: a view may reparent a delegate (the
+                                // reuse pool), so a row asks the VIEW for its width —
+                                // ListView.view is the documented way in (the old
+                                // Repeater could rely on the contentItem).
+                                width: ListView.view.width - 24
 
                                 radius: 4
                                 // The floating "New show" pill sits OVER the last rows.
@@ -1585,7 +1643,7 @@ Rectangle {
                                     color: Theme.textPrimary
                                     elide: Text.ElideRight
                                     font.family: "Segoe UI"; font.pixelSize: 14
-                                    text: modelData.name
+                                    text: { table_body.probeEvals.rows++; return modelData.name }   // (scroll-cost probe: the row's name binding)
                                     textFormat: Text.PlainText
                                 }
                                 Text {
@@ -1621,8 +1679,7 @@ Rectangle {
                                     }
                                 }
                             }
-                        }
-                        }   // Flickable table_scroll
+                        }   // ListView table_scroll
 
                         // A real draggable bar for the now-scrolling table
                         // (auto-hides when every row already fits).
@@ -1645,7 +1702,9 @@ Rectangle {
 
                         visible: media_tab_bar.currentPane === "shows"
                         anchors.right: parent.right
-                        anchors.rightMargin: 22
+                        // Clears the template column as well as its own margin (the
+                        // container now spans the whole dock — see media_table).
+                        anchors.rightMargin: 22 + shows_template_sidebar.width
                         anchors.bottom: parent.bottom
                         anchors.bottomMargin: 16
 

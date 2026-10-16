@@ -100,6 +100,11 @@ ReferencePane {
         // property already owns the change signal name `userDataChanged` — an
         // explicit signal of that name is a QML duplicate-signal error.)
         signal changed()
+        // Declared because the shared pane's adapter contract carries it (the pane
+        // re-asks a query that went through its SYNC search fallback when the worker's
+        // answer lands — see ScripturePane's adapter, which forwards it). The Table
+        // never emits it: its search is async and answers with a token.
+        signal searchCached(string text)
         property int userDataRevision: 0
     }
 

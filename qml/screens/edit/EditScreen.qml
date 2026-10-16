@@ -137,8 +137,10 @@ Rectangle {
     function openShow() { showSession.openShow() }
     // Opens a library path directly (shows-table row click, Main.qml routes it here).
     function openShowPath(path) { showSession.openShowPath(path) }
-    function saveShow() { return showSession.saveShow() }
-    function saveShowAs() { return showSession.saveShowAs() }
+    // `then(saved)` is optional: the write is queued off the interface thread, so a
+    // caller that must wait for the file (the "save changes?" dialog) passes it.
+    function saveShow(then) { showSession.saveShow(then) }
+    function saveShowAs(then) { showSession.saveShowAs(then) }
     // UI self-test helper (Main.qml scenario): resolve a named item into
     // WINDOW coordinates by recursively walking this screen's item tree.
     // C++ findChild can't reach some QML-created items (Repeater delegates

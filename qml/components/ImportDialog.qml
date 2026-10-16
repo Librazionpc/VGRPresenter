@@ -26,6 +26,9 @@ Item {
     property string page: ""
     property string pendingFormat: ""
     property string pendingFilter: ""
+    // "Paste from clipboard" is in flight (the read is on a worker; the answer
+    // arrives on ImportService.clipboardImported — see the Connections below).
+    property bool awaitingClipboard: false
 
     anchors.fill: parent
     visible: root.open
@@ -68,6 +71,15 @@ Item {
         target: ImportService
         function onFinished(answer) {
             if (answer.ok) root.closed()
+        }
+        // The clipboard read runs on a worker (the PAL's clipboard open waits
+        // out another process's write — see ImportService::importClipboard), so
+        // the dialog is finished by the answer rather than by the click.
+        function onClipboardImported(result) {
+            if (!root.awaitingClipboard)
+                return
+            root.awaitingClipboard = false
+            root.finish(result)
         }
     }
 
@@ -273,7 +285,10 @@ Item {
 
                     ActionButton {
                         text: qsTr("Paste from clipboard")
-                        onClicked: root.finish(ImportService.importClipboard())
+                        onClicked: {
+                            root.awaitingClipboard = true
+                            ImportService.importClipboard()
+                        }
                     }
 
                     Rule { title: qsTr("Media import") }

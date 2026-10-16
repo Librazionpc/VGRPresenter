@@ -269,7 +269,7 @@ Result<void> DesignLibrary::Load() {
     return {};
 }
 
-Result<void> DesignLibrary::SaveLocked() const {
+std::string DesignLibrary::BuildStoreJsonLocked() const {
     J::Array cats;
     for (const DesignCategory& c : categories_) cats.push_back(ToJson(c));
     J::Array designs;
@@ -281,11 +281,16 @@ Result<void> DesignLibrary::SaveLocked() const {
     root["categories"] = J(std::move(cats));
     root["designs"] = J(std::move(designs));
     root["deletedDefaults"] = J(std::move(gone));
-    const std::string text = J(std::move(root)).ToString();
+    return J(std::move(root)).ToString();
+}
 
+Result<void> DesignLibrary::CommitSave(const std::string& json) const {
+    if (storageFile_.empty() || json.empty()) return Ok();
     // ATOMIC: the design library is user-authored content; an interrupted save
     // must leave the previous document intact rather than truncating it.
-    return platform::PlatformAccessor::Get().Filesystem().WriteAtomic(storageFile_, text);
+    //
+    // PAL: callers call this AFTER releasing mutex_ — see the header.
+    return platform::PlatformAccessor::Get().Filesystem().WriteAtomic(storageFile_, json);
 }
 
 // ---------------------------------------------------------------------------
@@ -321,18 +326,27 @@ std::string DesignLibrary::NextIdLocked(std::string_view prefix) const {
 
 template <typename Change>
 Result<void> DesignLibrary::Edit(std::string_view id, Change&& change) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    Design* d = FindLocked(id);
-    if (!d) return Missing();
-    const Design before = *d;
-    if constexpr (std::is_void_v<decltype(change(*d))>) {
-        change(*d);
-    } else if (auto applied = change(*d); !applied.ok()) {
-        *d = before;
-        return applied.error();
+    std::string json;
+    Design undo;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Design* d = FindLocked(id);
+        if (!d) return Missing();
+        undo = *d;
+        if constexpr (std::is_void_v<decltype(change(*d))>) {
+            change(*d);
+        } else if (auto applied = change(*d); !applied.ok()) {
+            *d = undo;
+            return applied.error();
+        }
+        json = BuildStoreJsonLocked();
     }
-    if (auto saved = SaveLocked(); !saved.ok()) {
-        *d = before;
+    // The write happens with the lock RELEASED; a failure re-takes it and puts
+    // the design back as it was (found again by id, not by a pointer that could
+    // have gone stale while the lock was down).
+    if (auto saved = CommitSave(json); !saved.ok()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (Design* d = FindLocked(id)) *d = undo;
         return saved.error();
     }
     return {};
@@ -350,14 +364,21 @@ std::vector<DesignCategory> DesignLibrary::Categories() const {
 Result<DesignCategory> DesignLibrary::CreateCategory(std::string_view name, std::string_view icon) {
     const std::string clean = Trim(name);
     if (clean.empty()) return Error::Make(Err::InvalidArgument, kModule, "a category needs a name");
-    std::lock_guard<std::mutex> lock(mutex_);
-    const std::string key = Lower(clean);
-    for (const DesignCategory& c : categories_)
-        if (Lower(c.name) == key) return Error::Make(Err::AlreadyExists, kModule, "a category with that name already exists");
-    DesignCategory made{ NextIdLocked("cat"), clean, icon.empty() ? "folder" : std::string(icon), false };
-    categories_.push_back(made);
-    if (auto saved = SaveLocked(); !saved.ok()) {
-        categories_.pop_back();
+    std::string json;
+    DesignCategory made;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const std::string key = Lower(clean);
+        for (const DesignCategory& c : categories_)
+            if (Lower(c.name) == key) return Error::Make(Err::AlreadyExists, kModule, "a category with that name already exists");
+        made = DesignCategory{ NextIdLocked("cat"), clean, icon.empty() ? "folder" : std::string(icon), false };
+        categories_.push_back(made);
+        json = BuildStoreJsonLocked();
+    }
+    if (auto saved = CommitSave(json); !saved.ok()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto gone = std::find_if(categories_.begin(), categories_.end(), [&](const DesignCategory& c) { return c.id == made.id; });
+        if (gone != categories_.end()) categories_.erase(gone);
         return saved.error();
     }
     return made;
@@ -366,18 +387,25 @@ Result<DesignCategory> DesignLibrary::CreateCategory(std::string_view name, std:
 Result<void> DesignLibrary::RenameCategory(std::string_view id, std::string_view name) {
     const std::string clean = Trim(name);
     if (clean.empty()) return Error::Make(Err::InvalidArgument, kModule, "a category needs a name");
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = std::find_if(categories_.begin(), categories_.end(), [&](const DesignCategory& c) { return c.id == id; });
-    if (it == categories_.end()) return Error::Make(Err::NotFound, kModule, "no such category");
-    if (it->isDefault) return Error::Make(Err::InvalidState, kModule, "a default category cannot be renamed");
-    const std::string key = Lower(clean);
-    for (const DesignCategory& c : categories_)
-        if (&c != &*it && Lower(c.name) == key)
-            return Error::Make(Err::AlreadyExists, kModule, "a category with that name already exists");
-    const std::string before = it->name;
-    it->name = clean;
-    if (auto saved = SaveLocked(); !saved.ok()) {
-        it->name = before;
+    std::string json;
+    std::string before;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(categories_.begin(), categories_.end(), [&](const DesignCategory& c) { return c.id == id; });
+        if (it == categories_.end()) return Error::Make(Err::NotFound, kModule, "no such category");
+        if (it->isDefault) return Error::Make(Err::InvalidState, kModule, "a default category cannot be renamed");
+        const std::string key = Lower(clean);
+        for (const DesignCategory& c : categories_)
+            if (&c != &*it && Lower(c.name) == key)
+                return Error::Make(Err::AlreadyExists, kModule, "a category with that name already exists");
+        before = it->name;
+        it->name = clean;
+        json = BuildStoreJsonLocked();
+    }
+    if (auto saved = CommitSave(json); !saved.ok()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(categories_.begin(), categories_.end(), [&](const DesignCategory& c) { return c.id == id; });
+        if (it != categories_.end()) it->name = before;
         return saved.error();
     }
     return {};
@@ -385,35 +413,49 @@ Result<void> DesignLibrary::RenameCategory(std::string_view id, std::string_view
 
 Result<void> DesignLibrary::SetCategoryIcon(std::string_view id, std::string_view icon) {
     if (icon.empty()) return Error::Make(Err::InvalidArgument, kModule, "an icon name is needed");
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = std::find_if(categories_.begin(), categories_.end(), [&](const DesignCategory& c) { return c.id == id; });
-    if (it == categories_.end()) return Error::Make(Err::NotFound, kModule, "no such category");
-    if (it->isDefault) return Error::Make(Err::InvalidState, kModule, "a default category keeps its icon");
-    const std::string before = it->icon;
-    it->icon = std::string(icon);
-    if (auto saved = SaveLocked(); !saved.ok()) {
-        it->icon = before;
+    std::string json;
+    std::string before;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(categories_.begin(), categories_.end(), [&](const DesignCategory& c) { return c.id == id; });
+        if (it == categories_.end()) return Error::Make(Err::NotFound, kModule, "no such category");
+        if (it->isDefault) return Error::Make(Err::InvalidState, kModule, "a default category keeps its icon");
+        before = it->icon;
+        it->icon = std::string(icon);
+        json = BuildStoreJsonLocked();
+    }
+    if (auto saved = CommitSave(json); !saved.ok()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(categories_.begin(), categories_.end(), [&](const DesignCategory& c) { return c.id == id; });
+        if (it != categories_.end()) it->icon = before;
         return saved.error();
     }
     return {};
 }
 
 Result<void> DesignLibrary::DeleteCategory(std::string_view id) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = std::find_if(categories_.begin(), categories_.end(), [&](const DesignCategory& c) { return c.id == id; });
-    if (it == categories_.end()) return Error::Make(Err::NotFound, kModule, "no such category");
-    if (it->isDefault) return Error::Make(Err::InvalidState, kModule, "a default category cannot be removed");
-    const DesignCategory removed = *it;
-    const size_t position = static_cast<size_t>(it - categories_.begin());
-    categories_.erase(it);
+    std::string json;
+    DesignCategory removed;
     std::vector<std::string> unfiled;   // the designs that were in it
-    for (Design& d : designs_)
-        if (d.category == removed.id) {
-            unfiled.push_back(d.id);
-            d.category.clear();
-        }
-    if (auto saved = SaveLocked(); !saved.ok()) {
-        categories_.insert(categories_.begin() + static_cast<std::ptrdiff_t>(position), removed);
+    size_t position = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(categories_.begin(), categories_.end(), [&](const DesignCategory& c) { return c.id == id; });
+        if (it == categories_.end()) return Error::Make(Err::NotFound, kModule, "no such category");
+        if (it->isDefault) return Error::Make(Err::InvalidState, kModule, "a default category cannot be removed");
+        removed = *it;
+        position = static_cast<size_t>(it - categories_.begin());
+        categories_.erase(it);
+        for (Design& d : designs_)
+            if (d.category == removed.id) {
+                unfiled.push_back(d.id);
+                d.category.clear();
+            }
+        json = BuildStoreJsonLocked();
+    }
+    if (auto saved = CommitSave(json); !saved.ok()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        categories_.insert(categories_.begin() + static_cast<std::ptrdiff_t>(std::min(position, categories_.size())), removed);
         for (Design& d : designs_)
             if (std::find(unfiled.begin(), unfiled.end(), d.id) != unfiled.end()) d.category = removed.id;
         return saved.error();
@@ -492,54 +534,75 @@ DesignCounts DesignLibrary::Counts() const {
 }
 
 Result<Design> DesignLibrary::Create(std::string_view name, std::string_view categoryId) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!categoryId.empty() && !CategoryLocked(categoryId))
-        return Error::Make(Err::InvalidArgument, kModule, "no such category");
-
-    std::string clean = Trim(name);
-    if (clean.empty()) {
-        // "Overlay", "Overlay 2", ...: the first one not taken.
-        auto taken = [&](const std::string& candidate) {
-            const std::string key = Lower(candidate);
-            return std::any_of(designs_.begin(), designs_.end(), [&](const Design& d) { return Lower(d.name) == key; });
-        };
-        clean = config_.defaultName;
-        for (int n = 2; taken(clean); ++n) clean = std::format("{} {}", config_.defaultName, n);
-    }
-
-    Design d;
-    d.id = NextIdLocked(config_.idPrefix);
-    d.name = clean;
-    d.category = std::string(categoryId);
-    d.color = "#0b57a2";
+    // The starter blocks are the app's own content: claiming their ids runs
+    // ShowEditor's block rules over a scratch presentation, which has nothing to
+    // do with this library's state — and it reaches the PAL, so it happens
+    // BEFORE the lock is taken (the lock-scope rule).
+    std::vector<pres::ContentBlock> starter;
     if (config_.starterBlocks) {
-        // Ids come from the same rules as every other block: the engine claims them.
-        WithBlocks(d, [&](pres::Presentation& scratch) {
+        Design bare;
+        WithBlocks(bare, [&](pres::Presentation& scratch) {
             for (pres::ContentBlock block : config_.starterBlocks())
                 (void)pres::ShowEditor::AddBlock(scratch, kScratchSlide, std::move(block));
             return 0;
         });
+        starter = std::move(bare.blocks);
     }
-    designs_.push_back(d);
-    if (auto saved = SaveLocked(); !saved.ok()) {
-        designs_.pop_back();
+
+    std::string json;
+    Design made;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!categoryId.empty() && !CategoryLocked(categoryId))
+            return Error::Make(Err::InvalidArgument, kModule, "no such category");
+
+        std::string clean = Trim(name);
+        if (clean.empty()) {
+            // "Overlay", "Overlay 2", ...: the first one not taken.
+            auto taken = [&](const std::string& candidate) {
+                const std::string key = Lower(candidate);
+                return std::any_of(designs_.begin(), designs_.end(), [&](const Design& d) { return Lower(d.name) == key; });
+            };
+            clean = config_.defaultName;
+            for (int n = 2; taken(clean); ++n) clean = std::format("{} {}", config_.defaultName, n);
+        }
+
+        made.id = NextIdLocked(config_.idPrefix);
+        made.name = clean;
+        made.category = std::string(categoryId);
+        made.color = "#0b57a2";
+        made.blocks = std::move(starter);
+        designs_.push_back(made);
+        json = BuildStoreJsonLocked();
+    }
+    if (auto saved = CommitSave(json); !saved.ok()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto gone = std::find_if(designs_.begin(), designs_.end(), [&](const Design& d) { return d.id == made.id; });
+        if (gone != designs_.end()) designs_.erase(gone);
         return saved.error();
     }
-    return d;
+    return made;
 }
 
 Result<Design> DesignLibrary::Duplicate(std::string_view id) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const Design* source = FindLocked(id);
-    if (!source) return Missing();
-    Design copy = *source;
-    copy.id = NextIdLocked(config_.idPrefix);
-    copy.name = source->name + " copy";
-    copy.isDefault = false;
-    copy.locked = false;
-    designs_.push_back(copy);
-    if (auto saved = SaveLocked(); !saved.ok()) {
-        designs_.pop_back();
+    std::string json;
+    Design copy;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const Design* source = FindLocked(id);
+        if (!source) return Missing();
+        copy = *source;
+        copy.id = NextIdLocked(config_.idPrefix);
+        copy.name = source->name + " copy";
+        copy.isDefault = false;
+        copy.locked = false;
+        designs_.push_back(copy);
+        json = BuildStoreJsonLocked();
+    }
+    if (auto saved = CommitSave(json); !saved.ok()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto gone = std::find_if(designs_.begin(), designs_.end(), [&](const Design& d) { return d.id == copy.id; });
+        if (gone != designs_.end()) designs_.erase(gone);
         return saved.error();
     }
     return copy;
@@ -583,17 +646,25 @@ Result<void> DesignLibrary::SetDisplayDuration(std::string_view id, double secon
 }
 
 Result<void> DesignLibrary::Delete(std::string_view id) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = std::find_if(designs_.begin(), designs_.end(), [&](const Design& d) { return d.id == id; });
-    if (it == designs_.end()) return Missing();
-    const Design removed = *it;
-    const size_t position = static_cast<size_t>(it - designs_.begin());
-    // Only a shipped design the app itself would put back needs remembering.
-    const bool remember = removed.isDefault;
-    designs_.erase(it);
-    if (remember) deletedDefaults_.insert(removed.id);
-    if (auto saved = SaveLocked(); !saved.ok()) {
-        designs_.insert(designs_.begin() + static_cast<std::ptrdiff_t>(position), removed);
+    std::string json;
+    Design removed;
+    size_t position = 0;
+    bool remember = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(designs_.begin(), designs_.end(), [&](const Design& d) { return d.id == id; });
+        if (it == designs_.end()) return Missing();
+        removed = *it;
+        position = static_cast<size_t>(it - designs_.begin());
+        // Only a shipped design the app itself would put back needs remembering.
+        remember = removed.isDefault;
+        designs_.erase(it);
+        if (remember) deletedDefaults_.insert(removed.id);
+        json = BuildStoreJsonLocked();
+    }
+    if (auto saved = CommitSave(json); !saved.ok()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        designs_.insert(designs_.begin() + static_cast<std::ptrdiff_t>(std::min(position, designs_.size())), removed);
         if (remember) deletedDefaults_.erase(removed.id);
         return saved.error();
     }
@@ -601,13 +672,18 @@ Result<void> DesignLibrary::Delete(std::string_view id) {
 }
 
 Result<size_t> DesignLibrary::RestoreDefaults() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const size_t before = designs_.size();
-    deletedDefaults_.clear();
-    EnsureDefaultsLocked();
-    const size_t restored = designs_.size() - before;
-    if (restored == 0) return size_t{ 0 };
-    if (auto saved = SaveLocked(); !saved.ok()) return saved.error();
+    std::string json;
+    size_t restored = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const size_t before = designs_.size();
+        deletedDefaults_.clear();
+        EnsureDefaultsLocked();
+        restored = designs_.size() - before;
+        if (restored == 0) return size_t{ 0 };
+        json = BuildStoreJsonLocked();
+    }
+    if (auto saved = CommitSave(json); !saved.ok()) return saved.error();
     return restored;
 }
 

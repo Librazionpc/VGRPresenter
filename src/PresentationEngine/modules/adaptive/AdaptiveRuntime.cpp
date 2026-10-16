@@ -425,9 +425,40 @@ Result<void> AdaptiveRuntime::LoadLearning() { return learning_.Load(); }
 // Optimization
 // ---------------------------------------------------------------------------
 
+namespace {
+// The notification bodies live OUT here, away from any lock scope: the deferred
+// queue in ApplyOptimization calls them after applyMutex_ is released, so no
+// dispatch ever happens under that lock (tools/check_lock_scope.mjs reads the
+// lock scope textually, and keeping the publish out of it keeps both truthful).
+void PublishQualityChanged(const std::string& quality, const std::string& why) {
+    (void)EventBus::Instance().Publish(events::AdaptiveQualityChanged{quality, why});
+}
+
+void PublishOptimizationApplied(const std::string& detail) {
+    (void)EventBus::Instance().Publish(events::AdaptiveOptimizationApplied{detail});
+}
+} // namespace
+
 Result<void> AdaptiveRuntime::ApplyOptimization(std::string_view reason) {
+    // The events this pass produces are COLLECTED under the lock and published
+    // after it is released. A subscriber that re-enters the runtime (the
+    // ResourceManager pressure path, Telemetry) would otherwise wait on
+    // applyMutex_ while this thread holds it — the self-deadlock that froze the
+    // GUI thread's next settings write.
+    //
+    // Deferred as DATA, not as closures: a lambda's body is physically inside
+    // the locked scope (this guard reads lock scope textually, and a reader
+    // should not have to prove the lambda only runs later), so collecting the
+    // payload and dispatching in a loop below keeps the publish CALLS outside
+    // the lock where they belong.
+    struct DeferredEvent {
+        std::string quality, why, detail;
+        bool isQuality = false;
+    };
+    std::vector<DeferredEvent> deferred;
     // Serialize with the heartbeat and event publishers (budgets_ → ThreadPool
     // → ResourceManager → CAMS mutex ordering stays consistent).
+    {
     std::lock_guard<std::mutex> applyLock(applyMutex_);
 
     const auto& hw = hwSnapshot_;
@@ -460,18 +491,28 @@ Result<void> AdaptiveRuntime::ApplyOptimization(std::string_view reason) {
     }
     (void)ResourceManager::Instance().SetMode(rm);
 
-    // 5. Publish on quality change.
+    // 5. Publish on quality change — deferred (see the head of this function).
     const QualityLevel q = optimizer_.GetQualityLevel();
     const QualityLevel prev = activeQuality_.exchange(q);
-    if (q != prev)
-        (void)EventBus::Instance().Publish(
-            events::AdaptiveQualityChanged{ToString(q), std::string(reason)});
+    if (q != prev) {
+        DeferredEvent e;
+        e.isQuality = true;
+        e.quality = ToString(q);
+        e.why = std::string(reason);
+        deferred.push_back(std::move(e));
+    }
 
     ++optimizationCount_;
-    if (optimizationCount_.load() % 10 == 1)
-        (void)EventBus::Instance().Publish(
-            events::AdaptiveOptimizationApplied{std::format("quality={} threads={} reason={}",
-                                                             ToString(q), threads, reason)});
+    if (optimizationCount_.load() % 10 == 1) {
+        DeferredEvent e;
+        e.detail = std::format("quality={} threads={} reason={}", ToString(q), threads, reason);
+        deferred.push_back(std::move(e));
+    }
+    }   // applyMutex_ released here
+    for (const DeferredEvent& e : deferred) {
+        if (e.isQuality) PublishQualityChanged(e.quality, e.why);
+        else PublishOptimizationApplied(e.detail);
+    }
     return Ok();
 }
 

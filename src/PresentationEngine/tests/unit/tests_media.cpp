@@ -488,7 +488,7 @@ void TestMediaLibraryNestedFolders() {
 // failure in the log. Both are now handled explicitly: an empty path is a
 // question with no answer, answered with an empty string.
 //
-// The media library is the reachable path: MediaLibrary::Canonical("") and
+// The media library is the reachable path: MediaLibrary::CanonicalKey("") and
 // Items("") both route an empty folder name into Absolute().
 // ---------------------------------------------------------------------------
 void TestEmptyPathSafety() {
@@ -534,9 +534,9 @@ void TestEmptyPathSafety() {
         CHECK(lib.AddFolder(root).ok());
         CHECK(lib.Scan(root).ok());                // items_ is filled by Scan, not AddFolder
 
-        // Canonical() is private; its empty-path guard is exercised through
-        // the public callers below (Scan/RemoveFolder/Subfolders all route
-        // their argument through it).
+        // CanonicalKey()/MatchKey() are private; their empty-path guard is
+        // exercised through the public callers below (Scan/RemoveFolder/
+        // Subfolders all route their argument through them).
         CHECK(lib.Items("").size() == 1);          // empty = "everything"
         CHECK(!lib.Scan("").ok());                 // empty is not a library folder
         CHECK(!lib.RemoveFolder("").ok());

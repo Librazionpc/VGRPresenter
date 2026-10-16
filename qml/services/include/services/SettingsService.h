@@ -10,6 +10,7 @@
 #include <QVariantMap>
 #include <QtQml/qqmlregistration.h>
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <utility>
@@ -140,62 +141,96 @@ public:
                              const std::vector<std::pair<int, int>> &bufferSizes = {});
 
     // Whether a file is there (the last show may have been moved or deleted since the app was closed).
-    Q_INVOKABLE bool fileExists(const QString &path) const;
+    // The ONE filesystem query left on the interface thread, and it is one
+    // IsRegularFile on a local path: no device, no lock, no directory walk —
+    // bounded at a single stat by the OS. Every backup/recovery entry point
+    // below, whose cost is a copy or a listing, runs on a worker instead.
+    Q_INVOKABLE bool fileExists(const QString &path) const;   // gui-ok: one local stat — bounded, no device wait, no lock
 
-    // ---- Backups & recovery ----
-    // Copies a show file into the backups folder (a dated copy) and drops the oldest beyond "Keep last". Returns the copy's path,
-    // or "" when nothing was copied (the show is unchanged since its newest backup, or it could not be read).
-    Q_INVOKABLE QString backupShow(const QString &showFile);
-    Q_INVOKABLE QString backupDirectory() const;
+    // ---- Backups & recovery --------------------------------------------------
+    // ALL of this work runs on a worker thread and the answers arrive as
+    // signals (see runOffThread in the .cpp). Every one of these entry points
+    // was called from the interface thread — an autosave timer copying the open
+    // show, a browser listing every backup, a button restoring one — and each
+    // touches the filesystem: copies, prunes, directory walks. On a slow or
+    // busy disk that is the window frozen, and none of it needs to happen
+    // before the call returns.
+    // Copies a show file into the backups folder (a dated copy) and drops the oldest beyond "Keep last".
+    // The copy's path is not returned: it is not known yet. backupMade says how many NEW copies a run made.
+    Q_INVOKABLE void backupShow(const QString &showFile);
+    Q_INVOKABLE QString backupDirectory() const;   // gui-ok: a path string — a join, no file touched
     // Shows the backups folder in the OS file manager. Creates the folder first when the app has
     // never taken a backup (the engine only makes it on the first Create), so the user sees an empty
     // folder rather than an error. False when the engine is not up yet (no data directory) or the
     // OS refused to open it.
-    Q_INVOKABLE bool openBackupDirectory() const;
+    Q_INVOKABLE void openBackupDirectory();
     // Reveals ONE backup file in the OS file manager (a browser row's "Show in
     // folder") — selects it in Explorer / Finder. Only a path inside the backups
     // folder is accepted; on a desktop with no portable "select" (Linux) this
     // falls back to opening the enclosing folder. False when refused.
-    Q_INVOKABLE bool showBackupInFolder(const QString &path) const;
-    Q_INVOKABLE QVariantList backupsOf(const QString &showName) const;   // [{ path, stamp, sizeBytes }] newest first
+    Q_INVOKABLE void showBackupInFolder(const QString &path);
+    Q_INVOKABLE void requestBackups(const QString &showName);   // -> backupsListed(showName, [{ path, stamp, sizeBytes }])
     // EVERY backup, newest first, each carrying a "category": the all-shows
     // browser (the row above only ever sees the OPEN show):
     // [{ path, show, category, stamp, sizeBytes }]. "category" is "show" for a
     // show file, "settings"/"overlays"/"templates" for one of those copies, so
     // the browser knows which restore a row needs.
-    Q_INVOKABLE QVariantList allBackups() const;
+    Q_INVOKABLE void requestAllBackups();                       // -> allBackupsListed
     // Copies each SELECTED category (the backups.include* settings) into the
     // backups folder and prunes it to "Keep last". Returns how many copies were
     // made (0 when a category is off or its file has never been written).
-    Q_INVOKABLE int backupCategories();
+    Q_INVOKABLE void backupCategories();                        // -> backupMade
     // Puts a settings / overlays / templates backup back over its live file and
     // reloads what reads it. False (with a report) for a show backup or a path
     // outside the backups folder. The current file is replaced — the caller
     // confirms first.
-    Q_INVOKABLE bool restoreCategoryBackup(const QString &backupPath);
+    Q_INVOKABLE void restoreCategoryBackup(const QString &backupPath);   // -> restoreFinished
     // Removes one backup file (a browser row's Delete). False + a report when the
     // engine refuses — a path that is not one of this store's own backups.
-    Q_INVOKABLE bool deleteBackup(const QString &path);
+    Q_INVOKABLE void deleteBackup(const QString &path);         // -> backupsChanged
     // Copies one of those backups OUT to `target` as a new file (an existing file is never overwritten).
     // The BackupStore could only ever create and prune backups; this is the read side, so the UI can hand one
     // back to the user as a new show instead of the backups being write-only. True when the copy was made.
-    Q_INVOKABLE bool restoreBackup(const QString &backupPath, const QString &target);
+    Q_INVOKABLE void restoreBackup(const QString &backupPath, const QString &target);   // -> restoreFinished
     // Where the app writes the recovery copy of the open show; then noteRecovery() says which show it is.
-    Q_INVOKABLE QString recoveryPath() const;
-    Q_INVOKABLE bool noteRecovery(const QString &showName, const QString &originalPath);
+    Q_INVOKABLE QString recoveryPath() const;   // gui-ok: a path string — a join, no file touched
+    Q_INVOKABLE void noteRecovery(const QString &showName, const QString &originalPath);
     // What a previous run left behind: { path, showName, originalPath }, or {} when it ended cleanly.
-    Q_INVOKABLE QVariantMap pendingRecovery() const;
-    Q_INVOKABLE void clearRecovery();
+    Q_INVOKABLE void requestPendingRecovery();                  // -> pendingRecoveryReady
+    // SYNC ON PURPOSE: the clean-exit path must finish inside the process, so a
+    // worker would be the wrong shape (an unfinished clear leaves the marker and
+    // the next launch offers answered work). One unlink of this store's own
+    // marker, at a point where the interface thread is going away anyway.
+    Q_INVOKABLE void clearRecovery();   // gui-ok: clean-exit path — must complete before the process ends; removes two small files inside the store's own folder
+
     // Puts what a previous run left behind into a NEW file at `target` (never over an existing one) and clears it. True when done.
-    Q_INVOKABLE bool restoreRecovery(const QString &target);
+    Q_INVOKABLE void restoreRecovery(const QString &target);    // -> restoreFinished
 
 signals:
     void changed();
     void hardwareChanged();
     // The locale was re-applied (see localeRevision).
     void localeChanged();
-    // One setting changed (already saved and applied to the engine).
+    // One setting changed (already saved; the ENGINE apply follows on a worker
+    // and is coalesced — see applyEngineSettingsAsync).
     void valueChanged(const QString &key);
+
+    // ---- Answers from the backup / recovery worker ---------------------------
+    // The set of backups changed (one was made, deleted, or restored into).
+    void backupsChanged();
+    // How many NEW copies the last backupShow/backupCategories run made
+    // (0 = everything was already saved).
+    void backupMade(int made);
+    // requestBackups' answer: one show's copies, newest first.
+    void backupsListed(const QString &showName, const QVariantList &rows);
+    // requestAllBackups' answer: every backup, newest first.
+    void allBackupsListed(const QVariantList &rows);
+    // A restore finished. `what` is "settings" / "overlays" / "templates" for a
+    // category restore, the target path for a show recovery, "" when refused.
+    void restoreFinished(bool ok, const QString &what);
+    // requestPendingRecovery's answer: { path, showName, originalPath }, or {}
+    // when the previous run ended cleanly.
+    void pendingRecoveryReady(const QVariantMap &info);
 
 private:
     explicit SettingsService(QObject *parent = nullptr);
@@ -213,8 +248,24 @@ private:
     // The chosen language as a person reads it ("Deutsch"), for the notice.
     QString languageLabel() const;
     void report(const QString &message, const QString &level = QStringLiteral("error")) const;
+    // Runs `fn` on a worker thread (a thread of its own, deleted when it ends —
+    // the same shape the search and indexer workers use).
+    void runOffThread(std::function<void()> fn);
+    // Pushes the whole store at the engine OFF the interface thread, coalesced:
+    // ApplyToEngine reaches AdaptiveRuntime::ApplyOptimization, whose lock the
+    // resource sampler can hold for as long as a pressure decision takes — the
+    // wait the app's hang dumps caught a settings write parked in (hang-3912).
+    void applyEngineSettingsAsync();
 
-    std::unique_ptr<bps::settings::AppSettings> settings_;
+    // SHARED, not unique: a worker holds this alive across its own run, so a
+    // service being torn down while an apply is in flight cannot leave the
+    // worker reading freed memory.
+    std::shared_ptr<bps::settings::AppSettings> settings_;
+    // True while an apply is queued or running (a burst of writes coalesces).
+    std::atomic<bool> applyQueued_{false};
+    // Set by every request: an apply that is already running re-runs when it
+    // sees this, so the LAST write's values always reach the engine.
+    std::atomic<bool> applyRequested_{false};
     // Callbacks handed to whenReady() before the store opened; drained once, at
     // the end of load().
     std::vector<std::function<void()>> pendingReady_;

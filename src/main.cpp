@@ -12,6 +12,7 @@
 #include <QQmlContext>
 #include <QVariant>
 #include <QQmlError>
+#include <QCoreApplication>
 #include <QStandardPaths>
 #include <QStringList>
 #include <QTimer>
@@ -37,7 +38,9 @@
 #include "services/SearchService.h"
 #include "services/MediaLibraryService.h"
 #include "services/TheTableService.h"
+#include "services/EngineWorker.h"
 #include "services/LiveOutputService.h"
+#include "services/TelemetryService.h"
 #include "services/RecordingService.h"
 #include "services/SettingsService.h"
 #include "services/MediaThumbnailProvider.h"
@@ -410,6 +413,39 @@ private:
 #endif
 };
 
+// The exit path's zero point: started the moment the event loop returns, so each
+// marker in the tail says how far past it it is instead of leaving a reader to
+// subtract timestamps from two different logs. A file static (not a local) so the
+// post-routine that main registers can still read it.
+static QElapsedTimer gExitClock;
+
+// Every aboutToQuit step is a JOIN or a teardown, and the exit path is where "the
+// app sits in Task Manager for two minutes after I close it" lands. Measured
+// before this existed: the event loop returns within a second (`app event loop
+// returned with code 0`), and the PROCESS then took ~150 s to disappear, with
+// nothing in the log saying which step owned it — the steps are silent while they
+// join. Timing each one names the owner instead of leaving it to be guessed at.
+//
+// `engineGone` marks the step that tears the engine down: its line goes out
+// BEFORE the call, because writing into a torn-down logger is how an exit-path
+// diagnostic becomes the crash it was added to explain.
+void timeExitStep(const char *name, const std::function<void()> &fn, bool engineGone = false)
+{
+    QElapsedTimer clock;
+    clock.start();
+    if (engineGone) {
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("Exit"),
+                            QStringLiteral("aboutToQuit: %1 starting (this step tears the engine down)")
+                                .arg(QString::fromLatin1(name)));
+        fn();
+        return;
+    }
+    fn();
+    EngineBridge::write(QStringLiteral("info"), QStringLiteral("Exit"),
+                        QStringLiteral("aboutToQuit: %1 took %2 ms")
+                            .arg(QString::fromLatin1(name)).arg(clock.elapsed()));
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -479,30 +515,56 @@ int main(int argc, char *argv[])
     // the Qt thread as EngineBridge requires, but its animation keeps moving.
     // Main.qml is not loaded until this synchronous boot has completely ended.
     QObject::connect(&app, &QGuiApplication::aboutToQuit, [] {
+        // Each step below is timed into engine.log (`Exit` / `aboutToQuit: <step>
+        // took <n> ms`), so the exit path's cost is attributable rather than
+        // guessed at — see timeExitStep above. Order is load-bearing (each join
+        // must precede the teardown it protects); the timings must not change it.
+        QElapsedTimer stepsClock;
+        stepsClock.start();
         // A Bible import may still be running on its own thread; let it finish before
         // the engine's systems are torn down under it.
-        SearchService::instance().shutdown();
-        MediaLibraryService::instance().shutdown();   // folder scans in progress
+        timeExitStep("SearchService.shutdown", [] { SearchService::instance().shutdown(); });
+        timeExitStep("MediaLibraryService.shutdown", [] { MediaLibraryService::instance().shutdown(); });   // folder scans in progress
         // The Table's search indexer: cancel + join BEFORE the kernel shutdown —
         // a still-running upsert pass into the Search Engine mid-teardown was the
         // 0xc0000005 on quit (the pass now stops between documents and joins here).
-        TheTableService::instance().shutdownIndexing();
+        timeExitStep("TheTableService.shutdownIndexing", [] { TheTableService::instance().shutdownIndexing(); });
         // The NDI send worker: stop + join BEFORE the engine teardown — the
         // SDK/provider must never be torn down under an in-flight frame send
         // (same quit-crash class as the indexer above).
-        LiveOutputService::instance().shutdownNdiWorker();
+        timeExitStep("LiveOutputService.shutdownNdiWorker", [] { LiveOutputService::instance().shutdownNdiWorker(); });
+        // The QML layer's engine worker: drain + join BEFORE the engine teardown
+        // too — it is where the services hand their engine calls now, and a queued
+        // call must never land in a torn-down engine (bounded join, same rule as
+        // the two joins above).
+        timeExitStep("EngineWorker.shutdown", [] { vgr::EngineWorker::instance().shutdown(); });
+        // The telemetry sampler: stop + join BEFORE the engine teardown too — it
+        // reads the PAL and the engine's own modules on its own thread, and neither
+        // may be torn down under a sample that is in flight. No-op unless something
+        // actually asked for the service (see its header).
+        timeExitStep("TelemetryService.shutdownSampler", [] { TelemetryService::shutdownSampler(); });
         // The hang watchdog's thread, so a late stall report can never touch a
         // service that is already being torn down.
-        calltrace::shutdown();
-        EngineBridge::instance().shutdown();
+        timeExitStep("calltrace.shutdown", [] { calltrace::shutdown(); });
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("Exit"),
+                            QStringLiteral("aboutToQuit: %1 ms across the steps above; the engine teardown starts now")
+                                .arg(stepsClock.elapsed()));
+        timeExitStep("EngineBridge.shutdown", [] { EngineBridge::instance().shutdown(); }, /*engineGone=*/true);
+        // Nothing is logged after EngineBridge.shutdown: the engine (and its
+        // logger) is what a line would be written into. The time from here to the
+        // process disappearing is the stack unwinding in main — the QML engine,
+        // the windows and Qt's own teardown — which no handler here can wrap, and
+        // which the quit harness measures from outside as `teardown=<s>s`.
     });
 #ifdef Q_OS_WIN
     QObject::connect(&app, &QGuiApplication::aboutToQuit,
                      [sourceSerifGdiHandle, sourceSerifItalicGdiHandle] {
-        if (sourceSerifGdiHandle)
-            RemoveFontMemResourceEx(sourceSerifGdiHandle);
-        if (sourceSerifItalicGdiHandle)
-            RemoveFontMemResourceEx(sourceSerifItalicGdiHandle);
+        timeExitStep("RemoveFontMemResourceEx", [sourceSerifGdiHandle, sourceSerifItalicGdiHandle] {
+            if (sourceSerifGdiHandle)
+                RemoveFontMemResourceEx(sourceSerifGdiHandle);
+            if (sourceSerifItalicGdiHandle)
+                RemoveFontMemResourceEx(sourceSerifItalicGdiHandle);
+        });
     });
 #endif
 
@@ -563,6 +625,15 @@ int main(int argc, char *argv[])
                             QStringLiteral("the previous run ended in a crash — ") + crashSummary);
     engine.rootContext()->setContextProperty(QStringLiteral("pendingCrashSummary"), crashSummary);
 
+    // Prove the forensics this build ships actually works on THIS machine, while
+    // the app is healthy enough to say so. "A crash was caught and analyzed" is
+    // only true when the tooling behind it runs — the bundled gdb, the dbghelp
+    // dump writer, the crash folder — and every way that fails is silent until
+    // the moment evidence is needed (see CrashHandler.h). Probes the real chain
+    // on a worker thread and logs one line: ready, or what is broken and what it
+    // costs. Never blocks the boot and never stops the app from starting.
+    VerifyForensicsTooling();
+
     // Transparency inspection flag for QML (OutputWindow's checkerboard base
     // layer). Same env the engine's own frame compositor reads — one switch
     // proves the alpha on every surface: in-app tile, real output window, NDI
@@ -577,7 +648,9 @@ int main(int argc, char *argv[])
     // frame's alpha, so it must never ride a normal run.
     if (alphaInspect) {
         bps::rendering::RenderEngine::Instance().SetAlphaInspect(true);
-        EngineBridge::write(QStringLiteral("warn"), QStringLiteral("Render"),
+        // "warning": EngineBridge::write() maps an unknown level down to Info,
+        // so "warn" here would have logged a degraded-output notice as INFO.
+        EngineBridge::write(QStringLiteral("warning"), QStringLiteral("Render"),
                             QStringLiteral("alpha inspection ON — transparent pixels are drawn as a checkerboard on every output "
                                            "(NDI/HDMI/output window); the feed is NOT keyable while this is on"));
     }
@@ -649,7 +722,7 @@ int main(int argc, char *argv[])
         // Falling back to today's behavior (two instances) rather than failing
         // the boot: the board still works, it just keeps the two-copy defect
         // until this resolves — and a boot that dies here would hide that.
-        EngineBridge::write(QStringLiteral("warn"), QStringLiteral("Startup"),
+        EngineBridge::write(QStringLiteral("warning"), QStringLiteral("Startup"),   // "warn" would log as INFO (see EngineBridge::write)
                             QStringLiteral("routing models: the QML singletons could not be "
                                            "resolved, so the board and the engine face may "
                                            "hold different instances of them"));
@@ -682,6 +755,67 @@ int main(int argc, char *argv[])
     EngineBridge::write(QStringLiteral("info"), QStringLiteral("StartupTrace"),
                         QStringLiteral("main window shown; visible=%1")
                             .arg(rootWindow && rootWindow->isVisible()));
+
+    // ---- TEMPORARY FRAME PROBE (deleted once the layout work is measured) ----
+    // Frame-to-frame time as the renderer actually paints it, which is what "the
+    // list takes a moment" means to an operator. The render loop waits on the
+    // interface thread's scene-graph sync, so a layout/shaping stall there shows up
+    // here as a long gap between painted frames. Sampled on the RENDER thread in a
+    // direct connection (a queued delivery would itself be delayed by the stall it
+    // is measuring), reported by a timer on the interface thread — whose own
+    // lateness is a second, independent reading of the same stall.
+    struct FrameProbe {
+        std::atomic<qint64> lastNs{0};
+        std::atomic<qint64> frames{0};
+        std::atomic<qint64> worstNs{0};
+        std::atomic<qint64> over33{0};
+        std::atomic<qint64> over50{0};
+        std::atomic<qint64> over100{0};
+        void sample()
+        {
+            const qint64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now().time_since_epoch())
+                                   .count();
+            const qint64 prev = lastNs.exchange(now);
+            frames.fetch_add(1);
+            if (prev == 0)
+                return;
+            const qint64 gap = now - prev;
+            if (gap > worstNs.load())
+                worstNs.store(gap);
+            if (gap > 33'000'000)
+                over33.fetch_add(1);
+            if (gap > 50'000'000)
+                over50.fetch_add(1);
+            if (gap > 100'000'000)
+                over100.fetch_add(1);
+        }
+    };
+    FrameProbe frameProbe;
+    if (qEnvironmentVariableIsSet("VGR_FRAMEPROBE") && rootWindow != nullptr) {
+        QObject::connect(rootWindow, &QQuickWindow::afterRendering, &app,
+                         [&frameProbe] { frameProbe.sample(); }, Qt::DirectConnection);
+        QElapsedTimer frameProbeTimer;
+        frameProbeTimer.start();
+        auto *frameProbeReport = new QTimer(&app);
+        frameProbeReport->setInterval(1000);
+        QObject::connect(frameProbeReport, &QTimer::timeout, &app, [&frameProbe, &frameProbeTimer] {
+            const qint64 frames = frameProbe.frames.exchange(0);
+            if (frames == 0)
+                return;
+            const double worst = double(frameProbe.worstNs.exchange(0)) / 1'000'000.0;
+            EngineBridge::write(QStringLiteral("info"), QStringLiteral("FrameProbe"),
+                                QStringLiteral("frames=%1 avg=%2ms worst=%3ms >33ms=%4 >50ms=%5 >100ms=%6 timerLate=%7ms")
+                                    .arg(frames)
+                                    .arg(QString::number(1000.0 / double(frames), 'f', 1))
+                                    .arg(QString::number(worst, 'f', 1))
+                                    .arg(frameProbe.over33.exchange(0))
+                                    .arg(frameProbe.over50.exchange(0))
+                                    .arg(frameProbe.over100.exchange(0))
+                                    .arg(frameProbeTimer.restart()));
+        });
+        frameProbeReport->start();
+    }
 
     // Temporary hang diagnostic: if the GUI thread stops processing events,
     // this timestamped line is the last confirmed event-loop progress in
@@ -779,6 +913,52 @@ int main(int argc, char *argv[])
         QStringLiteral("SelfTestPaneHighlight"),
         QVariant(qEnvironmentVariableIsSet("VGR_PANEHL_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The show-document scenario: it creates a show, saves it to a file, opens it
+    // back, peeks it, applies the next timer and writes a recovery copy — all
+    // through ShowService's QUEUED document jobs, whose verdicts it prints. Its own
+    // env var like the rest (a plain VGR_SELFTEST=1 run must never write files).
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestShowIo"),
+        QVariant(qEnvironmentVariableIsSet("VGR_SHOWIO_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The quit-path scenario: it leaves a show with unsaved changes AND an output
+    // live, then closes the WINDOW the way the title bar does (through the
+    // unsaved-changes guard) and answers the dialog — its own env var like the
+    // rest, because a plain VGR_SELFTEST=1 run must never close itself or write a
+    // show.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestQuit"),
+        QVariant(qEnvironmentVariableIsSet("VGR_QUIT_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The go-live latency ladder: it drives live sessions of growing size (slides
+    // x blocks per rung) and quits, so run_live_latency_test.sh can measure the
+    // first frame and the live cadence against a budget — its own env var like the
+    // rest, because a plain VGR_SELFTEST=1 run must never put an output on air on
+    // its own. VGR_LIVELAT_LADDER overrides the rungs ("slides:blocks," repeats).
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestLiveLat"),
+        QVariant(qEnvironmentVariableIsSet("VGR_LIVELAT_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    const QString liveLatLadder = qEnvironmentVariable("VGR_LIVELAT_LADDER");
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestLiveLatLadder"),
+        QVariant(liveLatLadder.isEmpty() ? QStringLiteral("1:2,7:3,20:5") : liveLatLadder));
+    // The scripture-corpus scenario: it opens the Scripture tab, prints what the
+    // pane's columns hold and what the service answers for the same Bible, then
+    // re-asks once and prints again — its own env var like the rest (a plain
+    // VGR_SELFTEST=1 run must never switch tabs or quit).
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestScripture"),
+        QVariant(qEnvironmentVariableIsSet("VGR_SCRIPTURE_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The pane-rows scenario: it types a two-character query into The Table pane's
+    // tab search, scrolls each of the pane's three result lists to its end and
+    // quits — so it owns an env var like the rest (a plain VGR_SELFTEST=1 run must
+    // never drive the pane's search or its hover).
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestPaneRows"),
+        QVariant(qEnvironmentVariableIsSet("VGR_PANEROWS_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     // The edit-canvas scenario: it opens a show, frames a text item to the
     // canvas edge, walks the real cursor onto every adjustment point and resizes
     // the window — so it gets its own env var like the rest (a plain
@@ -794,6 +974,29 @@ int main(int argc, char *argv[])
         QStringLiteral("SelfTestScopeLock"),
         QVariant(qEnvironmentVariableIsSet("VGR_SCOPELOCK_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The mark scenario: it marks a verse in the OPEN chapter (highlight on and
+    // off, then a note added and removed, all through the pane's own handlers)
+    // and prints what each mark cost the interface thread — its own env var like
+    // the rest, because a plain VGR_SELFTEST=1 run must never write to the
+    // operator's store, even to undo it.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestMark"),
+        QVariant(qEnvironmentVariableIsSet("VGR_MARK_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The pre-split scenario: it opens a sermon, EMPTIES the pick and reads the
+    // rows the paragraph list renders — so it gets its own env var like the rest
+    // (a plain VGR_SELFTEST=1 run must never rewrite a Table option).
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestPreSplit"),
+        QVariant(qEnvironmentVariableIsSet("VGR_PRESPLIT_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // TEMP PROBE SCENARIO (deleted once the layout work is measured): walks the
+    // library tabs, types filters into Media and The Table and quits — its own env
+    // var like the rest, so no other run walks the UI on its own.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestLayout"),
+        QVariant(qEnvironmentVariableIsSet("VGR_LAYOUT_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     // The output-edit-save scenario: it adds a style, opens Settings · Outputs,
     // opens the Edit dialog, presses Save and quits — its own env var like the
     // rest, so a plain VGR_SELFTEST=1 run never rewrites the roster.
@@ -806,6 +1009,14 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty(
         QStringLiteral("SelfTestStyleBg"),
         QVariant(qEnvironmentVariableIsSet("VGR_STYLEBG_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The startup-forensics verdict scenario: it reads the verdict the probe
+    // published, opens Settings · General's "Crash reports" row and checks the
+    // note that rides a recovered crash, then quits — its own env var like the
+    // rest, so a plain VGR_SELFTEST=1 run never opens Settings.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestForensics"),
+        QVariant(qEnvironmentVariableIsSet("VGR_FORENSICS_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     // The blank GO LIVE carrier scenario: it takes a real window input, presses
     // GO LIVE with nothing staged (which sends the one blank carrier slide) and
@@ -901,13 +1112,35 @@ int main(int argc, char *argv[])
         EngineBridge::write(QStringLiteral("info"), QStringLiteral("StartupTrace"),
                             QStringLiteral("entering app event loop"));
         const int code = app.exec();
+        gExitClock.start();
         EngineBridge::write(QStringLiteral("info"), QStringLiteral("StartupTrace"),
                             QStringLiteral("app event loop returned with code %1").arg(code));
         // Finalize any still-running recording BEFORE the kernel tears the
         // engine down — the file on disk must be complete (a planned exit
         // has no excuse for a half-written recording; a CRASHED one recovers
         // through the engine's journal on the next boot).
-        RecordingService::instance().shutdown();
+        timeExitStep("RecordingService.shutdown", [] { RecordingService::instance().shutdown(); });
+        // Last line before the stack unwinds (the QML engine, the windows, Qt): a
+        // quit harness measures from here to the process's exit, which is the only
+        // place the post-handler teardown's cost can be seen at all.
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("Exit"),
+                            QStringLiteral("main: leaving at +%1 ms — the stack teardown (QML engine, windows, Qt) is next")
+                                .arg(gExitClock.elapsed()));
+        // ...and one marker INSIDE that tail, because "the stack teardown" is two
+        // very different things and only one of them is worth chasing. Qt runs
+        // post-routines while QCoreApplication is being destroyed — i.e. AFTER the
+        // QQmlApplicationEngine and every window are gone — so the gap between
+        // `main: leaving` and this line is the QML engine/window teardown, and the
+        // time from here to the process disappearing is Qt's own statics and
+        // platform layer (Media Foundation among them). MEASURED: the aboutToQuit
+        // handlers are 86 ms of a ~150 s exit, which is what makes the split worth
+        // having — no handler owns that wait, and guessing which does is how a
+        // report like "it sits in Task Manager for two minutes" stays unfixed.
+        qAddPostRoutine([] {
+            EngineBridge::write(QStringLiteral("info"), QStringLiteral("Exit"),
+                                QStringLiteral("QCoreApplication teardown reached at +%1 ms — the QML engine and the windows are gone; Qt's own statics are next")
+                                    .arg(gExitClock.elapsed()));
+        });
         return code;
     } catch (const std::exception &e) {
         qCritical() << "Unhandled exception:" << e.what();

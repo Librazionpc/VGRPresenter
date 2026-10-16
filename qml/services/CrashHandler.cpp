@@ -1,13 +1,19 @@
 #include "services/CallTrace.h"
 #include "services/CrashHandler.h"
+#include "services/EngineBridge.h"
 
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QProcess>
 #include <QStringList>
 #include <QStandardPaths>
 #include <QString>
+#include <QThread>
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <csignal>
 #include <cstdlib>
@@ -369,11 +375,49 @@ std::string ResolveGdb()
     return {};   // no gdb on this machine — the text record + minidump remain
 }
 
-void SpawnGdbCapture(const std::string &outPath)
+// ONE attach at a time, and not again inside this window. The attach SUSPENDS
+// EVERY THREAD while gdb walks them, so a stall that persists must not spawn a
+// fresh attach on every watchdog report — that converts one slow stall into a
+// run of them. Observed before this guard: five hang records minutes apart in a
+// single session (5.2 s, 20.4 s, 5.5 s, 5.2 s, 5.9 s), each one re-freezing the
+// very GUI thread it was trying to diagnose.
+std::atomic<bool> g_gdbCaptureInFlight{false};
+std::chrono::steady_clock::time_point g_lastGdbCapture{};
+constexpr auto kGdbCaptureCooldown = std::chrono::seconds(60);
+
+// A capture is only a capture if it has CONTENT. The file exists either way:
+// CreateFileA creates it before gdb is even launched, so an empty one is a
+// decoy, not evidence.
+bool GdbCaptureHasContent(const std::string &path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &fad))
+        return false;
+    const unsigned long long size =
+        (static_cast<unsigned long long>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+    return size > 0;
+}
+
+// Returns true only when gdb actually wrote a backtrace; false means the caller
+// got no symbolized stacks (gdb missing, unable to start, still running from a
+// previous hang, or inside the cooldown).
+bool SpawnGdbCapture(const std::string &outPath)
 {
     const std::string gdb = ResolveGdb();
     if (gdb.empty())
-        return;
+        return false;
+
+    bool idle = false;
+    if (!g_gdbCaptureInFlight.compare_exchange_strong(idle, true))
+        return false;   // an attach from an earlier report is still walking
+    struct ReleaseInFlight {
+        ~ReleaseInFlight() { g_gdbCaptureInFlight.store(false); }
+    } releaseInFlight;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (g_lastGdbCapture.time_since_epoch().count() != 0
+        && now - g_lastGdbCapture < kGdbCaptureCooldown)
+        return false;
 
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
@@ -381,7 +425,7 @@ void SpawnGdbCapture(const std::string &outPath)
     HANDLE hOut = CreateFileA(outPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa,
                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hOut == INVALID_HANDLE_VALUE)
-        return;
+        return false;
 
     // thread apply all bt: every thread, not just the blocked one — a deadlock
     // needs BOTH stacks (who holds the lock, who waits).
@@ -402,6 +446,14 @@ void SpawnGdbCapture(const std::string &outPath)
     si.hStdError = hOut;
     si.hStdInput = INVALID_HANDLE_VALUE;
     PROCESS_INFORMATION pi{};
+    // SEM_FAILCRITICALERRORS FOR THE SPAWN ONLY. A gdb that cannot load its own
+    // DLLs would otherwise raise a MODAL loader dialog ("The code execution
+    // cannot proceed because ... was not found") in the operator's face — which
+    // is exactly what a broken bundled gdb produced, instead of the hang
+    // capture it was spawned for, on top of the frozen UI it was meant to
+    // explain. The child inherits this process's error mode, so this makes the
+    // failure silent on its side; the log line below then reports it honestly.
+    const UINT savedErrorMode = SetErrorMode(SEM_FAILCRITICALERRORS);
     if (CreateProcessA(nullptr, mutableCmd.data(), nullptr, nullptr,
                        TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
         // Bounded: gdb walks + loads the (large) symbol table, then detaches.
@@ -411,7 +463,13 @@ void SpawnGdbCapture(const std::string &outPath)
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
     }
+    SetErrorMode(savedErrorMode);
     CloseHandle(hOut);
+
+    if (!GdbCaptureHasContent(outPath))
+        return false;
+    g_lastGdbCapture = std::chrono::steady_clock::now();
+    return true;
 }
 
 // A HANG is not a crash: nothing faulted, so the SEH/signal handlers never run
@@ -491,17 +549,30 @@ void WriteHangDump(const char *reason)
     // per-thread backtraces beside the dump. This is what actually names the
     // blocked call on a machine with no debugger — see SpawnGdbCapture.
     std::string gdbOut;
+    bool captured = false;
     {
         const auto sep = dumpPath.find_last_of("\\/");
         const std::string dir = (sep != std::string::npos) ? dumpPath.substr(0, sep + 1)
                                                            : std::string();
         gdbOut = dir + "hang-" + std::to_string(GetCurrentProcessId()) + "-gdb.txt";
-        SpawnGdbCapture(gdbOut);
+        captured = SpawnGdbCapture(gdbOut);
+        // No capture → no artifact. Leaving the empty file behind is worse than
+        // leaving none: the old record reported "present=yes" on the strength of
+        // a file gdb had not written a byte to, so a session whose bundled gdb
+        // could not even start read as if the capture had worked.
+        if (!captured)
+            DeleteFileA(gdbOut.c_str());
     }
     if (FILE *f = std::fopen(g_crashLogPath.c_str(), "a")) {
-        std::snprintf(buf, sizeof(buf), "gdb capture: %s (present=%s)",
-                      gdbOut.c_str(),
-                      GetFileAttributesA(gdbOut.c_str()) != INVALID_FILE_ATTRIBUTES ? "yes" : "no");
+        if (captured)
+            std::snprintf(buf, sizeof(buf), "gdb capture: %s (every thread, symbolized)",
+                          gdbOut.c_str());
+        else
+            std::snprintf(buf, sizeof(buf),
+                          "gdb capture: FAILED — no symbolized stacks (tools\\gdb could not start, "
+                          "a capture was already running, or none was resolvable). The dump above "
+                          "still holds every thread's stack; check the bundled gdb with "
+                          "\"tools\\gdb\\gdb.exe --batch -ex \"show version\"\".");
         AppendLine(f, buf);
         std::fclose(f);
     }
@@ -625,4 +696,202 @@ void InstallCrashHandler()
     std::signal(SIGFPE, HandleSignal);
     std::signal(SIGILL, HandleSignal);
 #endif
+}
+
+// ---- startup self-check of the shipped forensics tooling --------------------
+// See CrashHandler.h. The point is that every failure here is SILENT until the
+// moment evidence is needed, so the check RUNS the chain instead of looking at
+// it. Each probe mirrors the real path deliberately: the gdb is chosen in the
+// same order ResolveGdb() chooses it, dbghelp is loaded the way the hang path
+// loads it, and the crash folder is opened for append the way the handlers open
+// it. If one of those moves, this must move with it.
+
+namespace {
+
+// The dist's layout, relative to the exe (what tools/make_portable.sh ships).
+constexpr const char *kGdbRel = "tools/gdb/gdb.exe";
+constexpr const char *kAnalyzeRel = "analyze.bat";
+
+// The folder the shipped tools sit in: beside the exe, or wherever
+// VGR_FORENSICS_DIR points (a packaged build with its tools elsewhere, or a
+// deliberately broken layout to exercise this check).
+QString ForensicsRoot()
+{
+    const QString dir = qEnvironmentVariable("VGR_FORENSICS_DIR");
+    return dir.isEmpty() ? QCoreApplication::applicationDirPath() : dir;
+}
+
+// Runs a candidate gdb ONCE and insists it ANSWERS — the same proof
+// tools/make_portable.sh runs before shipping one, because the failure it
+// catches is invisible otherwise: a gdb that cannot load its own runtime prints
+// no error, it dies at process start (and the capture spawn suppresses the
+// loader dialog that would otherwise say so). `why` always receives a reason.
+bool GdbAnswers(const QString &gdb, QString *why)
+{
+    QProcess proc;
+    proc.setProcessChannelMode(QProcess::MergedChannels);
+    proc.start(gdb, {QStringLiteral("--batch"), QStringLiteral("-ex"),
+                     QStringLiteral("show version")});
+    if (!proc.waitForStarted(5000)) {
+        *why = QStringLiteral("could not be started");
+        return false;
+    }
+    if (!proc.waitForFinished(10000)) {
+        proc.kill();
+        proc.waitForFinished(2000);
+        *why = QStringLiteral("did not answer within 10 s (killed)");
+        return false;
+    }
+    const QString out = QString::fromLocal8Bit(proc.readAll());
+    if (!out.contains(QStringLiteral("GNU gdb"))) {
+        // An NTSTATUS (negative) exit code means the process never reached
+        // main() — the loader refused it, which on a packaged build is the
+        // broken-bundle failure and nothing else: gdb's own runtime DLL is
+        // missing (0xC0000135, STATUS_DLL_NOT_FOUND) or the copy in the bundle
+        // dir is not a usable image (0xC000007B/0xC0000020). Name it, because
+        // "gdb did not run" is not something a support log can act on.
+        const int code = static_cast<int>(proc.exitCode());
+        const QString hex = QStringLiteral("0x%1")
+                                .arg(static_cast<quint32>(code), 8, 16, QLatin1Char('0'));
+        *why = code < 0
+                   ? QStringLiteral("does not load (exit %1 — a required DLL is missing or corrupt)").arg(hex)
+                   : QStringLiteral("does not report a gdb version (exit %1)").arg(hex);
+        return false;
+    }
+    return true;
+}
+
+// Every problem at once, so ONE log line is enough to act on. Empty means the
+// tooling works (the healthy case, and also a dev tree that ships no tools —
+// the text record and minidump remain, which is a working configuration).
+QString ForensicsToolingProblems()
+{
+    QStringList problems;
+    const QDir root(ForensicsRoot());
+
+    const QString bundledGdb = root.filePath(QString::fromLatin1(kGdbRel));
+    const QString analyze = root.filePath(QString::fromLatin1(kAnalyzeRel));
+    const bool hasBundledGdb = QFileInfo::exists(bundledGdb);
+    const bool hasAnalyze = QFileInfo::exists(analyze);
+    // A dist carries the gdb folder and analyze.bat; a dev tree carries neither.
+    // Only a dist is expected to be complete.
+    const bool packaged = hasBundledGdb || hasAnalyze;
+
+    // 1. The gdb a capture would actually attach, in ResolveGdb()'s order:
+    //    override, then the bundled copy, then PATH.
+    const QString fromEnv = qEnvironmentVariable("VGR_GDB_BIN");
+    QString gdb;
+    if (!fromEnv.isEmpty() && QFileInfo::exists(fromEnv))
+        gdb = fromEnv;
+    else if (hasBundledGdb)
+        gdb = bundledGdb;
+    else
+        gdb = QStandardPaths::findExecutable(QStringLiteral("gdb"));
+
+    QString why;
+    if (gdb.isEmpty()) {
+        if (packaged)
+            problems << QStringLiteral("no gdb: %1 is missing and none is on PATH, "
+                                       "so a hang capture would produce no stack")
+                            .arg(QString::fromLatin1(kGdbRel));
+        // A dev tree with no gdb is not a fault: the hang path falls back to the
+        // text record plus the minidump, which is exactly what it does on a
+        // machine with no debugger installed.
+    } else if (!GdbAnswers(gdb, &why)) {
+        problems << QStringLiteral("the gdb a capture would use (%1) %2, "
+                                   "so a hang capture would produce no stack")
+                        .arg(QDir::toNativeSeparators(gdb), why);
+    }
+
+    // 2. The one double-click that reads a report without developer tools.
+    //    Expected in a dist, missing by construction in a dev tree.
+    if (packaged && !hasAnalyze)
+        problems << QStringLiteral("%1 is missing beside the app, so a report could not be read "
+                                   "on a machine with no developer tools")
+                        .arg(QString::fromLatin1(kAnalyzeRel));
+    else if (hasAnalyze && QFileInfo(analyze).size() == 0)
+        problems << QStringLiteral("%1 is empty, so a report could not be read")
+                        .arg(QString::fromLatin1(kAnalyzeRel));
+
+    // 3. The dump writer, resolved the same way the hang path resolves it.
+#ifdef _WIN32
+    if (HMODULE dbg = LoadLibraryA("dbghelp.dll")) {
+        const bool hasWriter = GetProcAddress(dbg, "MiniDumpWriteDump") != nullptr;
+        FreeLibrary(dbg);
+        if (!hasWriter)
+            problems << QStringLiteral("dbghelp.dll has no MiniDumpWriteDump, "
+                                       "so no hang minidump could be written");
+    } else {
+        problems << QStringLiteral("dbghelp.dll cannot be loaded, "
+                                   "so no hang minidump could be written");
+    }
+#endif
+
+    // 4. The folder every artifact goes into. InstallCrashHandler() ignores
+    //    mkpath()'s result (a read-only profile or a denied folder is silent),
+    //    so probe it the way the handlers do — append-open. "a" creates the file
+    //    if it is absent, which is exactly what the first crash would do, and
+    //    nothing is discarded.
+    if (!g_crashLogPath.empty()) {
+        if (FILE *f = std::fopen(g_crashLogPath.c_str(), "a"))
+            std::fclose(f);
+        else
+            problems << QStringLiteral("the crash folder is not writable (%1), "
+                                       "so nothing would be recorded at all")
+                            .arg(QFileInfo(QString::fromStdString(g_crashLogPath)).absolutePath());
+    }
+
+    return problems.isEmpty() ? QString() : problems.join(QStringLiteral("; "));
+}
+
+} // namespace
+
+void VerifyForensicsTooling()
+{
+    // An explicit off-switch, for a packaging/CI smoke launch that must not pay
+    // a process spawn. The normal path never sets it.
+    if (qEnvironmentVariableIsSet("VGR_SKIP_FORENSICS_CHECK")) {
+        // And SAY so, rather than leaving the UI on "checking" forever: an
+        // unasked question is a different answer from an unanswered one, and
+        // the Settings row shows them differently (see EngineBridge's
+        // crashToolingState property).
+        EngineBridge::instance().publishCrashTooling(QStringLiteral("skipped"), QString());
+        return;
+    }
+
+    // On a WORKER: the gdb probe SPAWNS A PROCESS AND WAITS for it, which must
+    // not happen on the thread that draws (see tools/check_gui_thread_blocks.mjs).
+    // The lambda captures nothing — it must not touch this translation unit's
+    // state from another thread.
+    QThread *worker = QThread::create([] {
+        const QString problems = ForensicsToolingProblems();
+        // Answer from the INTERFACE thread: one line, on the thread (and in the
+        // log) everything else reports through. qApp is the context object, so
+        // Qt drops the call if the app is already tearing down.
+        QMetaObject::invokeMethod(
+            qApp,
+            [problems] {
+                if (problems.isEmpty())
+                    EngineBridge::write(QStringLiteral("info"), QStringLiteral("Forensics"),
+                                        QStringLiteral("crash tooling ready: a crash or hang from this run "
+                                                       "can be captured and read"));
+                else
+                    // "warning", not "warn": EngineBridge::write() maps a level
+                    // it does not know down to Info, so the wrong word here
+                    // would bury the one line this check exists to produce.
+                    EngineBridge::write(QStringLiteral("warning"), QStringLiteral("Forensics"),
+                                        QStringLiteral("crash tooling is INCOMPLETE — ") + problems);
+                // The SAME verdict, to the UI (EngineBridge's crashTooling*
+                // properties): the log line is for whoever opens the log, and a
+                // crash that produced no evidence is read by nobody. Published
+                // here, on the interface thread, which is the only thread that
+                // touches those members (see the header).
+                EngineBridge::instance().publishCrashTooling(
+                    problems.isEmpty() ? QStringLiteral("ready") : QStringLiteral("incomplete"),
+                    problems.isEmpty() ? QString() : problems);
+            },
+            Qt::QueuedConnection);
+    });
+    QObject::connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
 }

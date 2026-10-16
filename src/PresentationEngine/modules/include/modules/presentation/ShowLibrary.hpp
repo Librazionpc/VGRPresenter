@@ -88,7 +88,20 @@ public:
     static std::string SafeName(std::string_view text);
 
 private:
-    Result<void> ScanLocked();
+    // What one filesystem pass produces.
+    struct Scanned {
+        std::vector<ShowEntry> entries;
+        std::vector<std::string> categories;
+        std::vector<std::string> problems;
+    };
+    // The PAL pass of a scan: one directory walk, one stat and one file read per
+    // show, with NO lock held and no member touched (the scan used to run
+    // entirely inside mutex_, so every reader waited out the whole walk).
+    Result<void> ScanUnlocked(Scanned& out) const;
+    // Scans (unlocked) and then swaps the results in under mutex_. This is how
+    // every mutator ends: the filesystem work happens first, the lock only
+    // publishes what it produced.
+    Result<void> Scan();
     std::string CategoryDir(std::string_view category) const;
 
     std::string root_;

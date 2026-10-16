@@ -78,6 +78,24 @@ public:
         return platform_ != nullptr;
     }
 
+    // Forget the alert latches (PressureLatch's SUSTAIN / HYSTERESIS / COOLDOWN
+    // state). The latches are what turn a stream of readings into ONE alert per
+    // sustained episode, and their state lives as long as the process does: an
+    // episode an earlier phase raised on this machine keeps `memLatch_` active,
+    // so the next Raise — the transition a test that drives the pressure path is
+    // waiting for — never arrives and the test fails for a reason that has
+    // nothing to do with the code under test (measured: the resource-dispatch
+    // suite passes alone and fails in a full run whenever real memory pressure
+    // had already raised the latch). Nothing in the app clears an alert this
+    // way; this exists so a suite can state its own precondition.
+    void ResetPressureAlerts() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        memLatch_ = PressureLatch{MemLatchConfig()};
+        cpuLatch_ = PressureLatch{CpuLatchConfig()};
+        lastMemPressure_ = PressureLevel::None;
+        lastCpuPressure_ = PressureLevel::None;
+    }
+
     // Budget accounting for owners (10 §2): coarse byte claims.
     Result<void> Claim(std::string_view owner, size_t bytes);
     Result<void> ReleaseClaim(std::string_view owner);
@@ -101,6 +119,17 @@ private:
     void SampleLocked();                     // requires mutex_
     static PressureLevel LevelFor(double ratio);
     std::chrono::milliseconds SamplePeriodFor(ResourceMode mode) const;
+    // The two latches' rules, named once: the members are built from these and
+    // ResetPressureAlerts() rebuilds them, so the reset cannot drift from the
+    // construction.
+    static PressureLatch::Config CpuLatchConfig() {
+        return PressureLatch::Config{PressureLevel::High, PressureLevel::Medium,
+                                     std::chrono::seconds(8), std::chrono::seconds(60)};
+    }
+    static PressureLatch::Config MemLatchConfig() {
+        return PressureLatch::Config{PressureLevel::High, PressureLevel::Medium,
+                                     std::chrono::seconds(3), std::chrono::seconds(30)};
+    }
 
     std::atomic<ResourceMode> mode_{ResourceMode::Balanced};
     mutable std::mutex mutex_;
@@ -120,10 +149,8 @@ private:
     // is not an emergency and must not toast (or evict caches) on every sample.
     // CPU is spiky, so it must hold 90%+ for 8 s and re-alerts at most once a minute;
     // memory moves slowly, so a short 3 s hold and a 30 s cooldown are enough.
-    PressureLatch cpuLatch_{PressureLatch::Config{PressureLevel::High, PressureLevel::Medium,
-                                                  std::chrono::seconds(8), std::chrono::seconds(60)}};  // guarded by mutex_
-    PressureLatch memLatch_{PressureLatch::Config{PressureLevel::High, PressureLevel::Medium,
-                                                  std::chrono::seconds(3), std::chrono::seconds(30)}};  // guarded by mutex_
+    PressureLatch cpuLatch_{CpuLatchConfig()};              // guarded by mutex_
+    PressureLatch memLatch_{MemLatchConfig()};              // guarded by mutex_
     std::deque<AutoDecision> decisions_;                    // guarded by mutex_
     static constexpr size_t kMaxDecisions = 64;
     TaskId heartbeatTask_ = 0;

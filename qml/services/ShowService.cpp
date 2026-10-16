@@ -2,6 +2,7 @@
 #include "services/ShowService.h"
 
 #include "services/EngineBridge.h"
+#include "services/EngineWorker.h"
 #include "services/EventBus.h"
 #include "services/ShowConverter.h"
 
@@ -73,6 +74,216 @@ QVariantList entriesToVariant(const std::vector<bp::ShowEntry> &entries)
 QString message(const bps::Error &e) { return QString::fromStdString(e.message); }
 
 } // namespace
+
+// ===========================================================================
+// The queued document jobs (see the header)
+// ===========================================================================
+
+// Which folder a saved path landed in — the test editShow has always made before
+// rescanning the library. Read from the JobContext so a job never touches the
+// library pointer (setLibraryPath may reset it while a job is in flight).
+bool ShowService::JobContext::inLibrary(const QString &path) const
+{
+    if (libraryRoot.isEmpty())
+        return false;
+    return QDir::fromNativeSeparators(path).startsWith(libraryRoot, Qt::CaseInsensitive);
+}
+
+ShowService::JobContext ShowService::jobContext() const
+{
+    // Read HERE, and carried into the job by value: EngineWorker's rule is that a
+    // lambda captures what it needs, because neither the bridge's boot flag nor
+    // this service's own members belong to another thread.
+    JobContext ctx;
+    ctx.booted = EngineBridge::instance().booted();
+    if (library_)
+        ctx.libraryRoot = QDir::fromNativeSeparators(libraryPath_);
+    return ctx;
+}
+
+int ShowService::runDocumentJobOffThread(const QString &kind, JobDurability durability,
+                                         const std::function<JobResult()> &work)
+{
+    const int token = ++jobToken_;
+    const bps::JobTicketPtr ticket = std::make_shared<bps::JobTicket>();
+    jobs_.insert(token, LiveJob{ kind, durability, ticket });
+    // Posted WITH the ticket, so this job can be taken back while it is queued
+    // (the work never runs) or have its verdict withdrawn while it runs (the work
+    // finishes — a Durable write is still wanted — and nothing is reported).
+    // Begin() is asked by the worker itself before it comes here, which is why an
+    // abandoned job never reaches the engine call below.
+    vgr::EngineWorker::instance().runOffThreadCancellable(ticket, [this, token, kind, ticket, work]() {
+        // The engine's document call, on the worker. Its own lock and its own
+        // revision check make this the supported way to use it (see the header).
+        const JobResult r = work();
+        // Everything the UI sees happens back on the interface thread: the toast,
+        // the signals, the library sweep, and the log line.
+        vgr::EngineWorker::onInterfaceThread(this, [this, token, kind, ticket, r]() {
+            jobs_.remove(token);
+            if (!ticket->Deliver()) {
+                // The verdict was withdrawn while this ran, so nobody is waiting
+                // for it — but what the job DID still stands (a Durable write is a
+                // file on disk now), and the library list and the peek cache read
+                // that file. So the state is applied and only the REPLY is dropped:
+                // no toast, no documentJobFinished. The poster already heard
+                // documentJobCancelled when it cancelled.
+                if (ticket->Started())
+                    applyJobState(r);
+                return;
+            }
+            finishDocumentJob(kind, r);
+            emit documentJobFinished(token, kind, r.ok, r.error, r.payload);
+        });
+    });
+    return token;
+}
+
+// ---- taking a job back (see the header) ------------------------------------
+bool ShowService::cancelDocumentJob(int token)
+{
+    const auto it = jobs_.constFind(token);
+    if (it == jobs_.constEnd())
+        return false;   // it already ended (its verdict landed), or was never ours
+    const QString kind = it->kind;
+    const bps::JobTicketPtr ticket = it->ticket;
+    if (it->durability == JobDurability::Durable)
+        ticket->WithdrawVerdict();   // the file the operator asked for is still written
+    else
+        ticket->Abandon();           // a read nobody is waiting for: do not spend the disk
+    if (!ticket->Started()) {
+        // Still queued: the worker will skip the work entirely and so will never
+        // report, which makes removing the entry this side's job. (A Durable job
+        // cancelled here still RUNS and still lands — its landing finds no entry,
+        // which is fine, and applies the file's consequences.)
+        jobs_.remove(token);
+    }
+    // Announced exactly once, here, whether the job had started or not: whoever
+    // holds this token stops waiting instead of hanging on a verdict that is not
+    // coming. A job that had already started applies its state silently when it
+    // lands (see the landing in runDocumentJobOffThread).
+    emit documentJobCancelled(token, kind);
+    return true;
+}
+
+int ShowService::cancelDocumentJobs(const QStringList &kinds)
+{
+    // Collected first: cancelDocumentJob() returns after the entry is gone, and
+    // the emits below can re-enter QML (a handler may cancel more of them).
+    QList<int> tokens;
+    for (auto it = jobs_.constBegin(); it != jobs_.constEnd(); ++it)
+        if (kinds.isEmpty() || kinds.contains(it->kind))
+            tokens.append(it.key());
+    int cancelled = 0;
+    for (const int token : tokens)
+        if (cancelDocumentJob(token))
+            ++cancelled;
+    return cancelled;
+}
+
+// The STATE a job that ran left behind. Applied by every landing, including the
+// one whose verdict was withdrawn: the file is on disk either way, and the
+// library list, the peek cache and the open-document signal all describe the
+// disk, not the answer. (The log line lives here rather than with the toast: it is
+// the record that the write happened, which is exactly what is worth keeping when
+// nobody was left to be told about it.)
+void ShowService::applyJobState(const JobResult &r)
+{
+    if (!r.logLine.isEmpty())
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("Show"), r.logLine);
+    if (!r.touchedPath.isEmpty())
+        dropPeek(QDir::fromNativeSeparators(r.touchedPath));
+    if (r.documentChanged)
+        emit showChanged();
+    if (r.openDocumentEdited)
+        dropPeekForOpenPath();   // the working show changed under the centre page
+    if (r.libraryChanged && library_)
+        refreshLibrary();
+}
+
+// Finishes one outcome ON THIS THREAD: the shared tail of the queued path and the
+// direct one, so a job's verdict and a synchronous call behave identically. The
+// reply is the toast; the state underneath it is applyJobState above.
+bool ShowService::finishHere(const JobResult &r)
+{
+    if (!r.ok && !r.error.isEmpty())
+        reportError(r.title.isEmpty() ? QStringLiteral("Show") : r.title, r.error);
+    if (!r.savedToast.isEmpty())
+        EventBus::instance().notify(QStringLiteral("Saved to %1").arg(r.savedToast),
+                                    QStringLiteral("success"), QStringLiteral("Show saved"),
+                                    QStringLiteral("show.saved"));
+    applyJobState(r);
+    return r.ok;
+}
+
+void ShowService::finishDocumentJob(const QString &kind, const JobResult &r)
+{
+    Q_UNUSED(kind)   // the signal carries it; the finishing is the same for every kind
+    finishHere(r);
+}
+
+// ---- the published peek (peekShow) -----------------------------------------
+// The read a peek job runs: the OLD peekShow body, unchanged, off the interface
+// thread. `path` is already cleaned. The open show is read AS IT IS THERE
+// (unsaved edits included) rather than from the older copy on disk.
+QVariantMap ShowService::peekAnswer(const QString &path) const
+{
+    if (!EngineBridge::instance().booted())
+        return { { QStringLiteral("ok"), false }, { QStringLiteral("error"), QStringLiteral("The engine isn't running.") },
+                 { QStringLiteral("pending"), false } };
+    if (auto open = showDocument(); open && open->HasDocument()
+        && QDir::fromNativeSeparators(QString::fromStdString(open->Path())).compare(path, Qt::CaseInsensitive) == 0)
+        return { { QStringLiteral("ok"), true }, { QStringLiteral("error"), QString() },
+                 { QStringLiteral("pending"), false }, { QStringLiteral("show"), ShowConverter::toVariant(open->Snapshot()) } };
+    bp::PresentationDocument peek;
+    auto opened = peek.Open(vgrPath(path));
+    if (!opened.ok())
+        return { { QStringLiteral("ok"), false }, { QStringLiteral("error"), message(opened.error()) },
+                 { QStringLiteral("pending"), false } };
+    return { { QStringLiteral("ok"), true }, { QStringLiteral("error"), QString() },
+             { QStringLiteral("pending"), false }, { QStringLiteral("show"), ShowConverter::toVariant(peek.Snapshot()) } };
+}
+
+void ShowService::peekOffThread(const QString &key) const
+{
+    if (peekInFlight_.contains(key) || !EngineBridge::instance().booted())
+        return;
+    peekInFlight_.insert(key);
+    vgr::EngineWorker::instance().runOffThread([this, key]() {
+        const QVariantMap answer = peekAnswer(key);
+        vgr::EngineWorker::onInterfaceThread(const_cast<ShowService *>(this),
+                                            [this, key, answer]() { publishPeek(key, answer); });
+    });
+}
+
+void ShowService::publishPeek(const QString &key, const QVariantMap &answer) const
+{
+    peekInFlight_.remove(key);
+    peekCache_.insert(key, answer);
+    // The revision really MOVES, it is not just a signal: the centre page binds to
+    // this property, and a binding that re-evaluates only because a signal fired
+    // while the value stayed the same is not a contract anyone should rely on.
+    // The const_cast is this .cpp's standing idiom for publishing from a const
+    // reader (see ScriptureService's publishMarks): the reader is const because it
+    // mutates nothing VISIBLE, not because the answer cannot be published.
+    ++peekRevision_;
+    emit const_cast<ShowService *>(this)->peekRevisionChanged();
+}
+
+void ShowService::dropPeek(const QString &key) const
+{
+    if (key.isEmpty())
+        return;
+    if (peekCache_.remove(key) > 0 || peekInFlight_.contains(key)) {
+        ++peekRevision_;
+        emit const_cast<ShowService *>(this)->peekRevisionChanged();
+    }
+}
+
+void ShowService::dropPeekForOpenPath() const
+{
+    if (auto doc = showDocument(); doc && doc->HasDocument())
+        dropPeek(QDir::fromNativeSeparators(QString::fromStdString(doc->Path())));
+}
 
 ShowService::ShowService(QObject *parent)
     : QObject(parent)
@@ -161,71 +372,112 @@ void ShowService::newShowDocument(const QString &name)
     }
 }
 
-bool ShowService::saveShowFile(const QVariantMap &show, const QString &path)
+int ShowService::saveShowFile(const QVariantMap &show, const QString &path)
 {
-    auto doc = showDocument();
-    if (!doc) {
-        reportError(QStringLiteral("Save show"),
-                    QStringLiteral("The engine isn't running, so the show can't be saved."));
-        return false;
-    }
-    // Keep the document's identity and creation time across saves: only the
-    // content comes from the UI.
-    bp::Presentation incoming = ShowConverter::fromVariant(show);
-    const bp::Presentation current = doc->Snapshot();
-    if (incoming.id.empty()) incoming.id = current.id;
-    if (incoming.name.empty()) incoming.name = current.name;
-    incoming.createdAt = current.createdAt;
-    doc->Replace(std::move(incoming));
+    const bool booted = EngineBridge::instance().booted();
+    const JobContext ctx = jobContext();
+    return runDocumentJobOffThread(QStringLiteral("save"), JobDurability::Durable,
+                                   [this, booted, ctx, show, path]() {
+        // The engine file path is worked out HERE, on the worker: vgrPath is pure
+        // string arithmetic (no file is touched), and there is no reason for even
+        // that to sit on the interface thread.
+        const std::string target = vgrPath(path);
+        JobResult r;
+        r.title = QStringLiteral("Save show");
+        auto doc = showDocument();
+        if (!doc || !booted) {
+            r.error = QStringLiteral("The engine isn't running, so the show can't be saved.");
+            return r;
+        }
+        // Keep the document's identity and creation time across saves: only the
+        // content comes from the UI.
+        bp::Presentation incoming = ShowConverter::fromVariant(show);
+        const bp::Presentation current = doc->Snapshot();
+        if (incoming.id.empty()) incoming.id = current.id;
+        if (incoming.name.empty()) incoming.name = current.name;
+        incoming.createdAt = current.createdAt;
+        doc->Replace(std::move(incoming));
 
-    auto saved = doc->Save(vgrPath(path));
-    emit showChanged();
-    if (!saved.ok()) {
-        reportError(QStringLiteral("Couldn't save the show"), message(saved.error()));
-        return false;
-    }
-    EngineBridge::write(QStringLiteral("info"), QStringLiteral("Show"), QStringLiteral("Saved '%1' to %2").arg(QString::fromStdString(doc->Snapshot().name), QString::fromStdString(doc->Path())));
-    EventBus::instance().notify(QStringLiteral("Saved to %1").arg(QString::fromStdString(doc->Path())),
-                                QStringLiteral("success"), QStringLiteral("Show saved"),
-                                QStringLiteral("show.saved"));
-    // Only rescan when the file landed inside the library — a scan reads every
-    // show in it, which is wasted work for a save somewhere else.
-    const QString saved_ = QDir::fromNativeSeparators(QString::fromStdString(doc->Path()));
-    if (library_ && saved_.startsWith(QDir::fromNativeSeparators(libraryPath_), Qt::CaseInsensitive))
-        refreshLibrary();
-    return true;
+        auto saved = doc->Save(target);
+        r.documentChanged = true;   // announced either way, as it always was
+        if (!saved.ok()) {
+            r.title = QStringLiteral("Couldn't save the show");
+            r.error = message(saved.error());
+            return r;
+        }
+        const QString savedPath = QString::fromStdString(doc->Path());
+        r.ok = true;
+        r.logLine = QStringLiteral("Saved '%1' to %2")
+                        .arg(QString::fromStdString(doc->Snapshot().name), savedPath);
+        r.savedToast = savedPath;
+        r.touchedPath = savedPath;
+        // Only rescan when the file landed inside the library — a scan reads every
+        // show in it, which is wasted work for a save somewhere else.
+        r.libraryChanged = ctx.inLibrary(savedPath);
+        r.payload = { { QStringLiteral("path"), savedPath } };
+        return r;
+    });
 }
 
-bool ShowService::saveCurrentShow(const QString &path, bool quiet)
+int ShowService::saveCurrentShow(const QString &path, bool quiet)
 {
-    auto doc = showDocument();
-    if (!doc || !doc->HasDocument()) {
-        reportError(QStringLiteral("Save show"), QStringLiteral("There is no show to save."));
-        return false;
-    }
-    auto saved = doc->Save(path.isEmpty() ? std::string() : vgrPath(path));
-    emit showChanged();
-    if (!saved.ok()) {
-        reportError(QStringLiteral("Couldn't save the show"), message(saved.error()));
-        return false;
-    }
-    EngineBridge::write(QStringLiteral("info"), QStringLiteral("Show"), QStringLiteral("%1 '%2' to %3").arg(quiet ? QStringLiteral("Auto-saved") : QStringLiteral("Saved"), QString::fromStdString(doc->Snapshot().name), QString::fromStdString(doc->Path())));
-    if (!quiet)
-        EventBus::instance().notify(QStringLiteral("Saved to %1").arg(QString::fromStdString(doc->Path())),
-                                    QStringLiteral("success"), QStringLiteral("Show saved"),
-                                    QStringLiteral("show.saved"));
-    const QString saved_ = QDir::fromNativeSeparators(QString::fromStdString(doc->Path()));
-    if (library_ && saved_.startsWith(QDir::fromNativeSeparators(libraryPath_), Qt::CaseInsensitive))
-        refreshLibrary();
-    return true;
+    const bool booted = EngineBridge::instance().booted();
+    const JobContext ctx = jobContext();
+    return runDocumentJobOffThread(QStringLiteral("save"), JobDurability::Durable,
+                                   [this, booted, ctx, path, quiet]() {
+        const std::string target = path.isEmpty() ? std::string() : vgrPath(path);
+        JobResult r;
+        r.title = QStringLiteral("Save show");
+        auto doc = showDocument();
+        if (!doc || !booted || !doc->HasDocument()) {
+            r.error = QStringLiteral("There is no show to save.");
+            return r;
+        }
+        auto saved = doc->Save(target);
+        r.documentChanged = true;
+        if (!saved.ok()) {
+            r.title = QStringLiteral("Couldn't save the show");
+            r.error = message(saved.error());
+            return r;
+        }
+        const QString savedPath = QString::fromStdString(doc->Path());
+        r.ok = true;
+        r.logLine = QStringLiteral("%1 '%2' to %3")
+                        .arg(quiet ? QStringLiteral("Auto-saved") : QStringLiteral("Saved"),
+                             QString::fromStdString(doc->Snapshot().name), savedPath);
+        if (!quiet)
+            r.savedToast = savedPath;
+        r.touchedPath = savedPath;
+        r.libraryChanged = ctx.inLibrary(savedPath);
+        r.payload = { { QStringLiteral("path"), savedPath },
+                      { QStringLiteral("name"), QString::fromStdString(doc->Snapshot().name) } };
+        return r;
+    });
 }
 
-bool ShowService::saveShowCopy(const QString &path)
+int ShowService::saveShowCopy(const QString &path)
 {
-    auto doc = showDocument();
-    if (!doc || !doc->HasDocument() || path.isEmpty())
-        return false;
-    return doc->SaveCopy(vgrPath(path)).ok();
+    const bool booted = EngineBridge::instance().booted();
+    return runDocumentJobOffThread(QStringLiteral("saveCopy"), JobDurability::Durable,
+                                   [this, booted, path]() {
+        const std::string target = vgrPath(path);
+        const QString cleanTarget = cleanPath(path);
+        // SILENT by contract (a background copy the operator did not ask for): a
+        // failure reports nothing to the interface, exactly as the synchronous
+        // version did. The verdict's `ok` is what the caller acts on.
+        JobResult r;
+        auto doc = showDocument();
+        if (!doc || !booted || !doc->HasDocument() || target.empty())
+            return r;
+        if (auto saved = doc->SaveCopy(target); !saved.ok()) {
+            r.error = message(saved.error());
+            r.title.clear();   // ...but nothing is toasted (see above)
+            return r;
+        }
+        r.ok = true;
+        r.payload = { { QStringLiteral("path"), cleanTarget } };
+        return r;
+    });
 }
 
 void ShowService::ensureShow(const QString &name)
@@ -257,57 +509,45 @@ QString ShowService::pickShowSavePath(const QString &defaultName)
 
 QVariantMap ShowService::peekShow(const QString &path) const
 {
-    // The show that is open in the editor is read as it is there (unsaved edits included), not from the older copy on disk.
-    if (auto open = showDocument(); open && open->HasDocument() && !path.isEmpty()
-        && QDir::fromNativeSeparators(QString::fromStdString(open->Path())).compare(QDir::fromNativeSeparators(path), Qt::CaseInsensitive) == 0)
-        return { { QStringLiteral("ok"), true }, { QStringLiteral("error"), QString() }, { QStringLiteral("show"), ShowConverter::toVariant(open->Snapshot()) } };
-    bp::PresentationDocument peek;
-    auto opened = peek.Open(vgrPath(path));
-    if (!opened.ok())
-        return { { QStringLiteral("ok"), false }, { QStringLiteral("error"), message(opened.error()) } };
-    return { { QStringLiteral("ok"), true }, { QStringLiteral("error"), QString() }, { QStringLiteral("show"), ShowConverter::toVariant(peek.Snapshot()) } };
+    // A LOOKUP into the published answer (see the header): asks the worker for what
+    // is missing and hands back what is known. `pending` is what tells a caller
+    // apart from "the file says there is no such show".
+    const QString key = QDir::fromNativeSeparators(cleanPath(path));
+    if (key.isEmpty())
+        return { { QStringLiteral("ok"), false }, { QStringLiteral("error"), QStringLiteral("No show was named.") },
+                 { QStringLiteral("pending"), false } };
+    const auto it = peekCache_.constFind(key);
+    if (it != peekCache_.constEnd())
+        return *it;
+    peekOffThread(key);
+    return { { QStringLiteral("ok"), false }, { QStringLiteral("error"), QString() },
+             { QStringLiteral("pending"), true } };
 }
 
-bool ShowService::editShow(const QString &path, const QString &title, const std::function<bps::Result<void>(bp::Presentation &)> &change)
+int ShowService::setNextTimer(const QString &path, double seconds)
 {
-    if (!EngineBridge::instance().booted() || path.isEmpty())
-        return false;
-    const QString wanted = QDir::fromNativeSeparators(path);
-
-    // The show that is open in the editor takes it into the open document (unsaved, like any other edit).
-    auto open = showDocument();
-    if (open && open->HasDocument() && QDir::fromNativeSeparators(QString::fromStdString(open->Path())).compare(wanted, Qt::CaseInsensitive) == 0)
-        return applyEdit(title, change);
-
-    bp::PresentationDocument file;
-    if (auto opened = file.Open(vgrPath(path)); !opened.ok()) {
-        reportError(title, message(opened.error()));
-        return false;
-    }
-    bp::Presentation show = file.Snapshot();
-    if (auto changed = change(show); !changed.ok()) {
-        reportError(title, message(changed.error()));
-        return false;
-    }
-    file.Replace(std::move(show));
-    if (auto saved = file.Save(vgrPath(path)); !saved.ok()) {
-        reportError(title, message(saved.error()));
-        return false;
-    }
-    if (library_ && wanted.startsWith(QDir::fromNativeSeparators(libraryPath_), Qt::CaseInsensitive))
-        refreshLibrary();
-    return true;
+    const JobContext ctx = jobContext();
+    return runDocumentJobOffThread(QStringLiteral("timer"), JobDurability::Durable,
+                                   [this, ctx, path, seconds]() {
+        JobResult r = editShowOutcome(ctx, path, QStringLiteral("Couldn't set the next timer"),
+                                      [&](bp::Presentation &s) { return bp::ShowEditor::SetNextTimer(s, seconds); });
+        if (r.ok)
+            r.logLine = QStringLiteral("Next timer %1 s on %2").arg(seconds).arg(path);
+        return r;
+    });
 }
 
-bool ShowService::setNextTimer(const QString &path, double seconds)
+int ShowService::editSlides(const QString &path, const QString &op, const QStringList &slideIds, const QVariantMap &args)
 {
-    const bool done = editShow(path, QStringLiteral("Couldn't set the next timer"), [&](bp::Presentation &s) { return bp::ShowEditor::SetNextTimer(s, seconds); });
-    if (done)
-        EngineBridge::write(QStringLiteral("info"), QStringLiteral("Show"), QStringLiteral("Next timer %1 s on %2").arg(seconds).arg(path));
-    return done;
+    const JobContext ctx = jobContext();
+    return runDocumentJobOffThread(QStringLiteral("slides"), JobDurability::Durable,
+                                   [this, ctx, path, op, slideIds, args]() {
+        return editSlidesOutcome(ctx, path, op, slideIds, args);
+    });
 }
 
-QVariantMap ShowService::editSlides(const QString &path, const QString &op, const QStringList &slideIds, const QVariantMap &args)
+ShowService::JobResult ShowService::editSlidesOutcome(const JobContext &ctx, const QString &path, const QString &op,
+                                                     const QStringList &slideIds, const QVariantMap &args) const
 {
     using Editor = bp::ShowEditor;
     std::vector<std::string> ids;
@@ -316,13 +556,21 @@ QVariantMap ShowService::editSlides(const QString &path, const QString &op, cons
     QStringList made;
     size_t replaced = 0;
     bool ok = false;
+    // What the ONE op this call runs found. Its toast, its signals and its log
+    // line are the ones that land when the verdict reaches the interface thread.
+    JobResult outcome;
+    auto edit = [&](const QString &toastTitle,
+                    const std::function<bps::Result<void>(bp::Presentation &)> &change) {
+        outcome = editShowOutcome(ctx, path, toastTitle, change);
+        return outcome.ok;
+    };
 
     if (op == QLatin1String("hidden")) {
-        ok = editShow(path, title, [&](bp::Presentation &s) { return Editor::SetSlidesHidden(s, ids, args.value(QStringLiteral("hidden")).toBool()); });
+        ok = edit(title, [&](bp::Presentation &s) { return Editor::SetSlidesHidden(s, ids, args.value(QStringLiteral("hidden")).toBool()); });
     } else if (op == QLatin1String("group")) {
-        ok = editShow(path, title, [&](bp::Presentation &s) { return Editor::SetSlidesGroup(s, ids, args.value(QStringLiteral("group")).toString().toStdString()); });
+        ok = edit(title, [&](bp::Presentation &s) { return Editor::SetSlidesGroup(s, ids, args.value(QStringLiteral("group")).toString().toStdString()); });
     } else if (op == QLatin1String("title")) {
-        ok = editShow(path, title, [&](bp::Presentation &s) -> bps::Result<void> {
+        ok = edit(title, [&](bp::Presentation &s) -> bps::Result<void> {
             if (ids.empty()) return bps::Error::Make(bps::Err::InvalidArgument, "ShowService", "no slide was chosen");
             for (const std::string &id : ids) {
                 auto it = std::find_if(s.slides.begin(), s.slides.end(), [&](const bp::Slide &x) { return x.id == id; });
@@ -337,9 +585,9 @@ QVariantMap ShowService::editSlides(const QString &path, const QString &op, cons
         if (kind == QLatin1String("lowercase")) format = Editor::TextFormat::Lowercase;
         else if (kind == QLatin1String("capitalize")) format = Editor::TextFormat::Capitalize;
         else if (kind == QLatin1String("trim")) format = Editor::TextFormat::Trim;
-        ok = editShow(path, title, [&](bp::Presentation &s) { return Editor::FormatSlidesText(s, ids, format); });
+        ok = edit(title, [&](bp::Presentation &s) { return Editor::FormatSlidesText(s, ids, format); });
     } else if (op == QLatin1String("replace")) {
-        ok = editShow(path, title, [&](bp::Presentation &s) -> bps::Result<void> {
+        ok = edit(title, [&](bp::Presentation &s) -> bps::Result<void> {
             auto r = Editor::ReplaceInSlides(s, ids, args.value(QStringLiteral("find")).toString().toStdString(), args.value(QStringLiteral("replace")).toString().toStdString(),
                                              args.value(QStringLiteral("caseSensitive")).toBool());
             if (!r.ok()) return r.error();
@@ -347,16 +595,16 @@ QVariantMap ShowService::editSlides(const QString &path, const QString &op, cons
             return bps::Ok();
         });
     } else if (op == QLatin1String("split")) {
-        ok = editShow(path, title, [&](bp::Presentation &s) -> bps::Result<void> {
+        ok = edit(title, [&](bp::Presentation &s) -> bps::Result<void> {
             auto r = Editor::SplitSlidesInHalf(s, ids);
             if (!r.ok()) return r.error();
             for (const std::string &id : r.value()) made.append(QString::fromStdString(id));
             return bps::Ok();
         });
     } else if (op == QLatin1String("merge")) {
-        ok = editShow(path, title, [&](bp::Presentation &s) { return Editor::MergeSlides(s, ids); });
+        ok = edit(title, [&](bp::Presentation &s) { return Editor::MergeSlides(s, ids); });
     } else if (op == QLatin1String("duplicate")) {
-        ok = editShow(path, title, [&](bp::Presentation &s) -> bps::Result<void> {
+        ok = edit(title, [&](bp::Presentation &s) -> bps::Result<void> {
             if (ids.empty()) return bps::Error::Make(bps::Err::InvalidArgument, "ShowService", "no slide was chosen");
             for (const std::string &id : ids) {
                 auto r = Editor::DuplicateSlide(s, id);
@@ -366,7 +614,7 @@ QVariantMap ShowService::editSlides(const QString &path, const QString &op, cons
             return bps::Ok();
         });
     } else if (op == QLatin1String("remove")) {
-        ok = editShow(path, title, [&](bp::Presentation &s) -> bps::Result<void> {
+        ok = edit(title, [&](bp::Presentation &s) -> bps::Result<void> {
             if (ids.empty()) return bps::Error::Make(bps::Err::InvalidArgument, "ShowService", "no slide was chosen");
             for (const std::string &id : ids)
                 if (auto r = Editor::RemoveSlide(s, id); !r.ok()) return r;
@@ -375,40 +623,56 @@ QVariantMap ShowService::editSlides(const QString &path, const QString &op, cons
     } else if (op == QLatin1String("transition")) {
         static const QStringList kinds = { QStringLiteral("fade"), QStringLiteral("slide"), QStringLiteral("push"), QStringLiteral("zoom"), QStringLiteral("wipe"), QStringLiteral("crossfade"), QStringLiteral("custom") };
         const int kind = std::max(0, static_cast<int>(kinds.indexOf(args.value(QStringLiteral("kind")).toString())));
-        ok = editShow(path, title, [&](bp::Presentation &s) { return Editor::SetSlidesTransition(s, ids, static_cast<bp::TransitionKind>(kind), args.value(QStringLiteral("ms"), 500).toDouble()); });
+        ok = edit(title, [&](bp::Presentation &s) { return Editor::SetSlidesTransition(s, ids, static_cast<bp::TransitionKind>(kind), args.value(QStringLiteral("ms"), 500).toDouble()); });
     } else if (op == QLatin1String("outputs")) {
         std::vector<std::string> outputs;
         for (const QVariant &o : args.value(QStringLiteral("outputs")).toList()) outputs.push_back(o.toString().toStdString());
-        ok = editShow(path, title, [&](bp::Presentation &s) { return Editor::SetSlidesOutputs(s, ids, outputs); });
+        ok = edit(title, [&](bp::Presentation &s) { return Editor::SetSlidesOutputs(s, ids, outputs); });
     } else if (op == QLatin1String("timer")) {
-        ok = editShow(path, QStringLiteral("Couldn't set the next timer"), [&](bp::Presentation &s) { return Editor::SetNextTimer(s, args.value(QStringLiteral("seconds")).toDouble(), ids); });
+        ok = edit(QStringLiteral("Couldn't set the next timer"), [&](bp::Presentation &s) { return Editor::SetNextTimer(s, args.value(QStringLiteral("seconds")).toDouble(), ids); });
     } else {
-        reportError(title, QStringLiteral("There is no slide operation '%1'.").arg(op));
+        // An op that does not exist touches no document: the verdict is the whole
+        // answer (the toast lands with it, see finishHere).
+        outcome.title = title;
+        outcome.error = QStringLiteral("There is no slide operation '%1'.").arg(op);
     }
 
     if (ok)
-        EngineBridge::write(QStringLiteral("info"), QStringLiteral("Show"), QStringLiteral("Slide %1 on %2 slide(s) of %3").arg(op).arg(slideIds.size()).arg(path));
-    return { { QStringLiteral("ok"), ok }, { QStringLiteral("made"), made }, { QStringLiteral("replaced"), static_cast<int>(replaced) } };
+        outcome.logLine = QStringLiteral("Slide %1 on %2 slide(s) of %3").arg(op).arg(slideIds.size()).arg(path);
+    outcome.payload = { { QStringLiteral("ok"), ok }, { QStringLiteral("made"), made },
+                        { QStringLiteral("replaced"), static_cast<int>(replaced) } };
+    return outcome;
 }
 
-QVariantMap ShowService::openShowFile(const QString &path)
+int ShowService::openShowFile(const QString &path)
 {
-
-    auto doc = showDocument();
-    if (!doc)
-        return { { QStringLiteral("ok"), false },
-                 { QStringLiteral("error"), QStringLiteral("The engine isn't running.") } };
-    auto opened = doc->Open(vgrPath(path));
-    if (!opened.ok()) {
-        const QString why = message(opened.error());
-        reportError(QStringLiteral("Couldn't open the show"), why);
-        return { { QStringLiteral("ok"), false }, { QStringLiteral("error"), why } };
-    }
-    EngineBridge::write(QStringLiteral("info"), QStringLiteral("Show"), QStringLiteral("Opened '%1' from %2").arg(QString::fromStdString(doc->Snapshot().name), path));
-    emit showChanged();
-    return { { QStringLiteral("ok"), true },
-             { QStringLiteral("error"), QString() },
-             { QStringLiteral("show"), ShowConverter::toVariant(doc->Snapshot()) } };
+    const bool booted = EngineBridge::instance().booted();
+    return runDocumentJobOffThread(QStringLiteral("open"), JobDurability::Abandonable,
+                                   [this, booted, path]() {
+        const std::string target = vgrPath(path);
+        JobResult r;
+        r.title = QStringLiteral("Couldn't open the show");
+        auto doc = showDocument();
+        const auto failed = [&r](const QString &why) {
+            r.payload = { { QStringLiteral("ok"), false }, { QStringLiteral("error"), why } };
+            return r;
+        };
+        if (!doc || !booted)
+            return failed(QStringLiteral("The engine isn't running."));
+        auto opened = doc->Open(target);
+        if (!opened.ok()) {
+            r.error = message(opened.error());
+            return failed(r.error);
+        }
+        r.ok = true;
+        r.documentChanged = true;
+        r.logLine = QStringLiteral("Opened '%1' from %2")
+                        .arg(QString::fromStdString(doc->Snapshot().name), path);
+        r.payload = { { QStringLiteral("ok"), true },
+                      { QStringLiteral("error"), QString() },
+                      { QStringLiteral("show"), ShowConverter::toVariant(doc->Snapshot()) } };
+        return r;
+    });
 }
 
 void ShowService::markShowClean()
@@ -433,22 +697,77 @@ void ShowService::markShowDirty()
 
 // ===========================================================================
 // Editing the show -- the engine (ShowEditor) does the work
-// ===========================================================================
+// ===========================================================================// THE ONE BODY an edit has, answering instead of reporting: every entry point
+// above reaches the engine through these two, so the queued path and the direct
+// path can never drift apart (see the header).
+ShowService::JobResult ShowService::applyEditOutcome(
+    const QString &title,
+    const std::function<bps::Result<void>(bp::Presentation &)> &fn) const
+{
+    JobResult r;
+    r.title = title;
+    auto doc = showDocument();
+    if (!doc || !doc->HasDocument()) {
+        r.error = QStringLiteral("No show is open.");
+        return r;
+    }
+    if (auto res = doc->Edit(fn); !res.ok()) {
+        r.error = message(res.error());
+        return r;
+    }
+    r.ok = true;
+    r.documentChanged = true;
+    // The WORKING show changed: a centre page showing it is reading a stale
+    // snapshot now (see dropPeekForOpenPath).
+    r.openDocumentEdited = true;
+    return r;
+}
+
+ShowService::JobResult ShowService::editShowOutcome(
+    const JobContext &ctx, const QString &path, const QString &title,
+    const std::function<bps::Result<void>(bp::Presentation &)> &change) const
+{
+    JobResult r;
+    r.title = title;
+    if (!ctx.booted || path.isEmpty())
+        return r;   // silent, as the synchronous entry point was
+    const QString wanted = QDir::fromNativeSeparators(path);
+
+    // The show that is open in the editor takes it into the open document (unsaved, like any other edit).
+    auto open = showDocument();
+    if (open && open->HasDocument()
+        && QDir::fromNativeSeparators(QString::fromStdString(open->Path())).compare(wanted, Qt::CaseInsensitive) == 0)
+        return applyEditOutcome(title, change);
+
+    bp::PresentationDocument file;
+    if (auto opened = file.Open(vgrPath(path)); !opened.ok()) {
+        r.error = message(opened.error());
+        return r;
+    }
+    bp::Presentation show = file.Snapshot();
+    if (auto changed = change(show); !changed.ok()) {
+        r.error = message(changed.error());
+        return r;
+    }
+    file.Replace(std::move(show));
+    if (auto saved = file.Save(vgrPath(path)); !saved.ok()) {
+        r.error = message(saved.error());
+        return r;
+    }
+    r.ok = true;
+    // The FILE changed (not the working document — this branch never touches it,
+    // which is why it has never announced showChanged): the centre page's peek of
+    // it is stale, and a path inside the library wants a rescan.
+    r.touchedPath = cleanPath(path);
+    r.libraryChanged = ctx.inLibrary(wanted);
+    return r;
+}
 
 bool ShowService::applyEdit(const QString &title,
                             const std::function<bps::Result<void>(bp::Presentation &)> &fn)
+
 {
-    auto doc = showDocument();
-    if (!doc || !doc->HasDocument()) {
-        reportError(title, QStringLiteral("No show is open."));
-        return false;
-    }
-    if (auto r = doc->Edit(fn); !r.ok()) {
-        reportError(title, message(r.error()));
-        return false;
-    }
-    emit showChanged();
-    return true;
+    return finishHere(applyEditOutcome(title, fn));
 }
 
 QString ShowService::applyEditForId(const QString &title,
@@ -734,27 +1053,44 @@ QStringList ShowService::validateShow(const QVariantMap &show)
     return out;
 }
 
-bool ShowService::saveTemplateFile(const QVariantMap &tmpl, const QString &path)
+int ShowService::saveTemplateFile(const QVariantMap &tmpl, const QString &path)
 {
-    auto saved = bp::TemplateFile::Save(ShowConverter::templateFromVariant(tmpl), vgrPath(path));
-    if (!saved.ok()) {
-        reportError(QStringLiteral("Couldn't save the template"), message(saved.error()));
-        return false;
-    }
-    return true;
+    return runDocumentJobOffThread(QStringLiteral("templateSave"), JobDurability::Durable,
+                                   [tmpl, path]() {
+        const std::string target = vgrPath(path);
+        const QString cleanTarget = cleanPath(path);
+        JobResult r;
+        r.title = QStringLiteral("Couldn't save the template");
+        auto saved = bp::TemplateFile::Save(ShowConverter::templateFromVariant(tmpl), target);
+        if (!saved.ok()) {
+            r.error = message(saved.error());
+            return r;
+        }
+        r.ok = true;
+        r.payload = { { QStringLiteral("path"), cleanTarget } };
+        return r;
+    });
 }
 
-QVariantMap ShowService::loadTemplateFile(const QString &path)
+int ShowService::loadTemplateFile(const QString &path)
 {
-    auto loaded = bp::TemplateFile::Load(vgrPath(path));
-    if (!loaded.ok()) {
-        const QString why = message(loaded.error());
-        reportError(QStringLiteral("Couldn't open the template"), why);
-        return { { QStringLiteral("ok"), false }, { QStringLiteral("error"), why } };
-    }
-    return { { QStringLiteral("ok"), true },
-             { QStringLiteral("error"), QString() },
-             { QStringLiteral("template"), ShowConverter::templateToVariant(loaded.value()) } };
+    return runDocumentJobOffThread(QStringLiteral("templateLoad"), JobDurability::Abandonable,
+                                   [path]() {
+        const std::string target = vgrPath(path);
+        JobResult r;
+        r.title = QStringLiteral("Couldn't open the template");
+        auto loaded = bp::TemplateFile::Load(target);
+        if (!loaded.ok()) {
+            r.error = message(loaded.error());
+            r.payload = { { QStringLiteral("ok"), false }, { QStringLiteral("error"), r.error } };
+            return r;
+        }
+        r.ok = true;
+        r.payload = { { QStringLiteral("ok"), true },
+                      { QStringLiteral("error"), QString() },
+                      { QStringLiteral("template"), ShowConverter::templateToVariant(loaded.value()) } };
+        return r;
+    });
 }
 
 // ===========================================================================
@@ -804,9 +1140,11 @@ void ShowService::refreshLibrary()
     VGR_CALL_TRACE("ShowService.refreshLibrary");
     // Create the library on the GUI thread first (library() lazily builds it and
     // every other entry point calls it there), then hand the WALK to a worker.
-    // The filesystem pass (Refresh -> ScanLocked, one stat/read per show) used
+    // The filesystem pass (Refresh -> ScanUnlocked, one stat/read per show) used
     // to run inline here, which stalled the UI on engine boot, when the Show
-    // screen opened, and after every import — the AppHangB1 class.
+    // screen opened, and after every import — the AppHangB1 class. The engine
+    // side is two halves now: the walk runs with the library lock released and
+    // only the published list is swapped under it.
     if (!library())
         return;
     if (refreshBusy_) {
@@ -955,52 +1293,66 @@ QString ShowService::duplicateShow(const QString &path, const QString &newName)
     return QString::fromStdString(r.value());
 }
 
-bool ShowService::rewriteShowFromText(const QString &path, const QString &text)
+int ShowService::rewriteShowFromText(const QString &path, const QString &text)
 {
-    if (!EngineBridge::instance().booted())
-        return false;
-    const std::string p = vgrPath(path);
+    const bool booted = EngineBridge::instance().booted();
+    return runDocumentJobOffThread(QStringLiteral("rewrite"), JobDurability::Durable,
+                                   [booted, text, path]() {
+        const std::string p = vgrPath(path);
+        JobResult r;
+        r.title = QStringLiteral("Couldn't open the show");
+        if (!booted)
+            return r;   // silent, as the synchronous entry point was
 
-    // A fresh, LOCAL document — never the shared "open document" the Edit
-    // screen/GO LIVE use, so an inline lyrics edit here can never collide
-    // with whatever that session has unsaved (the same isolation
-    // ImportService's own save sweep relies on).
-    bp::PresentationDocument doc;
-    if (auto opened = doc.Open(p); !opened.ok()) {
-        reportError(QStringLiteral("Couldn't open the show"), message(opened.error()));
-        return false;
-    }
-    bp::Presentation show = doc.Snapshot();
+        // A fresh, LOCAL document — never the shared "open document" the Edit
+        // screen/GO LIVE use, so an inline lyrics edit here can never collide
+        // with whatever that session has unsaved (the same isolation
+        // ImportService's own save sweep relies on).
+        bp::PresentationDocument doc;
+        if (auto opened = doc.Open(p); !opened.ok()) {
+            r.error = message(opened.error());
+            return r;
+        }
+        bp::Presentation show = doc.Snapshot();
 
-    bps::import::ImportedShow imported = bps::import::ParseSongText(text.toStdString());
-    if (imported.sections.empty()) {
-        reportError(QStringLiteral("Couldn't save the edit"), QStringLiteral("There is no text."));
-        return false;
-    }
+        bps::import::ImportedShow imported = bps::import::ParseSongText(text.toStdString());
+        if (imported.sections.empty()) {
+            r.title = QStringLiteral("Couldn't save the edit");
+            r.error = QStringLiteral("There is no text.");
+            return r;
+        }
 
-    // The rebuilt slides look like whatever the show's own first slide
-    // already looked like (its own template blocks), not a fresh import's
-    // default layout — an edit should not restyle the show.
-    bps::import::ShowBuildOptions options;
-    if (!show.slides.empty()) {
-        options.background = show.slides.front().background;
-        options.templateBlocks = show.slides.front().blocks;
-    }
-    bp::Presentation rebuilt = bps::import::ShowFromImported(imported, options);
+        // The rebuilt slides look like whatever the show's own first slide
+        // already looked like (its own template blocks), not a fresh import's
+        // default layout — an edit should not restyle the show.
+        bps::import::ShowBuildOptions options;
+        if (!show.slides.empty()) {
+            options.background = show.slides.front().background;
+            options.templateBlocks = show.slides.front().blocks;
+        }
+        bp::Presentation rebuilt = bps::import::ShowFromImported(imported, options);
 
-    const std::string categoryId = show.categories.empty() ? "" : show.categories.front().id;
-    for (bp::Slide &slide : rebuilt.slides)
-        slide.categoryId = categoryId;
-    show.slides = std::move(rebuilt.slides);
+        const std::string categoryId = show.categories.empty() ? "" : show.categories.front().id;
+        for (bp::Slide &slide : rebuilt.slides)
+            slide.categoryId = categoryId;
+        show.slides = std::move(rebuilt.slides);
 
-    doc.Replace(std::move(show));
-    if (auto saved = doc.Save(p); !saved.ok()) {
-        reportError(QStringLiteral("Couldn't save the edit"), message(saved.error()));
-        return false;
-    }
-    publishLibrary();
-    emit showChanged();
-    return true;
+        doc.Replace(std::move(show));
+        if (auto saved = doc.Save(p); !saved.ok()) {
+            r.title = QStringLiteral("Couldn't save the edit");
+            r.error = message(saved.error());
+            return r;
+        }
+        r.ok = true;
+        // The FILE changed under a show anyone may have on screen, and the
+        // library's own row for it (its slide count, its modified time) with it —
+        // the old code republished the library here, which is the same thing said
+        // on the interface thread (publishLibrary is this thread's state).
+        r.libraryChanged = true;
+        r.documentChanged = true;
+        r.touchedPath = cleanPath(path);
+        return r;
+    });
 }
 
 QString ShowService::deleteShow(const QString &path)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <optional>
 #include <thread>
 
 // The UI's window onto the ENGINE's sermon library (bps::library::TheTableLibrary)
@@ -16,6 +17,8 @@
 #include <QStringList>
 #include <QVariantList>
 #include <QVariantMap>
+#include "services/SlideBuilder.h"
+
 #include <QtQml/qqmlregistration.h>
 
 class QQmlEngine;
@@ -145,7 +148,7 @@ public:
     // it (recursively) on a WORKER THREAD — the UI stays live; `progress`
     // carries { done, total, current } per file and one final `imported`
     // ({ imported, skipped, failed }) toast lands when it finishes.
-    Q_INVOKABLE bool newSermonFolder();
+    Q_INVOKABLE bool newSermonFolder();   // gui-ok: a modal native picker parks the interface thread on PURPOSE — the user is looking at the dialog, and its own event loop keeps the window painting; the work after the pick (import, scan, copy) already runs off the interface thread
     // The same sweep for a root that is already known - the folder picker above
     // calls this, and the env-gated self-test scenario drives it directly (the
     // same worker thread, the same progress and the same final toast, without a
@@ -170,6 +173,26 @@ private:
     std::atomic<int> latestSearchToken_{0};   // searchAsync: only the newest emits
     std::atomic<int> latestChapterToken_{0};  // chapterAsync: only the newest emits
     explicit TheTableService(QObject *parent = nullptr);
+
+    // THE SPLIT CUT AHEAD OF THE CLICK — the same contract as ScriptureService's
+    // (see SlideBuilder's warm cache): a sermon's paragraphs are long, so the cut is
+    // what makes clicking one during a service a lookup instead of a fill.
+    SlideBuilder::ChapterKey chapterKey(const QString &bookId, int chapter) const;
+    std::optional<SlideBuilder::WarmSlides> warmFor(const QString &bookId, int chapter, int number) const;
+    mutable bool warmServeLogged_ = false;
+    mutable bool warmMissLogged_ = false;
+
+    // The sermon on screen and the key its split was cut with — see ScriptureService's
+    // own pair (the same contract and the same guard).
+    QString cutBookId_;
+    int cutChapter_ = 0;
+    int cutToken_ = 0;
+    std::optional<SlideBuilder::ChapterKey> cutKey_;
+    bool cutStale_ = false;
+    // THE WORDS UNDER THE HELD CUT MOVED (a sermon imported, the library reopened, a
+    // template edited in place): drop the cut, say so, and let the re-cut handler cut the
+    // open sermon again. See the .cpp — a settings write must NOT come through here.
+    void libraryMoved();
 
     void loadLibrary();
     QVariantMap documentFromEngine() const;

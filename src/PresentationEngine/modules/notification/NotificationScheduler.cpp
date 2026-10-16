@@ -45,16 +45,26 @@ bool NotificationScheduler::InQuietHours(int64_t nowMs) const {
 }
 
 void NotificationScheduler::Tick(int64_t nowMs) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (auto it = due_.begin(); it != due_.end();) {
-        if (it->first <= nowMs) {
-            Notification n = it->second;
-            it = due_.erase(it);
-            if (deliver_) deliver_(n);
-        } else {
-            break;
+    // The due list is taken under the lock; the DELIVERY is not. `deliver_` is a
+    // foreign callback (the notification provider), and invoking it with this
+    // lock held is how one slow or re-entrant provider turns the scheduler's
+    // lock into an app-wide pile-up.
+    std::vector<Notification> ready;
+    std::function<void(const Notification&)> deliver;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = due_.begin(); it != due_.end();) {
+            if (it->first <= nowMs) {
+                ready.push_back(it->second);
+                it = due_.erase(it);
+            } else {
+                break;
+            }
         }
+        deliver = deliver_;
     }
+    if (deliver)
+        for (const auto& n : ready) deliver(n);
 }
 
 size_t NotificationScheduler::PendingCount() const {

@@ -87,11 +87,15 @@ std::string ShowLibrary::CategoryDir(std::string_view category) const {
 }
 
 Result<void> ShowLibrary::Refresh() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return ScanLocked();
+    return Scan();
 }
 
-Result<void> ShowLibrary::ScanLocked() {
+// The PAL pass. No lock is held and no member is touched: the results go into
+// `out` and Scan() publishes them. This is the difference that matters — the
+// pass is one directory walk, one stat and one file read PER SHOW, and it used
+// to run with mutex_ held, so every reader (and the interface thread that asked
+// for the list) waited out the whole corpus.
+Result<void> ShowLibrary::ScanUnlocked(Scanned& out) const {
     auto& fs = platform::PlatformAccessor::Get().Filesystem();
     if (!fs.Exists(root_)) {
         if (auto c = fs.CreateDirectories(root_); !c.ok()) return c.error();
@@ -99,26 +103,22 @@ Result<void> ShowLibrary::ScanLocked() {
     auto top = fs.Enumerate(root_);
     if (!top.ok()) return top.error();
 
-    entries_.clear();
-    categories_.clear();
-    problems_.clear();
-
     auto readShows = [&](const std::string& dir, const std::string& category) {
         auto files = fs.Enumerate(dir);
         if (!files.ok()) {
-            problems_.push_back(dir + ": " + files.error().message);
+            out.problems.push_back(dir + ": " + files.error().message);
             return;
         }
         for (const std::string& path : files.value()) {
             if (fs.IsDirectory(path) || !IsShowFile(path)) continue;
             auto doc = vgr::VgrFile::Read(path);
             if (!doc.ok()) {
-                problems_.push_back(path + ": " + doc.error().message);
+                out.problems.push_back(path + ": " + doc.error().message);
                 continue;
             }
             const auto& h = doc.value().header;
             if (h.type != vgr::DocumentType::Show && h.type != vgr::DocumentType::Presentation) {
-                problems_.push_back(path + ": not a show (" + vgr::ToString(h.type) + ")");
+                out.problems.push_back(path + ": not a show (" + vgr::ToString(h.type) + ")");
                 continue;
             }
             ShowEntry e;
@@ -129,7 +129,7 @@ Result<void> ShowLibrary::ScanLocked() {
             e.modifiedMs = h.modifiedMs;
             if (auto it = h.searchMetadata.find("slides"); it != h.searchMetadata.end())
                 e.slideCount = std::atoi(it->second.c_str());
-            entries_.push_back(std::move(e));
+            out.entries.push_back(std::move(e));
         }
     };
 
@@ -138,14 +138,24 @@ Result<void> ShowLibrary::ScanLocked() {
         if (!fs.IsDirectory(path)) continue;
         const std::string name = LeafName(path);
         if (!name.empty() && name.front() == '.') continue;   // .deleted etc. — not a category
-        categories_.push_back(name);
+        out.categories.push_back(name);
         readShows(path, name);
     }
 
     auto ci = [](const std::string& a, const std::string& b) { return Lower(a) < Lower(b); };
-    std::sort(categories_.begin(), categories_.end(), ci);
-    std::sort(entries_.begin(), entries_.end(),
+    std::sort(out.categories.begin(), out.categories.end(), ci);
+    std::sort(out.entries.begin(), out.entries.end(),
               [](const ShowEntry& a, const ShowEntry& b) { return a.modifiedMs > b.modifiedMs; });
+    return Ok();
+}
+
+Result<void> ShowLibrary::Scan() {
+    Scanned scanned;   // filled with no lock held
+    if (auto s = ScanUnlocked(scanned); !s.ok()) return s.error();
+    std::lock_guard<std::mutex> lock(mutex_);
+    entries_ = std::move(scanned.entries);
+    categories_ = std::move(scanned.categories);
+    problems_ = std::move(scanned.problems);
     return Ok();
 }
 
@@ -223,8 +233,7 @@ Result<void> ShowLibrary::CreateCategory(std::string_view name) {
     if (fs.Exists(dir))
         return Error::Make(Err::AlreadyExists, kModule, std::format("category '{}' already exists", name));
     if (auto c = fs.CreateDirectories(dir); !c.ok()) return c.error();
-    std::lock_guard<std::mutex> lock(mutex_);
-    return ScanLocked();
+    return Scan();
 }
 
 Result<void> ShowLibrary::RenameCategory(std::string_view from, std::string_view to) {
@@ -237,8 +246,7 @@ Result<void> ShowLibrary::RenameCategory(std::string_view from, std::string_view
     if (fs.Exists(dst))
         return Error::Make(Err::AlreadyExists, kModule, std::format("category '{}' already exists", to));
     if (auto m = fs.Move(src, dst); !m.ok()) return m.error();
-    std::lock_guard<std::mutex> lock(mutex_);
-    return ScanLocked();
+    return Scan();
 }
 
 Result<void> ShowLibrary::RemoveCategory(std::string_view name) {
@@ -254,8 +262,7 @@ Result<void> ShowLibrary::RemoveCategory(std::string_view name) {
         return Error::Make(Err::InvalidState, kModule,
                            std::format("category '{}' still has shows in it — move or delete them first", name));
     if (auto r = fs.Remove(dir); !r.ok()) return r.error();
-    std::lock_guard<std::mutex> lock(mutex_);
-    return ScanLocked();
+    return Scan();
 }
 
 Result<void> ShowLibrary::ClearCategory(std::string_view name) {
@@ -277,8 +284,7 @@ Result<void> ShowLibrary::ClearCategory(std::string_view name) {
             target = fs.Join(bin, std::format("{}-{}", NowMs(), LeafName(path)));
         if (auto m = fs.Move(path, target); !m.ok()) return m.error();
     }
-    std::lock_guard<std::mutex> lock(mutex_);
-    return ScanLocked();
+    return Scan();
 }
 
 Result<std::string> ShowLibrary::MoveShow(std::string_view path, std::string_view category) {
@@ -296,8 +302,7 @@ Result<std::string> ShowLibrary::MoveShow(std::string_view path, std::string_vie
         return Error::Make(Err::AlreadyExists, kModule,
                            "a show with that file name already exists in the destination");
     if (auto m = fs.Move(from, dest); !m.ok()) return m.error();
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (auto s = ScanLocked(); !s.ok()) return s.error();
+    if (auto s = Scan(); !s.ok()) return s.error();
     return dest;
 }
 
@@ -352,8 +357,7 @@ Result<std::string> ShowLibrary::RenameShow(std::string_view path, std::string_v
     // leaves both, never neither.
     if (auto w = StoreShow(target, show.value()); !w.ok()) return w.error();
     if (target != from) (void)fs.Remove(from);
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (auto s = ScanLocked(); !s.ok()) return s.error();
+    if (auto s = Scan(); !s.ok()) return s.error();
     return target;
 }
 
@@ -372,8 +376,7 @@ Result<std::string> ShowLibrary::DuplicateShow(std::string_view path, std::strin
     if (!target.ok()) return target.error();
     show.value().doc.header.createdMs = NowMs();
     if (auto w = StoreShow(target.value(), show.value()); !w.ok()) return w.error();
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (auto s = ScanLocked(); !s.ok()) return s.error();
+    if (auto s = Scan(); !s.ok()) return s.error();
     return target.value();
 }
 
@@ -390,8 +393,7 @@ Result<std::string> ShowLibrary::DeleteShow(std::string_view path) {
     if (fs.Exists(target))
         target = fs.Join(bin, std::format("{}-{}", NowMs(), LeafName(from)));
     if (auto m = fs.Move(from, target); !m.ok()) return m.error();
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (auto s = ScanLocked(); !s.ok()) return s.error();
+    if (auto s = Scan(); !s.ok()) return s.error();
     return target;
 }
 

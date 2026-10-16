@@ -154,7 +154,16 @@ public:
     const DesignLibraryConfig& Config() const { return config_; }
 
 private:
-    Result<void> SaveLocked() const;
+    // SPLIT IN TWO ON PURPOSE (the lock-scope rule this module was breaking):
+    // BuildStoreJsonLocked runs with mutex_ HELD and is pure serialization — no
+    // PAL, no provider, nothing that can block. CommitSave does the PAL write and
+    // must be called AFTER the lock is released: the two used to be one helper
+    // (SaveLocked) called from inside every mutator's locked scope, so a disk
+    // write sat on the interface thread with the design library parked behind it.
+    std::string BuildStoreJsonLocked() const;
+    // Writes the text BuildStoreJsonLocked() produced. PAL: NEVER call with
+    // mutex_ held. "" / no store path is a no-op.
+    Result<void> CommitSave(const std::string& json) const;
     void EnsureDefaultsLocked();
     Design* FindLocked(std::string_view id);
     const DesignCategory* CategoryLocked(std::string_view id) const;

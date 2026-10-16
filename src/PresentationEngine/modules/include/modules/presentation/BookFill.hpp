@@ -315,4 +315,20 @@ std::string NumberRange(const std::vector<int>& numbers);
 std::vector<BookSlide> FillBookSlides(const std::vector<ContentBlock>& templateBlocks, const BookSource& source,
                                       const BookFillOptions& options, bool onlyFirst = false);
 
+// ONE ITEM OF AN ALREADY-READ CHAPTER, in the shape a fill of just that item needs.
+//
+// A caller that already holds the whole chapter — a service warming every item of it
+// ahead of the operator's click — must not pay for the chapter AGAIN once per item:
+// the read is the expensive half (`items` is a copy of the book's own verses, and
+// every parallel Bible is another whole chapter read). Only `items` and each
+// parallel column's items depend on the item, and a column that does not carry it is
+// DROPPED — exactly what a per-item read produces, its own column having been
+// filtered to the same item and left empty. The rest (the reference line, the
+// citation, the version, the family) is a fact about the chapter and is copied, so a
+// field added to BookSource later carries over here without being named again.
+//
+// The answer holds the one item asked for — none at all when the chapter has no such
+// item, which is the same "nothing to fill" a per-item read would have reported.
+BookSource ItemOf(const BookSource& chapter, int number);
+
 } // namespace bps::presentation

@@ -2,6 +2,7 @@
 #include "services/SearchService.h"
 
 #include <QThread>
+#include <QThreadPool>
 
 #include "services/EngineBridge.h"
 #include "services/MediaLibraryService.h"
@@ -338,7 +339,17 @@ SearchService *SearchService::create(QQmlEngine *engine, QJSEngine *jsEngine)
     return &instance();
 }
 
+// THE PUBLISHED BIBLE-ID LIST (see the header): read once on a worker and
+// published; the property binding reads this member, and every path that used to
+// `emit bibleChanged()` now asks for a fresh walk instead.
 QStringList SearchService::bibles() const
+{
+    if (!biblesInFlight_ && biblesCache_.isEmpty())
+        refreshBiblesOffThread();
+    return biblesCache_;
+}
+
+QStringList SearchService::readBibles() const
 {
     QStringList out;
     if (!EngineBridge::instance().booted())
@@ -348,7 +359,70 @@ QStringList SearchService::bibles() const
     return out;
 }
 
+void SearchService::refreshBiblesOffThread() const
+{
+    if (biblesInFlight_ || !EngineBridge::instance().booted())
+        return;
+    biblesInFlight_ = true;
+    QPointer<SearchService> guard(const_cast<SearchService *>(this));
+    QThreadPool::globalInstance()->start([guard]() {
+        const QStringList ids = guard ? guard->readBibles() : QStringList();
+        if (!guard)
+            return;
+        QMetaObject::invokeMethod(guard, [guard, ids]() {
+            SearchService *self = guard.data();
+            if (!self)
+                return;
+            self->biblesInFlight_ = false;
+            self->biblesCache_ = ids;
+            emit self->bibleChanged();
+        }, Qt::QueuedConnection);
+    });
+}
+
+// The SYNC word resolution is PUBLISHED like the other reads (see the header):
+// it answers from the last worker read of that text, or no rows while the read it
+// queues is in flight — and wordsCached is what says the answer has landed. The
+// GUI-facing path is resolveWordsAsync, and a WORKER reads readResolveWords
+// directly: there is no signal to wait on down there, which is why readSearch
+// below no longer comes through here (a miss used to drop the typo correction a
+// locked search exists to apply).
 QVariantList SearchService::resolveWords(const QString &text) const
+{
+    const QString typed = text.trimmed();
+    if (typed.isEmpty())
+        return {};
+    const auto it = wordsCache_.constFind(typed);
+    if (it == wordsCache_.constEnd()) {
+        refreshResolveWordsOffThread(typed);
+        return {};
+    }
+    return *it;
+}
+
+void SearchService::refreshResolveWordsOffThread(const QString &text) const
+{
+    if (wordsInFlight_.contains(text))
+        return;
+    wordsInFlight_.insert(text);
+    QPointer<SearchService> guard(const_cast<SearchService *>(this));
+    QThreadPool::globalInstance()->start([guard, text]() {
+        if (!guard)
+            return;
+        const QVariantList rows = guard->readResolveWords(text);
+        QMetaObject::invokeMethod(guard, [guard, text, rows]() {
+            SearchService *self = guard.data();
+            if (!self)
+                return;
+            self->wordsInFlight_.remove(text);
+            self->wordsCache_.insert(text, rows);
+            // The sync resolveWords()'s answer has landed (see the header).
+            emit self->wordsCached(text);
+        }, Qt::QueuedConnection);
+    });
+}
+
+QVariantList SearchService::readResolveWords(const QString &text) const
 {
     QVariantList out;
     const auto words = bs::textmatch::TokenizeWords(text.toStdString());
@@ -399,7 +473,7 @@ void SearchService::resolveWordsAsync(const QString &text, int token)
     auto *runner = QThread::create([this, text, token] {
         if (token != latestResolveToken_.load(std::memory_order_acquire))
             return;
-        const QVariantList rows = resolveWords(text);
+        const QVariantList rows = readResolveWords(text);
         QMetaObject::invokeMethod(this, [this, token, rows] {
             if (token == latestResolveToken_)
                 emit wordsResolved(token, rows);
@@ -416,8 +490,52 @@ QVariantList SearchService::searchSettings(const QString &text, int limit) const
 }
 
 // One verse's full text — the Quick search hover preview (see the header).
+// PUBLISHED like the other reads: the hover asks once per row, and the answer
+// arrives on verseCached for the row that is still hovered (the dialog re-asks).
 QString SearchService::fullVerse(const QString &bibleId, const QString &bookId,
                                  int chapter, int verse) const
+{
+    if (bibleId.isEmpty() || bookId.isEmpty() || chapter <= 0 || verse <= 0)
+        return {};
+    const auto it = verseCache_.constFind(verseCacheKey(bibleId, bookId, chapter, verse));
+    if (it == verseCache_.constEnd()) {
+        refreshFullVerseOffThread(bibleId, bookId, chapter, verse);
+        return {};
+    }
+    return *it;
+}
+
+QString SearchService::verseCacheKey(const QString &bibleId, const QString &bookId, int chapter, int verse)
+{
+    return bibleId + QLatin1Char('\n') + bookId + QLatin1Char('\n') + QString::number(chapter)
+           + QLatin1Char(':') + QString::number(verse);
+}
+
+void SearchService::refreshFullVerseOffThread(const QString &bibleId, const QString &bookId,
+                                              int chapter, int verse) const
+{
+    const QString key = verseCacheKey(bibleId, bookId, chapter, verse);
+    if (verseInFlight_.contains(key) || !EngineBridge::instance().booted())
+        return;
+    verseInFlight_.insert(key);
+    QPointer<SearchService> guard(const_cast<SearchService *>(this));
+    QThreadPool::globalInstance()->start([guard, bibleId, bookId, chapter, verse, key]() {
+        if (!guard)
+            return;
+        const QString text = guard->readFullVerse(bibleId, bookId, chapter, verse);
+        QMetaObject::invokeMethod(guard, [guard, bibleId, bookId, chapter, verse, key, text]() {
+            SearchService *self = guard.data();
+            if (!self)
+                return;
+            self->verseInFlight_.remove(key);
+            self->verseCache_.insert(key, text);
+            emit self->verseCached(bibleId, bookId, chapter, verse);
+        }, Qt::QueuedConnection);
+    });
+}
+
+QString SearchService::readFullVerse(const QString &bibleId, const QString &bookId,
+                                     int chapter, int verse) const
 {
     if (!EngineBridge::instance().booted())
         return {};
@@ -430,7 +548,53 @@ QString SearchService::fullVerse(const QString &bibleId, const QString &bookId,
 // Search
 // ===========================================================================
 
+// The SYNC aggregate answers from a published result for the same query; a
+// query nobody has run yet is queued and reads as no rows. The Quick search
+// dialog prefers searchAsync (whose worker runs readSearch below), so this is
+// the contract for a caller that cannot wait.
 QVariantList SearchService::search(const QString &rawText, int perKind, bool exactWords) const
+{
+    const QString typed = rawText.trimmed();
+    if (typed.isEmpty() || !EngineBridge::instance().booted())
+        return {};
+    const QString key = QString::number(perKind) + QLatin1Char('\n')
+                        + (exactWords ? QStringLiteral("1") : QStringLiteral("0"))
+                        + QLatin1Char('\n') + typed;
+    const auto it = aggregateCache_.constFind(key);
+    if (it == aggregateCache_.constEnd()) {
+        refreshAggregateOffThread(typed, perKind, exactWords);
+        return {};
+    }
+    return *it;
+}
+
+void SearchService::refreshAggregateOffThread(const QString &text, int perKind, bool exactWords) const
+{
+    const QString key = QString::number(perKind) + QLatin1Char('\n')
+                        + (exactWords ? QStringLiteral("1") : QStringLiteral("0"))
+                        + QLatin1Char('\n') + text;
+    if (aggregateInFlight_.contains(key) || !EngineBridge::instance().booted())
+        return;
+    aggregateInFlight_.insert(key);
+    QPointer<SearchService> guard(const_cast<SearchService *>(this));
+    QThreadPool::globalInstance()->start([guard, text, perKind, exactWords, key]() {
+        if (!guard)
+            return;
+        const QVariantList rows = guard->readSearch(text, perKind, exactWords);
+        QMetaObject::invokeMethod(guard, [guard, text, key, rows]() {
+            SearchService *self = guard.data();
+            if (!self)
+                return;
+            self->aggregateInFlight_.remove(key);
+            self->aggregateCache_.insert(key, rows);
+            // The sync search()'s answer has landed: what re-asks it (the caller
+            // of that entry point has no token to match — see the header).
+            emit self->searchCached(text);
+        }, Qt::QueuedConnection);
+    });
+}
+
+QVariantList SearchService::readSearch(const QString &rawText, int perKind, bool exactWords) const
 {
     QVariantList out;
     QString text = rawText.trimmed();
@@ -443,7 +607,17 @@ QVariantList SearchService::search(const QString &rawText, int perKind, bool exa
     // hint from saying "recieve -> receive" while the padlock searches for
     // "recieve" and rejects every correctly spelled passage.
     if (exactWords) {
-        const QVariantList resolved = resolveWords(text);
+        // THE WARM CACHE, THEN THE READ. This runs on a worker, and the published
+        // lookup is not an answer here: on a miss it queues its read and returns {}
+        // — a hook no worker has — so the FIRST locked search of a misspelled word
+        // silently lost the correction this whole block exists to apply while the
+        // second identical search found it (the worker's answer only fills the
+        // cache a beat later). Every word comes back when the read runs (see
+        // readResolveWords), so an empty list means "nothing read yet / nothing to
+        // resolve", which is exactly when reading is right.
+        QVariantList resolved = resolveWords(text);
+        if (resolved.isEmpty())
+            resolved = readResolveWords(text);
         for (const QVariant &row : resolved) {
             const QVariantMap word = row.toMap();
             if (!word.value(QStringLiteral("changed")).toBool()
@@ -754,7 +928,7 @@ void SearchService::searchAsync(const QString &text, int perKind, int token, boo
         std::unique_lock<std::mutex> searchLock(asyncSearchMutex);
         if (token != latestToken_.load(std::memory_order_acquire))
             return;
-        const QVariantList rows = search(text, perKind, exactWords);
+        const QVariantList rows = readSearch(text, perKind, exactWords);
         QMetaObject::invokeMethod(this, [this, token, rows] {
             if (token == latestToken_)
                 emit resultsReady(token, rows);
@@ -795,6 +969,15 @@ QStringList SearchService::candidateBibleFiles()
     return files;
 }
 
+void SearchService::refreshBibles()
+{
+    // The one thing an installer has to ask for (see the header): the walk publishes
+    // the new ids and bibleChanged lands with them. Without it the published list
+    // keeps the ids it had — the getter only re-walks an EMPTY list — so a Bible
+    // installed into a non-empty list never appeared in `bibles` at all.
+    refreshBiblesOffThread();
+}
+
 void SearchService::loadBibles()
 {
     if (loadStarted_ || !EngineBridge::instance().booted())
@@ -805,7 +988,7 @@ void SearchService::loadBibles()
         return;
 
     loading_ = true;
-    emit bibleChanged();
+    refreshBiblesOffThread();   // the notify comes with the fresh published list
 
     QThread *thread = QThread::create([files] {
         for (const QString &path : files) {
@@ -817,7 +1000,7 @@ void SearchService::loadBibles()
     loader_ = thread;
     connect(thread, &QThread::finished, this, [this] {
         loading_ = false;
-        emit bibleChanged();
+        refreshBiblesOffThread();
     });
     connect(thread, &QThread::finished, thread, &QObject::deleteLater);
     thread->start();
@@ -878,7 +1061,7 @@ bool SearchService::importBibleFile(const QString &path)
                                             QStringLiteral("bible.import"));
                 return;
             }
-            emit bibleChanged();
+            refreshBiblesOffThread();
             EventBus::instance().notify(name, QStringLiteral("success"),
                                         QObject::tr("Bible installed"), QStringLiteral("bible.import"));
         }, Qt::QueuedConnection);

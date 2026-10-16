@@ -21,6 +21,19 @@ import VGRPresenterUI
 Item {
     id: root
 
+    // LAYOUT PROBE (VGR_LAYOUT_TEST): how many cards this grid's delegate has built and how
+    // many it has thrown away, so a pane switch can be told from a filter change by the
+    // counters alone — a switch that throws away everything it built is the Qt item view
+    // releasing its items for a hidden view.
+    property int gridRowBuilds: 0
+    property int gridRowDrops: 0
+    // SCROLL-COST PROBE (VGR_LAYOUT_TEST, tools/selftest/run_layout_probe.sh): the number of
+    // fit solvers every card in this grid ran — the cards' own per-block text work, reported UP
+    // by each DesignPreview (see its `probeSink`). It lives here, on the pane, because the cards
+    // themselves are destroyed and rebuilt by every filter and scroll: a counter on a card
+    // resets with the card, and a scroll's delta over it could come out negative.
+    property int gridFitSolves: 0
+
     // The singleton this tab browses (OverlayLibraryService or TemplateLibraryService).
     property var service: null
     // The noun in the UI's strings ("overlay", "template").
@@ -35,6 +48,101 @@ Item {
     readonly property bool categorySelected: selection !== "all" && selection !== "unlabeled"
 
     property var gridItems: []
+    // ---- the grid's MODEL: rows that are INSERTED, REMOVED and UPDATED, not reset --------
+    // `gridItems` is what the SERVICE says (a fresh array per reload); this ListModel is what
+    // the view is fed, and syncGridRows() turns the array into the smallest set of row moves
+    // that reaches it. It exists because handing the view the new array was a MODEL RESET:
+    // Qt destroys every card in view and builds them again, so a filter that hides 23 of 37
+    // templates rebuilt all 13 that SURVIVED it (~30 ms each, and with them each card's fit
+    // solvers) — the cost the layout probe measured on every templates/overlays filter step.
+    //
+    // ONE named role, holding the whole row: by Qt's own rule for models with a single role,
+    // the delegate's `modelData` IS that role's data, so every card keeps reading
+    // `modelData.name` / `modelData.blocks` exactly as it did against the array — the only
+    // thing that changed is that the model now reports insert/remove/update per row.
+    ListModel { id: gridRows }
+    function gridRowId(index) {
+        const row = gridRows.get(index)
+        return (row && row.design) ? String(row.design.id) : ""
+    }
+    // Reduce the model to `gridItems`, row by row: drop what the new list no longer holds,
+    // then walk the wanted order, moving a card that is already further down into place
+    // (a re-file changes a card's position, not its identity), inserting what is new, and
+    // UPDATING in place what merely changed content — a rename, a colour, an edited block
+    // set, which is what the common case is.
+    // What each row's CONTENT was when it was last written into the model (id -> JSON). A row
+    // whose content is unchanged is left alone: writing it again with set() is not free — the
+    // view treats a changed row as new data for that card and rebuilds it, so a filter that
+    // touched every survivor rebuilt the ones on screen (measured: +10 cards built by a filter
+    // that only HID rows). With this, a row is written only when its design actually changed.
+    property var gridRowSig: ({})
+    function syncGridRows() {
+        const want = gridItems
+        const wanted = ({})
+        const sigs = ({})
+        for (let i = 0; i < want.length; ++i) {
+            const id = String(want[i].id)
+            wanted[id] = true
+            sigs[id] = JSON.stringify(want[i])
+        }
+        for (let i = gridRows.count - 1; i >= 0; --i) {
+            const id = root.gridRowId(i)
+            if (wanted[id] !== true) {
+                gridRows.remove(i)
+                delete gridRowSig[id]
+            }
+        }
+        for (let i = 0; i < want.length; ++i) {
+            const row = want[i]
+            const id = String(row.id)
+            if (i >= gridRows.count) {
+                gridRows.append({ design: row })          // new cards at the end
+                gridRowSig[id] = sigs[id]
+                continue
+            }
+            const here = root.gridRowId(i)
+            if (here !== id) {
+                let from = -1
+                for (let j = i + 1; j < gridRows.count; ++j)
+                    if (root.gridRowId(j) === id) { from = j; break }
+                if (from >= 0)
+                    gridRows.move(from, i, 1)             // it was below: bring it up
+                else
+                    gridRows.insert(i, { design: row })   // not in the model at all
+                gridRowSig[id] = sigs[id]
+                continue
+            }
+            if (gridRowSig[id] !== sigs[id]) {            // same card, different content
+                gridRows.set(i, { design: row })
+                gridRowSig[id] = sigs[id]
+            }
+        }
+        checkGridRows()
+    }
+    // The model's own invariant, checked where it is free — at the end of every sync, and
+    // only under the layout probe: the rows must be the service's list, in ITS order, one
+    // row per design. The probe's churn numbers say how many cards the view built; this
+    // says whether the rows it was given were the right ones, which is the thing those
+    // numbers are evidence ABOUT (a cheap filter that showed the wrong cards would score
+    // the same).
+    function checkGridRows() {
+        if (typeof SelfTestLayout === "undefined" || !SelfTestLayout)
+            return
+        let mismatch = ""
+        if (gridRows.count !== gridItems.length) {
+            mismatch = "count=" + gridRows.count + " want=" + gridItems.length
+        } else {
+            for (let i = 0; i < gridItems.length; ++i) {
+                if (root.gridRowId(i) !== String(gridItems[i].id)) {
+                    mismatch = "row=" + i + " id=" + root.gridRowId(i) + " want=" + gridItems[i].id
+                    break
+                }
+            }
+        }
+        EngineBridge.log("info", "DesignRows",
+                         root.noun + " rows=" + gridRows.count + " want=" + gridItems.length
+                         + (mismatch === "" ? " match=1" : " MISMATCH " + mismatch))
+    }
     function reload() {
         // The filter is derived HERE from the fresh selection — a dependent
         // binding read inside onSelectionChanged hands designs() the
@@ -44,6 +152,7 @@ Item {
         const filter = selection === "all" ? ""
                      : (selection === "unlabeled" ? service.unlabeledFilter : selection)
         gridItems = service.designs(filter, query)
+        syncGridRows()
     }
     onSelectionChanged: reload()
     onQueryChanged: reload()
@@ -275,6 +384,10 @@ Item {
 
         GridView {
             id: grid
+            // The scroll probe scrolls this grid BY NAME; the name carries the noun
+            // ("templates" / "overlays") because two DesignLibraryPanes are alive at once
+            // and an objectName lookup resolves to the first match in the tree.
+            objectName: "selfTestDesignGrid-" + root.noun
             anchors.fill: parent
             anchors.margins: 4
             anchors.rightMargin: 10   // room for the scrollbar
@@ -283,7 +396,38 @@ Item {
             // behind it), so cards scroll beneath it like under any FAB.
             clip: true
             boundsBehavior: Flickable.StopAtBounds
-            model: root.gridItems
+            // SCROLL: keep the cards the viewport has finished with and RE-BIND them to the
+            // next index, instead of destroying them and building new ones as the grid moves.
+            // The scroll probe measured the alternative: a 2 174 px scroll built 26 of the 37
+            // cards and threw 25 away (and with them their previews — each text block
+            // re-running its fit solver), which is why the templates grid could not hold a
+            // frame while scrolling. Every card binding reads `modelData` (its design), so a
+            // rebound card is a correct card, and the blocks Repeater inside DesignPreview
+            // rebuilds the block delegates when the design changes.
+            // Measured after (the same 2 174 px scroll, same probe): 0 cards built, 0 thrown
+            // away, worst frame 614.9 → 83.7 ms, the animation back to its own 831 ms — and
+            // still ~23 fps, because re-binding a card to a DIFFERENT template re-makes its
+            // block delegates and their fit solvers (cardFitSolves 75 → 83). The pool removes
+            // the card's construction; it cannot remove its content.
+            reuseItems: true
+            // ---- the filter cost, and what was done about it -----------------------
+            // Every card is a DesignPreview plus its name bar, and reload() still asks the
+            // service for the whole list per filter change (designs()) — but the view is no
+            // longer handed that array. It is fed `gridRows`, the ListModel syncGridRows()
+            // reduces to it with row inserts, removals and updates: a filter that hides 23 of
+            // 37 templates REMOVES 23 rows, and the cards it leaves in place are not rebuilt.
+            // The reset destroyed and rebuilt the survivors as well (~30 ms per card,
+            // measured: 13 built / 13 dropped on every templates filter, 502-694 ms a step).
+            // What this does NOT do, measured on the same probe: a filter that leaves
+            // DIFFERENT designs on screen still gives those cards new content, so their block
+            // delegates and fit solvers are remade (templates filter: 13 dropped → 0, but 10
+            // built and 52-54 cardFitSolves either way, 637-694 ms). The overlays grid, whose
+            // whole roster is one screenful, is where the rows tell the truth: its filter
+            // steps went 3 built / 6 dropped → 0 / 0 and 250-392 ms → 68-176 ms.
+            // Offscreen cache is deliberately left at Qt's default: trimming it
+            // (cacheBuffer: 0) measured only ~35 ms of the phase and would move card building
+            // into the scroll.
+            model: gridRows
 
             readonly property int columns: Math.max(2, Math.floor(width / 230))
             cellWidth: Math.floor(width / columns)
@@ -292,11 +436,15 @@ Item {
 
             delegate: DesignCard {
                 required property var modelData
+                // LAYOUT PROBE (VGR_LAYOUT_TEST).
+                Component.onCompleted: root.gridRowBuilds++
+                Component.onDestruction: root.gridRowDrops++
                 objectName: "selfTestDesignCard_" + modelData.name
                 width: grid.cellWidth
                 height: grid.cellHeight
                 design: modelData
                 now: ticker.now
+                probeSink: root   // (scroll-cost probe: the cards' fit solvers are counted here)
                 dragKind: root.noun === "overlay" ? "overlay" : ""
                 onActivated: root.designActivated(modelData.id, modelData.name)
                 onOpened: root.designOpened(modelData.id, modelData.name)

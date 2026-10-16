@@ -10,11 +10,11 @@
 // VGRPresenter_Settings_Audio_Video_Add_Compressor.qml's rack — Gain /
 // Equalizer / Compressor / Reverb / Limiter / Noise Gate / Delay).
 // HALF-REAL today, by design: `enabled`/`value` are pushed onto REAL
-// production-graph processing stages (AudioInputListModel::pushEffectsToGraph
+// production-graph processing stages (AudioInputListModel::pushEffectsOffThread
 // — the graph is the engine's routing/DSP state), while the rack's stored
 // numbers are still cosmetic UI state, not live DSP parameters read by a
 // playback device. Don't add "there is no engine" claims here without
-// checking pushEffectsToGraph first — this struct is mid-migration.
+// checking pushEffectsOffThread first — this struct is mid-migration.
 struct AudioEffect
 {
     // "gain" | "eq" | "compressor" | "reverb" | "limiter" | "noiseGate" | "delay"
@@ -177,7 +177,7 @@ public:
     // by the Media Library. "" when cancelled. Lives here (not QML) so the
     // engine's dialog service is used, same as every other file picker in
     // the app (see StyleListModel::pickImageFile).
-    Q_INVOKABLE QString pickAudioFile() const;
+    Q_INVOKABLE QString pickAudioFile() const;   // gui-ok: a modal native picker parks the interface thread on PURPOSE — the user is looking at the dialog, and its own event loop keeps the window painting; the work after the pick (import, scan, copy) already runs off the interface thread
     Q_INVOKABLE void setLevel(int index, qreal level);
     Q_INVOKABLE void setMuted(int index, bool muted);
     // Latency compensation (clamped 0..1000 ms) and channel count (clamped
@@ -253,7 +253,12 @@ public:
     // No-op when the row is unrouted (its node does not exist — processing on
     // an unpatched source means nothing) or the engine is not booted. Called
     // from every effects/level/mute write so the board IS the graph's truth.
-    void pushEffectsToGraph(int index);
+    //
+    // The graph work itself runs on the engine worker (see EngineWorker): this
+    // is called on every fader tick, and a graph mutator serializes and
+    // re-validates the whole graph. The row's values are read here and captured
+    // by value; the worker's queue is FIFO, so the last write wins.
+    void pushEffectsOffThread(int index);
 
     // ROUTING MATRIX → GRAPH. The matrix (the Routing… modal) is per CHANNEL ×
     // BUS, while a graph edge is per source→bus, so the two halves split: this
@@ -274,7 +279,12 @@ public:
     // no longer routed to. A route made on the BOARD or in the bus dialog carries
     // no mask and is never touched here, so the surfaces still cannot fight over
     // one edge. No-op when the engine is not booted or the bus row is gone.
-    void pushRoutingToGraph(int index);
+    //
+    // Runs on the engine worker, for the same reason as the rack push above: a
+    // graph mutator serializes and re-validates the graph, and this one runs on
+    // every matrix cell the user ticks. The masks are MODEL state, so they are
+    // read on the interface thread and captured by value.
+    void pushRoutingOffThread(int index);
 
 private:
     static inline AudioInputListModel *s_instance = nullptr;
@@ -288,6 +298,12 @@ private:
     // The single write of the trim list (the public faces above only decide
     // WHEN a trim is worth remembering). true when it changed anything.
     bool writeChannelTrim(int index, int channel, qreal trim);
+
+    // The single write of a side's GAIN, shared by setChannelGain and
+    // toggleChannelGain (each owns its own policy for WHAT the gain should be).
+    // true when it changed anything — i.e. exactly when the graph push that
+    // follows is worth making.
+    bool writeChannelGain(int index, int channel, qreal gain);
 
     QList<AudioInputItem> m_inputs;
     int m_nextId = 1;   // stable-id counter ("a<n>"); seeded past the restored roster's highest id

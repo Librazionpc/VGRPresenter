@@ -223,13 +223,16 @@ Result<std::string> MediaEngine::Import(std::string_view path, std::string_view 
 }
 
 Result<void> MediaEngine::Remove(std::string_view mediaId) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = library_.find(std::string(mediaId));
-    if (it == library_.end())
-        return Error::Make(Err::Media_NotFound, "MediaEngine",
-                           "media '" + std::string(mediaId) + "' not found");
-    library_.erase(it);
-    playback_.erase(std::string(mediaId));
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = library_.find(std::string(mediaId));
+        if (it == library_.end())
+            return Error::Make(Err::Media_NotFound, "MediaEngine",
+                               "media '" + std::string(mediaId) + "' not found");
+        library_.erase(it);
+        playback_.erase(std::string(mediaId));
+    }
+    // Published with mutex_ released: a subscriber may re-enter the engine.
     (void)EventBus::Instance().Publish(events::MediaRemoved{std::string(mediaId)});
     return Ok();
 }
@@ -259,6 +262,7 @@ size_t MediaEngine::MediaCount() const {
 // Thumbnails
 // ---------------------------------------------------------------------------
 Result<void> MediaEngine::GenerateThumbnail(std::string_view mediaId, int width, int height) {
+    {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = library_.find(std::string(mediaId));
     if (it == library_.end())
@@ -268,6 +272,8 @@ Result<void> MediaEngine::GenerateThumbnail(std::string_view mediaId, int width,
     it->second.thumbnailW = width;
     it->second.thumbnailH = height;
     it->second.hasThumbnail = true;
+    }
+    // Published with mutex_ released: a subscriber may re-enter the engine.
     (void)EventBus::Instance().Publish(
         events::MediaThumbnailGenerated{std::string(mediaId), width, height});
     return Ok();
@@ -283,6 +289,11 @@ bool MediaEngine::HasThumbnail(std::string_view mediaId) const {
 // Playback
 // ---------------------------------------------------------------------------
 Result<void> MediaEngine::Play(std::string_view mediaId, DecodePath path) {
+    // The decode path the event reports is read out while the record is alive:
+    // the publish happens after the lock is released, so no reference into the
+    // map may outlive it.
+    std::string playDetail;
+    {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = library_.find(std::string(mediaId));
     if (it == library_.end())
@@ -304,8 +315,11 @@ Result<void> MediaEngine::Play(std::string_view mediaId, DecodePath path) {
                                      "MediaEngine");
         }
     }
+    playDetail = ToString(pb.path);
+    }
+    // Published with mutex_ released: a subscriber may re-enter the engine.
     (void)EventBus::Instance().Publish(
-        events::MediaPlaybackStarted{std::string(mediaId), ToString(pb.path)});
+        events::MediaPlaybackStarted{std::string(mediaId), playDetail});
     return Ok();
 }
 
@@ -330,11 +344,14 @@ Result<void> MediaEngine::Resume(std::string_view mediaId) {
 }
 
 Result<void> MediaEngine::Stop(std::string_view mediaId) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = playback_.find(std::string(mediaId));
-    if (it == playback_.end()) return Ok();
-    it->second.state = PlaybackState::Stopped;
-    it->second.positionSec = 0.0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = playback_.find(std::string(mediaId));
+        if (it == playback_.end()) return Ok();
+        it->second.state = PlaybackState::Stopped;
+        it->second.positionSec = 0.0;
+    }
+    // Published with mutex_ released: a subscriber may re-enter the engine.
     (void)EventBus::Instance().Publish(events::MediaPlaybackStopped{std::string(mediaId)});
     return Ok();
 }

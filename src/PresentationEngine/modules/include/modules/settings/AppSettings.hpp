@@ -101,7 +101,12 @@ public:
 private:
     // The slide builder's options under one tab's prefix ("scripture" | "table").
     presentation::BookFillOptions FillOptionsFor(const std::string& prefix) const;
-    Result<void> SaveLocked() const;
+    // SPLIT IN TWO ON PURPOSE (the lock-scope rule this module was breaking):
+    // BuildJsonLocked runs with mutex_ HELD and is pure serialization; CommitJson
+    // does the PAL write and is called with the lock RELEASED (the two used to be
+    // one helper, SaveLocked, called from inside Set's scope).
+    std::string BuildJsonLocked() const;
+    Result<void> CommitJson(const std::string& json) const;
     Result<void> Validate(const SettingDef& def, const json::Value& value) const;
 
     std::string storageFile_;

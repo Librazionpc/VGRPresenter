@@ -79,6 +79,18 @@ Item {
 
     // The canvas's clock/timer formatting, shared (this one never ticks; the host feeds `now`).
     LiveClock { id: fmt; running: false }
+    // SCROLL-COST PROBE (VGR_LAYOUT_TEST, tools/selftest/run_layout_probe.sh): every text block
+    // that runs its fit solver reports it to `probeSink`, the library pane hosting the card. One
+    // solve is eleven bisection steps, each re-measuring the invisible twin Text's layout — the
+    // single most expensive thing building a card does — so a scroll that builds six cards of
+    // three text blocks each reports +198 solves into the pane's `gridFitSolves`, and that is
+    // what the templates grid pays per newly-revealed card.
+    //
+    // The counter lives on the PANE, not on this preview: a card is destroyed and recreated by
+    // every filter and every scroll (that is the very cost being measured), so a counter on the
+    // preview would fall to zero with each recycled card and a delta over a step could come out
+    // NEGATIVE. null (every other host in the app) simply counts nowhere.
+    property var probeSink: null
     // Fully transparent? Works for "transparent", "#00000000" (what a live colour reads back as) and real colours alike.
     function isClear(c) { return c === undefined || c === null || c === "" || Qt.color(c).a === 0 }
 
@@ -179,6 +191,12 @@ Item {
                     if (fitSolving)
                         return
                     fitSolving = true
+                    // (scroll-cost probe: one bisection over the twin Text, per solve. The delegate can
+                    // be DESTROYED between the Qt.callLater that queued this and the call — the pane it
+                    // reports to goes with it — so `typeof` guards the dead scope, the same way
+                    // DropdownPanel's stale-row guards do.)
+                    if (typeof root !== "undefined" && root && root.probeSink)
+                        root.probeSink.gridFitSolves++
                     const pad = el.style.padding ?? 0
                     const bw = el.width - pad * 2, bh = el.height - pad * 2
                     let lo = 3, hi = 400

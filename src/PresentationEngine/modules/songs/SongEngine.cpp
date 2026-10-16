@@ -456,16 +456,22 @@ Result<void> SongEngine::SetPerformanceKey(std::string_view songId, std::string_
     if (!normalized.ok())
         return Error::Make(Err::InvalidArgument, "SongEngine",
                            "not a recognized key: " + std::string(key));
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = songs_.find(std::string(songId));
-    if (it == songs_.end())
-        return Error::Make(Err::Song_NotFound, "SongEngine",
-                           "song not found: " + std::string(songId));
-    it->second.metadata.performanceKey = normalized.value();
-    it->second.modifiedMs = NowMs();
-    // Note: no snapshot on a pure key change (a transposable preference).
-    (void)EventBus::Instance().Publish(events::SongKeyChanged{
-        it->second.id, it->second.metadata.performanceKey});
+    std::string eventSongId;
+    std::string eventKey;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = songs_.find(std::string(songId));
+        if (it == songs_.end())
+            return Error::Make(Err::Song_NotFound, "SongEngine",
+                               "song not found: " + std::string(songId));
+        it->second.metadata.performanceKey = normalized.value();
+        it->second.modifiedMs = NowMs();
+        eventSongId = it->second.id;
+        eventKey = it->second.metadata.performanceKey;
+        // Note: no snapshot on a pure key change (a transposable preference).
+    }
+    // Published with mutex_ released: a subscriber may re-enter the engine.
+    (void)EventBus::Instance().Publish(events::SongKeyChanged{eventSongId, eventKey});
     return Ok();
 }
 
@@ -484,6 +490,7 @@ void SongEngine::EnsureOriginalArrangement(Song& song) {
 Result<void> SongEngine::AddArrangement(std::string_view songId, const Arrangement& arr) {
     if (arr.id.empty())
         return Error::Make(Err::InvalidArgument, "SongEngine", "arrangement id is required");
+    {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = songs_.find(std::string(songId));
     if (it == songs_.end())
@@ -504,8 +511,10 @@ Result<void> SongEngine::AddArrangement(std::string_view songId, const Arrangeme
                                "arrangement already exists: " + arr.id);
     it->second.arrangements.push_back(arr);
     it->second.modifiedMs = NowMs();
+    }
+    // Published with mutex_ released: a subscriber may re-enter the engine.
     (void)EventBus::Instance().Publish(events::SongArrangementChanged{
-        it->second.id, arr.id});
+        std::string(songId), arr.id});
     return Ok();
 }
 

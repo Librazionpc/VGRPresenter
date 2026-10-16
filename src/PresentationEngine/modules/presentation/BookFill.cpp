@@ -565,4 +565,35 @@ std::vector<BookSlide> FillBookSlides(const std::vector<ContentBlock>& tmpl, con
     return slides;
 }
 
+BookSource ItemOf(const BookSource& chapter, int number)
+{
+    // Copy first, narrow after: a field added to BookSource later is carried into
+    // every item of the chapter without being named here a second time.
+    BookSource out = chapter;
+    out.items.clear();
+    for (const BookItem& item : chapter.items) {
+        if (item.number == number) {
+            out.items.push_back(item);
+            // The caller asked about ONE item, and it is in hand.
+            break;
+        }
+    }
+    if (out.items.empty())
+        return out;          // no such item here: nothing to fill, and that is the answer
+    out.parallels.clear();
+    for (const ParallelBible& column : chapter.parallels) {
+        ParallelBible narrowed;
+        narrowed.name = column.name;
+        narrowed.bookAbbr = column.bookAbbr;
+        for (const BookItem& item : column.items)
+            if (item.number == number)
+                narrowed.items.push_back(item);
+        // A version that does not carry this item contributes NO column, the same
+        // rule the per-item read applies (see ScriptureService::sourceFor).
+        if (!narrowed.items.empty())
+            out.parallels.push_back(std::move(narrowed));
+    }
+    return out;
+}
+
 } // namespace bps::presentation

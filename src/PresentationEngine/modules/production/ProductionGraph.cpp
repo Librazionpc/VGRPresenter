@@ -324,7 +324,7 @@ bool ProductionGraph::CanConnect(std::string_view from, std::string_view to,
     // Connect(), whenever it's missing — a brand-new, never-before-routed
     // source has no node yet, which is the COMMON case for a video source
     // (nothing else ever creates its node proactively the way
-    // AudioInputListModel::pushEffectsToGraph does for audio on any
+    // AudioInputListModel::pushEffectsOffThread does for audio on any
     // level/mute change). Refusing here meant a video source's very FIRST
     // connection attempt was refused unconditionally, forever — the node
     // it was checking for only ever gets created BY a successful connect,

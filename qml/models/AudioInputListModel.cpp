@@ -3,6 +3,7 @@
 #include "BusListModel.h"
 #include "ChannelTrim.h"
 #include "services/EngineBridge.h"
+#include "services/EngineWorker.h"
 #include "services/SettingsService.h"
 #include "platform/PlatformAccessor.hpp"
 #include "modules/production/ProductionEngine.hpp"
@@ -381,7 +382,7 @@ void AudioInputListModel::setLevel(int index, qreal level)
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { LevelRole });
     scheduleSave();
-    pushEffectsToGraph(index);   // the fader IS the graph's gainDb
+    pushEffectsOffThread(index);   // the fader IS the graph's gainDb
 }
 
 void AudioInputListModel::setMuted(int index, bool muted)
@@ -395,19 +396,28 @@ void AudioInputListModel::setMuted(int index, bool muted)
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { MutedRole });
     scheduleSave();
-    pushEffectsToGraph(index);   // mute is graph VolumeControl::mute
+    pushEffectsOffThread(index);   // mute is graph VolumeControl::mute
 }
 
 // ---------------------------------------------------------------------------
 // REAL DSP PUSH — the effects rack onto the production graph (docs/specs/27
-// §Processing chains). The rack stops being decoration: each row's enabled
-// effects become ProcessingStages on its "asrc:<id>" SOURCE NODE and its
-// level/mute land in the node's VolumeControl — the SAME nodes the routing
-// board's buses patch from, so anything downstream of the source hears the
-// rack. No-op when the row is unrouted (no node = nothing to process) or the
-// engine is not booted. Values map: UI dB stay dB, ratios (:1) and percents
-// fold into the stage's 0..1 amount, delay ms into seconds.
-void AudioInputListModel::pushEffectsToGraph(int index)
+// §Processing chains), ON THE ENGINE WORKER.
+//
+// The rack stops being decoration: each row's enabled effects become
+// ProcessingStages on its "asrc:<id>" SOURCE NODE and its level/mute land in
+// the node's VolumeControl — the SAME nodes the routing board's buses patch
+// from, so anything downstream of the source hears the rack. No-op when the row
+// is unrouted (no node = nothing to process) or the engine is not booted.
+// Values map: UI dB stay dB, ratios (:1) and percents fold into the stage's
+// 0..1 amount, delay ms into seconds.
+//
+// WHY IT HOPS (and the `...OffThread` name says so): this runs on EVERY fader
+// tick of a drag, and one graph mutator serializes and re-validates the whole
+// graph and queues its persist — engine work, not work for the thread that
+// draws. The values are the MODEL'S, so they are read here (this thread) and
+// captured by value; the worker's queue is FIFO, so a dragged fader lands after
+// the values before it and the last one wins.
+void AudioInputListModel::pushEffectsOffThread(int index)
 {
     if (!m_active)
         return;   // never push a displaced roster's view onto the engine
@@ -419,85 +429,88 @@ void AudioInputListModel::pushEffectsToGraph(int index)
     const QString nodeQ = BusListModel::audioSourceNodeId(index);
     if (nodeQ.isEmpty())
         return;
-    const std::string node = nodeQ.toStdString();
-
-    auto &graph = bps::production::ProductionEngine::Instance().Graph();
-    // Unrouted source: its node is never created (nodes appear with the first
-    // route, BusListModel::toggleAudioRoute) — nothing to push.
-    if (!graph.HasNode(node))
-        return;
-
-    const bool ownsEdit = graph.BeginEdit().ok();
+    const QString node = nodeQ;
     const AudioInputItem &item = m_inputs.at(index);
+    const qreal level = item.level;
+    const bool muted = item.muted;
+    const QList<qreal> channelGains = item.channelGains;
+    const QList<AudioEffect> effects = item.effects;
 
-    // ---- VolumeControl: the row's fader + mute -----------------------------
-    bps::production::VolumeControl vol;
-    if (auto cur = graph.Volume(node); cur.ok())
-        vol = cur.value();          // keep solo/pan; this model owns gain/mute
-    // UI 0..100 → engine gain, the SAME mapping BusListModel's fader uses
-    // (0 = −60 dB silence, 100 = unity). Local copy of the mapping — the
-    // helper lives in BusListModel.cpp's anonymous namespace.
-    vol.gainDb = -60.0 + (item.level / 100.0) * 60.0;
-    vol.mute = item.muted;
-    (void)graph.SetVolume(node, vol);
+    vgr::EngineWorker::instance().runOffThread([node, level, muted, channelGains, effects] {
+        const std::string nodeStd = node.toStdString();
+        auto &graph = bps::production::ProductionEngine::Instance().Graph();
+        // Unrouted source: its node is never created (nodes appear with the
+        // first route, BusListModel::toggleAudioRoute) — nothing to push.
+        if (!graph.HasNode(nodeStd))
+            return;
 
-    // Store the independent channel trims on the source node so the actual
-    // AudioMixer path (and its program meter) applies the same L/R state as
-    // the Media and Settings meters. Older rosters with no saved trims use
-    // unity, matching channelGain().
-    for (int channel = 0; channel < 8; ++channel) {
-        const qreal gain = channel < item.channelGains.size()
-            ? item.channelGains.at(channel) : 1.0;
-        (void)graph.SetMeta(node, "uiChannelGain" + std::to_string(channel),
-                            std::to_string(gain));
-    }
+        const bool ownsEdit = graph.BeginEdit().ok();
 
-    // ---- Processing chain: rebuilt from the rack on every write ------------
-    (void)graph.ClearProcessing(node);
-    using PK = bps::production::ProcessKind;
-    for (const AudioEffect &e : item.effects) {
-        if (!e.enabled)
-            continue;
-        bps::production::ProcessingStage stage;
-        if (e.key == QLatin1String("gain")) {
-            // The rack's Gain is a trim in dB — the SAME domain as the fader.
-            stage.kind = PK::Gain;
-            stage.amount = e.value;
-        } else if (e.key == QLatin1String("eq")) {
-            // Bands 1..5 — the amount carries the band count; tone shaping
-            // per band is a future engine refinement.
-            stage.kind = PK::Eq;
-            stage.amount = e.value / 5.0;
-        } else if (e.key == QLatin1String("compressor")) {
-            // Ratio 1..10:1 — intensity as (ratio-1)/9 so 1:1 = 0, 10:1 = 1.
-            stage.kind = PK::Compressor;
-            stage.amount = std::clamp((e.value - 1.0) / 9.0, 0.0, 1.0);
-        } else if (e.key == QLatin1String("limiter")) {
-            // Ceiling -24..0 dBFS.
-            stage.kind = PK::Limiter;
-            stage.amount = std::clamp((e.value + 24.0) / 24.0, 0.0, 1.0);
-        } else if (e.key == QLatin1String("noiseGate")) {
-            // Threshold -80..0 dBFS.
-            stage.kind = PK::Gate;
-            stage.amount = std::clamp((e.value + 80.0) / 80.0, 0.0, 1.0);
-        } else if (e.key == QLatin1String("delay")) {
-            // 0..500 ms → the stage's seconds domain.
-            stage.kind = PK::Delay;
-            stage.amount = e.value / 1000.0;
-        } else if (e.key == QLatin1String("reverb")) {
-            // No reverb stage in the engine's ProcessKind set — carried as a
-            // named Custom stage so the intent survives the graph (a future
-            // reverb stage claims it without a model change).
-            stage.kind = PK::Custom;
-            stage.custom = "reverb";
-            stage.amount = std::clamp(e.value / 100.0, 0.0, 1.0);
-        } else {
-            continue;
+        // ---- VolumeControl: the row's fader + mute -------------------------
+        bps::production::VolumeControl vol;
+        if (auto cur = graph.Volume(nodeStd); cur.ok())
+            vol = cur.value();      // keep solo/pan; this model owns gain/mute
+        // UI 0..100 → engine gain, the SAME mapping BusListModel's fader uses
+        // (0 = −60 dB silence, 100 = unity).
+        vol.gainDb = -60.0 + (level / 100.0) * 60.0;
+        vol.mute = muted;
+        (void)graph.SetVolume(nodeStd, vol);
+
+        // Store the independent channel trims on the source node so the actual
+        // AudioMixer path (and its program meter) applies the same L/R state as
+        // the Media and Settings meters. Older rosters with no saved trims use
+        // unity, matching channelGain().
+        for (int channel = 0; channel < 8; ++channel) {
+            const qreal gain = channel < channelGains.size() ? channelGains.at(channel) : 1.0;
+            (void)graph.SetMeta(nodeStd, "uiChannelGain" + std::to_string(channel),
+                                std::to_string(gain));
         }
-        (void)graph.AddProcessing(node, stage);
-    }
-    if (ownsEdit)
-        (void)graph.CommitEdit();
+
+        // ---- Processing chain: rebuilt from the rack on every write ---------
+        (void)graph.ClearProcessing(nodeStd);
+        using PK = bps::production::ProcessKind;
+        for (const AudioEffect &e : effects) {
+            if (!e.enabled)
+                continue;
+            bps::production::ProcessingStage stage;
+            if (e.key == QLatin1String("gain")) {
+                // The rack's Gain is a trim in dB — the SAME domain as the fader.
+                stage.kind = PK::Gain;
+                stage.amount = e.value;
+            } else if (e.key == QLatin1String("eq")) {
+                // Bands 1..5 — the amount carries the band count.
+                stage.kind = PK::Eq;
+                stage.amount = e.value / 5.0;
+            } else if (e.key == QLatin1String("compressor")) {
+                // Ratio 1..10:1 — intensity as (ratio-1)/9 so 1:1 = 0, 10:1 = 1.
+                stage.kind = PK::Compressor;
+                stage.amount = std::clamp((e.value - 1.0) / 9.0, 0.0, 1.0);
+            } else if (e.key == QLatin1String("limiter")) {
+                // Ceiling -24..0 dBFS.
+                stage.kind = PK::Limiter;
+                stage.amount = std::clamp((e.value + 24.0) / 24.0, 0.0, 1.0);
+            } else if (e.key == QLatin1String("noiseGate")) {
+                // Threshold -80..0 dBFS.
+                stage.kind = PK::Gate;
+                stage.amount = std::clamp((e.value + 80.0) / 80.0, 0.0, 1.0);
+            } else if (e.key == QLatin1String("delay")) {
+                // 0..500 ms → the stage's seconds domain.
+                stage.kind = PK::Delay;
+                stage.amount = e.value / 1000.0;
+            } else if (e.key == QLatin1String("reverb")) {
+                // No reverb stage in the engine's ProcessKind set — carried as a
+                // named Custom stage so the intent survives the graph.
+                stage.kind = PK::Custom;
+                stage.custom = "reverb";
+                stage.amount = std::clamp(e.value / 100.0, 0.0, 1.0);
+            } else {
+                continue;
+            }
+            (void)graph.AddProcessing(nodeStd, stage);
+        }
+        if (ownsEdit)
+            (void)graph.CommitEdit();
+    });
 }
 
 void AudioInputListModel::setDelayMs(int index, int delayMs)
@@ -532,26 +545,8 @@ void AudioInputListModel::setChannelGain(int index, int channel, qreal gain)
 {
     if (index < 0 || index >= m_inputs.size() || channel < 0 || channel >= 8)
         return;
-    const qreal clamped = std::clamp(gain, 0.0, 1.0);
-    QList<qreal> &gains = m_inputs[index].channelGains;
-    while (gains.size() <= channel)
-        gains.append(1.0);   // absent = unity
-    // Remember the level as this side's trim on the way past (see
-    // models/ChannelTrim.h). It rides EVERY write of an open level, so a knob
-    // dragged here leaves a restorable trim behind without the caller knowing
-    // anything about it — and a close (gain 0) deliberately does not, or the
-    // next reopen would arm silence.
-    const bool remember = !qFuzzyCompare(gains[channel], clamped)
-                          && channeltrim::remembersTrim(clamped);
-    if (qFuzzyCompare(gains[channel], clamped))
-        return;
-    gains[channel] = clamped;
-    if (remember)
-        writeChannelTrim(index, channel, clamped);
-    const QModelIndex changed = this->index(index);
-    emit dataChanged(changed, changed, { ChannelGainsRole });
-    scheduleSave();   // debounced — a dragged knob coalesces into one write
-    pushEffectsToGraph(index);   // per-channel trim rides the node volume
+    if (writeChannelGain(index, channel, gain))
+        pushEffectsOffThread(index);   // per-channel trim rides the node volume
 }
 
 void AudioInputListModel::toggleChannelGain(int index, int channel)
@@ -559,10 +554,45 @@ void AudioInputListModel::toggleChannelGain(int index, int channel)
     // THE reopen policy, asked of one place: ChannelTrim.h. Closing writes 0;
     // reopening hands back the trim the side was closed with, and only unity if
     // there never was one.
-    if (channeltrim::isOff(channelGain(index, channel)))
-        setChannelGain(index, channel, channelTrim(index, channel));
-    else
-        setChannelGain(index, channel, channeltrim::closed());
+    //
+    // It writes through writeChannelGain and then pushes HERE, rather than
+    // calling setChannelGain: the push is the part that must hop off the
+    // interface thread (see pushEffectsOffThread), and keeping it named in this
+    // body is what makes that true of the pill as well as of a knob drag.
+    const qreal target = channeltrim::isOff(channelGain(index, channel))
+        ? channelTrim(index, channel)
+        : channeltrim::closed();
+    if (writeChannelGain(index, channel, target))
+        pushEffectsOffThread(index);
+}
+
+// The one write of a side's gain. The public faces above only decide WHAT that
+// gain should be (a dragged knob's value, the pill's reopen policy); the store,
+// the trim it leaves behind and the model signal all happen here. Returns true
+// when it changed anything — i.e. exactly when the graph has something new to
+// hear.
+bool AudioInputListModel::writeChannelGain(int index, int channel, qreal gain)
+{
+    if (index < 0 || index >= m_inputs.size() || channel < 0 || channel >= 8)
+        return false;
+    const qreal clamped = std::clamp(gain, 0.0, 1.0);
+    QList<qreal> &gains = m_inputs[index].channelGains;
+    while (gains.size() <= channel)
+        gains.append(1.0);   // absent = unity
+    if (qFuzzyCompare(gains[channel], clamped))
+        return false;
+    gains[channel] = clamped;
+    // Remember the level as this side's trim on the way past (see
+    // models/ChannelTrim.h): it rides EVERY write of an open level, so a knob
+    // dragged here leaves a restorable trim behind without the caller knowing
+    // anything about it — and a close (gain 0) deliberately does not, or the
+    // next reopen would arm silence.
+    if (channeltrim::remembersTrim(clamped))
+        writeChannelTrim(index, channel, clamped);
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { ChannelGainsRole });
+    scheduleSave();   // debounced — a dragged knob coalesces into one write
+    return true;
 }
 
 qreal AudioInputListModel::channelTrim(int index, int channel) const
@@ -586,6 +616,7 @@ void AudioInputListModel::setChannelTrim(int index, int channel, qreal trim)
 
 // The one write of the trim list (kept private-ish: the public faces above only
 // decide WHEN a trim is worth remembering). Returns true when it changed.
+// (writeChannelGain, just above, is the same shape for the gain itself.)
 bool AudioInputListModel::writeChannelTrim(int index, int channel, qreal trim)
 {
     if (index < 0 || index >= m_inputs.size() || channel < 0 || channel >= 8)
@@ -781,11 +812,11 @@ int AudioInputListModel::restoreRoster()
     endResetModel();
 
     for (int row = 0; row < m_inputs.size(); ++row) {
-        pushEffectsToGraph(row);
+        pushEffectsOffThread(row);
         // A matrix saved in an earlier session must reach the graph again —
         // otherwise a restored routing shows checked in the dialog and is dead
         // in the engine (the "it isn't saving my connections" report).
-        pushRoutingToGraph(row);
+        pushRoutingOffThread(row);
     }
 
     if (!migratedSilentDefaults.isEmpty())
@@ -839,7 +870,7 @@ void AudioInputListModel::setRoutingAuto(int index, bool auto_)
 // ROUTING MATRIX → GRAPH — see the header. Called from every matrix write and
 // from the roster restore, so a matrix the user set in an earlier session lands
 // in the graph again on the next boot.
-void AudioInputListModel::pushRoutingToGraph(int index)
+void AudioInputListModel::pushRoutingOffThread(int index)
 {
     if (!m_active)
         return;   // a displaced roster must not re-add an edge the board removed
@@ -851,9 +882,10 @@ void AudioInputListModel::pushRoutingToGraph(int index)
     const QString nodeQ = BusListModel::audioSourceNodeId(index);
     if (nodeQ.isEmpty())
         return;
-    const std::string node = nodeQ.toStdString();
 
-    // bus number → the channels routed into it.
+    // bus number → the channels routed into it. MODEL state, so it is read HERE
+    // (the interface thread owns the roster) and captured by value — the worker
+    // must never reach back into this object (see EngineWorker's capture rule).
     QMap<int, unsigned> masks;
     const AudioInputItem &item = m_inputs.at(index);
     for (int c = 0; c < item.channelRoutes.size() && c < 8; ++c) {
@@ -863,63 +895,72 @@ void AudioInputListModel::pushRoutingToGraph(int index)
             masks[busNo] = masks.value(busNo, 0u) | (1u << c);
         }
     }
-    auto &graph = bps::production::ProductionEngine::Instance().Graph();
-    const bool ownsEdit = graph.BeginEdit().ok();
-    // ADD half — one edge (+ its channel mask) per bus the matrix names. Skipped
-    // when the matrix names nothing; the REMOVE half below still runs, because
-    // "the matrix names no bus at all" is exactly when its old edges must go.
-    for (auto it = masks.constBegin(); it != masks.constEnd(); ++it) {
-        const std::string busNode = "bus:" + std::to_string(it.key()) + "#a";
-        if (!graph.HasNode(busNode))
-            continue;   // that bus row is gone; the matrix entry is stale
-        // The row's node is created on its FIRST route (the same lazy creation
-        // the bus dialog's toggle performs) — a matrix-only route is still a
-        // route, and without the node there is nothing to feed the bus.
-        if (!graph.HasNode(node)) {
-            if (!graph.AddSource(node, "Audio Source",
-                                 bps::production::SignalType::Audio).ok())
+
+    // The graph work runs on the engine worker: every graph mutator serializes
+    // and re-validates the graph, and this one runs on each matrix cell (and once
+    // per restored row). The node id is the row's STABLE id, so the lambda needs
+    // nothing but that id and the masks. Posts from this model are FIFO, so the
+    // last matrix the user clicked is the last one applied.
+    vgr::EngineWorker::instance().runOffThread([nodeQ, masks] {
+        const std::string node = nodeQ.toStdString();
+        auto &graph = bps::production::ProductionEngine::Instance().Graph();
+        const bool ownsEdit = graph.BeginEdit().ok();
+        // ADD half — one edge (+ its channel mask) per bus the matrix names. Skipped
+        // when the matrix names nothing; the REMOVE half below still runs, because
+        // "the matrix names no bus at all" is exactly when its old edges must go.
+        for (auto it = masks.constBegin(); it != masks.constEnd(); ++it) {
+            const std::string busNode = "bus:" + std::to_string(it.key()) + "#a";
+            if (!graph.HasNode(busNode))
+                continue;   // that bus row is gone; the matrix entry is stale
+            // The row's node is created on its FIRST route (the same lazy creation
+            // the bus dialog's toggle performs) — a matrix-only route is still a
+            // route, and without the node there is nothing to feed the bus.
+            if (!graph.HasNode(node)) {
+                if (!graph.AddSource(node, "Audio Source",
+                                     bps::production::SignalType::Audio).ok())
+                    continue;
+            }
+            bool connected = false;
+            for (const auto &up : graph.Upstream(busNode))
+                if (up == node) { connected = true; break; }
+            if (!connected
+                && !graph.Connect(node, busNode, bps::production::SignalType::Audio).ok()) {
+                qWarning() << "AudioInputListModel: routing-matrix Connect failed for"
+                           << QString::fromStdString(busNode);
                 continue;
+            }
+            (void)graph.SetMeta(node, "uiRouteMask:" + busNode, std::to_string(it.value()));
         }
-        bool connected = false;
-        for (const auto &up : graph.Upstream(busNode))
-            if (up == node) { connected = true; break; }
-        if (!connected
-            && !graph.Connect(node, busNode, bps::production::SignalType::Audio).ok()) {
-            qWarning() << "AudioInputListModel: routing-matrix Connect failed for"
-                       << QString::fromStdString(busNode);
-            continue;
-        }
-        (void)graph.SetMeta(node, "uiRouteMask:" + busNode, std::to_string(it.value()));
-    }
-    // REMOVE half — the edges THIS ROW'S MATRIX made and no longer names. The
-    // marker is the "uiRouteMask:<busNode>" meta the add half just wrote: a route
-    // made on the board's drag or in the bus dialog's toggle carries no mask, so
-    // those surfaces keep their own edges and nothing fights over one edge. What
-    // this fixes: unticking the LAST channel of a bus left the edge and its stale
-    // channel mask in the graph, so the row stayed wired to (and audible on) a
-    // bus its matrix no longer routed to.
-    if (graph.HasNode(node)) {
-        const auto meta = graph.GetNode(node);
-        if (meta.ok()) {
-            for (const std::string &busNode : graph.Downstream(node)) {
-                const QString key = QStringLiteral("uiRouteMask:") + QString::fromStdString(busNode);
-                if (!meta.value().meta.count(key.toStdString()))
-                    continue;   // not this matrix's edge
-                const int busNo = busNumberFromPlaneNode(busNode);
-                if (busNo < 0 || masks.contains(busNo))
-                    continue;   // still routed there (or not one of ours)
-                if (graph.Disconnect(node, busNode).ok()) {
-                    qInfo() << "AudioInputListModel: routing-matrix unrouted" << nodeQ
-                            << "from" << QString::fromStdString(busNode);
-                } else {
-                    qWarning() << "AudioInputListModel: routing-matrix Disconnect failed for"
-                               << nodeQ << "->" << QString::fromStdString(busNode);
+        // REMOVE half — the edges THIS ROW'S MATRIX made and no longer names. The
+        // marker is the "uiRouteMask:<busNode>" meta the add half just wrote: a route
+        // made on the board's drag or in the bus dialog's toggle carries no mask, so
+        // those surfaces keep their own edges and nothing fights over one edge. What
+        // this fixes: unticking the LAST channel of a bus left the edge and its stale
+        // channel mask in the graph, so the row stayed wired to (and audible on) a
+        // bus its matrix no longer routed to.
+        if (graph.HasNode(node)) {
+            const auto meta = graph.GetNode(node);
+            if (meta.ok()) {
+                for (const std::string &busNode : graph.Downstream(node)) {
+                    const QString key = QStringLiteral("uiRouteMask:") + QString::fromStdString(busNode);
+                    if (!meta.value().meta.count(key.toStdString()))
+                        continue;   // not this matrix's edge
+                    const int busNo = busNumberFromPlaneNode(busNode);
+                    if (busNo < 0 || masks.contains(busNo))
+                        continue;   // still routed there (or not one of ours)
+                    if (graph.Disconnect(node, busNode).ok()) {
+                        qInfo() << "AudioInputListModel: routing-matrix unrouted" << nodeQ
+                                << "from" << QString::fromStdString(busNode);
+                    } else {
+                        qWarning() << "AudioInputListModel: routing-matrix Disconnect failed for"
+                                   << nodeQ << "->" << QString::fromStdString(busNode);
+                    }
                 }
             }
         }
-    }
-    if (ownsEdit)
-        (void)graph.CommitEdit();
+        if (ownsEdit)
+            (void)graph.CommitEdit();
+    });
 }
 
 void AudioInputListModel::toggleChannelRoute(int index, int channel, int busIndex)
@@ -951,7 +992,7 @@ void AudioInputListModel::toggleChannelRoute(int index, int channel, int busInde
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { RoutingRole });
     scheduleSave();
-    pushRoutingToGraph(index);   // the cell IS a route into that bus
+    pushRoutingOffThread(index);   // the cell IS a route into that bus
 }
 
 void AudioInputListModel::setChannelRoutes(int index, const QVariantList &perChannel)
@@ -983,7 +1024,7 @@ void AudioInputListModel::setChannelRoutes(int index, const QVariantList &perCha
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { RoutingRole });
     scheduleSave();
-    pushRoutingToGraph(index);   // the whole matrix, in one push
+    pushRoutingOffThread(index);   // the whole matrix, in one push
 }
 
 static AudioEffect *findEffect(QList<AudioEffect> &effects, const QString &key)
@@ -1007,7 +1048,7 @@ void AudioInputListModel::setEffectEnabled(int index, const QString &key, bool e
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { EffectsRole });
     scheduleSave();
-    pushEffectsToGraph(index);   // the rack IS the graph's processing chain
+    pushEffectsOffThread(index);   // the rack IS the graph's processing chain
 }
 
 void AudioInputListModel::setEffectValue(int index, const QString &key, qreal value)
@@ -1026,7 +1067,7 @@ void AudioInputListModel::setEffectValue(int index, const QString &key, qreal va
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { EffectsRole });
     scheduleSave();
-    pushEffectsToGraph(index);   // re-translate the whole chain (cheap)
+    pushEffectsOffThread(index);   // re-translate the whole chain (cheap)
 }
 
 QVariantList AudioInputListModel::defaultEffectsTemplate() const

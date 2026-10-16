@@ -43,6 +43,42 @@ Item {
     // the read-only `plugins`, which threw "Cannot assign to read-only
     // property 'plugins'" the moment one of these rows was switched.)
     property var uiOnlyStates: ({})
+
+    // ---- The NDI toggle's firewall answer (see EngineBridge::
+    // requestNdiFirewallAccess) -------------------------------------------
+    // Turning NDI on asks for INBOUND firewall access — a hidden `netsh` child
+    // process (elevated when the rule has to be added), which runs off the
+    // interface thread, so the notice for that toggle is sent from the result
+    // handler below instead of from a return value. The flag says a toggle is
+    // WAITING for that answer, so a switch-off, or a second screen's ask, never
+    // claims it.
+    property bool ndiTogglePending: false
+    function handleNdiFirewallResult(outcome) {
+        if (!root.ndiTogglePending)
+            return
+        root.ndiTogglePending = false
+        if (outcome === "prompt") {
+            EventBus.notify(qsTr("NDI switched on — approve the Windows permission prompt so other computers can receive your video."),
+                            "info", qsTr("Plugins"), "plugins.toggle.ndi.firewall")
+            return
+        }
+        if (outcome === "denied" || outcome === "failed") {
+            EventBus.notify(qsTr("NDI switched on, but network access was refused — sending to other computers won't work until you allow it (Settings › Outputs)."),
+                            "warning", qsTr("Plugins"), "plugins.toggle.ndi.firewall")
+            return
+        }
+        if (outcome === "unavailable") {
+            EventBus.notify(qsTr("NDI switched on — this platform can't grant network access automatically; allow it manually if sending doesn't reach other computers."),
+                            "warning", qsTr("Plugins"), "plugins.toggle.ndi.firewall")
+            return
+        }
+        // "allowed" / "added": access is in place — the plain notice says it.
+        EventBus.notify(qsTr("NDI switched on."), "info", qsTr("Plugins"), "plugins.toggle.ndi")
+    }
+    Connections {
+        target: EngineBridge
+        function onNdiFirewallAccessResult(outcome) { root.handleNdiFirewallResult(outcome) }
+    }
     // Engine rows REPLACE their UI twin (no duplicates when the registry
     // grows); UI-only rows keep their local `enabled` flag.
     readonly property var plugins: {
@@ -273,23 +309,21 @@ Item {
                                                 // contract) — a no-op toast-wise
                                                 // when access is already there.
                                                 if (want && feature === "ndi") {
-                                                    const outcome = EngineBridge.requestNdiFirewallAccess()
-                                                    if (outcome === "prompt") {
-                                                        EventBus.notify(qsTr("NDI switched on — approve the Windows permission prompt so other computers can receive your video."),
-                                                            "info", qsTr("Plugins"), "plugins.toggle.ndi.firewall")
-                                                        return
-                                                    } else if (outcome === "denied" || outcome === "failed") {
-                                                        EventBus.notify(qsTr("NDI switched on, but network access was refused — sending to other computers won't work until you allow it (Settings › Outputs)."),
-                                                            "warning", qsTr("Plugins"), "plugins.toggle.ndi.firewall")
-                                                        return
-                                                    } else if (outcome === "unavailable") {
-                                                        EventBus.notify(qsTr("NDI switched on — this platform can't grant network access automatically; allow it manually if sending doesn't reach other computers."),
-                                                            "warning", qsTr("Plugins"), "plugins.toggle.ndi.firewall")
-                                                        return
-                                                    }
-                                                    // "added": access already confirmed — the
-                                                    // plain "switched on" toast below covers it.
+                                                    // The ask and its probe are `netsh` child
+                                                    // processes off the interface thread, so the
+                                                    // outcome lands on ndiFirewallAccessResult
+                                                    // and THAT sends this toggle's notice —
+                                                    // including the plain "switched on." one when
+                                                    // access was already in place.
+                                                    rootRef.ndiTogglePending = true
+                                                    EngineBridge.requestNdiFirewallAccess()
+                                                    return
                                                 }
+                                                // Any pending NDI answer is no longer this
+                                                // toggle's (switched back off while the ask
+                                                // was in flight): its notice must not claim
+                                                // this one.
+                                                rootRef.ndiTogglePending = false
                                                 EventBus.notify(want
                                                     ? qsTr("%1 switched on.").arg(name)
                                                     : qsTr("%1 switched off — its outputs and inputs stop with it.").arg(name),

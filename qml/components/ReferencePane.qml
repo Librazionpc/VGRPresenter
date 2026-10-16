@@ -31,6 +31,49 @@ import VGRPresenterUI
 Item {
     id: root
 
+    // LAYOUT PROBE (VGR_LAYOUT_TEST): every LIST this pane owns reports how many delegates it
+    // built and threw away, so a rebuild on a pane switch is visible as builds AND drops moving
+    // together, and so a list that builds its whole model at once shows up as builds == rows.
+    //   verse  — the passage rows (a ListView)
+    //   hit    — the pill search's hits (a ListView)
+    //   match  — The Table's citation matches (a ListView)
+    //   peek   — the hovered sermon's paragraphs in the peek panel (a ListView)
+    property int verseRowBuilds: 0
+    property int verseRowDrops: 0
+    property int hitRowBuilds: 0
+    property int hitRowDrops: 0
+    property int matchRowBuilds: 0
+    property int matchRowDrops: 0
+    property int peekRowBuilds: 0
+    property int peekRowDrops: 0
+    // HOW OFTEN A ROW'S OWN BINDINGS EVALUATE (the scroll-cost probe — the layout probe's
+    // scroll phase, tools/selftest/run_layout_probe.sh). Builds and drops say a row was
+    // created; these say how much binding work each row did, which is the other half of a
+    // scroll's cost: a scroll that builds nothing but still drops frames is a list whose
+    // IN-VIEW rows are re-evaluating, and one that builds a row per frame is paying the row's
+    // own binding set on every step.
+    //
+    // A PLAIN JS OBJECT, deliberately, and not a QML `property int`: incrementing a QML
+    // property from inside a binding is a property WRITE during evaluation, which QML reports
+    // as a binding loop (the first cut of this did exactly that — "Binding loop detected for
+    // property text/oneLine" at every row in the pane). A field on a JS object is not a QML
+    // property: it cannot notify, so nothing re-evaluates because of it, and the probe reads
+    // the totals on demand (it never binds to them). The increment sits in the VALUE
+    // expression of the binding it counts — QML caches a binding's result, so READS of the
+    // bound property do not count, only real evaluations do.
+    //   verse   — the passage row's text (its `oneLine` flattening: a regex over the
+    //             paragraph, run per row construction and per model change)
+    //   book    — a book row's label text
+    //   chapter — a chapter row's label text (a sermon title in The Table)
+    //   source  — a source (Bible / sermon folder) row's label text
+    readonly property var probeEvals: ({ verse: 0, book: 0, chapter: 0, source: 0 })
+
+    // The lists a scenario scrolls BY NAME. The same pane class serves two tabs, so the
+    // names are per-TAB ("selfTestVersesList-table" / "selfTestVersesList-scripture") —
+    // an objectName lookup finds the first match in the tree, and a name shared by two
+    // panes would resolve to whichever one happens to come first, hidden or not.
+    readonly property string paneTag: (root.adapter && root.adapter.contentType) ? root.adapter.contentType : "pane"
+
     // The tab bar's search box: a reference ("John 3:16") jumps there, anything else narrows the book list.
     property string filter: ""
 
@@ -238,6 +281,80 @@ Item {
     }
     property int previewSlideIndex: 0
     readonly property var previewSlides: root.preview.slides || []
+    // The pieces the preview is showing RIGHT NOW. The rows no longer carry a slide index
+    // of their own (see mainRows), so "is this row the selected one" is answered in the
+    // identity both sides have: the paragraph and the piece of it.
+    readonly property var previewSlideParts: {
+        const slides = root.previewSlides
+        if (slides.length === 0)
+            return []
+        return slides[Math.max(0, Math.min(root.previewSlideIndex, slides.length - 1))].parts || []
+    }
+    // Is this row the one the pick is on? Undivided: as soon as its paragraph is picked.
+    // Divided: while its own piece is the piece the preview shows — so walking a long
+    // paragraph part by part with ‹ › (stepSlide) moves the highlight with it.
+    function rowIsActive(number, partIndex, isSplit) {
+        if (root.selected.indexOf(number) < 0)
+            return false
+        if (!isSplit)
+            return true
+        for (const part of root.previewSlideParts)
+            if (Number(part.number) === number && Number(part.partIndex ?? 0) === partIndex)
+                return true
+        return false
+    }
+
+    // Put a paragraph ROW on screen, by its index in mainRows. The list is
+    // VIRTUALIZED (see the ListView), so "scroll to it" and "build it" are one
+    // operation, and positionViewAtIndex is the single call that does both — there is
+    // no item to measure or move for a row that does not exist yet.
+    //
+    // Deferred a turn deliberately: a positioning asked for in the same tick as a
+    // model change would be measured against a list that has not laid out yet, and the
+    // chapter's own reveal asks for one immediately after assigning the rows. Passed as
+    // a closure so the list settles first, and so a caller may reveal several rows in
+    // one go without the first request winning.
+    function revealRow(index) {
+        if (index < 0 || index >= root.mainRows.length)
+            return
+        Qt.callLater(function () { versesFlick.positionViewAtIndex(index, ListView.Beginning) })
+    }
+
+    // The same by paragraph NUMBER — the identity the rest of the app speaks in. A
+    // number is not an index once the chapter is divided (the fortieth paragraph can
+    // be row 78: a divided paragraph contributes one row per piece), so it is resolved
+    // through the model, to the row that HEADS the paragraph (a continuation hangs off
+    // its head, and the head is the row worth showing).
+    function revealVerse(number) {
+        root.revealRow(root.mainRows.findIndex((row) => Number(row.number) === Number(number)
+                                                     && row.continuation !== true))
+    }
+
+    // ---- the list's place, across a cut that lands behind the operator ---------
+    // The rows of a passage GROW where its cut divided it (see mainRows), so a second rows
+    // delivery — the rest of a long passage's cut arriving after the head was shown, or an
+    // option moving under an open passage — renumbers every row below the first divided
+    // one. Restoring the pixel offset would leave the operator reading a different
+    // paragraph; restoring the ROW's identity (paragraph + piece) leaves them where they
+    // were, which is what "the list keeps its place" has to mean. Nothing is done at all
+    // while the list is at the top, which is where every open starts.
+    function topRowIdentity() {
+        if (root.mainRows.length === 0 || versesFlick.contentY <= 0)
+            return null
+        const at = versesFlick.indexAt(4, Math.round(versesFlick.contentY) + 4)
+        if (at < 0 || at >= root.mainRows.length)
+            return null
+        const row = root.mainRows[at]
+        return { number: Number(row.number), partIndex: Number(row.partIndex ?? 0) }
+    }
+    function restoreRowAnchor(anchor) {
+        Qt.callLater(function () {
+            const at = root.mainRows.findIndex((row) => Number(row.number) === anchor.number
+                                                        && Number(row.partIndex ?? 0) === anchor.partIndex)
+            if (at >= 0)
+                versesFlick.positionViewAtIndex(at, ListView.Beginning)
+        })
+    }
     readonly property var currentPreviewSlide: root.previewSlides.length > 0
         ? root.previewSlides[Math.max(0, Math.min(root.previewSlideIndex, root.previewSlides.length - 1))]
         : null
@@ -245,50 +362,54 @@ Item {
         if (root.previewSlideIndex >= root.previewSlides.length)
             root.previewSlideIndex = 0
     }
-    // Show one row for each output slide. Several split pieces can share a
-    // slide; combine them into one row labeled by its first piece. Search
-    // results stay unchanged.
+    // ONE ROW PER OUTPUT SLIDE. The rows come from THE CHAPTER ITSELF: the services cut
+    // the chapter in the background before it is shown and write each divided item's own
+    // rows onto it (SlideBuilder::attachSplit), so a long paragraph's continuations are
+    // on screen the moment the chapter is — the operator can see where a passage divides
+    // while presenting, without clicking a row to find out, and no click has to fill
+    // anything on the interface thread.
+    //
+    // The cut arrives in TWO pieces, and this list is what that is for: the head (what one
+    // screenful of it can show) with the open, so the list is divided the moment it
+    // appears, and the rest of the passage a beat LATER, as a second rows delivery that
+    // divides every row below the fold (see SlideBuilder's head/remainder block). A row's
+    // rows therefore grow under it exactly once, right after a passage opens — which is
+    // why nothing below re-picks or re-scrolls for a delivery that is not an open.
+    //
+    // A row with no `split` is an item the cut did not divide: it shows the chapter's own
+    // stored text, as it always did (the number is the row's own label, not part of the
+    // wording). A chapter that was never cut — nothing warmed yet, a library too large to
+    // hold — carries no `split` anywhere and reads whole, which is exactly the behaviour
+    // before this existed. Search results stay unchanged.
     readonly property var mainRows: {
-        const piecesByVerse = ({})
-        for (let slideIndex = 0; slideIndex < root.previewSlides.length; ++slideIndex) {
-            const parts = root.previewSlides[slideIndex].parts || []
-            for (const part of parts) {
-                const key = String(part.number)
-                if (!piecesByVerse[key]) piecesByVerse[key] = []
-                piecesByVerse[key].push({ number: part.number, text: part.text, partIndex: part.partIndex,
-                                          slideIndex: slideIndex, continuation: part.continuation })
-            }
-        }
+        // The user's marks are read HERE, once, and carried BY THE ROW. They come
+        // from the one batched chapter read (chapterMarks) and land on every row's
+        // delegate as a value — so a row never calls markFor() to paint its number
+        // gold, and the work is bounded by the chapter rather than by how many rows
+        // happen to be on screen. (This list therefore re-builds when a mark lands,
+        // which is a real model change and a rare one — a note or a highlight write
+        // — not something a scroll or a repaint can cause.)
+        const marks = root.hasUserData ? (root.chapterMarks || ({}).valueOf()) : ({}).valueOf()
         const rows = []
         for (const verse of root.chapterVerses) {
-            const pieces = piecesByVerse[String(verse.number)] || []
-            pieces.sort((a, b) => a.partIndex - b.partIndex)
-            const isSplit = pieces.length > 1
-            if (!isSplit) {
+            const mark = marks[String(verse.number)]
+            const marked = !!(mark && mark.highlight === true)
+            const hasNote = !!((mark && mark.note) || "")
+            const split = verse.split
+            if (!split || split.length === 0) {
                 rows.push({ number: verse.number, text: verse.text, continuation: false, isSplit: false,
-                            partIndex: 0, slideIndex: 0 })
+                            partIndex: 0, marked: marked, hasNote: hasNote })
                 continue
-                }
-            const groups = ({})
-            const slideOrder = []
-            for (const piece of pieces) {
-                const key = String(piece.slideIndex)
-                if (!groups[key]) {
-                    groups[key] = []
-                    slideOrder.push(piece.slideIndex)
-                }
-                groups[key].push(piece)
             }
-            slideOrder.sort((a, b) => a - b)
-            for (const slideIndex of slideOrder) {
-                const group = groups[String(slideIndex)]
-                const first = group[0]
-                rows.push({ number: verse.number,
-                            text: group.map((piece) => piece.text).join(" "),
-                            partIndex: first.partIndex,
-                            slideIndex: slideIndex,
-                            continuation: first.partIndex > 0,
-                            isSplit: true })
+            for (const piece of split) {
+                // A continuation is never itself marked: the verse's number is worn
+                // by the piece that HEADS it, exactly as the delegate's own rule
+                // spelled it (`!continuation && …`).
+                const cont = piece.continuation === true
+                rows.push({ number: verse.number, text: piece.text,
+                            partIndex: Number(piece.partIndex ?? 0),
+                            continuation: cont, isSplit: true,
+                            marked: cont ? false : marked, hasNote: cont ? false : hasNote })
             }
         }
         return rows
@@ -349,6 +470,18 @@ Item {
             root.engineRevision++
             root.syncSources()
         }
+        // A SYNC-fallback query's worker answer landed (a tab whose adapter has no
+        // searchAsync). The published search answers [] for a query nobody has run
+        // yet — "not searched yet" and "no rows" are different facts, the same split
+        // peekShow's `pending` draws for a show nobody has read — so the fallback
+        // re-asks here, by which time the answer is a cache read. Without this the
+        // first empty answer was the last word: the search list stayed empty with
+        // nothing on screen to say the query was still being run. Both tabs shipped
+        // today have an async search, so this is the shape for one that has none.
+        function onSearchCached(text) {
+            if (root.searching && searchInput.text.trim() === text)
+                root.runSearch(text)
+        }
     }
     // The engine boots (and reads its settings store) AFTER this UI is up, so
     // at construction the remembered source key is not there yet — syncSources
@@ -379,8 +512,23 @@ Item {
             root.selected = []
             return
         }
-        if (root.currentSource)
+        if (root.currentSource) {
+            // THE SOURCE IS OPEN — but its OUTLINE may not be in yet, and that
+            // used to be the end of it. The service's corpus reads are PUBLISHED
+            // (a miss queues the read on a worker and answers EMPTY, see
+            // ScriptureService's header), so the FIRST openSource can land in that
+            // gap: it set the source, took an empty outline, and left no book — and
+            // every later notify then returned HERE, with the Bibles column listing
+            // the Bible and the books / chapters / verses columns blank forever
+            // (user report, with the tab's screenshot: "scripture is not showing").
+            // An empty outline is therefore asked for again; openSource is the
+            // whole repair (it reads once more and opens the first book — and with
+            // it the chapter — when the rows finally arrive), and repeating it is
+            // cheap: a read already in flight is not queued twice.
+            if (root.books.length === 0)
+                root.openSource(root.sourceId)
             return
+        }
         // The adapter opts into "remember the last source" by naming a
         // REGISTERED settings key (Scripture: session.scriptureBible). No key
         // — single-source tabs like The Table — just opens the first.
@@ -481,10 +629,24 @@ Item {
                 || !root.book || bookId !== root.book.id || number !== root.chapterNumber)
             return
         const startedAt = root.chapterStartedAt
+        // Was this a read the pane ASKED for? A chapter the SERVICE cuts again on its
+        // own (an option moved under an open passage — see ScriptureService::changed)
+        // arrives with chapterLoading already false, and it must not be logged as an
+        // open: its timing would be measured from the original open, and the line would
+        // claim the operator had navigated somewhere they had not.
+        const opened = root.chapterLoading
+        // A chapter that arrives while one is ALREADY on screen is the service cutting it
+        // again — the rest of a long passage's cut landing after the head was shown, or an
+        // option moving under an open passage (ScriptureService::changed). The list is the
+        // operator's: it keeps reading the row it was reading (see topRowIdentity), and
+        // nothing below re-picks for them.
+        const anchor = opened ? null : root.topRowIdentity()
         root.chapterVerses = rows
         root.chapterLoading = false
+        if (anchor)
+            root.restoreRowAnchor(anchor)
         const pending = root.pendingGoTo
-        if (pending && pending.bookId === bookId && pending.chapter === number) {
+        if (opened && pending && pending.bookId === bookId && pending.chapter === number) {
             const end = pending.verseEnd > 0 ? pending.verseEnd : pending.verseStart
             const picked = rows.map((v) => v.number).filter((n) => n >= pending.verseStart && n <= end)
             root.pendingGoTo = null
@@ -492,16 +654,17 @@ Item {
                 root.selected = picked
                 root.anchorVerse = picked[0]
                 root.previewSlideIndex = 0
-                versesFlick.contentY = Math.max(0, (picked[0] - 1) * 38 - 40)
+                root.revealVerse(picked[0])
                 if (root.adapter && root.adapter.contentType === "table" && pending.matchText)
                     root.selectMatchingSubpart(picked[0], pending.matchText)
             }
-        } else if (root.chapterSelectFirst && rows.length > 0) {
+        } else if (opened && root.chapterSelectFirst && rows.length > 0) {
             root.selected = [rows[0].number]
             root.anchorVerse = rows[0].number
         }
-        EngineBridge.log("info", "OpenTrace", "openChapter n=" + number
-                         + " async=" + (Date.now() - startedAt) + "ms rows=" + rows.length)
+        if (opened)
+            EngineBridge.log("info", "OpenTrace", "openChapter n=" + number
+                             + " async=" + (Date.now() - startedAt) + "ms rows=" + rows.length)
     }
 
     Connections {
@@ -592,10 +755,12 @@ Item {
         root.selected = [number]
         root.anchorVerse = number
         root.previewSlideIndex = best.slideIndex
+        // The row to reveal is found by the PIECE the hit sits on, not by a slide index:
+        // the rows carry the chapter's cut and the pick its own, and the paragraph plus
+        // its piece is the identity the two share (see mainRows).
         const rowIndex = root.mainRows.findIndex((row) => Number(row.number) === number
-                                                     && Number(row.slideIndex) === best.slideIndex)
-        if (rowIndex >= 0)
-            versesFlick.contentY = Math.max(0, rowIndex * 38 - 40)
+                                                     && Number(row.partIndex ?? 0) === best.partIndex)
+        root.revealRow(rowIndex)
     }
 
     // The previous / next verse (crossing into the next chapter or book).
@@ -660,8 +825,11 @@ Item {
                 root.selected = picked
                 root.anchorVerse = picked[0]
                 root.previewSlideIndex = 0
-                // Bring the first picked verse into view (rows are a fixed 38, as in the list).
-                versesFlick.contentY = Math.max(0, (picked[0] - 1) * 38 - 40)
+                // Bring the first picked verse into view — by ROW, not by the arithmetic
+                // this used to do (a verse number minus one times 38): a divided chapter
+                // makes those two different, and the row it names is the one the operator
+                // needs to see (see revealVerse).
+                root.revealVerse(picked[0])
                 if (root.adapter && root.adapter.contentType === "table" && ref.matchText)
                     root.selectMatchingSubpart(picked[0], ref.matchText)
             }
@@ -676,7 +844,31 @@ Item {
             root.goTo(ref)
     }
 
+    // THE PUBLISHED CORPUS READ LANDED. The service reads its corpus off the
+    // interface thread now (books, chapter, resolve), so the answer to a question
+    // the operator has just asked arrives a beat later than the call that asked
+    // it — `resolve` says "not a reference yet" while the read is in flight, and
+    // the hover peek has no rows until the chapter is published. The adapter that
+    // owns the service calls this when one lands; both re-asks below are then
+    // pure cache reads, and `corpusRevision` is what re-evaluates visibleBooks
+    // (whose answer to "is the box a reference" changed).
+    // A tab whose adapter has no worker-backed reads simply never calls it.
+    property int corpusRevision: 0
+    function corpusCacheLanded() {
+        root.corpusRevision++
+        if (root.peekIndex >= 0)
+            root.peekSuggestion(root.peekIndex)
+        if (root.filter.trim() !== "") {
+            const ref = root.adapter ? root.adapter.resolve(root.filter, root.sourceId) : ({
+                bookId: undefined
+            })
+            if (ref.bookId !== undefined)
+                root.goTo(ref)
+        }
+    }
+
     readonly property var visibleBooks: {
+        root.corpusRevision   // a reference resolution just landed: re-ask
         const needle = root.filter.trim().toLowerCase()
         if (needle === "")
             return root.books
@@ -698,16 +890,28 @@ Item {
     // the "no highlight at all" case.)
     readonly property string activeQuery: root.searching ? searchInput.text : root.filter
 
+    // The compiled highlight for the CURRENT query, built ONCE per query instead of
+    // once per row per evaluation. The row delegate called highlight() for every
+    // visible row and each call compiled its own RegExp out of the query words —
+    // work that scaled with the row count on every repaint, which is part of what
+    // made scrolling these passage lists stutter. A single `g` regex is safe to
+    // share: String.replace always starts at 0 and leaves lastIndex at 0.
+    readonly property var highlightRegex: {
+        const words = root.highlightQuery.trim().toLowerCase().split(/\s+/).filter((w) => w.length >= 2)
+        if (words.length === 0)
+            return null   // nothing to highlight (an empty or one-letter query)
+        const safeWords = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        return new RegExp("(" + safeWords.join("|") + ")", "gi")
+    }
+
     function highlight(text) {
         const source = String(text ?? "")
         if (source === "")
             return ""
-        const words = root.highlightQuery.trim().toLowerCase().split(/\s+/).filter((w) => w.length >= 2)
-        if (words.length === 0)
+        const re = root.highlightRegex
+        if (!re)
             return source
         const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-        const safeWords = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-        const re = new RegExp("(" + safeWords.join("|") + ")", "gi")
         // Qt StyledText ignores background-color on spans (bold survived, the yellow
         // didn't render — user screenshot). A colored <font> is honored.
         return esc(source).replace(re, '<b><font color="#ffd54a">$1</font></b>')
@@ -831,7 +1035,7 @@ Item {
                         if (cite.toLowerCase().indexOf(needle + "-") === 0)
                             yearMatches.push(root.citeRow(yearBook, i, cite))
                     }
-                    return { rows: yearMatches.slice(0, 150), complete: "-" }
+                    return { rows: yearMatches, complete: "-" }
                 }
             }
             // A CITATION + PARAGRAPH query ("64-0617 54") names one sermon AND one
@@ -883,9 +1087,12 @@ Item {
                     return { rows: [], complete: root.citationRest(text, matches[0].cite) }
                 }
                 if (matches.length > 0)
-                    // The list scrolls (matchesList sits in the pane's Flickable);
-                    // the cap bounds the worst 2-char case (~a thousand delegates).
-                    return { rows: matches.slice(0, 150).map((m) => root.citeRow(m.book, m.index, m.cite)), complete: "" }
+                    // EVERY match, uncapped: the pane's list is a ListView now, so
+                    // the cost is the viewport's rows and not the result count
+                    // ("th" matches 641 sermons of 1206 in a real library — the
+                    // 150-row cap here existed only to bound that build, and it
+                    // hid the rest of the matches from a list that scrolls).
+                    return { rows: matches.map((m) => root.citeRow(m.book, m.index, m.cite)), complete: "" }
             }
             return { rows: [], complete: "" }
         }
@@ -979,11 +1186,9 @@ Item {
             // so the user can Tab the correction in and find the passage.)
             root.resolveToken++
             root.resolvedWords = []
-        } else if (SearchService.resolveWordsAsync) {
+        } else {
             root.resolveToken++
             SearchService.resolveWordsAsync(text, root.resolveToken)
-        } else {
-            root.resolvedWords = SearchService.resolveWords(text)
         }
         // The chapter lock rides along as the scope (empty = the whole tab, as
         // it always was); adapters without the feature ignore the extra pair.
@@ -1414,6 +1619,7 @@ Item {
 
         Flickable {
             id: sourcesFlick
+            objectName: "selfTestSourcesList-" + root.paneTag   // (the scroll probe scrolls it by name)
             x: 8; y: 42; width: parent.width - 16; height: parent.height - 42 - 48
             clip: true
             contentHeight: sourceList.height
@@ -1442,7 +1648,7 @@ Item {
                         }
                         Text {
                             x: 28; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 34
-                            text: sourceRow.modelData.name
+                            text: { root.probeEvals.source++; return sourceRow.modelData.name }   // (scroll-cost probe: the row's label binding)
                             color: sourceRow.active ? Theme.textPrimary : root.textDim
                             elide: Text.ElideRight
                             font.family: Theme.fontFamily; font.pixelSize: 14
@@ -1557,6 +1763,7 @@ Item {
 
         Flickable {
             id: booksFlick
+            objectName: "selfTestBooksList-" + root.paneTag   // (the scroll probe scrolls it by name)
             anchors.fill: parent
             clip: true
             contentHeight: booksList.height + 8
@@ -1580,7 +1787,7 @@ Item {
                         }
                         Text {
                             x: 12; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 20
-                            text: bookRow.modelData.name
+                            text: { root.probeEvals.book++; return bookRow.modelData.name }   // (scroll-cost probe: the row's label binding)
                             color: bookRow.active ? Theme.textPrimary : root.textDim
                             elide: Text.ElideRight
                             font.family: Theme.fontFamily; font.pixelSize: 16
@@ -1630,6 +1837,7 @@ Item {
 
         Flickable {
             id: chaptersFlick
+            objectName: "selfTestChaptersList-" + root.paneTag   // (the scroll probe scrolls it by name)
             anchors.fill: parent
             clip: true
             contentHeight: chapterList.height + 8
@@ -1658,7 +1866,7 @@ Item {
                             anchors.leftMargin: chaptersCol.hasTitles ? 10 : 0
                             anchors.horizontalCenter: chaptersCol.hasTitles ? undefined : parent.horizontalCenter
                             width: chaptersCol.hasTitles ? parent.width - 18 : undefined
-                            text: chapterRow.title !== "" ? chapterRow.title : chapterRow.modelData
+                            text: { root.probeEvals.chapter++; return chapterRow.title !== "" ? chapterRow.title : chapterRow.modelData }   // (scroll-cost probe: the row's label binding)
                             elide: Text.ElideRight
                             color: chapterRow.active ? Theme.textPrimary : root.textDim
                             font.family: Theme.fontFamily; font.pixelSize: 16
@@ -1695,231 +1903,300 @@ Item {
         width: parent.width - x - previewCol.width; height: parent.height
         color: "#0f1015"
 
-        Flickable {
+        // THE PARAGRAPH ROWS. A LISTVIEW, not a Column-and-Repeater: only the rows
+        // in view are built. A sermon is one row per output slide once its chapter
+        // is divided — the shipped library's longest is 546 rows — and the old
+        // Column built every one of them the moment the chapter arrived, for a
+        // viewport that shows nine (measured: 546 rows realized, 19732 px of
+        // content, 317 px of view). The list now builds what fits on screen, plus
+        // ListView's own small cache, and builds more as it is scrolled.
+        //
+        // The geometry the rest of the pane assumes is unchanged: a 4 px header
+        // (the rows' old y: 4), 38 px rows (34 for a continuation, 122 while the
+        // note editor is open), 60 px of room under the last row. What IS different
+        // is that a row which is off screen does not EXIST — so anything that needs
+        // a row that is not built (a reveal, a self-test click) asks for it by
+        // index through revealRow(), which both scrolls and materializes it.
+        ListView {
             id: versesFlick
+            objectName: "selfTestVersesList-" + root.paneTag   // (the scroll probe scrolls it by name)
             anchors.fill: parent
+            visible: !root.searching && root.citationMatches.length === 0
             clip: true
-            contentHeight: (root.searching ? searchList.height
-                                            : (root.citationMatches.length > 0 ? matchesList.height : versesList.height)) + 60
+            // The paragraph list is already the one list in the app that does NOT
+            // rebuild on a filter or a tab switch: the probe measured 28 rows built
+            // once and never dropped, for a 945-row chapter (this ListView, and the
+            // panes keeping their width — see the dock's own note). Its rows are
+            // rebuilt only when the CHAPTER itself changes, which is a real model
+            // change and not a churn to remove.
+            //
+            // SCROLLING was the other half of that, and the scroll probe measured it:
+            // for a 945-row chapter, one 32 831 px scroll built 288 rows and threw 296
+            // away (~29 fps, ~11 frames over 33 ms) — every row the viewport passed
+            // was re-created and re-shaped, and the chapter was on screen the whole
+            // time, so nothing about the model had changed. The shows table in this
+            // app already scrolls the same distance building 22 rows and dropping
+            // none, and the one difference is `reuseItems`: ListView keeps the rows
+            // it has finished with in a pool and RE-BINDS them to the next index
+            // instead of destroying and re-creating them. Every binding in this
+            // delegate already reads `modelData` (including the objectName the
+            // self-tests address rows by, and the `oneLine` text), so a rebound row
+            // is a correct row — which is the same posture the shows rows and this
+            // list's own recycled-row notes (SelfTestDriver's reuse-pool comment)
+            // already assume.
+            reuseItems: true
+            model: root.mainRows
             boundsBehavior: Flickable.StopAtBounds
-
-            Column {
-                id: versesList
-                visible: !root.searching && root.citationMatches.length === 0
-                x: 0; y: 4; width: parent.width - 8
-
-                Repeater {
-                    model: root.mainRows
-                    delegate: Item {
-                        id: verseRow
-                        // Self-test handle: the verse double-click scenario
-                        // (double-click goes on air) addresses rows by name.
-                        objectName: "selfTestVerseRow_" + Number(modelData.number)
-                        required property var modelData
-                        readonly property bool continuation: modelData.continuation === true
-                        readonly property int verseNumber: Number(modelData.number)
-                        readonly property int partIndex: Number(modelData.partIndex ?? 0)
-                        readonly property int slideIndex: Number(modelData.slideIndex ?? 0)
-                        readonly property bool isSplit: modelData.isSplit === true || continuation
-                        readonly property bool active: root.selected.indexOf(verseNumber) >= 0
-                            && (!isSplit || root.previewSlideIndex === slideIndex)
-                        // One line per row, like FreeShow's own verse list (the full paragraph is what the preview pane on the right is
-                        // for). A verse spanning several of the sermon's own blank-line paragraphs still carries their break as a literal
-                        // "\n" in its text - elide alone does not collapse a real line break, so it is flattened to a space here too.
-                        readonly property string oneLine: verseRow.modelData.text.replace(/\s*\n+\s*/g, " ")
-                        // The user's marks, re-asked whenever one lands (root.userRevision) —
-                        // the verse number wears gold while the verse carries either.
-                        // The user's marks, from the ONE batched chapter read
-                        // (root.chapterMarks) — no per-row engine calls.
-                        readonly property bool marked: !continuation && root.hasUserData && root.markFor(verseNumber).highlight === true
-                        readonly property bool hasNote: !continuation && (root.markFor(verseNumber).note || "") !== ""
-                        // The open note editor stretches this one row to make room for itself.
-                        width: versesList.width
-                        height: continuation ? 34 : (root.noteVerse === verseNumber ? 122 : 38)
-                        Rectangle {
-                            anchors.fill: parent; anchors.margins: 1; radius: 4
-                            // Position-truth hover (PositionHoverArea), not DragSource's
-                            // containsMouse — the latter LATCHES in this build (hover-enter
-                            // delivers, hover-exit never does; see PositionHoverArea's
-                            // header), which is exactly the "verse row stays highlighted
-                            // after I click it" report.
-                            color: verseRow.active ? "#2a2b35"
-                                                   : (verseHover.hovered ? "#1a1b23" : "transparent")
+            header: Item { height: 4 }
+            footer: Item { height: 60 }
+            delegate: Item {
+                id: verseRow
+                // LAYOUT PROBE (VGR_LAYOUT_TEST).
+                Component.onCompleted: root.verseRowBuilds++
+                Component.onDestruction: root.verseRowDrops++
+                // Self-test handle: the verse double-click scenario
+                // (double-click goes on air) addresses rows by name. A divided
+                // paragraph shows SEVERAL rows for one number, so the name carries
+                // the piece as well, spelled exactly as the row's own label spells
+                // it ("selfTestVerseRow_12", "selfTestVerseRow_12-1") — one row per
+                // number was not enough to address a continuation row at all.
+                objectName: "selfTestVerseRow_" + Number(modelData.number)
+                            + (continuation ? "-" + partIndex : "")
+                required property var modelData
+                readonly property bool continuation: modelData.continuation === true
+                readonly property int verseNumber: Number(modelData.number)
+                readonly property int partIndex: Number(modelData.partIndex ?? 0)
+                readonly property bool isSplit: modelData.isSplit === true || continuation
+                readonly property bool active: root.rowIsActive(verseNumber, partIndex, isSplit)
+                // One line per row, like FreeShow's own verse list (the full paragraph is what the preview pane on the right is
+                // for). A verse spanning several of the sermon's own blank-line paragraphs still carries their break as a literal
+                // "\n" in its text - elide alone does not collapse a real line break, so it is flattened to a space here too.
+                readonly property string oneLine: { root.probeEvals.verse++; return verseRow.modelData.text.replace(/\s*\n+\s*/g, " ") }   // (scroll-cost probe: the row's text binding)
+                // The user's marks, from the ONE batched chapter read
+                // (root.chapterMarks) — no per-row engine calls and no per-row JS:
+                // mainRows owns that dependency and put the two flags on the row,
+                // so the verse number wears gold from a value rather than from two
+                // markFor() calls on every evaluation of this delegate.
+                readonly property bool marked: modelData.marked === true
+                readonly property bool hasNote: modelData.hasNote === true
+                // The open note editor stretches this one row to make room for itself.
+                width: versesFlick.width - 8
+                height: continuation ? 34 : (root.noteVerse === verseNumber ? 122 : 38)
+                Rectangle {
+                    anchors.fill: parent; anchors.margins: 1; radius: 4
+                    // Position-truth hover (PositionHoverArea), not DragSource's
+                    // containsMouse — the latter LATCHES in this build (hover-enter
+                    // delivers, hover-exit never does; see PositionHoverArea's
+                    // header), which is exactly the "verse row stays highlighted
+                    // after I click it" report.
+                    color: verseRow.active ? "#2a2b35"
+                                           : (verseHover.hovered ? "#1a1b23" : "transparent")
+                }
+                PositionHoverArea {
+                    id: verseHover
+                    anchors.fill: parent
+                    checkAncestors: false   // (rows inside a Flickable; no hover-gated visibility in the chain)
+                    clickEnabled: false     // the DragSource below owns verse clicks and drags
+                }
+                // The verse number: the usual red, gold while the user has
+                // marked this verse with a highlight or a note.
+                Text {
+                    x: verseRow.continuation ? 18 : 10; anchors.verticalCenter: parent.verticalCenter
+                    width: 40; horizontalAlignment: Text.AlignRight
+                    text: verseRow.continuation
+                        ? qsTr("%1-%2").arg(verseRow.verseNumber).arg(verseRow.partIndex)
+                        : verseRow.verseNumber
+                    color: verseRow.marked ? "#f5c542" : Theme.accent
+                    font.family: Theme.fontFamily; font.pixelSize: 16; font.bold: true
+                }
+                Text {
+                    x: verseRow.continuation ? 68 : 60
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - (verseRow.continuation ? 114 : 106)
+                    // While a search (or citation filter) is showing, the typed
+                    // words light up yellow in the visible text — the same obvious
+                    // chip Quick search uses.
+                    text: root.canHighlight ? root.highlight(verseRow.oneLine) : verseRow.oneLine
+                    color: Theme.textPrimary
+                    wrapMode: Text.NoWrap
+                    elide: Text.ElideRight
+                    textFormat: root.canHighlight ? Text.StyledText : Text.PlainText
+                    font.family: Theme.fontFamily; font.pixelSize: 16
+                }
+                // Click selects (Ctrl / Shift add); drag carries the selection into a project; DOUBLE-CLICK GOES ON AIR
+                // (FreeShow's verse dblclick -> playScripture — the original report: "double click on the scripture
+                // doesn't display on the monitor").
+                DragSource {
+                    id: verseSource
+                    anchors.fill: parent
+                    owner: root
+                    // LAZY (not `payload:`): dragPayload asks the engine for the
+                    // reference, and this delegate is created for EVERY paragraph of
+                    // the sermon at once — ~200 engine calls at open cost ~2s of the
+                    // click-to-open delay (measured). Evaluated once, at drag start.
+                    payloadProvider: () => {
+                        const p = root.dragPayload(verseRow.active ? root.selected : [verseRow.verseNumber])
+                        return p ? { payload: p, label: p.items[0].name } : null
+                    }
+                    // `owner` is this pane. A click or double-click already
+                    // in flight when the pane is rebuilt (a tab switch, a
+                    // settings toggle the tab renders — table.splitLongVerses
+                    // was the reported one) arrives with a DESTROYED pane,
+                    // and a property read off a destroyed object is
+                    // `undefined` rather than an error: that is the reported
+                    // "Cannot read property 'playPicked' of undefined". The
+                    // `typeof` half mirrors DropdownPanel's stale-row
+                    // guards. A vanished pane simply has nothing to select
+                    // into, so selection work is skipped, not attempted.
+                    //
+                    // The guard is INLINED — a property read on the
+                    // DragSource, never a helper FUNCTION declared on it.
+                    // selectVerse can rebuild the verse list synchronously,
+                    // destroying this DragSource while its own handler is
+                    // still running; calling a function member of a
+                    // destroyed object throws "Property 'ownerPane' ... is
+                    // not a function" and "attempted to evaluate a function
+                    // in an invalid context" (the reported crash), whereas
+                    // re-reading the plain `verseSource.owner` property is
+                    // exactly the read that safely yields undefined.
+                    // The modifiers come FROM THE CLICK (`activated`
+                    // carries them). This used to read
+                    // `Qt.application.keyboardModifiers`, which is
+                    // `undefined` on Qt 6 — so the Ctrl/Shift halves of
+                    // "Click selects (Ctrl / Shift add)" above were
+                    // inert and every click was a plain single select.
+                    onActivated: (mods) => {
+                        if (typeof verseSource === "undefined" || !verseSource)
+                            return
+                        const pane = verseSource.owner
+                        if (!pane)
+                            return
+                        if (verseRow.isSplit) {
+                            pane.selectSubpart(verseRow.verseNumber, verseRow.partIndex)
+                        } else {
+                            pane.selectVerse(verseRow.verseNumber, (mods & Qt.ControlModifier) !== 0, (mods & Qt.ShiftModifier) !== 0)
                         }
-                        PositionHoverArea {
-                            id: verseHover
-                            anchors.fill: parent
-                            checkAncestors: false   // (rows inside a Flickable; no hover-gated visibility in the chain)
-                            clickEnabled: false     // the DragSource below owns verse clicks and drags
+                    }
+                    onOpened: {
+                        if (typeof verseSource === "undefined" || !verseSource)
+                            return
+                        const pane = verseSource.owner
+                        if (!pane)
+                            return
+                        if (verseRow.isSplit)
+                            pane.selectSubpart(verseRow.verseNumber, verseRow.partIndex)
+                        else
+                            pane.selectVerse(verseRow.verseNumber, false, false)
+                        // RE-RESOLVED, deliberately not the `pane` above: the
+                        // selection just made can rebuild the pane
+                        // synchronously, and the second fresh read of
+                        // `verseSource.owner` is precisely the one that came
+                        // back undefined (the first call had succeeded).
+                        if (typeof verseSource === "undefined" || !verseSource)
+                            return
+                        const live = verseSource.owner
+                        if (live)
+                            live.playPicked()
+                    }
+                }
+                // The note affordance: a pencil on hover, persistent while a note
+                // exists or the editor is open (gold then). Click opens the inline
+                // editor; Enter saves, Esc discards.
+                Item {
+                    id: noteBtn
+                    readonly property bool editing: !verseRow.continuation && root.noteVerse === verseRow.verseNumber
+                    visible: root.hasUserData && (verseHover.hovered || verseRow.hasNote || editing)
+                    x: parent.width - 34; y: 7
+                    width: 24; height: 24
+                    Rectangle { anchors.fill: parent; radius: 5; color: noteBtn.editing || noteHover.hovered ? "#22242e" : "transparent" }
+                    IconGlyph {
+                        anchors.centerIn: parent
+                        name: "pencil"
+                        color: noteBtn.editing || verseRow.hasNote ? "#f5c542" : Theme.textSecondary
+                        width: 11; height: 11
+                    }
+                    HoverHandler { id: noteHover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: root.openNoteEditor(verseRow.verseNumber) }
+                }
+                // The note editor, open under its verse (one at a time).
+                Rectangle {
+                    visible: !verseRow.continuation && root.noteVerse === verseRow.verseNumber
+                    x: 4; y: 40
+                    width: parent.width - 8; height: 76
+                    radius: 6
+                    color: "#14151d"
+                    border.color: Theme.border
+                    TextInput {
+                        id: noteInput
+                        anchors.fill: parent; anchors.margins: 8
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily; font.pixelSize: 13
+                        wrapMode: TextInput.Wrap
+                        clip: true
+                        // Seed on open + take focus HERE (delegate
+                        // scope can see its own id; the root's
+                        // functions can't).
+                        onVisibleChanged: if (visible) {
+                            text = root.markFor(verseRow.modelData.number).note || ""
+                            forceActiveFocus()
                         }
-                        // The verse number: the usual red, gold while the user has
-                        // marked this verse with a highlight or a note.
-                        Text {
-                            x: verseRow.continuation ? 18 : 10; anchors.verticalCenter: parent.verticalCenter
-                            width: 40; horizontalAlignment: Text.AlignRight
-                            text: verseRow.continuation
-                                ? qsTr("%1-%2").arg(verseRow.verseNumber).arg(verseRow.partIndex)
-                                : verseRow.verseNumber
-                            color: verseRow.marked ? "#f5c542" : Theme.accent
-                            font.family: Theme.fontFamily; font.pixelSize: 16; font.bold: true
-                        }
-                        Text {
-                            x: verseRow.continuation ? 68 : 60
-                            anchors.verticalCenter: parent.verticalCenter
-                            width: parent.width - (verseRow.continuation ? 114 : 106)
-                            // While a search (or citation filter) is showing, the typed
-                            // words light up yellow in the visible text — the same obvious
-                            // chip Quick search uses.
-                            text: root.canHighlight ? root.highlight(verseRow.oneLine) : verseRow.oneLine
-                            color: Theme.textPrimary
-                            wrapMode: Text.NoWrap
-                            elide: Text.ElideRight
-                            textFormat: root.canHighlight ? Text.StyledText : Text.PlainText
-                            font.family: Theme.fontFamily; font.pixelSize: 16
-                        }
-                        // Click selects (Ctrl / Shift add); drag carries the selection into a project; DOUBLE-CLICK GOES ON AIR
-                        // (FreeShow's verse dblclick -> playScripture — the original report: "double click on the scripture
-                        // doesn't display on the monitor").
-                        DragSource {
-                            id: verseSource
-                            anchors.fill: parent
-                            owner: root
-                            // LAZY (not `payload:`): dragPayload asks the engine for the
-                            // reference, and this delegate is created for EVERY paragraph of
-                            // the sermon at once — ~200 engine calls at open cost ~2s of the
-                            // click-to-open delay (measured). Evaluated once, at drag start.
-                            payloadProvider: () => {
-                                const p = root.dragPayload(verseRow.active ? root.selected : [verseRow.verseNumber])
-                                return p ? { payload: p, label: p.items[0].name } : null
-                            }
-                            // `owner` is this pane. A click or double-click already
-                            // in flight when the pane is rebuilt (a tab switch, a
-                            // settings toggle the tab renders — table.splitLongVerses
-                            // was the reported one) arrives with a DESTROYED pane,
-                            // and a property read off a destroyed object is
-                            // `undefined` rather than an error: that is the reported
-                            // "Cannot read property 'playPicked' of undefined". The
-                            // `typeof` half mirrors DropdownPanel's stale-row
-                            // guards. A vanished pane simply has nothing to select
-                            // into, so selection work is skipped, not attempted.
-                            //
-                            // The guard is INLINED — a property read on the
-                            // DragSource, never a helper FUNCTION declared on it.
-                            // selectVerse can rebuild the verse list synchronously,
-                            // destroying this DragSource while its own handler is
-                            // still running; calling a function member of a
-                            // destroyed object throws "Property 'ownerPane' ... is
-                            // not a function" and "attempted to evaluate a function
-                            // in an invalid context" (the reported crash), whereas
-                            // re-reading the plain `verseSource.owner` property is
-                            // exactly the read that safely yields undefined.
-                            // The modifiers come FROM THE CLICK (`activated`
-                            // carries them). This used to read
-                            // `Qt.application.keyboardModifiers`, which is
-                            // `undefined` on Qt 6 — so the Ctrl/Shift halves of
-                            // "Click selects (Ctrl / Shift add)" above were
-                            // inert and every click was a plain single select.
-                            onActivated: (mods) => {
-                                if (typeof verseSource === "undefined" || !verseSource)
-                                    return
-                                const pane = verseSource.owner
-                                if (!pane)
-                                    return
-                                if (verseRow.isSplit) {
-                                    pane.selectSubpart(verseRow.verseNumber, verseRow.partIndex)
-                                } else {
-                                    pane.selectVerse(verseRow.verseNumber, (mods & Qt.ControlModifier) !== 0, (mods & Qt.ShiftModifier) !== 0)
-                                }
-                            }
-                            onOpened: {
-                                if (typeof verseSource === "undefined" || !verseSource)
-                                    return
-                                const pane = verseSource.owner
-                                if (!pane)
-                                    return
-                                if (verseRow.isSplit)
-                                    pane.selectSubpart(verseRow.verseNumber, verseRow.partIndex)
-                                else
-                                    pane.selectVerse(verseRow.verseNumber, false, false)
-                                // RE-RESOLVED, deliberately not the `pane` above: the
-                                // selection just made can rebuild the pane
-                                // synchronously, and the second fresh read of
-                                // `verseSource.owner` is precisely the one that came
-                                // back undefined (the first call had succeeded).
-                                if (typeof verseSource === "undefined" || !verseSource)
-                                    return
-                                const live = verseSource.owner
-                                if (live)
-                                    live.playPicked()
-                            }
-                        }
-                        // The note affordance: a pencil on hover, persistent while a note
-                        // exists or the editor is open (gold then). Click opens the inline
-                        // editor; Enter saves, Esc discards.
-                        Item {
-                            id: noteBtn
-                            readonly property bool editing: !verseRow.continuation && root.noteVerse === verseRow.verseNumber
-                            visible: root.hasUserData && (verseHover.hovered || verseRow.hasNote || editing)
-                            x: parent.width - 34; y: 7
-                            width: 24; height: 24
-                            Rectangle { anchors.fill: parent; radius: 5; color: noteBtn.editing || noteHover.hovered ? "#22242e" : "transparent" }
-                            IconGlyph {
-                                anchors.centerIn: parent
-                                name: "pencil"
-                                color: noteBtn.editing || verseRow.hasNote ? "#f5c542" : Theme.textSecondary
-                                width: 11; height: 11
-                            }
-                            HoverHandler { id: noteHover; cursorShape: Qt.PointingHandCursor }
-                            TapHandler { onTapped: root.openNoteEditor(verseRow.verseNumber) }
-                        }
-                        // The note editor, open under its verse (one at a time).
-                        Rectangle {
-                            visible: !verseRow.continuation && root.noteVerse === verseRow.verseNumber
-                            x: 4; y: 40
-                            width: parent.width - 8; height: 76
-                            radius: 6
-                            color: "#14151d"
-                            border.color: Theme.border
-                            TextInput {
-                                id: noteInput
-                                anchors.fill: parent; anchors.margins: 8
-                                color: Theme.textPrimary
-                                font.family: Theme.fontFamily; font.pixelSize: 13
-                                wrapMode: TextInput.Wrap
-                                clip: true
-                                // Seed on open + take focus HERE (delegate
-                                // scope can see its own id; the root's
-                                // functions can't).
-                                onVisibleChanged: if (visible) {
-                                    text = root.markFor(verseRow.modelData.number).note || ""
-                                    forceActiveFocus()
-                                }
-                                Keys.onEscapePressed: root.noteVerse = 0
-                                Keys.onReturnPressed: root.saveNoteDraft(text)
-                            }
-                            Text {
-                                anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 6
-                                text: qsTr("Enter to save · Esc to close")
-                                color: Theme.textMuted
-                                font.family: Theme.fontFamily; font.pixelSize: 10
-                            }
-                        }
+                        Keys.onEscapePressed: root.noteVerse = 0
+                        Keys.onReturnPressed: root.saveNoteDraft(text)
+                    }
+                    Text {
+                        anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 6
+                        text: qsTr("Enter to save · Esc to close")
+                        color: Theme.textMuted
+                        font.family: Theme.fontFamily; font.pixelSize: 10
                     }
                 }
             }
+        }
 
-            Column {
-                id: searchList
+        // The column's other two contents — the search hits and The Table's citation
+        // matches (with the hover peek beside them) — each a LISTVIEW, like the
+        // paragraph list above, and for the same reason: the row count is the QUERY's,
+        // not the viewport's. Both used to be a Column-and-Repeater, which built every
+        // row the moment the model landed: a two-character query matches hundreds of
+        // sermons in a real library ("th" matches 641 of 1206 here), and the citation
+        // list was capped at 150 only to bound that build — a cap that also hid the
+        // rest of the matches from a list the operator can scroll. The modes are
+        // mutually exclusive, so the two never share a viewport, and the scrollbar
+        // follows whichever is showing. The container is a plain Item (not a Flickable):
+        // each list scrolls itself now, and the peek beside them has its own.
+        Item {
+            id: resultsArea
+            anchors.fill: parent
+            clip: true
+
+            ListView {
+                id: hitsList
+                objectName: "selfTestPaneHitList"   // (the pane-rows scenario reads it by name)
                 visible: root.searching
-                x: 0; y: 4; width: parent.width - 8
-                // The engine's resolved-words hint ("thn → then   freind →
-                // friend"), gold like the match highlight. Tab in the pill box
-                // accepts it — the same behavior Quick search has.
-                Text {
+                x: 0; y: 4; width: parent.width - 8; height: parent.height - 8
+                clip: true
+                model: root.searchResults
+                boundsBehavior: Flickable.StopAtBounds
+                // The engine's resolved-words hint rides ABOVE the rows (the old
+                // Column's first child): a header, so it scrolls away with them
+                // instead of eating the top of the viewport forever.
+                header: Item {
+                    width: hitsList.width
+                    height: hitsHint.visible ? hitsHint.implicitHeight : 0
+                    Text {
+                        id: hitsHint
+                    // The engine's resolved-words hint ("thn → then   freind →
+                    // friend"), gold like the match highlight. Tab in the pill box
+                    // accepts it — the same behavior Quick search has.
+                    //
                     // Named for the pane-highlight scenario, which asserts this line
                     // is really ON SCREEN for a misspelled query (the user's ask:
                     // "the typo fixer should be there" in this box as well).
-                    objectName: "selfTestPaneSearchHint"
+                    // Per-TAB, like the lists above: the same pane class serves two tabs and
+                    // both hints are alive at once, so a bare name resolves to whichever pane
+                    // the tree walk reaches first (that is how a scenario came to read the
+                    // OTHER tab's empty hint and call the correction missing).
+                    objectName: "selfTestPaneSearchHint-" + root.paneTag
                     visible: root.resolvedWords.some((w) => w.changed === true
                                                      || (w.candidates && w.candidates.length > 0))
                     width: parent.width
@@ -1937,71 +2214,80 @@ Item {
                                        ? w.typed + " \u2192 " + w.candidates.slice(0, 3).join(" \u00b7 ")
                                        : w.typed + " \u2192 " + w.resolved).join("   ")
                               + "   (Tab to accept)"
+                    }
                 }
-                Repeater {
-                    model: root.searchResults
-                    delegate: Item {
-                        id: hitRow
-                        required property var modelData
-                        width: searchList.width; height: 32
-                        Rectangle { anchors.fill: parent; anchors.margins: 1; radius: 4; color: hitHover.hovered ? "#16171e" : "transparent" }
-                        Text {
-                            x: 10; anchors.verticalCenter: parent.verticalCenter; width: 170
-                            text: hitRow.modelData.reference
-                            color: Theme.textPrimary
-                            elide: Text.ElideRight
-                            font.family: Theme.fontFamily; font.pixelSize: 15
-                        }
-                        // The row's own measurement of its snippet — BOUND, so the
-                        // windowing below stays a pure function of its arguments.
-                        // (Measuring inside `shown` instead made that binding write
-                        // the shared TextMetrics it was reading: a binding loop Qt
-                        // re-evaluated for every row, every frame.)
-                        TextMetrics {
-                            id: hitMetrics
-                            font.family: Theme.fontFamily; font.pixelSize: 15
-                            text: hitSnippet.collapsed
-                        }
-                        Text {
-                            id: hitSnippet
-                            objectName: "selfTestPaneHitSnippet"   // (the pane-highlight scenario reads the rendered row by name)
-                            x: 190; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 198
-                            readonly property string collapsed: root.collapseSnippet(hitRow.modelData.snippet)
-                            // The hit is centred in the row (see centeredSnippet) so the
-                            // words that matched are actually on screen, and the highlight
-                            // wraps every typed word (see highlightQuery).
-                            readonly property string shown: root.centeredSnippet(
-                                hitSnippet.collapsed, width, hitMetrics.advanceWidth)
-                            text: root.canHighlight ? root.highlight(shown) : shown
-                            color: root.textDim
-                            elide: Text.ElideRight
-                            textFormat: root.canHighlight ? Text.StyledText : Text.PlainText
-                            font.family: Theme.fontFamily; font.pixelSize: 15
-                        }
-                        HoverHandler { id: hitHover; cursorShape: Qt.PointingHandCursor }
-                        TapHandler {
-                            onTapped: {
-                                root.goTo({ bookId: hitRow.modelData.bookId, chapter: hitRow.modelData.chapter,
-                                            verseStart: hitRow.modelData.verse, verseEnd: hitRow.modelData.verse,
-                                            matchText: searchInput.text })
-                                root.searching = false
-                            }
+                delegate: Item {
+                    id: hitRow
+                    required property var modelData
+                    required property int index
+                    objectName: "selfTestHitRow_" + index   // (the pane-rows scenario scrolls to it by name)
+                    // LAYOUT PROBE (VGR_LAYOUT_TEST).
+                    Component.onCompleted: root.hitRowBuilds++
+                    Component.onDestruction: root.hitRowDrops++
+                    width: hitsList.width; height: 32
+                    Rectangle { anchors.fill: parent; anchors.margins: 1; radius: 4; color: hitHover.hovered ? "#16171e" : "transparent" }
+                    Text {
+                        x: 10; anchors.verticalCenter: parent.verticalCenter; width: 170
+                        text: hitRow.modelData.reference
+                        color: Theme.textPrimary
+                        elide: Text.ElideRight
+                        font.family: Theme.fontFamily; font.pixelSize: 15
+                    }
+                    // The row's own measurement of its snippet — BOUND, so the
+                    // windowing below stays a pure function of its arguments.
+                    // (Measuring inside `shown` instead made that binding write
+                    // the shared TextMetrics it was reading: a binding loop Qt
+                    // re-evaluated for every row, every frame.)
+                    TextMetrics {
+                        id: hitMetrics
+                        font.family: Theme.fontFamily; font.pixelSize: 15
+                        text: hitSnippet.collapsed
+                    }
+                    Text {
+                        id: hitSnippet
+                        objectName: "selfTestPaneHitSnippet"   // (the pane-highlight scenario reads the rendered row by name)
+                        x: 190; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 198
+                        readonly property string collapsed: root.collapseSnippet(hitRow.modelData.snippet)
+                        // The hit is centred in the row (see centeredSnippet) so the
+                        // words that matched are actually on screen, and the highlight
+                        // wraps every typed word (see highlightQuery).
+                        readonly property string shown: root.centeredSnippet(
+                            hitSnippet.collapsed, width, hitMetrics.advanceWidth)
+                        text: root.canHighlight ? root.highlight(shown) : shown
+                        color: root.textDim
+                        elide: Text.ElideRight
+                        textFormat: root.canHighlight ? Text.StyledText : Text.PlainText
+                        font.family: Theme.fontFamily; font.pixelSize: 15
+                    }
+                    HoverHandler { id: hitHover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler {
+                        onTapped: {
+                            root.goTo({ bookId: hitRow.modelData.bookId, chapter: hitRow.modelData.chapter,
+                                        verseStart: hitRow.modelData.verse, verseEnd: hitRow.modelData.verse,
+                                        matchText: searchInput.text })
+                            root.searching = false
                         }
                     }
                 }
-                Text {
-                    visible: root.searchResults.length === 0
-                    x: 12; y: 12
-                    width: parent.width - 24
-                    wrapMode: Text.WordWrap
-                    // Locked with nothing found: say WHY the list is empty (an
-                    // unnoticed padlock looks like a broken search), and how to get
-                    // the loose results back.
-                    text: root.exact && searchInput.text.trim() !== ""
-                          ? qsTr("No exact match for “%1” — with the padlock on, the words must appear together, exactly as typed. Click the padlock to search loosely.").arg(searchInput.text.trim())
-                          : (root.adapter ? root.adapter.searchHint : qsTr("Type words to find, then press Enter."))
-                    color: Theme.textMuted
-                    font.family: Theme.fontFamily; font.pixelSize: 14
+                // Nothing found: a FOOTER, so it sits under the empty list instead
+                // of being a row that was always there. Say WHY the list is empty
+                // (an unnoticed padlock looks like a broken search), and how to get
+                // the loose results back.
+                footer: Item {
+                    width: hitsList.width
+                    height: hitsEmpty.visible ? hitsEmpty.implicitHeight + 24 : 0
+                    Text {
+                        id: hitsEmpty
+                        visible: root.searchResults.length === 0
+                        x: 12; y: 12
+                        width: parent.width - 24
+                        wrapMode: Text.WordWrap
+                        text: root.exact && searchInput.text.trim() !== ""
+                              ? qsTr("No exact match for “%1” — with the padlock on, the words must appear together, exactly as typed. Click the padlock to search loosely.").arg(searchInput.text.trim())
+                              : (root.adapter ? root.adapter.searchHint : qsTr("Type words to find, then press Enter."))
+                        color: Theme.textMuted
+                        font.family: Theme.fontFamily; font.pixelSize: 14
+                    }
                 }
             }
 
@@ -2011,62 +2297,72 @@ Item {
             // a row and the right half (peekPanel) shows that sermon's full
             // paragraphs — the preview can't cover anything because it lives in
             // its own half. Click opens the sermon for real.
-            Column {
+            //
+            // A LISTVIEW, for the reason in the note above: "th" matches 641
+            // sermons in a real library, and this list used to build them all (it
+            // was capped at 150 for that reason alone — see suggest()). The cap is
+            // gone with the build it was bounding, so the list now holds every
+            // match and builds only the rows the viewport shows.
+            ListView {
                 id: matchesList
+                objectName: "selfTestPaneMatchList"   // (the pane-rows scenario scrolls it by name)
                 visible: !root.searching && root.citationMatches.length > 0
                 // FIXED half-split while the matches show (never re-laid-out by the
                 // hover): an early version narrowed the list only WHILE the preview
                 // was open, so a pointer near a row's right edge oscillated — hover
                 // opens the panel, the row shrinks away under the pointer, the panel
                 // closes, the row widens back, hover again…
-                x: 0; y: 4; width: parent.width * 0.52
-                Repeater {
-                    model: root.citationMatches
-                    delegate: Item {
-                        id: matchRow
-                        required property var modelData
-                        required property int index
-                        objectName: "selfTestMatchRow_" + index   // (the self-test hovers these by name)
-                        readonly property bool active: root.peekIndex === index
-                        width: matchesList.width; height: 30
-                        Rectangle {
-                            anchors.fill: parent; anchors.margins: 1; radius: 4
-                            color: matchRow.active ? "#2a2b35" : (matchHover.hovered ? "#16171e" : "transparent")
-                            Rectangle { visible: matchRow.active; x: 0; y: 4; width: 2; height: parent.height - 8; color: Theme.accent }
-                        }
-                        Text {
-                            x: 10; anchors.verticalCenter: parent.verticalCenter
-                            width: parent.width - 86
-                            text: matchRow.modelData.label
-                            color: Theme.textPrimary
-                            elide: Text.ElideRight
-                            font.family: Theme.fontFamily; font.pixelSize: 15
-                        }
-                        Text {
-                            anchors.right: parent.right; anchors.rightMargin: 10
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: matchRow.modelData.trailing
-                            color: Theme.textSecondary
-                            font.family: Theme.fontFamily; font.pixelSize: 11
-                        }
-                        // Position truth (PositionHoverArea), the codebase convention —
-                        // also what the self-test can drive deterministically.
-                        PositionHoverArea {
-                            id: matchHover
-                            anchors.fill: parent
-                            checkAncestors: false
-                            onHoveredChanged: {
-                                if (hovered) {
-                                    peekClear.stop()
-                                    root.peekSuggestion(matchRow.index)
-                                } else {
-                                    peekClear.restart()   // row-to-row moves deliver exit(A)/enter(B) unordered — the 0-timer lets a following enter cancel the clear
-                                }
+                x: 0; y: 4; width: parent.width * 0.52; height: parent.height - 8
+                clip: true
+                model: root.citationMatches
+                boundsBehavior: Flickable.StopAtBounds
+                delegate: Item {
+                    id: matchRow
+                    required property var modelData
+                    required property int index
+                    objectName: "selfTestMatchRow_" + index   // (the self-test hovers these by name)
+                    readonly property bool active: root.peekIndex === index
+                    // LAYOUT PROBE (VGR_LAYOUT_TEST).
+                    Component.onCompleted: root.matchRowBuilds++
+                    Component.onDestruction: root.matchRowDrops++
+                    width: matchesList.width; height: 30
+                    Rectangle {
+                        anchors.fill: parent; anchors.margins: 1; radius: 4
+                        color: matchRow.active ? "#2a2b35" : (matchHover.hovered ? "#16171e" : "transparent")
+                        Rectangle { visible: matchRow.active; x: 0; y: 4; width: 2; height: parent.height - 8; color: Theme.accent }
+                    }
+                    Text {
+                        x: 10; anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width - 86
+                        text: matchRow.modelData.label
+                        color: Theme.textPrimary
+                        elide: Text.ElideRight
+                        font.family: Theme.fontFamily; font.pixelSize: 15
+                    }
+                    Text {
+                        anchors.right: parent.right; anchors.rightMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: matchRow.modelData.trailing
+                        color: Theme.textSecondary
+                        font.family: Theme.fontFamily; font.pixelSize: 11
+                    }
+                    // Position truth (PositionHoverArea), the codebase convention —
+                    // also what the self-test can drive deterministically.
+                    PositionHoverArea {
+                        id: matchHover
+                        anchors.fill: parent
+                        checkAncestors: false
+                        onHoveredChanged: {
+                            if (hovered) {
+                                peekClear.stop()
+                                root.peekSuggestion(matchRow.index)
+                            } else {
+                                peekClear.restart()   // row-to-row moves deliver exit(A)/enter(B) unordered — the 0-timer lets a following enter cancel the clear
                             }
-                            onClicked: {
-                                root.applySuggestion(matchRow.modelData.ref)
-                                root.clearCitationMatches()
-                            }
+                        }
+                        onClicked: {
+                            root.applySuggestion(matchRow.modelData.ref)
+                            root.clearCitationMatches()
                         }
                     }
                 }
@@ -2093,40 +2389,54 @@ Item {
                     elide: Text.ElideRight
                     font.family: Theme.fontFamily; font.pixelSize: 12
                 }
-                Flickable {
+                // A LISTVIEW, for the same reason as the two lists above: the peek is
+                // a whole sermon of paragraphs (500+ in a real library) and it was
+                // built in full on the HOVER that opened it — a two-character query
+                // plus one hover was a thousand rows built at once, which is exactly
+                // when the pointer is supposed to feel instant. Rows here are as tall
+                // as their wrapped text, so the list measures them as they arrive
+                // rather than assuming a height (the paragraph list above is fixed and
+                // does not have to).
+                ListView {
                     id: peekFlick
+                    objectName: "selfTestPanePeekList"   // (the pane-rows scenario scrolls it by name)
                     anchors.fill: parent
                     anchors.topMargin: 26
                     anchors.rightMargin: 10
                     clip: true
-                    contentHeight: peekCol.height + 20
+                    model: root.peekVerses
                     boundsBehavior: Flickable.StopAtBounds
-                    Column {
-                        id: peekCol
-                        x: 4; width: parent.width - 8
-                        Repeater {
-                            model: root.peekVerses
-                            delegate: Item {
-                                width: peekCol.width; height: peekText.implicitHeight + 10
-                                Text {
-                                    id: peekNum
-                                    x: 6; y: 5
-                                    width: 26; horizontalAlignment: Text.AlignRight
-                                    text: modelData.number
-                                    color: Theme.accent
-                                    font.family: Theme.fontFamily; font.pixelSize: 14; font.bold: true
-                                }
-                                Text {
-                                    id: peekText
-                                    x: 40; y: 5; width: parent.width - 48
-                                    text: modelData.text
-                                    color: Theme.textPrimary
-                                    wrapMode: Text.Wrap
-                                    font.family: Theme.fontFamily; font.pixelSize: 14
-                                }
-                            }
+                    // The old Column sat at x: 4 with a width of parent.width - 8;
+                    // the content margins reproduce that exactly, so the peek's text
+                    // wraps at the same place it always did.
+                    leftMargin: 4; rightMargin: 4
+                    delegate: Item {
+                        required property var modelData
+                        required property int index
+                        objectName: "selfTestPeekRow_" + index
+                        width: peekFlick.width - 8; height: peekText.implicitHeight + 10
+                        // LAYOUT PROBE (VGR_LAYOUT_TEST).
+                        Component.onCompleted: root.peekRowBuilds++
+                        Component.onDestruction: root.peekRowDrops++
+                        Text {
+                            id: peekNum
+                            x: 6; y: 5
+                            width: 26; horizontalAlignment: Text.AlignRight
+                            text: modelData.number
+                            color: Theme.accent
+                            font.family: Theme.fontFamily; font.pixelSize: 14; font.bold: true
+                        }
+                        Text {
+                            id: peekText
+                            x: 40; y: 5; width: parent.width - 48
+                            text: modelData.text
+                            color: Theme.textPrimary
+                            wrapMode: Text.Wrap
+                            font.family: Theme.fontFamily; font.pixelSize: 14
                         }
                     }
+                    // The old Column's 20px of room under the last paragraph.
+                    footer: Item { width: peekFlick.width - 8; height: 20 }
                     // A long sermon's peek overflowed with no way to drag it.
                     AppScrollBar {
                         flickable: peekFlick
@@ -2148,9 +2458,11 @@ Item {
 
         // The verses (or search results / matches) column's scrollbar — the
         // chapter can be 150 sermons or 176 verses; wheel-only was the only
-        // way to move it.
+        // way to move it. Each MODE now scrolls its own list (see resultsArea),
+        // so the bar follows whichever one is showing.
         AppScrollBar {
-            flickable: versesFlick
+            flickable: root.searching ? hitsList
+                    : (root.citationMatches.length > 0 ? matchesList : versesFlick)
             anchors.top: parent.top; anchors.bottom: parent.bottom
             anchors.topMargin: 2; anchors.bottomMargin: 44   // clear the floating chip/pill
             anchors.right: parent.right; anchors.rightMargin: 4

@@ -630,6 +630,17 @@ private:
 void TestResourceDispatchOutsideLock() {
     auto& res = ResourceManager::Instance();
     res.SetPlatform(std::make_shared<FullyUsedRamPlatform>());
+    // The latch state belongs to the PROCESS, not to this test. An earlier phase
+    // samples the real machine (the Kernel suite boots the heartbeat and the
+    // resource phase samples for real), so a sustained spike in that phase —
+    // this machine's CPU sits above 90% for whole stretches of a full suite run
+    // — leaves one of the latches active. An active latch answers Update() with
+    // None until it clears and its cooldown expires, so the transition this test
+    // WAITS for never arrives and the two CHECKs below fail for a reason that
+    // has nothing to do with the dispatch scope under test. Measured: this suite
+    // passes alone and failed in every full run here until the precondition was
+    // stated explicitly.
+    res.ResetPressureAlerts();
     // Deliberately no Initialize(): the pump below is what drives the latch, so
     // the test does not depend on the sampling heartbeat's scheduler — an earlier
     // phase (the Kernel suite) may already have torn it down.
@@ -2224,4 +2235,152 @@ void TestAtomicWrite() {
     CHECK(!fs.Exists(emptyPath + ".tmp"));
 
     (void)fs.RemoveAll(root);
+}
+
+// The cancellation handle on a job handed to another thread (core/threading/
+// JobTicket.hpp). This is the shape that lets a job be taken back: the QML layer's
+// engine worker posts its work with one (EngineWorker::runOffThreadCancellable,
+// and ShowService's queued document jobs above it), because a single serialized
+// queue means a job nobody wants any more sits in front of the work the screen
+// that IS showing needs.
+//
+// Its TWO cancels mean different things, and that difference is what keeps
+// cancelling from losing data — so each one is pinned down here, not just the
+// happy path:
+//   * Abandon()         the work is pointless (a read): a queued job never runs.
+//   * WithdrawVerdict() the work is still wanted (a save the operator asked for)
+//                       and only the answer is: the write happens, nothing reports.
+void TestJobCancellation() {
+    // Full life, nobody cancels: the work runs and its answer is used.
+    {
+        JobTicketPtr t = std::make_shared<JobTicket>();
+        CHECK(!t->Cancelled());
+        CHECK(t->Begin());
+        CHECK(t->Started());
+        CHECK(t->Deliver());
+        CHECK(t->Deliver());   // asking twice is not a state change
+    }
+
+    // Abandoned while QUEUED — the deterministic case a canceller produces, and
+    // the one that makes abandoning a read worth doing: the work never runs.
+    {
+        JobTicketPtr t = std::make_shared<JobTicket>();
+        CHECK(t->Abandon());
+        CHECK(t->Cancelled());
+        CHECK(!t->Begin());      // the worker must not do the work at all
+        CHECK(!t->Started());    // ...and nothing may treat it as having run
+        CHECK(!t->Deliver());
+        CHECK(!t->Abandon());    // a second cancel changes nothing, and says so
+    }
+
+    // Abandoned while RUNNING: an engine call cannot be interrupted mid-lock, so
+    // the work finishes and Started() is what tells a caller to keep its
+    // consequences — while the answer is dropped.
+    {
+        JobTicketPtr t = std::make_shared<JobTicket>();
+        CHECK(t->Begin());
+        CHECK(t->Abandon());
+        CHECK(!t->Deliver());
+        CHECK(t->Started());
+        CHECK(t->Cancelled());
+    }
+
+    // WithdrawVerdict on a Durable job (a save): the work still happens — the file
+    // is the point — and only the report is dropped.
+    {
+        JobTicketPtr t = std::make_shared<JobTicket>();
+        CHECK(t->WithdrawVerdict());
+        CHECK(t->Cancelled());
+        CHECK(t->Begin());
+        CHECK(t->Started());
+        CHECK(!t->Deliver());
+        CHECK(!t->WithdrawVerdict());
+    }
+
+    // The two cancels are independent ("the first one wins" is per question), and
+    // the stricter of them is what the worker obeys.
+    {
+        JobTicketPtr t = std::make_shared<JobTicket>();
+        CHECK(t->WithdrawVerdict());
+        CHECK(t->Abandon());
+        CHECK(!t->Begin());
+        CHECK(!t->Deliver());
+    }
+
+    // A cancel that arrives AFTER the verdict was delivered decides nothing
+    // retroactively: the worker already had its Delivered() answer, and no flag
+    // takes that back. What it does record is that nobody wants anything MORE from
+    // this job, so a later reader is never told the job is still wanted. (The two
+    // facts a caller acts on are answered to the two sides separately, and
+    // ShowService cannot reach a ticket whose verdict has landed — its entry is
+    // removed on the landing — so there is no shape in which this ordering can be
+    // read as "my cancel stopped a job that had already reported".)
+    {
+        JobTicketPtr t = std::make_shared<JobTicket>();
+        CHECK(t->Begin());
+        CHECK(t->Deliver());
+        CHECK(t->Started());
+        t->Abandon();
+        t->WithdrawVerdict();
+        CHECK(t->Cancelled());
+        CHECK(!t->Begin());   // a second Begin() is not a re-run of this job
+    }
+
+    // A copy shares the state: the poster keeps one handle and the worker captures
+    // another (EngineWorker's capture-by-value rule), so the sharing IS the
+    // mechanism rather than a detail of it.
+    {
+        JobTicketPtr poster = std::make_shared<JobTicket>();
+        JobTicketPtr worker = poster;
+        CHECK(worker->Begin());
+        CHECK(poster->WithdrawVerdict());
+        CHECK(!worker->Deliver());
+        CHECK(worker->Started());
+    }
+
+    // Exactly one canceller is told it was the one that abandoned the job, however
+    // many ask at once (the poster that wins is the one whose toast/log line is
+    // the truth about what happened).
+    {
+        JobTicketPtr t = std::make_shared<JobTicket>();
+        std::atomic<int> winners{0};
+        std::vector<std::thread> posters;
+        for (int i = 0; i < 8; ++i)
+            posters.emplace_back([&] { if (t->Abandon()) winners.fetch_add(1); });
+        for (auto &p : posters) p.join();
+        CHECK(winners.load() == 1);
+        CHECK(t->Cancelled());
+        CHECK(!t->Begin());
+    }
+
+    // The real contention: the poster cancels while the worker runs the job, 2000
+    // times. Either outcome is correct (the cancel landed before Begin() or after
+    // it), so the contract asserted here is the one a waiting caller depends on —
+    // a DROPPED answer always has a canceller behind it, so nobody stops waiting on
+    // a job that then reports success. The deterministic orders above are where the
+    // semantics themselves are pinned down; this loop is the thread-safety check.
+    {
+        int dropped = 0, delivered = 0;
+        for (int i = 0; i < 2000; ++i) {
+            JobTicketPtr t = std::make_shared<JobTicket>();
+            bool ran = false, used = false;
+            std::thread worker([&] {
+                ran = t->Begin();
+                if (ran)
+                    used = t->Deliver();
+            });
+            std::thread poster([&] { t->Abandon(); });
+            worker.join();
+            poster.join();
+            if (used) {
+                ++delivered;
+            } else {
+                ++dropped;
+                CHECK(t->Cancelled());
+            }
+            if (ran && !used)
+                CHECK(t->Started());
+        }
+        CHECK(dropped + delivered == 2000);
+    }
 }

@@ -38,6 +38,16 @@ struct StyleItem
     // The style's background IMAGE (absolute file path, "" = none) — painted
     // cover-fit on air behind all content, FreeShow's backgroundImage.
     QString backgroundImage;
+    // Is that file actually there? DERIVED, never saved: the one place it is
+    // decided is where the path is (re)loaded or set — reloadFromStore() and
+    // setBackgroundImage() — because the answer is a filesystem stat, and the
+    // readers of it (OutputListModel's styleBackground role, via getStyle) are
+    // QML bindings and a self-test log line. Doing the stat in the reader put a
+    // disk touch on the interface thread on every role read; doing it here costs
+    // one stat per style when the roster loads or the image changes. A file that
+    // vanishes during a session therefore keeps reading as present until the next
+    // load — the composed frame is still the truth about what got painted.
+    bool backgroundImageExists = false;
     // FreeShow's clearStyleBackgroundOnText: when the slide itself carries a
     // background colour, the style's background steps aside for it.
     bool clearBackgroundOnText = false;
@@ -188,7 +198,7 @@ public:
     // Native image-file picker (png/jpg/webp/...) for the style background
     // image; "" when cancelled. Lives here (not QML) so the engine's dialog
     // service is used, same as every other file picker in the app.
-    Q_INVOKABLE QString pickImageFile() const;
+    Q_INVOKABLE QString pickImageFile() const;   // gui-ok: a modal native picker parks the interface thread on PURPOSE — the user is looking at the dialog, and its own event loop keeps the window painting; the work after the pick (import, scan, copy) already runs off the interface thread
 
     // Snapshot for the Edit Style dialog — one QVariantMap with the same
     // keys as the role names, so QML doesn't keep parallel state (same

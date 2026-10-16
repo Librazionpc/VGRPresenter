@@ -776,7 +776,15 @@ void ProductionEngine::RollbackEdit() { graph_.RollbackEdit(); }
 
 Result<void> ProductionEngine::ApplyCommand(std::string_view command) {
     PersistGate _save(*this);
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // The lock is NOT held across the dispatch below. SetSceneState,
+    // AssignOutputBuses, TriggerFallback and SendControl all publish bus events
+    // (and take mutex_ themselves for their own short graph edits), so holding it
+    // here put a subscriber that re-enters this engine behind a lock this thread
+    // owned. Only the graph READS need it, one short critical section each.
+    auto hasNode = [&](const std::string& id) {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        return graph_.HasNode(id);
+    };
     auto parts = Split(command);
     if (parts.empty()) return Error::Make(Err::Production_InvalidState, kModule,
                                           "empty command");
@@ -797,19 +805,19 @@ Result<void> ProductionEngine::ApplyCommand(std::string_view command) {
                      : parts[2] == "disabled" ? SceneState::Disabled
                      : parts[2] == "emergency" ? SceneState::Emergency
                                                : SceneState::Standby;
-        if (!graph_.HasNode(parts[1]))
+        if (!hasNode(parts[1]))
             return Error::Make(Err::Production_SceneNotFound, kModule,
                                "no scene: " + parts[1]);
         return SetSceneState(parts[1], state);
     }
     if (verb == "mute" && need(3).ok()) {
-        if (!graph_.HasNode(parts[1]))
+        if (!hasNode(parts[1]))
             return Error::Make(Err::Production_NodeNotFound, kModule,
                                "no node: " + parts[1]);
         return SetMute(parts[1], parts[2] == "1" || parts[2] == "true");
     }
     if (verb == "gain" && need(3).ok()) {
-        if (!graph_.HasNode(parts[1]))
+        if (!hasNode(parts[1]))
             return Error::Make(Err::Production_NodeNotFound, kModule,
                                "no node: " + parts[1]);
         double db = 0.0;
@@ -819,7 +827,7 @@ Result<void> ProductionEngine::ApplyCommand(std::string_view command) {
         return SetGain(parts[1], db);
     }
     if (verb == "assign" && need(4).ok()) {
-        if (!graph_.HasNode(parts[1]))
+        if (!hasNode(parts[1]))
             return Error::Make(Err::Production_OutputNotFound, kModule,
                                "no output: " + parts[1]);
         return AssignOutputBuses(parts[1], parts[2], parts[3]);

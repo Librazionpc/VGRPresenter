@@ -268,9 +268,37 @@ ModalCard {
     // are applied (SearchService drops stale ones too — belt and braces).
     property int searchToken: 0
     property int resolveToken: 0
+    // The LAST resolved word list for the current query (the async answer), and
+    // whether Tab is waiting for one. Tab needs the engine's corrections to
+    // rewrite the box, and rewriting used to ask for them SYNCHRONOUSLY —
+    // resolveWords scans the whole vocabulary per misspelled token, on the
+    // interface thread, exactly what resolveWordsAsync was added to stop. Tab
+    // now reuses the list the hint was built from, and when that answer is
+    // still in flight it asks for one and applies it on arrival (below).
+    property var resolvedWords: []
+    property bool pendingTabFix: false
+    function fixQueryWith(words) {
+        let fixed = root.query.trim()
+        for (const w of words) {
+            if (w.changed !== true) continue   // spelled right: leave it
+            const parts = String(w.resolved).split(/\s+/)
+            fixed = fixed.replace(new RegExp("\\b" + w.typed + "\\b", "i"), parts.join(" "))
+        }
+        queryInput.text = fixed
+        root.query = fixed
+        root.refresh()
+    }
     function applyResolvedWords(token, words) {
         if (token !== root.resolveToken || root.query.trim() === "")
             return
+        root.resolvedWords = words
+        // A Tab pressed while this resolution was in flight: its correction is
+        // what the user asked for, so it lands now.
+        if (root.pendingTabFix) {
+            root.pendingTabFix = false
+            root.fixQueryWith(words)
+            return
+        }
         // The hint reads the corrections AND the half-typed last word's candidate
         // ladder (most confident first): "recieve -> receive" as before, and
         // "rec -> receive \u00b7 received \u00b7 record" while the word is still being
@@ -293,6 +321,8 @@ ModalCard {
         // OFF the GUI thread: a big query ("the", ~1,200 candidates) blocked
         // typing for hundreds of ms synchronously. Rows come back via
         // resultsReady; the empty query path clears inline as before.
+        root.resolvedWords = []      // never a correction from the PREVIOUS query
+        root.pendingTabFix = false
         if (root.query.trim() === "") {
             root.searchToken++
             root.resolveToken++
@@ -388,10 +418,23 @@ ModalCard {
         interval: 140
         onTriggered: root.refresh()
     }
+    // A published verse read landed: the hovered row re-asks for its full text (see
+    // the entry's `fullText` binding). Bumped by a signal rather than polled, so a
+    // row fills WHILE the pointer is still on it — which is the whole point of the
+    // preview.
+    property int verseRevision: 0
+
     // A Bible finishing its background load makes new results possible.
     Connections {
         target: SearchService
         function onBibleChanged() { if (root.shown && root.query !== "") root.refresh() }
+        // fullVerse is a PUBLISHED read (see SearchService's header): it answers ""
+        // for a verse nobody has read yet and queues the read, and this is what says
+        // the answer is in. Nothing re-asked at all before this existed — the
+        // service's own comment claimed "the dialog re-asks" and the dialog had no
+        // verseCached handler — so the preview stayed the row's two-line snippet
+        // until the pointer left the row and came back.
+        function onVerseCached(bibleId, bookId, chapter, verse) { root.verseRevision++ }
         // The async search's rows: applied only when this request is still the
         // latest (a fast typist's older keystrokes answer into the void).
         function onResultsReady(token, rows) {
@@ -464,17 +507,16 @@ ModalCard {
                 // friends". Only when a hint is showing (a well-spelled query has
                 // nothing to fix, and Tab keeps its normal focus behavior).
                 if (hint.text === "") return
-                const words = SearchService.resolveWords(root.query)
-                if (words.length === 0) return
-                let fixed = root.query.trim()
-                for (const w of words) {
-                    if (w.changed !== true) continue   // spelled right: leave it
-                    const parts = String(w.resolved).split(/\s+/)
-                    fixed = fixed.replace(new RegExp("\\b" + w.typed + "\\b", "i"), parts.join(" "))
+                // The words the hint was built from, when they have landed.
+                if (root.resolvedWords.length > 0) {
+                    root.fixQueryWith(root.resolvedWords)
+                    return
                 }
-                queryInput.text = fixed
-                root.query = fixed
-                root.refresh()
+                // Still resolving: ask, and let the answer do the rewrite (see
+                // applyResolvedWords). No synchronous scan on this thread.
+                root.pendingTabFix = true
+                root.resolveToken++
+                SearchService.resolveWordsAsync(root.query, root.resolveToken)
             }
 
             Text {
@@ -591,6 +633,9 @@ ModalCard {
 
             delegate: Column {
                 id: entry
+                // The hook the self-test hovers a specific row by (it reads the
+                // preview off the item itself — see Main.qml's rank scenario).
+                objectName: "selfTestQuickRow" + index
                 required property var modelData
                 required property int index
                 readonly property var info: root.kindInfo[modelData.kind] || root.kindInfo["show"]
@@ -615,7 +660,34 @@ ModalCard {
                 // chapter synchronously on hover can block the UI behind an
                 // in-flight library search and make a result click look like a
                 // crash.
-                property string fullText: String(modelData.fullText ?? "")
+                // The hover preview as a BINDING on the published read: it asks
+                // while the pointer is on the row, and re-asks when a verse read
+                // lands (verseRevision) or when the row's own data changes. The old
+                // shape fetched once into this property from the hover handler, and
+                // since fullVerse answers "" while its worker read is in flight, a
+                // cold row showed its snippet for as long as the pointer stayed on
+                // it. Rows that already carry the full passage (modelData.fullText —
+                // a Bible reference hit) keep it, and an unhovered row reads exactly
+                // as it did before the text was ever fetched.
+                property string fullText: {
+                    root.verseRevision
+                    const seeded = String(modelData.fullText ?? "")
+                    if (!rowHover.hovered || !isLocatedVerse)
+                        return seeded
+                    // A sermon paragraph (or the pair a spanned hit needs) comes from
+                    // the library; a verse from SearchService.fullVerse.
+                    if (modelData.kind === "table")
+                        return TheTableService.paragraphPair(modelData.bookId, modelData.chapter,
+                                                             modelData.verse,
+                                                             modelData.spanned === true ? 2 : 1)
+                    // The published read first, the row's own passage while its answer
+                    // is in flight: fullVerse answers "" until its worker read lands
+                    // (and verseCached re-asks for it), so a hovered row must not drop
+                    // the text it was already carrying in the meantime.
+                    const asked = SearchService.fullVerse(modelData.bibleId, modelData.bookId,
+                                                          modelData.chapter, modelData.verse)
+                    return asked !== "" ? asked : seeded
+                }
                 width: parent.width
 
                 // Group header
@@ -747,25 +819,11 @@ ModalCard {
                     PositionHoverArea {
                         id: rowHover
                         anchors.fill: parent
+                        // The preview itself is the entry's `fullText` binding (it
+                        // needs the pointer's state, which the binding reads), so
+                        // hovering only moves the selection here.
                         onHoveredChanged: {
                             if (hovered) root.current = entry.index
-                            // Hover-preview: fetch once, keep it cached. Bible verses
-                            // through SearchService.fullVerse; sermon paragraphs through
-                            // TheTableService.paragraphPair (paragraph + the next one).
-                            if (hovered && entry.isLocatedVerse && entry.fullText === "") {
-                                if (entry.modelData.kind === "table")
-                                    // A spanned match (words across two paragraphs) previews
-                                    // BOTH; a normal hit previews its one paragraph.
-                                    entry.fullText = TheTableService.paragraphPair(entry.modelData.bookId,
-                                                                                   entry.modelData.chapter,
-                                                                                   entry.modelData.verse,
-                                                                                   entry.modelData.spanned === true ? 2 : 1)
-                                else
-                                    entry.fullText = SearchService.fullVerse(entry.modelData.bibleId,
-                                                                             entry.modelData.bookId,
-                                                                             entry.modelData.chapter,
-                                                                             entry.modelData.verse)
-                            }
                         }
                         onClicked: root.choose(entry.modelData)
                     }

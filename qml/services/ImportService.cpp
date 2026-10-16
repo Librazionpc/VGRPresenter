@@ -21,6 +21,7 @@
 #include <QImage>
 #include <QStandardPaths>
 #include <QFileInfo>
+#include <QThread>
 #include <QJSEngine>
 #include <QMetaObject>
 #include <QQmlEngine>
@@ -118,7 +119,10 @@ QVariantMap finish(const bi::ImportResult &result, const QString &formatName, bo
     if (saved > 0)
         ShowService::instance().refreshLibrary();
     if (bibles > 0)
-        emit SearchService::instance().bibleChanged();   // the Scripture tab lists the new Bible
+        // And with it the published id list is re-walked, so the new Bible is in
+        // `bibles` when bibleChanged arrives (see refreshBibles — hand-emitting the
+        // signal here announced a list that still held the ids from before).
+        SearchService::instance().refreshBibles();
 
     QString summary;
     if (saved > 0 && bibles > 0) summary = QObject::tr("Imported %n show(s) and %1 Bible(s).", "", saved).arg(bibles);
@@ -329,7 +333,7 @@ QVariantMap ImportService::importFiles(const QString &formatId, const QStringLis
             if (saved > 0)
                 ShowService::instance().refreshLibrary();
             if (bibles > 0)
-                emit SearchService::instance().bibleChanged();   // the Scripture tab lists the new Bible
+                SearchService::instance().refreshBibles();   // the new Bible lands in the published list (see the sync path above)
 
             QString summary;
             if (saved > 0 && bibles > 0) summary = QObject::tr("Imported %n show(s) and %1 Bible(s).", "", saved).arg(bibles);
@@ -377,62 +381,114 @@ QVariantMap ImportService::importText(const QString &text, const QString &name, 
     return answer;
 }
 
-QVariantMap ImportService::importClipboard()
-{
-    // READ THROUGH THE PLATFORM LAYER, not QClipboard. Two reasons, one of them
-    // the notice this path used to produce:
-    //   * the PAL's clipboard open WAITS OUT another process's write — a
-    //     screenshot posts a full-screen bitmap, which takes a moment, so a
-    //     first-attempt read fails on a machine doing nothing wrong; and
-    //   * Qt's own clipboard probing is what emits "Retrying to obtain
-    //     clipboard." when that happens, the amber "Application — ..." notice
-    //     the notification area had to learn to suppress. Qt is consulted only
-    //     when there is no platform layer at all (headless/test).
-    if (bps::platform::PlatformAccessor::Installed()) {
-        auto &clipboard = bps::platform::PlatformAccessor::Get().Clipboard();
-        // Text first: after copying a verse the clipboard holds words, and words
-        // are what this dialog's text import is for.
-        if (auto text = clipboard.ReadText(); text.ok() && !text.value().empty())
-            return importText(qstr(text.value()));
-        // A SCREENSHOT is the ordinary clipboard content on Windows — Win+Shift+S
-        // posts a bitmap and no text at all — so an image is not an error, it is
-        // the thing to import: it lands in the media library as a still source
-        // the operator can put on air.
-        auto image = clipboard.ReadImage();
-        if (image.ok() && !image.value().empty()) {
-            QString folder;
-            const QString path = saveClipboardImage(image.value(), &folder);
-            if (path.isEmpty())
-                return failure(tr("The screenshot on the clipboard could not be saved."));
-            // Already-added folders answer false; the rescan is what picks the
-            // new file up either way.
-            MediaLibraryService::instance().addFolderPath(folder);
-            MediaLibraryService::instance().rescan(folder);
-            const QString summary = tr("Screenshot added to your media library.");
-            EngineBridge::write(QStringLiteral("info"), QStringLiteral("Import"),
-                                summary + QLatin1Char(' ') + path);
-            EventBus::instance().notify(summary, QStringLiteral("success"), tr("Import"),
-                                        QStringLiteral("import.done"));
-            emit imported(0, 0);
-            return { { QStringLiteral("ok"), true }, { QStringLiteral("error"), QString() },
-                     { QStringLiteral("shows"), 0 }, { QStringLiteral("bibles"), 0 },
-                     { QStringLiteral("files"), 1 }, { QStringLiteral("warnings"), QStringList() },
-                     { QStringLiteral("firstShow"), QString() } };
-        }
-        if (image.error().code == bps::Err::Unsupported)
-            return failure(tr("The clipboard holds no text, and this platform cannot read "
-                              "clipboard images."));
-        return failure(tr("There is nothing on the clipboard to import."));
-    }
+struct ImportService::ClipboardPick {
+    enum class Kind { Text, Image, NoImageSupport, Empty } kind = Kind::Empty;
+    QString text;         // Kind::Text
+    QString imagePath;    // Kind::Image: the saved screenshot
+    QString imageFolder;  // ... and the folder it landed in
+};
 
-    // No platform layer (headless): Qt's own clipboard, best effort.
-    QClipboard *clipboard = QGuiApplication::clipboard();
-    const QString text = clipboard->text();
-    if (text.trimmed().isEmpty()) {
-        const QMimeData *data = clipboard->mimeData();
-        if (data != nullptr && data->hasImage())
-            return failure(tr("The clipboard holds an image (a screenshot), which needs the "
-                              "platform clipboard to be readable here."));
+// ASYNC, and it has to be. READ THROUGH THE PLATFORM LAYER, not QClipboard:
+// the PAL's clipboard open WAITS OUT another process's write (a screenshot
+// posts a full-screen bitmap, which takes a moment, so a first-attempt read
+// fails on a machine doing nothing wrong), and Qt's own probing is what emits
+// "Retrying to obtain clipboard." when that happens — the amber "Application
+// — ..." notice the notification area had to learn to suppress. Qt is
+// consulted only when there is no platform layer at all (headless/test).
+//
+// The read runs on a worker because that wait belongs to somebody else's
+// process: the interface thread has no business in it, and neither has the
+// screenshot's PNG encode (tens of megabytes of pixels). Only the library
+// notify and the emits need the interface thread — applyClipboardRead below.
+void ImportService::importClipboard()
+{
+    auto *runner = QThread::create([this] {
+        ClipboardPick pick;
+        if (bps::platform::PlatformAccessor::Installed()) {
+            auto &clipboard = bps::platform::PlatformAccessor::Get().Clipboard();
+            // Text first: after copying a verse the clipboard holds words, and
+            // words are what this dialog's text import is for.
+            if (auto text = clipboard.ReadText(); text.ok() && !text.value().empty()) {
+                pick.kind = ClipboardPick::Kind::Text;
+                pick.text = qstr(text.value());
+            } else {
+                // A SCREENSHOT is the ordinary clipboard content on Windows —
+                // Win+Shift+S posts a bitmap and no text at all — so an image
+                // is not an error, it is the thing to import: it lands in the
+                // media library as a still source the operator can put on air.
+                auto image = clipboard.ReadImage();
+                if (image.ok() && !image.value().empty()) {
+                    pick.kind = ClipboardPick::Kind::Image;
+                    QString folder;
+                    pick.imagePath = saveClipboardImage(image.value(), &folder);
+                    pick.imageFolder = folder;
+                } else if (image.error().code == bps::Err::Unsupported) {
+                    pick.kind = ClipboardPick::Kind::NoImageSupport;
+                }
+            }
+        } else {
+            // No platform layer (headless): Qt's own clipboard, best effort.
+            QClipboard *clipboard = QGuiApplication::clipboard();
+            const QString text = clipboard == nullptr ? QString() : clipboard->text();
+            if (!text.trimmed().isEmpty()) {
+                pick.kind = ClipboardPick::Kind::Text;
+                pick.text = text;
+            } else {
+                const QMimeData *data = clipboard == nullptr ? nullptr : clipboard->mimeData();
+                pick.kind = (data != nullptr && data->hasImage())
+                                ? ClipboardPick::Kind::NoImageSupport
+                                : ClipboardPick::Kind::Empty;
+            }
+        }
+        QMetaObject::invokeMethod(this, [this, pick] { applyClipboardRead(pick); },
+                                  Qt::QueuedConnection);
+    });
+    connect(runner, &QThread::finished, runner, &QObject::deleteLater);
+    runner->start();
+}
+
+// The interface thread's half: what the pick MEANS, said out loud and handed
+// back to the dialog. Everything here touches app state (the media library,
+// the notice bus, the emits), which is why the half that must stay there.
+void ImportService::applyClipboardRead(const ClipboardPick &pick)
+{
+    switch (pick.kind) {
+    case ClipboardPick::Kind::Text:
+        emit clipboardImported(importText(pick.text));
+        return;
+    case ClipboardPick::Kind::Image: {
+        if (pick.imagePath.isEmpty()) {
+            emit clipboardImported(failure(tr("The screenshot on the clipboard could not be saved.")));
+            return;
+        }
+        // Already-added folders answer false; the rescan is what picks the new
+        // file up either way.
+        MediaLibraryService::instance().addFolderPath(pick.imageFolder);
+        MediaLibraryService::instance().rescan(pick.imageFolder);
+        const QString summary = tr("Screenshot added to your media library.");
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("Import"),
+                            summary + QLatin1Char(' ') + pick.imagePath);
+        EventBus::instance().notify(summary, QStringLiteral("success"), tr("Import"),
+                                    QStringLiteral("import.done"));
+        emit imported(0, 0);
+        QVariantMap answer;
+        answer.insert(QStringLiteral("ok"), true);
+        answer.insert(QStringLiteral("error"), QString());
+        answer.insert(QStringLiteral("shows"), 0);
+        answer.insert(QStringLiteral("bibles"), 0);
+        answer.insert(QStringLiteral("files"), 1);
+        answer.insert(QStringLiteral("warnings"), QStringList());
+        answer.insert(QStringLiteral("firstShow"), QString());
+        emit clipboardImported(answer);
+        return;
     }
-    return importText(text);
+    case ClipboardPick::Kind::NoImageSupport:
+        emit clipboardImported(failure(tr("The clipboard holds no text, and this platform cannot "
+                                          "read clipboard images.")));
+        return;
+    case ClipboardPick::Kind::Empty:
+    default:
+        emit clipboardImported(failure(tr("There is nothing on the clipboard to import.")));
+        return;
+    }
 }

@@ -360,7 +360,13 @@ Result<void> LiveOutputController::StopLive() {
     // owner, no double-join, no thread-over-thread assignment.
     if (worker_.joinable())
         worker_.join();
-    return StopLiveTail();
+    // The tail runs with lifecycle_ HELD ON PURPOSE, and that is what makes it
+    // safe: it detaches the runtime under control_ and only then calls Close()
+    // (a provider call) — a start that slipped in while the gate was released
+    // would have the runtime it just bound torn down under it, which is the
+    // "press GO LIVE and immediately unpress" crash this gate was added for.
+    // The gate is the bound on the call; there is nowhere cheaper to put it.
+    return StopLiveTail();   // lock-ok: the lifecycle gate is what orders it against a concurrent start (the crash it prevents)
 }
 
 // The GUI-thread-safe stop: returns immediately, the join happens on a
@@ -376,7 +382,7 @@ void LiveOutputController::StopLiveAsync() {
         // Nothing running: still run the tail once — a stop arriving while
         // StartFrom* HELD the gate (queued behind it) must clean up whatever
         // that start half-built. lifecycle_ is held, so this is serialized.
-        (void)StopLiveTail();
+        (void)StopLiveTail();   // lock-ok: the lifecycle gate is what orders it against a concurrent start (see StopLive)
         return;
     }
     // Take the worker handle by moving it out under the gate — StopLive()'s
@@ -695,8 +701,12 @@ Result<void> LiveOutputController::RenderOnce() {
     }
     // THE OTHER LIVE OUTPUTS: one gated pass per entry of the engine's
     // live-output style set (best-effort — a failure in one pass never
-    // kills the main deck's frame).
-    RenderPerOutputPasses();
+    // kills the main deck's frame). Runs under control_ on purpose: the pass
+    // reads the runtime's compiled set (pres_->Runtime().Compiled(), the
+    // builder, the active slide) while the GUI thread's replace path rewrites
+    // exactly those members, so releasing the lock here would let a content
+    // replace tear the set out from under a pass mid-frame.
+    RenderPerOutputPasses();   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
 
     // frames_ is what LiveOutputService::pollTick() polls to decide whether
     // to bump frameRev (the QML image providers' cache-buster) — and

@@ -16,6 +16,10 @@ import VGRPresenterUI
 Item {
     id: root
 
+    // LAYOUT PROBE (VGR_LAYOUT_TEST): the media grid's own card churn (see DesignLibraryPane).
+    property int gridRowBuilds: 0
+    property int gridRowDrops: 0
+
     // A tile was clicked / double-clicked: { type: "image"|"video"|"audio", ref: path, name }.
     signal itemActivated(var item)
     signal itemOpened(var item)
@@ -574,6 +578,10 @@ Item {
             anchors.rightMargin: 10   // room for the scrollbar
             clip: true
             boundsBehavior: Flickable.StopAtBounds
+            // The engine hands this grid a new array per filter change, which is a
+            // model reset — see DesignLibraryPane's note on what that costs the
+            // cards and what the layout probe measured (and why reuseItems is not
+            // the fix for it).
             model: root.gridItems
 
             readonly property int columns: Math.max(2, Math.floor(width / 230))
@@ -583,6 +591,10 @@ Item {
 
             delegate: MediaTile {
                 required property var modelData
+                // LAYOUT PROBE (VGR_LAYOUT_TEST): how many tiles the grid built, and how
+                // many it threw away.
+                Component.onCompleted: root.gridRowBuilds++
+                Component.onDestruction: root.gridRowDrops++
                 width: grid.cellWidth
                 height: grid.cellHeight
                 name: modelData.name

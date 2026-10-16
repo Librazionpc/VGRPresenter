@@ -44,33 +44,39 @@ Result<void> RecoveryManager::RecordUnsavedWork(std::string_view projectId,
     item.detail = std::string(detail);
     item.timestampMs = MsNow();
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    items_.erase(std::remove_if(items_.begin(), items_.end(),
-                                [&](const RecoveryItem& x) {
-                                    return x.projectId == projectId &&
-                                           x.documentId == documentId && x.kind == item.kind;
-                                }),
-                 items_.end());
-    items_.push_back(item);
-    return Persist();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        items_.erase(std::remove_if(items_.begin(), items_.end(),
+                                    [&](const RecoveryItem& x) {
+                                        return x.projectId == projectId &&
+                                               x.documentId == documentId && x.kind == item.kind;
+                                    }),
+                     items_.end());
+        items_.push_back(item);
+    }
+    return Persist();   // takes the lock itself to read, and stores with it released
 }
 
 Result<void> RecoveryManager::ClearProject(std::string_view projectId) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    items_.erase(std::remove_if(items_.begin(), items_.end(),
-                                [&](const RecoveryItem& x) { return x.projectId == projectId; }),
-                 items_.end());
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        items_.erase(std::remove_if(items_.begin(), items_.end(),
+                                    [&](const RecoveryItem& x) { return x.projectId == projectId; }),
+                     items_.end());
+    }
     return Persist();
 }
 
 Result<void> RecoveryManager::Resolve(std::string_view itemId) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = std::find_if(items_.begin(), items_.end(),
-                           [&](const RecoveryItem& x) {
-                               return x.kind + ":" + x.projectId + ":" + x.documentId == itemId;
-                           });
-    if (it == items_.end()) return Ok();   // already resolved
-    items_.erase(it);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(items_.begin(), items_.end(),
+                               [&](const RecoveryItem& x) {
+                                   return x.kind + ":" + x.projectId + ":" + x.documentId == itemId;
+                               });
+        if (it == items_.end()) return Ok();   // already resolved
+        items_.erase(it);
+    }
     return Persist();
 }
 
@@ -87,6 +93,7 @@ bool RecoveryManager::DetectCrashedSession() {
                     prev.value().startedAtMs);
     item.timestampMs = MsNow();
 
+    bool added = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         bool hasCrash = false;
@@ -94,9 +101,10 @@ bool RecoveryManager::DetectCrashedSession() {
             if (x.kind == "crashed-session") hasCrash = true;
         if (!hasCrash) {
             items_.push_back(item);
-            (void)Persist();
+            added = true;
         }
     }
+    if (added) (void)Persist();   // stored with the lock RELEASED (see Persist)
     // Publish outside the lock: subscribers may call back into the engine.
     Logger::Instance().Warning("Crash recovery: unsaved work detected", "RecoveryManager");
     (void)EventBus::Instance().Publish(events::RecoveryAvailable{prev.value().activeProjectId,
@@ -125,9 +133,19 @@ size_t RecoveryManager::Count() const {
     return items_.size();
 }
 
-Result<void> RecoveryManager::Persist() {   // requires mutex_ held by the caller
+// Serializes the list and stores it. It takes the lock ITSELF to read the list
+// and calls the store AFTER releasing it: DatabaseManager is another engine
+// singleton, and a module lock held across a call into one is exactly what the
+// lock-scope rule forbids (Put is an in-memory map write, but the rule does not
+// get to depend on that, and the shape is DatabaseManager's own Flush(): build
+// under the lock, hand the bytes over outside it). Callers therefore no longer
+// call this with mutex_ held.
+Result<void> RecoveryManager::Persist() {
     json::Value::Array arr;
-    for (const auto& i : items_) arr.push_back(ItemToJson(i));
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& i : items_) arr.push_back(ItemToJson(i));
+    }
     return DatabaseManager::Instance().Put("recovery", "items", json::Value(std::move(arr)));
 }
 

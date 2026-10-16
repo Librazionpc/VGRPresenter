@@ -591,15 +591,21 @@ Result<std::string> FlowEngine::Load(std::string_view source, std::string_view f
     if (flow.id.empty())
         return Error::Make(Err::Flow_ValidationFailed, "FlowEngine", "flow id is missing");
 
+    std::string result;
+    std::size_t warningCount = 0;
+    {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (flows_.count(flow.id))
         return Error::Make(Err::Flow_AlreadyExists, "FlowEngine",
                            "flow already loaded: " + flow.id);
     auto warnings = Validate(flow);
     if (!warnings.ok()) return warnings.error();
-    const std::string result = flow.id;  // capture before move (std::string is moved-from below)
+    result = flow.id;  // capture before move (std::string is moved-from below)
+    warningCount = warnings.value();
     flows_[flow.id] = std::move(flow);
-    (void)EventBus::Instance().Publish(events::FlowValidated{result, warnings.value()});
+    }
+    // Published with mutex_ released: a subscriber may re-enter the engine.
+    (void)EventBus::Instance().Publish(events::FlowValidated{result, warningCount});
     return result;
 }
 
@@ -797,6 +803,10 @@ Result<void> FlowEngine::RunMacro(std::string_view name,
 // ===========================================================================
 Result<std::string> FlowEngine::Start(
     std::string_view flowId, const std::map<std::string, std::string, std::less<>>& vars) {
+    std::string execId;
+    std::string flowName;
+    bool waitsForTrigger = false;
+    {
     std::unique_lock<std::recursive_mutex> lock(mutex_);
     auto it = flows_.find(std::string(flowId));
     if (it == flows_.end())
@@ -811,7 +821,7 @@ Result<std::string> FlowEngine::Start(
     for (const auto& [k, v] : vars) exec.variables[k] = v;
     exec.state = FlowState::Running;
     exec.startedMs = NowMs();
-    std::string execId = exec.executionId;
+    execId = exec.executionId;
 
     // Trigger (docs/specs/26 §Triggers): an event trigger holds the flow until
     // its topic arrives; manual/time triggers start immediately.
@@ -827,16 +837,25 @@ Result<std::string> FlowEngine::Start(
 
     executions_[execId] = std::move(exec);
     executionCount_.fetch_add(1);
-    if (!waitTopic.empty()) return execId;
+    flowName = it->second.name;
+    waitsForTrigger = !waitTopic.empty();
+    }   // mutex_ released here
+    if (waitsForTrigger) return execId;
 
-    auto& stored = executions_[execId];
-    (void)EventBus::Instance().Publish(
-        events::FlowStarted{std::string(flowId), execId, it->second.name});
-    (void)Drain(lock, stored);
+    // Published with mutex_ released (a subscriber may re-enter the engine) and
+    // before the first nodes run, so the start event still leads the node events
+    // it triggers.
+    (void)EventBus::Instance().Publish(events::FlowStarted{std::string(flowId), execId, flowName});
+    {
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    auto storedIt = executions_.find(execId);
+    if (storedIt != executions_.end()) (void)Drain(lock, storedIt->second);
+    }
     return execId;
 }
 
 Result<void> FlowEngine::Pause(std::string_view executionId) {
+    {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = executions_.find(std::string(executionId));
     if (it == executions_.end())
@@ -845,11 +864,14 @@ Result<void> FlowEngine::Pause(std::string_view executionId) {
     if (it->second.state != FlowState::Running)
         return Error::Make(Err::Flow_InvalidState, "FlowEngine", "execution is not running");
     it->second.state = FlowState::Paused;
+    }
+    // Published with mutex_ released: a subscriber may re-enter the engine.
     (void)EventBus::Instance().Publish(events::FlowPaused{std::string(executionId)});
     return Ok();
 }
 
 Result<void> FlowEngine::Resume(std::string_view executionId) {
+    {
     std::unique_lock<std::recursive_mutex> lock(mutex_);
     auto it = executions_.find(std::string(executionId));
     if (it == executions_.end())
@@ -858,12 +880,19 @@ Result<void> FlowEngine::Resume(std::string_view executionId) {
     if (it->second.state != FlowState::Paused)
         return Error::Make(Err::Flow_InvalidState, "FlowEngine", "execution is not paused");
     it->second.state = FlowState::Running;
+    }   // mutex_ released here
+    // Published with mutex_ released, and before the resumed nodes run.
     (void)EventBus::Instance().Publish(events::FlowResumed{std::string(executionId)});
-    (void)Drain(lock, it->second);
+    {
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    auto resumedIt = executions_.find(std::string(executionId));
+    if (resumedIt != executions_.end()) (void)Drain(lock, resumedIt->second);
+    }
     return Ok();
 }
 
 Result<void> FlowEngine::Stop(std::string_view executionId) {
+    {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = executions_.find(std::string(executionId));
     if (it == executions_.end())
@@ -873,6 +902,8 @@ Result<void> FlowEngine::Stop(std::string_view executionId) {
         return Error::Make(Err::Flow_InvalidState, "FlowEngine", "execution is not active");
     it->second.state = FlowState::Stopped;
     it->second.waitingFor.clear();
+    }
+    // Published with mutex_ released: a subscriber may re-enter the engine.
     (void)EventBus::Instance().Publish(events::FlowStopped{std::string(executionId)});
     (void)EventBus::Instance().Publish(
         events::AutomationCancelled{std::string(executionId), "operator stop"});
@@ -882,6 +913,7 @@ Result<void> FlowEngine::Stop(std::string_view executionId) {
 Result<std::string> FlowEngine::Restart(std::string_view executionId) {
     std::string flowId;
     std::map<std::string, std::string, std::less<>> vars;
+    bool stopped = false;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         auto it = executions_.find(std::string(executionId));
@@ -891,14 +923,20 @@ Result<std::string> FlowEngine::Restart(std::string_view executionId) {
         flowId = it->second.flowId;
         vars = it->second.variables;
         it->second.state = FlowState::Stopped;
-        (void)EventBus::Instance().Publish(events::FlowStopped{std::string(executionId)});
+        stopped = true;
     }
+    // Published with mutex_ released: a subscriber may re-enter the engine.
+    if (stopped)
+        (void)EventBus::Instance().Publish(events::FlowStopped{std::string(executionId)});
     // Reuse the flow's defaults plus the current variable values. Start() takes
     // its own lock (and drains), so run it outside this one.
     return Start(flowId, vars);
 }
 
 Result<void> FlowEngine::Skip(std::string_view executionId) {
+    events::FlowStarted startEvent{"", "", ""};
+    bool hasStart = false;
+    {
     std::unique_lock<std::recursive_mutex> lock(mutex_);
     auto it = executions_.find(std::string(executionId));
     if (it == executions_.end())
@@ -921,17 +959,26 @@ Result<void> FlowEngine::Skip(std::string_view executionId) {
             }
             exec.waitNodeId.clear();
         } else {
-            // Start-trigger skip == manual start.
-            (void)EventBus::Instance().Publish(events::FlowStarted{exec.flowId, exec.executionId, ""});
+            // Start-trigger skip == manual start. Published with mutex_ released
+            // (below): a subscriber may re-enter the engine.
+            startEvent = events::FlowStarted{exec.flowId, exec.executionId, ""};
+            hasStart = true;
         }
-        (void)Drain(lock, exec);
+        // Drain (below) runs the next nodes; it needs the lock again.
+    } else if (exec.pc < exec.order.size()) {
+        FlowNode& cur = exec.order[exec.pc];
+        CompleteNode(lock, exec, cur, NodeState::Skipped, "skipped by operator");
+        exec.pc = AdvancePc(exec.order, exec.pc);
+    } else {
         return Ok();
     }
-    if (exec.pc >= exec.order.size()) return Ok();
-    FlowNode& cur = exec.order[exec.pc];
-    CompleteNode(lock, exec, cur, NodeState::Skipped, "skipped by operator");
-    exec.pc = AdvancePc(exec.order, exec.pc);
-    (void)Drain(lock, exec);
+    }   // mutex_ released here
+    if (hasStart) (void)EventBus::Instance().Publish(startEvent);
+    {
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    auto skipIt = executions_.find(std::string(executionId));
+    if (skipIt != executions_.end()) (void)Drain(lock, skipIt->second);
+    }
     return Ok();
 }
 
@@ -992,21 +1039,25 @@ Result<void> FlowEngine::Override(std::string_view executionId, std::string_view
 }
 
 Result<void> FlowEngine::EmergencyStop() {
+    std::vector<std::string> halted;
+    {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    size_t n = 0;
     for (auto& [id, exec] : executions_) {
         if (exec.state == FlowState::Running || exec.state == FlowState::Paused) {
             exec.state = FlowState::EmergencyStopped;
             exec.waitingFor.clear();
             exec.waitDeadlineMs = 0;
-            (void)EventBus::Instance().Publish(events::AutomationEmergencyStopped{id});
-            (void)EventBus::Instance().Publish(
-                events::FlowInterrupted{id, "emergency stop"});
-            ++n;
+            halted.push_back(id);
         }
     }
+    }
+    // Published with mutex_ released: a subscriber may re-enter the engine.
+    for (const auto& id : halted) {
+        (void)EventBus::Instance().Publish(events::AutomationEmergencyStopped{id});
+        (void)EventBus::Instance().Publish(events::FlowInterrupted{id, "emergency stop"});
+    }
     Logger::Instance().Warning(std::format("FlowEngine: emergency stop halted {} execution(s)",
-                                           n),
+                                           halted.size()),
                                "FlowEngine");
     return Ok();
 }
@@ -1383,18 +1434,22 @@ void FlowEngine::ProcessPendingDispatches() {
 // Event pump (docs/specs/26 §EventBus Integration)
 // ===========================================================================
 Result<size_t> FlowEngine::Notify(std::string_view eventTopic, std::string_view executionId) {
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
     size_t satisfied = 0;
     std::vector<std::string> toDrain;
+    std::vector<events::FlowStarted> starts;
+    {
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     for (auto& [id, exec] : executions_) {
         if (!executionId.empty() && id != executionId) continue;
         if (exec.state != FlowState::Running || exec.waitingFor != eventTopic) continue;
         exec.waitingFor.clear();
         exec.lastEventMs = NowMs();
         if (exec.waitNodeId.empty()) {
-            // Start-trigger wait resolved -> the flow officially starts.
+            // Start-trigger wait resolved -> the flow officially starts. The
+            // event is published with mutex_ released (below): a subscriber may
+            // re-enter the engine.
             auto fit = flows_.find(exec.flowId);
-            (void)EventBus::Instance().Publish(events::FlowStarted{
+            starts.push_back(events::FlowStarted{
                 exec.flowId, id, fit != flows_.end() ? fit->second.name : ""});
         } else {
             FlowNode* wnode = const_cast<FlowNode*>(FindNode(exec, exec.waitNodeId));
@@ -1409,9 +1464,15 @@ Result<size_t> FlowEngine::Notify(std::string_view eventTopic, std::string_view 
         ++satisfied;
         toDrain.push_back(id);
     }
+    }   // mutex_ released here
+    // Published with mutex_ released: a subscriber may re-enter the engine.
+    for (const auto& s : starts) (void)EventBus::Instance().Publish(s);
+    {
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     for (const auto& id : toDrain) {
         auto it = executions_.find(id);
         if (it != executions_.end()) (void)Drain(lock, it->second);
+    }
     }
     return satisfied;
 }
@@ -1482,6 +1543,9 @@ Result<FlowSnapshot> FlowEngine::Snapshot(std::string_view executionId) const {
 }
 
 Result<std::string> FlowEngine::Recover(const FlowSnapshot& snapshot) {
+    std::string execId;
+    bool resumeNow = false;
+    {
     std::unique_lock<std::recursive_mutex> lock(mutex_);
     auto fit = flows_.find(snapshot.flowId);
     if (fit == flows_.end())
@@ -1513,11 +1577,18 @@ Result<std::string> FlowEngine::Recover(const FlowSnapshot& snapshot) {
         rec.result = "ok";
         exec.history.push_back(std::move(rec));
     }
-    std::string execId = exec.executionId;
+    execId = exec.executionId;
     executions_[execId] = std::move(exec);
     executionCount_.fetch_add(1);
+    resumeNow = executions_[execId].state == FlowState::Running;
+    }   // mutex_ released here
+    // Published with mutex_ released: a subscriber may re-enter the engine.
     (void)EventBus::Instance().Publish(events::FlowRecovered{execId, snapshot.currentNodeId});
-    if (executions_[execId].state == FlowState::Running) (void)Drain(lock, executions_[execId]);
+    {
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    auto recIt = executions_.find(execId);
+    if (resumeNow && recIt != executions_.end()) (void)Drain(lock, recIt->second);
+    }
     return execId;
 }
 
@@ -1536,12 +1607,15 @@ Result<void> FlowEngine::SetVariable(std::string_view executionId, std::string_v
                                      std::string_view value) {
     if (std::string(name).empty())
         return Error::Make(Err::InvalidArgument, "FlowEngine", "variable name is empty");
+    {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = executions_.find(std::string(executionId));
     if (it == executions_.end())
         return Error::Make(Err::Flow_NotFound, "FlowEngine",
                            "execution not found: " + std::string(executionId));
     it->second.variables[std::string(name)] = std::string(value);
+    }
+    // Published with mutex_ released: a subscriber may re-enter the engine.
     (void)EventBus::Instance().Publish(events::VariableChanged{
         std::string(executionId), std::string(name), std::string(value)});
     return Ok();

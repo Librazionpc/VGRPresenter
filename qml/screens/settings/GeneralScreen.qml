@@ -79,6 +79,117 @@ Item {
              : String(category)
     }
 
+    // ---- Backups: the answers all arrive asynchronously ----------------------
+    // Every backup action copies or lists FILES, so SettingsService runs them on
+    // a worker and answers with a signal (see the header's backups section).
+    // These three fields are how this screen tracks what it asked for, so the
+    // notice the user reads is about the action they took.
+    property string restoreTarget: ""     // a show copy in flight (restoreFinished reports by target)
+    property string restoreName: ""       // what that copy was named
+    property string deletedBackupShow: "" // the row a Delete is waiting to answer for
+    // A "Back up now" run asks TWICE (the open show, then the selected
+    // categories), each answering with its own count: the notice waits for both.
+    property int backupRunAsked: 0
+    property int backupRunMade: 0
+    function backupNow() {
+        root.backupRunAsked = 0
+        root.backupRunMade = 0
+        if (ShowService.showPath !== "") {
+            root.backupRunAsked++
+            SettingsService.backupShow(ShowService.showPath)
+        }
+        root.backupRunAsked++
+        SettingsService.backupCategories()
+    }
+
+    // ---- What a crash on THIS machine would leave behind ----------------------
+    // The startup forensics probe's verdict (CrashHandler.h's
+    // VerifyForensicsTooling -> EngineBridge's crashTooling* properties), as the
+    // "Crash reports" row reads it. One place composes both halves of the row so
+    // the self-test asserts what is DRAWN rather than a second copy of the
+    // wording, and so the detail line is the probe's own sentence about what is
+    // broken instead of a summary of it.
+    function crashToolingLabel() {
+        const s = EngineBridge.crashToolingState
+        if (s === "incomplete")
+            return qsTr("Incomplete")
+        if (s === "ready")
+            return qsTr("Ready")
+        if (s === "skipped")
+            return qsTr("Not checked")
+        return qsTr("Checking…")
+    }
+    function crashToolingDetail() {
+        const s = EngineBridge.crashToolingState
+        if (s === "incomplete")
+            return EngineBridge.crashToolingProblem
+        if (s === "ready")
+            return qsTr("A crash or hang from this run can be captured and read.")
+        if (s === "skipped")
+            return qsTr("This launch skipped the check, so nothing is known about the tools that write a crash down.")
+        return qsTr("Checking that a crash or hang can be captured and read…")
+    }
+    // Is the verdict a fault (draws in the warning ink, not the muted one)?
+    readonly property bool crashToolingBroken: EngineBridge.crashToolingState === "incomplete"
+
+    Connections {
+        target: SettingsService
+        // How many NEW copies the last run made (one answer per run: the open
+        // show's, then the selected categories').
+        function onBackupMade(made) {
+            if (root.backupRunAsked === 0)
+                return   // an AUTOMATIC run's answer: not this screen's notice
+            root.backupRunMade += made
+            root.backupRunAsked--
+            if (root.backupRunAsked > 0)
+                return
+            const total = root.backupRunMade
+            root.backupRunMade = 0
+            EventBus.notify(total > 0 ? qsTr("Made %n new saved copy(s).", "", total)
+                                      : qsTr("Everything selected is already saved."),
+                            "info", qsTr("Backups"), "settings.backups.now")
+        }
+        function onAllBackupsListed(rows) { backupsBrowser.rows = rows }
+        // The set of backups changed: the browser refills, and a Delete this
+        // screen asked for says so now that the list has come back shorter.
+        function onBackupsChanged() {
+            backupsBrowser.reload()
+            if (root.deletedBackupShow !== "") {
+                const show = root.deletedBackupShow
+                root.deletedBackupShow = ""
+                EventBus.notify(qsTr("Deleted a backup of \"%1\".").arg(show),
+                                "info", qsTr("Backups"), "settings.backups.deleted")
+            }
+        }
+        // A restore finished. A category restore reports its own name; a show
+        // copy reports the path it was written to.
+        function onRestoreFinished(ok, what) {
+            const category = what === "settings" || what === "overlays" || what === "templates"
+            if (category) {
+                if (!ok) {
+                    EventBus.notify(qsTr("That backup could not be restored."), "error", qsTr("Backups"), "settings.backups.restore")
+                    return
+                }
+                backupsBrowser.reload()
+                EventBus.notify(qsTr("%1 was put back from its backup.").arg(root.backupCategoryLabel(what)),
+                                "info", qsTr("Backups"), "settings.backups.restored")
+                return
+            }
+            if (what === "" || what !== root.restoreTarget)
+                return
+            const name = root.restoreName
+            root.restoreTarget = ""
+            root.restoreName = ""
+            if (!ok) {
+                EventBus.notify(qsTr("That backup could not be restored."), "error", qsTr("Backups"), "settings.backups.restore")
+                return
+            }
+            ShowService.refreshLibrary()
+            backupsBrowser.reload()
+            EventBus.notify(qsTr("Restored \"%1\" as a new show.").arg(name), "info", qsTr("Backups"), "settings.backups.restored")
+        }
+    }
+
     Flickable {
         id: flick
         objectName: "selfTestGeneralFlick"
@@ -779,6 +890,71 @@ Item {
                 }
             }
 
+            // A label with a status pill on its right, and under it what that
+            // status MEANS ("Crash reports" below is its one user). Like PrefRow,
+            // but the right-hand side reports rather than controls, and the row
+            // grows with the detail: the probe's list of broken parts is a
+            // sentence, and a fixed row height clipped it.
+            component StatusRow: Column {
+                id: statusRow
+                property string label: ""
+                property string detail: ""
+                property string status: ""
+                property bool fault: false
+                property bool last: false
+                width: parent.width
+
+                Item {
+                    width: statusRow.width
+                    height: Math.max(52, detailText.implicitHeight + 24)
+
+                    Column {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Math.max(80, parent.width - pill.width - 16)
+                        spacing: 2
+
+                        Text {
+                            text: statusRow.label
+                            color: Theme.textPrimary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.textSm
+                        }
+                        Text {
+                            id: detailText
+                            objectName: "selfTestCrashToolingDetail"
+                            width: parent.width
+                            text: statusRow.detail
+                            color: statusRow.fault ? Theme.warningLight : Theme.textMuted
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.textSub
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+
+                    Pill {
+                        id: pill
+                        objectName: "selfTestCrashToolingPill"
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: statusRow.status
+                        // The warning pair on a fault, a neutral chip otherwise:
+                        // "Checking…" is not a problem, and neither is "Not
+                        // checked" (nothing asked it).
+                        tint: statusRow.fault
+                        baseColor: Theme.warning
+                        lightColor: Theme.warningLight
+                        fontSize: Theme.textSub
+                    }
+                }
+                Rectangle {
+                    visible: !statusRow.last
+                    x: 2
+                    width: statusRow.width - 2
+                    height: 1
+                    color: Theme.border
+                }
+            }
+
             // The OPEN SHOW's dated backups. The engine has always kept them (DataProtection's BackupStore)
             // and could list them (SettingsService.backupsOf), but nothing ever showed one - they were
             // write-only. This row is the read side: it lists them and hands one back as a NEW show.
@@ -807,28 +983,45 @@ Item {
                 // a timer, so there is no signal to bind to; reading on demand is always current).
                 property var backups: []
                 function refresh() {
-                    backupRow.backups = backupRow.fileStem !== "" ? SettingsService.backupsOf(backupRow.fileStem) : []
+                    // The list is built on a worker and arrives on backupsListed
+                    // (below) — this only asks; the row is emptied first so the
+                    // previous show's copies are never shown against this name.
+                    backupRow.backups = []
+                    if (backupRow.fileStem !== "")
+                        SettingsService.requestBackups(backupRow.fileStem)
                 }
                 Component.onCompleted: refresh()
                 Connections {
                     target: ShowService
                     function onShowChanged() { backupRow.refresh() }
                 }
+                Connections {
+                    target: SettingsService
+                    function onBackupsListed(showName, rows) {
+                        if (showName === backupRow.fileStem)
+                            backupRow.backups = rows
+                    }
+                    // A copy was made, deleted or restored: this row's own list
+                    // is one of the things that changed.
+                    function onBackupsChanged() { backupRow.refresh() }
+                }
 
                 // Stamp/size formatting lives on the root now (backupStampText /
                 // backupSizeText) — the all-shows browser formats the same way.
 
                 // Copies a backup out as a NEW library show; the show it came from is never touched.
+                // The copy runs on a worker, so the notice and the refresh follow
+                // when the engine reports it (onRestoreFinished on the screen root).
                 function restore(backupPath) {
                     const name = qsTr("%1 (backup)").arg(backupRow.title)
                     const target = ShowService.newLibraryShowPath("", name)
-                    if (target === "" || !SettingsService.restoreBackup(backupPath, target)) {
+                    if (target === "") {
                         EventBus.notify(qsTr("That backup could not be restored."), "error", qsTr("Backups"), "settings.backups.restore")
                         return
                     }
-                    ShowService.refreshLibrary()
-                    backupRow.refresh()
-                    EventBus.notify(qsTr("Restored \"%1\" as a new show.").arg(name), "info", qsTr("Backups"), "settings.backups.restored")
+                    root.restoreTarget = target
+                    root.restoreName = name
+                    SettingsService.restoreBackup(backupPath, target)
                 }
 
                 Item {
@@ -953,6 +1146,26 @@ Item {
                           sub: root.definitions["notifications.logLevel"].description; last: true }
             }
 
+            // Whether a crash or a hang on THIS machine can be written down and
+            // read afterwards (see crashToolingLabel above). It is a Settings
+            // fact — not a notice — because nothing is wrong with the app: what
+            // is missing is the tooling an installed build carries, and the one
+            // thing the user can do about it (reinstall, or run from a build
+            // that has it) is done from here. The verdict is probed at every
+            // launch on a worker, so this row reads "Checking…" for the first
+            // moments of a session and the truth from the moment it lands.
+            SettingsSection {
+                objectName: "selfTestCardStability"   // inset self-test grab target
+                title: qsTr("Crash reports")
+                StatusRow {
+                    label: qsTr("Crash and hang capture")
+                    status: root.crashToolingLabel()
+                    detail: root.crashToolingDetail()
+                    fault: root.crashToolingBroken
+                    last: true
+                }
+            }
+
             // A row with a label on the left and a small action button on the right.
             component ActionRow: Item {
                 id: actionRow
@@ -1039,8 +1252,13 @@ Item {
                     label: qsTr("Open the backups folder")
                     buttonText: qsTr("Open")
                     onActivated: {
-                        if (!SettingsService.openBackupDirectory())
+                        // The folder is prepared on a worker and opened from
+                        // there; only a not-yet-ready engine (no data directory)
+                        // has nothing to open.
+                        if (SettingsService.backupDirectory() === "")
                             EventBus.notify(qsTr("The backups folder is not ready yet."), "warning", qsTr("Backups"), "settings.backups.openFolder")
+                        else
+                            SettingsService.openBackupDirectory()
                     }
                 }
                 Rectangle {
@@ -1054,15 +1272,7 @@ Item {
                 ActionRow {
                     label: qsTr("Back up the open show and everything selected")
                     buttonText: qsTr("Back up now")
-                    onActivated: {
-                        let made = 0
-                        if (ShowService.showPath !== "" && SettingsService.backupShow(ShowService.showPath) !== "")
-                            ++made
-                        made += SettingsService.backupCategories()
-                        EventBus.notify(made > 0 ? qsTr("Made %n new saved copy(s).", "", made)
-                                                 : qsTr("Everything selected is already saved."),
-                                        "info", qsTr("Backups"), "settings.backups.now")
-                    }
+                    onActivated: root.backupNow()
                 }
             }
 
@@ -1101,9 +1311,10 @@ Item {
 
     // ---- The all-shows backups browser --------------------------------------
     // EVERY backup the engine holds (the modal the "All backups" card opens),
-    // newest first. Read on each open — backups are taken on a timer, so there
-    // is no signal to bind to. Restore hands a copy back as a NEW show; Delete
-    // removes the copy after the confirm dialog below.
+    // newest first. Listed on each open and re-listed whenever the set changes
+    // (SettingsService.allBackupsListed / backupsChanged — the listing walks a
+    // folder, so it runs on a worker). Restore hands a copy back as a NEW show;
+    // Delete removes the copy after the confirm dialog below.
     ModalCard {
         id: backupsBrowser
         title: qsTr("Backups")
@@ -1119,7 +1330,9 @@ Item {
         // The settings/overlays/templates row a Restore is waiting to confirm.
         property var pendingRestore: null
 
-        function reload() { backupsBrowser.rows = SettingsService.allBackups() }
+        // Rows are listed on a worker and arrive on allBackupsListed (the
+        // screen's Connections below), so this only asks.
+        function reload() { SettingsService.requestAllBackups() }
         onShownChanged: if (backupsBrowser.shown) backupsBrowser.reload()
 
         // A category copy (settings / overlays / templates) rolls back OVER its
@@ -1135,13 +1348,13 @@ Item {
             }
             const name = qsTr("%1 (backup)").arg(row.show)
             const target = ShowService.newLibraryShowPath("", name)
-            if (target === "" || !SettingsService.restoreBackup(row.path, target)) {
+            if (target === "") {
                 EventBus.notify(qsTr("That backup could not be restored."), "error", qsTr("Backups"), "settings.backups.restore")
                 return
             }
-            ShowService.refreshLibrary()
-            backupsBrowser.reload()
-            EventBus.notify(qsTr("Restored \"%1\" as a new show.").arg(name), "info", qsTr("Backups"), "settings.backups.restored")
+            root.restoreTarget = target
+            root.restoreName = name
+            SettingsService.restoreBackup(row.path, target)
         }
 
         // Puts a settings/overlays/templates copy back in place (the engine also
@@ -1149,31 +1362,31 @@ Item {
         function restoreCategory(row) {
             if (!row)
                 return
-            if (!SettingsService.restoreCategoryBackup(row.path)) {
-                EventBus.notify(qsTr("That backup could not be restored."), "error", qsTr("Backups"), "settings.backups.restore")
-                return
-            }
-            backupsBrowser.reload()
-            EventBus.notify(qsTr("%1 was put back from its backup.").arg(root.backupCategoryLabel(row.category)),
-                            "info", qsTr("Backups"), "settings.backups.restored")
+            // The copy and the reload run on a worker; restoreFinished answers
+            // by category name (root's onRestoreFinished).
+            SettingsService.restoreCategoryBackup(row.path)
         }
 
         // Reveals THIS copy in the OS file manager (Explorer/Finder select it;
         // a desktop without that opens the folder).
         function showInFolder(row) {
-            if (!row || SettingsService.showBackupInFolder(row.path))
+            if (!row)
                 return
-            EventBus.notify(qsTr("That backup could not be shown in the file manager."),
-                            "warning", qsTr("Backups"), "settings.backups.showInFolder")
+            // Best effort, and already off-thread: the reveal either happens of
+            // the file manager's own accord or not at all (there is no answer
+            // left to report — the existence check and the shell hand-off are
+            // the worker's and the OS's business now).
+            SettingsService.showBackupInFolder(row.path)
         }
 
         function remove(row) {
-            if (row && SettingsService.deleteBackup(row.path)) {
-                backupsBrowser.reload()
-                EventBus.notify(qsTr("Deleted a backup of \"%1\".").arg(row.show), "info", qsTr("Backups"), "settings.backups.deleted")
-            } else {
-                EventBus.notify(qsTr("That backup could not be deleted."), "error", qsTr("Backups"), "settings.backups.deleteRefused")
-            }
+            if (!row)
+                return
+            // The delete and the refill happen on workers: the notice fires when
+            // the list comes back shorter (onBackupsChanged below), and a
+            // refused delete reports itself through the engine's own message.
+            root.deletedBackupShow = String(row.show)
+            SettingsService.deleteBackup(row.path)
         }
 
         Column {

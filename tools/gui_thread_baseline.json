@@ -1,0 +1,4 @@
+{
+  "note": "EMPTY ON PURPOSE (2026-10-15). Every entry this file recorded has been FIXED, not waived — the three groups in its old note (the audio/stream meter tap open-close surface, the device-enumeration entry points that reached the SDI provider's inline COM walk, and the NDI firewall pair) now split exactly the way the video taps were split in §3.9/§3.11 of docs/gui_thread_audit.md: the bridge's own bookkeeping stays on the caller's thread and each device call is queued on a worker, with its verdict marshalled back onto the interface thread (§6.5). With the ledger empty, a new HARD finding fails the build immediately, which is the point of the guard. `--update-baseline` is a STAGING tool, not an allowance: it records whatever the run found — including the SOFT inventory, which is by design not debt — and a key here would also hide that entry point if it later grew a hard call. Do not re-add one without the same treatment §6.5 got.",
+  "keys": []
+}

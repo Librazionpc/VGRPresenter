@@ -559,7 +559,7 @@ void TestProductionAudioMixer() {
 
     // ---- the L/R channel trim must REACH THE ENGINE'S OUTPUT -------------
     // The channel buttons a source card shows write uiChannelGain<channel> on
-    // the source node (AudioInputListModel::pushEffectsToGraph). This is the
+    // the source node (AudioInputListModel::pushEffectsOffThread). This is the
     // behavioural proof that the trim travels all the way down into the mixed
     // frames AND into the program meter the output tiles render — closing one
     // side really silences that side of the output, on EITHER side.

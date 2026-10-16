@@ -92,12 +92,35 @@ Result<void> BibleEngine::Initialize() {
                     store = std::move(parsed.value());
                     haveStore = true;
                 } else {
-                    // SELF-HEALING: the operator's notes and highlights live in
-                    // this one file — a damaged store is set aside as evidence
+                    // SELF-HEALING: a damaged corpus is set aside as evidence
                     // and the engine comes up empty instead of failing the
                     // boot, and the next save rebuilds it at the same path.
+                    // (User data lives in its own file since schema 3, so a
+                    // damaged corpus cannot take the notes with it.)
                     (void)recovery::SetAsideDamagedDocument(
                         storePath_, "BibleEngine", parsed.error().message);
+                }
+            }
+        }
+    }
+    // The USER-DATA sidecar (schema 3) is read and parsed out here for the same
+    // reason the corpus is: the read is a PAL call and the parse is work over
+    // the operator's notes, and neither may run under mutex_ (LoadStoreLocked
+    // only INSTALLS what this hands it). A missing sidecar means a schema <= 2
+    // store — user data still inside the corpus — or a first boot.
+    json::Value userStore;
+    bool haveUserStore = false;
+    if (!userDataPath_.empty()) {
+        auto& fsys = platform::PlatformAccessor::Get().Filesystem();
+        if (fsys.Exists(userDataPath_)) {
+            auto body = fsys.ReadText(userDataPath_);
+            if (body.ok()) {
+                if (auto parsed = json::Parse(body.value()); parsed.ok()) {
+                    userStore = std::move(parsed.value());
+                    haveUserStore = true;
+                } else {
+                    (void)recovery::SetAsideDamagedDocument(
+                        userDataPath_, "BibleEngine", parsed.error().message);
                 }
             }
         }
@@ -120,7 +143,7 @@ Result<void> BibleEngine::Initialize() {
         // evidence above; both leave the library empty, exactly like a first run.
         size_t restored = 0;
         if (haveStore) {
-            if (auto loaded = LoadStoreLocked(store); loaded.ok())
+            if (auto loaded = LoadStoreLocked(store, haveUserStore ? &userStore : nullptr); loaded.ok())
                 restored = loaded.value();
             else
                 Logger::Instance().Warning("BibleEngine: bible store restore failed: " +
@@ -135,6 +158,24 @@ Result<void> BibleEngine::Initialize() {
             Logger::Instance().Info(std::format("BibleEngine: restored {} bible(s) from store",
                                                 bibles_.size()), "BibleEngine");
         }
+    }
+    // THE SCHEMA-3 MIGRATION: this boot read the user data out of the CORPUS
+    // (schema <= 2). Write the sidecar from memory now — built under the lock,
+    // written after it — so the corpus can stop carrying what the mark path
+    // used to rewrite. Best effort on purpose: a failed write leaves
+    // userDataFileWritten_ false, the corpus keeps carrying the data, and the
+    // next boot (or the next mark) tries again.
+    if (userDataFromCorpus_.load() && !haveUserStore && !userDataPath_.empty()) {
+        std::string sidecar;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            sidecar = BuildUserDataJsonLocked();
+        }
+        if (auto saved = WriteUserDataFile(sidecar); saved.ok())
+            userDataFileWritten_.store(true);
+        else
+            Logger::Instance().Warning("BibleEngine: user-data sidecar write failed: " +
+                                           saved.error().message, "BibleEngine");
     }
     if (!reindex.empty()) {
         // Join/start with mutex_ RELEASED: IndexBible takes that lock itself,
@@ -214,14 +255,26 @@ Result<void> BibleEngine::Reload() {
 }
 
 Result<void> BibleEngine::Reset() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    notes_.clear();
-    highlights_.clear();
-    collections_.clear();
-    for (auto& [id, bible] : bibles_) bible.verses.clear();
-    bibles_.clear();
-    // An emptied library persists as an empty store (no path = tests, no-op).
-    if (!storePath_.empty()) (void)SaveStoreLocked();
+    std::string storeJson;
+    std::string userJson;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        notes_.clear();
+        highlights_.clear();
+        collections_.clear();
+        for (auto& [id, bible] : bibles_) bible.verses.clear();
+        bibles_.clear();
+        // An emptied library persists as an empty store (no path = tests, no-op).
+        // BUILT here, WRITTEN below with the lock released (see the header).
+        if (!storePath_.empty()) storeJson = BuildStoreJsonLocked();
+        if (userDataFileWritten_.load()) userJson = BuildUserDataJsonLocked();
+    }
+    if (auto saved = WriteUserDataFile(userJson); !saved.ok())
+        Logger::Instance().Warning("BibleEngine: user-data store save failed: " +
+                                       saved.error().message, "BibleEngine");
+    if (auto saved = WriteStoreFile(storeJson); !saved.ok())
+        Logger::Instance().Warning("BibleEngine: bible store save failed: " +
+                                       saved.error().message, "BibleEngine");
     return Ok();
 }
 
@@ -337,6 +390,8 @@ Result<std::string> BibleEngine::Import(std::string_view source, std::string_vie
 
     BibleVersion oldBible;
     bool hadOld = false;
+    std::string storeJson;
+    std::string userJson;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = bibles_.find(bible.metadata.id);
@@ -359,13 +414,23 @@ Result<std::string> BibleEngine::Import(std::string_view source, std::string_vie
             highlights_.erase(bible.metadata.id);
         }
         bibles_[bible.metadata.id] = bible;
-        // Persist the whole store so the import survives a restart (no-op
-        // while no store path is set — unit tests stay in memory).
-        if (!storePath_.empty()) {
-            if (auto saved = SaveStoreLocked(); !saved.ok())
-                Logger::Instance().Warning("BibleEngine: bible store save failed: " +
-                                               saved.error().message, "BibleEngine");
-        }
+        // Persist the whole corpus so the import survives a restart (no-op
+        // while no store path is set — unit tests stay in memory). The JSON is
+        // BUILT here and WRITTEN below, with mutex_ released: the corpus is
+        // megabytes of verse text and WriteAtomic is a PAL call.
+        if (!storePath_.empty()) storeJson = BuildStoreJsonLocked();
+        // A REPLACED translation's notes and highlights were just dropped in
+        // here: when the sidecar is their home, it has to follow — otherwise the
+        // notes drawer keeps offering notes for a text that is gone.
+        if (hadOld && userDataFileWritten_.load()) userJson = BuildUserDataJsonLocked();
+    }
+    if (auto saved = WriteUserDataFile(userJson); !saved.ok())
+        Logger::Instance().Warning("BibleEngine: user-data store save failed: " +
+                                       saved.error().message, "BibleEngine");
+    if (!storeJson.empty()) {
+        if (auto saved = WriteStoreFile(storeJson); !saved.ok())
+            Logger::Instance().Warning("BibleEngine: bible store save failed: " +
+                                           saved.error().message, "BibleEngine");
     }
 
     // Replacing a translation: drop its stale index documents first so the
@@ -465,6 +530,8 @@ Result<size_t> BibleEngine::IndexBible(const BibleVersion& bible,
 
 Result<void> BibleEngine::RemoveBible(std::string_view bibleId) {
     BibleVersion removed;
+    std::string storeJson;
+    std::string userJson;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = bibles_.find(std::string(bibleId));
@@ -483,13 +550,18 @@ Result<void> BibleEngine::RemoveBible(std::string_view bibleId) {
             highlights_.erase(std::string(bibleId));
         }
         // Keep the store in sync so a removed translation stays removed after
-        // a restart (no-op while no store path is set).
-        if (!storePath_.empty()) {
-            if (auto saved = SaveStoreLocked(); !saved.ok())
-                Logger::Instance().Warning("BibleEngine: bible store save failed: " +
-                                               saved.error().message, "BibleEngine");
-        }
+        // a restart (no-op while no store path is set). Built under the lock,
+        // written after it is released.
+        if (!storePath_.empty()) storeJson = BuildStoreJsonLocked();
+        // The removal dropped this translation's user data: its sidecar follows.
+        if (userDataFileWritten_.load()) userJson = BuildUserDataJsonLocked();
     }
+    if (auto saved = WriteUserDataFile(userJson); !saved.ok())
+        Logger::Instance().Warning("BibleEngine: user-data store save failed: " +
+                                       saved.error().message, "BibleEngine");
+    if (auto saved = WriteStoreFile(storeJson); !saved.ok())
+        Logger::Instance().Warning("BibleEngine: bible store save failed: " +
+                                       saved.error().message, "BibleEngine");
     // Drop this translation's documents from the global search index.
     auto& search = search::SearchEngine::Instance();
     for (const auto& v : removed.verses) (void)search.RemoveDocument(DocId(bibleId, v));
@@ -501,8 +573,26 @@ Result<void> BibleEngine::RemoveBible(std::string_view bibleId) {
 // Installed-bible persistence (docs/specs/24 §Import — restart survival)
 // ---------------------------------------------------------------------------
 void BibleEngine::SetStorePath(std::string_view path) {
+    std::string store(path);
+    // The user-data SIDECAR lives beside the corpus and is named after it
+    // ("bibles.json" -> "bibles.userdata.json"), so one path from the Kernel
+    // still configures both and no other module's file can collide with it.
+    // Derived here, outside the lock: path splitting is pure string work, and
+    // the locked scope stays a two-assignment scope.
+    std::string sidecar;
+    if (!store.empty()) {
+        static const std::string kJson = ".json";
+        std::string base = store;
+        if (base.ends_with(kJson)) base.erase(base.size() - kJson.size());
+        sidecar = base + ".userdata.json";
+    }
     std::lock_guard<std::mutex> lock(mutex_);
-    storePath_ = std::string(path);
+    storePath_ = std::move(store);
+    userDataPath_ = std::move(sidecar);
+    // A new location is a new layout to establish: until a sidecar is written
+    // THERE, the corpus at that path carries the user data (see BuildStoreJsonLocked).
+    userDataFileWritten_.store(false);
+    userDataFromCorpus_.store(false);
 }
 
 // One bible -> JSON. Only the canonical shape persists: metadata + books +
@@ -628,7 +718,7 @@ void BibleEngine::FlattenVersesLocked(BibleVersion& bible) const {
     }
 }
 
-Result<size_t> BibleEngine::LoadStoreLocked(const json::Value& root) {
+Result<size_t> BibleEngine::LoadStoreLocked(const json::Value& root, const json::Value* userRoot) {
     bibles_.clear();
     size_t count = 0;
     if (const json::Value* arr = root.Find("bibles"); arr && arr->asArray()) {
@@ -640,29 +730,132 @@ Result<size_t> BibleEngine::LoadStoreLocked(const json::Value& root) {
             ++count;
         }
     }
-    // User data rides in the same file (schema 2): restore notes, highlights,
-    // and collections with the bibles they belong to. Absent = first boot or
-    // schema 1, both of which mean "no user data yet".
-    ReadUserDataLocked(root);
+    // USER DATA: the SIDECAR is its home (schema 3) when it is there — the
+    // corpus's own copy is then ignored, however old it is. Without a sidecar
+    // the corpus's arrays are consumed (schema <= 2) and the corpus is REMEMBERED
+    // as their home, so the next corpus save keeps carrying them until the
+    // migration write lands (a note must never be lost to a failed write).
+    if (userRoot) {
+        ReadUserDataLocked(*userRoot);
+        userDataFileWritten_.store(true);
+        userDataFromCorpus_.store(false);
+    } else {
+        const bool carried = root.Find("notes") != nullptr || root.Find("highlights") != nullptr
+                             || root.Find("collections") != nullptr;
+        ReadUserDataLocked(root);
+        userDataFromCorpus_.store(carried);
+    }
     return count;
 }
 
-Result<void> BibleEngine::SaveStoreLocked() {
-    if (storePath_.empty()) return Ok();
+std::string BibleEngine::BuildStoreJsonLocked() {
+    if (storePath_.empty()) return std::string();
     using J = json::Value;
     J::Array arr;
     for (const auto& [id, bible] : bibles_)
         arr.push_back(BibleToJsonLocked(bible));
     J::Object root;
-    root["schema"] = J::Number(2);
+    // schema 3 = user data lives in the sidecar; schema 2 = THIS file still
+    // carries it, which is true exactly until the sidecar's first successful
+    // write (userDataFileWritten_). A bible is ~4 MB of verse text, so that
+    // switch is what lets a mark stop rewriting megabytes.
+    const bool corpusCarriesUserData = !userDataFileWritten_.load();
+    root["schema"] = J::Number(corpusCarriesUserData ? 2 : 3);
     root["bibles"] = J(std::move(arr));
-    WriteUserDataLocked(root);   // the store is ONE file: never orphan user data
+    if (corpusCarriesUserData)
+        WriteUserDataLocked(root);   // still ONE file: never orphan user data
+    return J(std::move(root)).ToString();
+}
 
-    // ATOMIC (WriteAtomic creates the parent dir too): the store holds the user's
-    // highlights and notes — written after every mark, so it is precisely the file
-    // an interrupted save would damage.
+Result<void> BibleEngine::WriteStoreFile(const std::string& json) {
+    if (storePath_.empty() || json.empty()) return Ok();
+    // ATOMIC (WriteAtomic creates the parent dir too). Called with mutex_
+    // RELEASED — see the header: this PAL write is what used to park every
+    // scripture read behind an import.
     auto& platform = platform::PlatformAccessor::Get();
-    return platform.Filesystem().WriteAtomic(storePath_, J(std::move(root)).ToString());
+    const auto t0 = std::chrono::steady_clock::now();
+    auto written = platform.Filesystem().WriteAtomic(storePath_, json);
+    // Logged on the same terms as the sidecar write below, and for the same
+    // reason: this is the MEGABYTES-per-change path, so a mark that ever reads
+    // or rewrites the corpus again is visible in the log as a corpus write next
+    // to the mark — where it used to be invisible (the two writes were the same
+    // line of code). `tools/selftest/run_mark_sidecar_test.sh` counts both after
+    // a mark: sidecar writes go up, corpus writes stay at zero.
+    if (written.ok())
+        Logger::Instance().Info(
+            "BibleEngine: store written (corpus) in " +
+                std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - t0)
+                                   .count()) +
+                " ms (" + std::to_string(json.size()) + " bytes)",
+            "BibleEngine");
+    return written;
+}
+
+// --- User-data <-> JSON -----------------------------------------------------
+
+// The SIDECAR document (notes, highlights, collections) — the only thing a mark
+// on a verse writes, and kilobytes rather than the corpus's megabytes.
+// Mutex-HELD by contract: it walks the user-data maps. The write is
+// WriteUserDataFile below, called with the lock released.
+std::string BibleEngine::BuildUserDataJsonLocked() {
+    const auto t0 = std::chrono::steady_clock::now();
+    using J = json::Value;
+    J::Object root;
+    root["schema"] = J::Number(1);   // the sidecar's own schema, not the corpus's
+    WriteUserDataLocked(root);
+    std::string out = J(std::move(root)).ToString();
+    lastUserDataBuildMs_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - t0)
+                                   .count());
+    lastUserDataBytes_.store(out.size());
+    return out;
+}
+
+Result<void> BibleEngine::WriteUserDataFile(const std::string& json) {
+    if (userDataPath_.empty() || json.empty()) return Ok();
+    auto& platform = platform::PlatformAccessor::Get();
+    // ATOMIC, like the corpus: the sidecar holds the user's notes and
+    // highlights, so an interrupted save must never damage it.
+    const auto t0 = std::chrono::steady_clock::now();
+    auto written = platform.Filesystem().WriteAtomic(userDataPath_, json);
+    lastUserDataWriteMs_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - t0)
+                                   .count());
+    return written;
+}
+
+BibleEngine::UserDataWriteStats BibleEngine::LastUserDataWrite() const {
+    UserDataWriteStats s;
+    s.lastBuildMs = lastUserDataBuildMs_.load();
+    s.lastWriteMs = lastUserDataWriteMs_.load();
+    s.lastWriteBytes = lastUserDataBytes_.load();
+    s.writes = userDataWrites_.load();
+    return s;
+}
+
+void BibleEngine::PersistUserDataSidecar(const std::string& json) {
+    if (auto saved = WriteUserDataFile(json); saved.ok()) {
+        // The layout only turns over once the data is REALLY on disk.
+        userDataFileWritten_.store(true);
+        // One line per mark, with the numbers the guarantee is about. The corpus
+        // is not read, not parsed and not rewritten by this path at all (the
+        // sidecar is the user data's home from the first successful write on),
+        // so the two figures below ARE the whole cost of the click — and the
+        // click is a QML call on the interface thread.
+        const auto stats = LastUserDataWrite();
+        Logger::Instance().Info(
+            "BibleEngine: user-data sidecar written in " +
+                std::to_string(stats.lastWriteMs) + " ms (" +
+                std::to_string(stats.lastWriteBytes) + " bytes, JSON built in " +
+                std::to_string(stats.lastBuildMs) + " ms; corpus untouched, write " +
+                std::to_string(stats.writes + 1) + ")",
+            "BibleEngine");
+        userDataWrites_.fetch_add(1);
+    } else {
+        Logger::Instance().Warning("BibleEngine: user-data save failed: " +
+                                       saved.error().message, "BibleEngine");
+    }
 }
 
 // --- User-data <-> JSON (schema 2) -----------------------------------------
@@ -774,36 +967,6 @@ void BibleEngine::ReadUserDataLocked(const json::Value& root) {
                 }
         }
     }
-}
-
-// Save ONLY the user-data half: load the store's bible array from disk and
-// rewrite the file with those bibles plus fresh user data. Beats threading a
-// snapshot into SaveStoreLocked() and re-serializing megabytes of verse text
-// on every highlight toggle.
-Result<void> BibleEngine::SaveUserDataLocked() {
-    if (storePath_.empty()) return Ok();
-    auto& platform = platform::PlatformAccessor::Get();
-    using J = json::Value;
-    J::Array bibles;
-    if (auto body = platform.Filesystem().ReadText(storePath_); body.ok()) {
-        if (auto parsed = json::Parse(body.value()); parsed.ok())
-            if (const J* arr = parsed.value().Find("bibles"); arr && arr->asArray())
-                bibles = *arr->asArray();
-    }
-    if (bibles.empty() && !bibles_.empty()) {
-        // Disk unreadable/corrupt: serialize from memory instead — a user-data
-        // save must never be the write that wipes installed bibles (slow path,
-        // and only on the happy path's failure mode).
-        for (const auto& [id, bible] : bibles_) bibles.push_back(BibleToJsonLocked(bible));
-    }
-    J::Object root;
-    root["schema"] = J::Number(2);
-    root["bibles"] = J(std::move(bibles));
-    WriteUserDataLocked(root);
-
-    (void)platform.Filesystem().CreateDirectories(
-        std::filesystem::path(storePath_).parent_path().generic_string());
-    return platform.Filesystem().WriteAtomic(storePath_, J(std::move(root)).ToString());
 }
 
 std::vector<std::string> BibleEngine::BibleIds() const {
@@ -1164,18 +1327,28 @@ Result<void> BibleEngine::AddNote(std::string_view bibleId, const PassageRef& re
     note.createdMs = note.modifiedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                           std::chrono::system_clock::now().time_since_epoch())
                                           .count();
-    std::lock_guard<std::mutex> lock(mutex_);
-    notes_[std::string(bibleId) + "|" + RefKey(ref)].push_back(std::move(note));
-    (void)SaveUserDataLocked();
+    std::string userJson;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        notes_[std::string(bibleId) + "|" + RefKey(ref)].push_back(std::move(note));
+        userJson = BuildUserDataJsonLocked();
+    }
+    // The write leaves the lock AND the corpus: a note is kilobytes, and the
+    // click that made it is a QML call on the interface thread.
+    PersistUserDataSidecar(userJson);
     return Ok();
 }
 
 Result<void> BibleEngine::RemoveNote(std::string_view bibleId, const PassageRef& ref) {
     if (!ref.Valid())
         return Error::Make(Err::Bible_InvalidReference, "BibleEngine", "invalid reference");
-    std::lock_guard<std::mutex> lock(mutex_);
-    notes_.erase(std::string(bibleId) + "|" + RefKey(ref));
-    (void)SaveUserDataLocked();
+    std::string userJson;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        notes_.erase(std::string(bibleId) + "|" + RefKey(ref));
+        userJson = BuildUserDataJsonLocked();
+    }
+    PersistUserDataSidecar(userJson);
     return Ok();
 }
 
@@ -1204,16 +1377,22 @@ Result<void> BibleEngine::SetHighlight(std::string_view bibleId, const PassageRe
                                        bool on) {
     if (!ref.Valid())
         return Error::Make(Err::Bible_InvalidReference, "BibleEngine", "invalid reference");
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto& list = highlights_[std::string(bibleId)];
-    auto it = std::find_if(list.begin(), list.end(), [&](const PassageRef& r) {
-        return RefKey(r) == RefKey(ref);
-    });
-    if (on && it == list.end())
-        list.push_back(ref);
-    else if (!on && it != list.end())
-        list.erase(it);
-    (void)SaveUserDataLocked();
+    std::string userJson;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto& list = highlights_[std::string(bibleId)];
+        auto it = std::find_if(list.begin(), list.end(), [&](const PassageRef& r) {
+            return RefKey(r) == RefKey(ref);
+        });
+        if (on && it == list.end())
+            list.push_back(ref);
+        else if (!on && it != list.end())
+            list.erase(it);
+        userJson = BuildUserDataJsonLocked();
+    }
+    // One small sidecar write, off the lock: a highlight click is a QML call on
+    // the interface thread and used to re-read, re-parse and rewrite the corpus.
+    PersistUserDataSidecar(userJson);
     return Ok();
 }
 
@@ -1234,13 +1413,17 @@ Result<void> BibleEngine::AddCollection(std::string_view name) {
 Result<void> BibleEngine::AddToCollection(std::string_view collection, const PassageRef& ref) {
     if (!ref.Valid())
         return Error::Make(Err::Bible_InvalidReference, "BibleEngine", "invalid reference");
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = collections_.find(std::string(collection));
-    if (it == collections_.end())
-        return Error::Make(Err::NotFound, "BibleEngine",
-                           "collection not found: " + std::string(collection));
-    it->second.push_back(ref);
-    (void)SaveUserDataLocked();
+    std::string userJson;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = collections_.find(std::string(collection));
+        if (it == collections_.end())
+            return Error::Make(Err::NotFound, "BibleEngine",
+                               "collection not found: " + std::string(collection));
+        it->second.push_back(ref);
+        userJson = BuildUserDataJsonLocked();
+    }
+    PersistUserDataSidecar(userJson);
     return Ok();
 }
 

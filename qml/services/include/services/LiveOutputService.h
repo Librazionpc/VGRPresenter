@@ -23,8 +23,9 @@
 #include <QQmlEngine>
 #include <QtQml/qqmlregistration.h>
 #include <QVariantMap>
-#include <mutex>
+#include <atomic>
 #include <memory>
+#include <mutex>
 
 // The feed's two engine-side anchors, needed by value in NdiSendPlan below:
 // the display provider that owns the NDI sender, and the render output the
@@ -200,7 +201,10 @@ public:
     qlonglong mediaDuration() const { return mediaDuration_; }
     qulonglong mediaRev() const { return mediaRev_; }
     bool mediaMuted() const { return mediaMuted_; }
-    // Read under ndiStateMutex_ — the worker writes these (see the members).
+    // No lock inside any of these: the pill's four fields are the GUI thread's
+    // own state and the frame counter is an atomic the feed thread publishes
+    // (see the members). They are read from QML bindings, so they must not wait
+    // on anything.
     bool ndiSending() const;
     QString ndiSendingOutputName() const;
     qulonglong ndiFramesSent() const;
@@ -457,6 +461,13 @@ private:
     // bumps inputRev so every consuming Image re-fetches. Stops itself when
     // neither a take nor a card preview is held.
     void pumpTick();
+    // A split tap OPEN came back refused (EngineBridge::previewRefused — see
+    // §3.9/§6.3 of docs/gui_thread_audit.md): the bridge accepted the claim on
+    // this thread and opened the device on the engine worker, so the refusal
+    // arrives a beat after the take/pip was published. Unwind that here —
+    // clearInput() for the output take, endPreviewInput() for a card preview —
+    // instead of leaving a warm-up placeholder that can never fill.
+    void onPreviewRefused(const QString &label, const QString &kind);
     // The newest frame of a held tap, kind-aware (camera/screen → the PAL's
     // decode cache, ndi → the engine receiver's converter) — see .cpp.
     QImage inputFrame(const QString &label, const QString &kind) const;
@@ -467,6 +478,30 @@ private:
     void pushNdiInputFrame(const QImage &frame);
     // Clears that compositor hold when it was an NDI feed that filled it.
     void clearNdiInputFrame();
+
+    // ---- takeMedia's off-thread preflight (see the hop in takeMedia) -------
+    // The half of a take that touches the DISK: path resolution, existence,
+    // the extension classification and — for a still — the decode itself. A
+    // plain VALUE (no QObject, no signal, no live member), so it is built on
+    // the worker thread and handed to the interface thread to apply. A mixed
+    // result is meaningful: `found && !recognized` is the "unrecognized
+    // extension" refusal, and `recognized && image.isNull()` is the "decoded
+    // nothing" still that still goes on air frameless (the tile's placeholder
+    // stays honest) — exactly the states the old synchronous body had.
+    struct MediaPreflight {
+        QString clean;             // resolved local path
+        QString name;              // display name ("draws from" clean when empty)
+        bool found = false;        // the file exists
+        bool recognized = false;   // the extension is one of the three families
+        bool isVideo = false;
+        bool isImage = false;
+        bool isAudio = false;
+        QImage image;              // the decoded still (image takes only)
+    };
+    void applyMediaTake(const MediaPreflight &pre);
+    // The disk half itself (a static: it reads no member, so the worker half of
+    // a take has nothing of this object to touch but the generation counter).
+    static MediaPreflight preflightMediaTake(const QString &path, const QString &name);
     // Re-reads the runtime's current slide into onAirSlide_ (onAirChanged
     // piggybacks the emit). The slide's blocks change without the title or
     // index moving (a document edit re-synced while live), so the 10Hz poll
@@ -543,7 +578,25 @@ private:
     // the active one — a projector can be on air while NDI must still feed)
     // gets the live loop's frames pushed at that output's CONFIGURED refresh
     // rate (Settings · Outputs) while live.
-    void pushNdiFrame();
+    //
+    // SPLIT ALONG THE THREAD BOUNDARY (docs/gui_thread_audit.md §6.6). The
+    // roster read (a QML model), the bridge's PUBLISHED NDI verdict and the
+    // buffer NAME stay on this thread; the ENGINE WALK — the display provider
+    // and the output's frame buffer, each behind its own engine lock — runs on
+    // the pool, and its answer comes back here to publish the plan and fire the
+    // signals (see applyNdiPlanProbe). One walk at a time: the plan is a value
+    // the feed thread reads, so a late answer is simply the next poll's answer.
+    void recheckNdiPlanOffThread();
+    // The walk's answer, on the interface thread: install the plan, or the
+    // warm-up/teardown state, exactly as the old inline resolution did. `bufferOk`
+    // is whether the output's buffer resolved at all, `enabled` whether it is
+    // enabled, `hasFrame` whether it has rendered anything yet — three different
+    // states the UI says three different things about.
+    void applyNdiPlanProbe(bps::display::NdiDisplayProvider *provider,
+                           const std::shared_ptr<bps::rendering::FrameBufferOutput> &buffer,
+                           bool bufferOk, bool enabled, bool hasFrame,
+                           const QString &outputName, const QString &senderName, float fps);
+    std::atomic<bool> ndiPlanProbeBusy_{false};   // one engine walk in flight at a time
     void stopNdiFeed();
     // The network-visible NDI source name for an output row: "<AppName>-<Row
     // name>" when the row has a name, or
@@ -596,56 +649,82 @@ private:
     QAudioOutput *mediaAudio_ = nullptr;
     QVideoSink *mediaSink_ = nullptr;
     QImage lastMediaFrame_;
+    // A take's GENERATION. takeMedia() bumps it on the interface thread before
+    // it hands the disk work off; the worker reads it (the only member of a
+    // take that is ever read off the interface thread — hence the atomic) and
+    // the apply half re-checks it there before touching a member. clearMedia()
+    // bumps it too: a decode that lands after the layer was cleared must not
+    // put itself back on air.
+    std::atomic<quint64> mediaTakeToken_{0};
 
     // ---- NDI program sender (see the properties above) --------------------
-    // The pill's state: ndiSending_/ndiSendingOutput_ are written by the GUI
-    // thread (there IS something to feed from the moment a plan with a frame
-    // is published), ndiFramesSent_ by the FEED thread (the provider's own
-    // counter). All three are read from QML bindings, so all three sit under
-    // ndiStateMutex_ — a plain mutex, never held across a send.
-    bool ndiSending_ = false;
-    QString ndiSendingOutput_;   // roster name of the row being fed while sending
-    // See ndiWarming: true between "an NDI row wants feeding" and "first
-    // frame is on the wire". GUI-thread only, but kept under the same lock as
-    // the sending state so the QML readers are uniform.
-    bool ndiWarming_ = false;
-    QString ndiWarmingOutput_;
+    // THE PILL'S STATE BELONGS TO THE GUI THREAD, AND NOTHING ELSE TOUCHES IT.
+    // ndiSending_ / ndiSendingOutput_ are written there (there IS something to
+    // feed from the moment a plan carrying a frame is published) and read there
+    // (the five Q_PROPERTY reads above run from QML bindings); no other thread
+    // reads or writes them, so there is nothing to synchronize and nothing a
+    // reader can wait for. The mutex that used to sit here was guarding against
+    // a cross-thread read that does not exist — the one piece that DOES cross
+    // threads is the frame counter, and that is an atomic.
+    bool ndiSending_ = false;                    // GUI thread only
+    QString ndiSendingOutput_;                   // GUI thread only (the pill's LIVE row)
+    // True between "an NDI row wants feeding" and "first frame is on the wire".
+    bool ndiWarming_ = false;                    // GUI thread only
+    QString ndiWarmingOutput_;                   // GUI thread only
     // Update the warming state and notify ONLY on a real change (the send
     // tick would otherwise emit ndiChanged 30-60x/s for a static value).
     void setNdiWarming(bool on, const QString &name);
-    qulonglong ndiFramesSent_ = 0;   // provider's own counter, worker-refreshed
-    // mutable: the const property readers lock it (QML reads from bindings).
-    mutable std::mutex ndiStateMutex_;
-    // ---- The published plan (GUI writes, feed thread reads) ----------------
-    // A plain value copy — never a pointer into the roster or the model — so
-    // the feed thread holds nothing the GUI thread can invalidate under it.
-    // The buffer is a shared_ptr (the render registry owns the real one), so a
-    // plan outliving its output cannot leave the feed thread reading freed
-    // pixels.
+    // The provider's own counter: written on the FEED thread by
+    // ndiWorkerSendFrame, read by the GUI's pill and its rate watch. Atomic, so
+    // neither side ever waits for the other — and the feed thread never takes a
+    // lock the GUI thread (or anything else) could be holding mid-operation.
+    std::atomic<qulonglong> ndiFramesSent_{0};
+    // ---- The plan: WHAT to send, HANDED to the feed thread -----------------
+    // A value copy — never a pointer into the roster or the model — so the feed
+    // thread holds nothing the GUI thread can invalidate under it, and the
+    // buffer is a shared_ptr (the render registry owns the real one), so a plan
+    // outliving its output cannot leave the feed thread reading freed pixels.
     struct NdiSendPlan {
         bool want = false;
         bps::display::NdiDisplayProvider *provider = nullptr;
         std::shared_ptr<bps::rendering::FrameBufferOutput> buffer;
         QString senderName;
         float fps = 30.0f;
+        bool operator==(const NdiSendPlan &o) const {
+            return want == o.want && provider == o.provider && buffer == o.buffer
+                   && senderName == o.senderName && fps == o.fps;
+        }
     };
-    NdiSendPlan ndiPlan_;
-    std::mutex ndiPlanMutex_;
+    // THE FEED THREAD'S OWN COPY — installed by the queued hand-over in
+    // setNdiPlan/clearNdiPlan, read by ndiWorkerTick on that thread, touched by
+    // nothing else. That is why there is no mutex: the value is not shared, it
+    // is given away (and the equal-plan short-circuit below means a steady feed
+    // hands over nothing at all).
+    NdiSendPlan ndiFeedPlan_;                            // feed thread only
+    // The last plan handed over, so a poll that changes nothing posts nothing
+    // (the 10 Hz poll republishes the same plan otherwise).
+    NdiSendPlan ndiSentPlan_;                            // GUI thread only
+    bool ndiPlanPublished_ = false;                      // GUI thread only
+    void handOverNdiPlan(const NdiSendPlan &plan);
     // One-shot send diagnostics (moved onto the worker with the send): the
     // gate warning, the first SendFrame failure, and the "frames flowing,
     // monitor discovering" note — each logs once per outage, not per tick.
-    bool ndiGateLogged_ = false;
-    bool ndiSendFailedLogged_ = false;
-    bool ndiFirstFrameLogged_ = false;
-    bool ndiWaitLogged_ = false;   // "waiting for buffer/frame" warm-up note
+    bool ndiGateLogged_ = false;      // GUI thread only
+    bool ndiSendFailedLogged_ = false;   // feed thread only
+    bool ndiFirstFrameLogged_ = false;   // feed thread only
+    bool ndiWaitLogged_ = false;      // GUI thread only; "waiting for buffer/frame" note
     // Backpressure is the feed thread's own pacing now: it clocks each send
     // (feed-thread only, and only ever touched there) and refuses a tick that
     // arrives inside the previous interval, so a slow send lowers the real rate
     // without ever lying about the advertised one — and without touching the
     // GUI thread at all.
     QElapsedTimer ndiSendClock_;
-    bool ndiSlowLogged_ = false;   // "send is slow" once per incident
-    int ndiFastStreak_ = 0;        // consecutive fast sends; ≥30 re-arms the slow-send log (toast-spam guard)
+    // The slow-send incident state: the FEED thread decides it (it measures the
+    // send) and the GUI thread clears it when the session ends (stopNdiFeed) —
+    // so both fields are atomics, and that clear never waits on a lock the feed
+    // thread would have to take around a send.
+    std::atomic<bool> ndiSlowLogged_{false};   // "send is slow" once per incident
+    std::atomic<int> ndiFastStreak_{0};        // consecutive fast sends; ≥30 re-arms the slow-send log (toast-spam guard)
     // ---- The NDI feed: WHAT on the GUI thread, WHEN on the feed thread -----
     // The feed's cadence lives on the FEED THREAD (ndiWorker_), never on the
     // GUI thread. It used to be a QTimer on the GUI thread, so every late tick

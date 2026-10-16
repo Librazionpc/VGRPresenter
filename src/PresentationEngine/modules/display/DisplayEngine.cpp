@@ -244,17 +244,23 @@ Result<void> DisplayEngine::RefreshDevices() {
 // ---------------------------------------------------------------------------
 Result<void> DisplayEngine::AddOutput(const Output& output) {
     auto r = router_.AddOutput(output);
+    bool ready = false;
     if (r.ok() && !output.displayId.empty()) {
         // If the bound device exists and is connected, mark the output ready.
         std::lock_guard<std::mutex> lock(mutex_);
         const DisplayDevice* d = FindDeviceLocked(output.displayId);
         if (d && d->connected) {
             auto out = router_.GetOutput(output.id);
-            if (out.ok()) out.value()->state = OutputState::Running;
-            (void)EventBus::Instance().Publish(
-                events::DisplayReady{output.displayId, "output '" + output.id + "' assigned"});
+            if (out.ok()) {
+                out.value()->state = OutputState::Running;
+                ready = true;
+            }
         }
     }
+    // Published with mutex_ released: a subscriber may re-enter the engine.
+    if (ready)
+        (void)EventBus::Instance().Publish(
+            events::DisplayReady{output.displayId, "output '" + output.id + "' assigned"});
     return r;
 }
 
@@ -323,19 +329,27 @@ Result<void> DisplayEngine::ApplyProfile(std::string_view name) {
             continue;
         }
         if (!output.displayId.empty()) {
-            // Re-bind and mark ready when the device is present.
-            std::lock_guard<std::mutex> lock(mutex_);
-            const DisplayDevice* d = FindDeviceLocked(output.displayId);
-            if (d && d->connected) {
-                auto out = router_.GetOutput(output.id);
-                if (out.ok()) out.value()->state = OutputState::Running;
+            // Re-bind and mark ready when the device is present. The state change
+            // happens under the lock; the event is published after it.
+            bool started = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                const DisplayDevice* d = FindDeviceLocked(output.displayId);
+                if (d && d->connected) {
+                    auto out = router_.GetOutput(output.id);
+                    if (out.ok()) {
+                        out.value()->state = OutputState::Running;
+                        started = true;
+                    }
+                } else {
+                    auto out = router_.GetOutput(output.id);
+                    if (out.ok()) out.value()->state = OutputState::Lost;
+                }
+            }
+            if (started)
                 (void)EventBus::Instance().Publish(
                     events::OutputStarted{output.id, output.displayId,
                                           static_cast<int>(output.kind)});
-            } else {
-                auto out = router_.GetOutput(output.id);
-                if (out.ok()) out.value()->state = OutputState::Lost;
-            }
         }
     }
     (void)EventBus::Instance().Publish(
@@ -378,19 +392,26 @@ Result<size_t> DisplayEngine::RestoreAssignments() {
     for (auto& output : outputs) {
         if (!output.autoRestore || output.displayId.empty() || output.state != OutputState::Lost)
             continue;
-        std::lock_guard<std::mutex> lock(mutex_);
-        const DisplayDevice* d = FindDeviceLocked(output.displayId);
-        if (d && d->connected) {
-            auto out = router_.GetOutput(output.id);
-            if (out.ok()) {
-                out.value()->state = OutputState::Running;
-                ++restored;
-                (void)EventBus::Instance().Publish(
-                    events::DisplayRestored{output.id, output.displayId});
-                (void)EventBus::Instance().Publish(
-                    events::OutputStarted{output.id, output.displayId,
-                                          static_cast<int>(output.kind)});
+        bool restoredNow = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const DisplayDevice* d = FindDeviceLocked(output.displayId);
+            if (d && d->connected) {
+                auto out = router_.GetOutput(output.id);
+                if (out.ok()) {
+                    out.value()->state = OutputState::Running;
+                    ++restored;
+                    restoredNow = true;
+                }
             }
+        }
+        // Both events after mutex_ is released (a subscriber may re-enter).
+        if (restoredNow) {
+            (void)EventBus::Instance().Publish(
+                events::DisplayRestored{output.id, output.displayId});
+            (void)EventBus::Instance().Publish(
+                events::OutputStarted{output.id, output.displayId,
+                                      static_cast<int>(output.kind)});
         }
     }
     restoredCount_.store(restored);
@@ -469,11 +490,11 @@ void DisplayEngine::OnMonitorDisconnected(const events::MonitorDisconnected& e) 
 }
 
 void DisplayEngine::OnMonitorResolutionChanged(const events::MonitorResolutionChanged& e) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = devices_.find(e.monitorId);
-    if (it != devices_.end()) {
-        // e carries only a detail string; refresh from providers is the robust path.
-    }
+    // e carries only a detail string, so the robust path is a re-probe — and
+    // RefreshDevices takes mutex_ ITSELF for the snapshot and the diff. Holding
+    // the lock across it (the old shape, with a lookup whose result was never
+    // used) parked every device caller behind a slow monitor.
+    (void)e;
     (void)RefreshDevices();
 }
 

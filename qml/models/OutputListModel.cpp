@@ -14,7 +14,6 @@
 #include <QJSEngine>
 #include <QScreen>
 #include <QTimer>
-#include <QFile>
 #include <QTimerEvent>
 #include <algorithm>
 #include <cstdio>
@@ -1071,6 +1070,11 @@ QVariantMap OutputListModel::styleBackground(int index) const
                  { "clearOnText", false } };
     const QVariantMap style = styleRoster()->getStyle(row);
     const QString image = style.value(QStringLiteral("backgroundImage")).toString();
+    // `hasImage` is the roster's CACHED answer (it stats the file where the path
+    // is loaded or changed — StyleListModel::reloadFromStore /
+    // setBackgroundImage). This getter used to call QFile::exists() itself, which
+    // put a filesystem stat on the interface thread behind every read of this
+    // role.
     // `clearOnText` (freeShow's clearStyleBackgroundOnText) is reported here as
     // the MODEL reads it, beside the colour and the image. WHAT A SURFACE PAINTS
     // is no longer this role: the tile and the output window take the style's
@@ -1081,7 +1085,7 @@ QVariantMap OutputListModel::styleBackground(int index) const
     // is the baseline the self-test logs against the composed picture.
     return { { "color", style.value(QStringLiteral("backgroundColor")).toString() },
              { "image", image },
-             { "hasImage", !image.isEmpty() && QFile::exists(image) },
+             { "hasImage", style.value(QStringLiteral("hasImage")).toBool() },
              { "clearOnText", style.value(QStringLiteral("clearBackgroundOnText")).toBool() } };
 }
 

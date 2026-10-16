@@ -62,7 +62,7 @@ public:
 
     // Asks for a folder with the native folder picker, then adds it. false if cancelled or
     // refused (a toast says why).
-    Q_INVOKABLE bool addFolder();
+    Q_INVOKABLE bool addFolder();   // gui-ok: a modal native picker parks the interface thread on PURPOSE — the user is looking at the dialog, and its own event loop keeps the window painting; the work after the pick (import, scan, copy) already runs off the interface thread
     // Adds `path` (a folder path or file:// URL). false + a toast if it isn't a folder or is
     // already in the library.
     Q_INVOKABLE bool addFolderPath(const QString &path);

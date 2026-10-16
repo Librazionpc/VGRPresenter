@@ -276,6 +276,21 @@ struct WindowsAudio::MeterTable {
     std::mutex mutex;
     std::map<uint32_t, std::unique_ptr<MeterTap>> taps;
 
+    // STRUCTURE GENERATION: bumped under `mutex` whenever the tap SET changes
+    // (a tap added, a tap released). The interface-thread reader below keeps
+    // its own last reading per tap and answers from it while a worker holds
+    // this mutex — but a reading is only reusable while the tap set is the one
+    // it was taken from, so the generation is what lets that cache be exact
+    // rather than merely stale-tolerant (a released tap must read as "no
+    // signal" immediately, not "whatever it showed a moment ago").
+    std::atomic<uint64_t> generation{0};
+
+    // The interface thread's reading cache. Its OWN mutex, and only the reader
+    // ever touches it, so unlike `mutex` it cannot be held by a capture thread
+    // and cannot park anyone. See InputLevels.
+    std::mutex readerMutex;
+    std::map<uint32_t, std::pair<uint64_t, IAudio::InputMeterLevels>> readerCache;
+
     // Erase-with-join, the one removal path: signal the tap, move it out,
     // destroy it with the mutex FREE (the worker takes this mutex to publish
     // its snapshots — joining while holding it would deadlock against
@@ -291,6 +306,7 @@ struct WindowsAudio::MeterTable {
             it->second->running.store(false);
             tap = std::move(it->second);
             taps.erase(it);
+            generation.fetch_add(1, std::memory_order_release);   // the reader's cache is stale now
         }
         tap.reset();   // ~MeterTap joins the worker here
     }
@@ -304,6 +320,7 @@ struct WindowsAudio::MeterTable {
             for (auto &[id, tap] : taps)
                 tap->running.store(false);
             all.swap(taps);
+            generation.fetch_add(1, std::memory_order_release);
         }
         all.clear();   // joins, mutex free
     }
@@ -485,6 +502,12 @@ void WindowsAudio::MeterThread(MeterTap &tap, std::mutex &publishMutex, bool loo
         // pointer may be null when that flag is set, so only dereference it
         // for real audio.
         const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
+        // This packet's converted frames, staged so the sample-through FIFO
+        // takes ONE lock per PACKET instead of one per frame (see the push
+        // after the loop). Declared outside the loop: reused every packet, so
+        // there is no allocation after the first.
+        std::vector<float> staged;
+        staged.reserve(static_cast<size_t>(frames) * channels);
         for (UINT32 f = 0; f < frames; ++f) {
             float converted[IAudio::kMaxInputMeterChannels] = {};
             if (!silent) {
@@ -506,27 +529,17 @@ void WindowsAudio::MeterThread(MeterTap &tap, std::mutex &publishMutex, bool loo
                     }
                 }
             }
-            // Sample-through: push the frame into the FIFO (overwrites the
-            // oldest when the render side falls behind — drop-old keeps a
-            // live input live instead of lagging forever). Under
-            // publishMutex — ReadTapAudio (the render thread, via
-            // AudioMixer::SumSource) reads/mutates this SAME ring, ringRead
-            // and ringWrite under that same lock; this push used to run
-            // unlocked, a real data race against that reader (found in
-            // review — an uncontended std::mutex lock is tens of ns, and a
-            // WASAPI packet is a handful of frames, not the render chunk,
-            // so the per-sample cost here is negligible against the
-            // correctness it buys).
-            {
-                const std::lock_guard<std::mutex> lock(publishMutex);
-                const size_t ringFrames = tap.ring.size() / (tap.ringChannels ? tap.ringChannels : 1);
-                const size_t w = tap.ringWrite % ringFrames;
-                for (UINT32 c = 0; c < tap.ringChannels; ++c)
-                    tap.ring[w * tap.ringChannels + c] = converted[c];
-                tap.ringWrite = (tap.ringWrite + 1) % ringFrames;
-                if (tap.ringWrite == tap.ringRead)
-                    tap.ringRead = (tap.ringRead + 1) % ringFrames;   // drop oldest
-            }
+            // Sample-through, staged: this frame joins the packet's buffer and
+            // lands in the FIFO under one lock at the end of the packet (see
+            // the push below). The ring is written under publishMutex because
+            // ReadTapAudio (the render thread, via AudioMixer::SumSource)
+            // reads/mutates this SAME ring, ringRead and ringWrite; what moved
+            // is only HOW OFTEN that lock is taken — a per-frame lock/unlock
+            // pair at a 10 ms packet cadence is ~48k acquisitions a second,
+            // and that convoy (not the length of any single critical section)
+            // is what starved the interface thread's meter pump under load.
+            for (UINT32 c = 0; c < channels; ++c)
+                staged.push_back(converted[c]);
             ++totalFrames;
             if (++framesSinceSnapshot >= windowFrames) {
                 IAudio::InputMeterLevels snap = base;
@@ -543,6 +556,21 @@ void WindowsAudio::MeterThread(MeterTap &tap, std::mutex &publishMutex, bool loo
                     tap.latest = snap;
                 }
                 framesSinceSnapshot = 0;
+            }
+        }
+        // The packet's frames enter the FIFO here: ONE critical section for the
+        // whole packet (drop-old keeps a live input live instead of lagging
+        // forever when the render side falls behind).
+        if (!staged.empty() && tap.ringChannels > 0 && !tap.ring.empty()) {
+            const std::lock_guard<std::mutex> lock(publishMutex);
+            const size_t ringFrames = tap.ring.size() / tap.ringChannels;
+            for (size_t i = 0; i + tap.ringChannels <= staged.size(); i += tap.ringChannels) {
+                const size_t w = tap.ringWrite % ringFrames;
+                for (UINT32 c = 0; c < tap.ringChannels; ++c)
+                    tap.ring[w * tap.ringChannels + c] = staged[i + c];
+                tap.ringWrite = (tap.ringWrite + 1) % ringFrames;
+                if (tap.ringWrite == tap.ringRead)
+                    tap.ringRead = (tap.ringRead + 1) % ringFrames;   // drop oldest
             }
         }
         capture->ReleaseBuffer(frames);
@@ -564,6 +592,7 @@ Result<void> WindowsAudio::StartInputMeter(uint32_t deviceId, const std::string 
     {
         const std::lock_guard<std::mutex> lock(meters_->mutex);
         auto &slot = meters_->taps[deviceId];
+        meters_->generation.fetch_add(1, std::memory_order_release);   // a new tap id may be read now
         if (slot && slot->running.load())
             return Ok();   // idempotent — already running
         if (slot) {
@@ -598,20 +627,47 @@ IAudio::InputMeterLevels WindowsAudio::InputLevels(uint32_t deviceId)
     // A stream tap answers here too (disjoint id ranges): the UI's per-label
     // level lookup is then the SAME call for a device and for a media file or
     // NDI stream, which is what lets one card kind meter either.
-    if (IAudio::IsStreamTap(deviceId)) {
-        if (!streams_)
-            return IAudio::InputMeterLevels{};
-        const std::lock_guard<std::mutex> lock(streams_->mutex);
-        auto it = streams_->taps.find(deviceId);
-        return it == streams_->taps.end() ? IAudio::InputMeterLevels{} : it->second->latest;
+    MeterTable *table = IAudio::IsStreamTap(deviceId) ? streams_.get() : meters_.get();
+    if (!table)
+        return IAudio::InputMeterLevels{};
+
+    // ---- THE INTERFACE THREAD MUST NOT WAIT HERE -----------------------------
+    // This is the meter pump's per-tap read: it runs ~20 times a second on the
+    // thread that draws, and the capture/stream threads take the SAME table
+    // mutex to publish their snapshots and their sample-through frames. Once
+    // the app's own hang dumps caught this read parked inside
+    // std::mutex::lock with the whole window frozen behind it (hang-10044,
+    // -30432, -32280, all at a saturated CPU): a contended lock on the
+    // interface thread is not a slow meter, it is a dead application.
+    //
+    // So the read never blocks. It TRY-locks; when a worker holds the mutex it
+    // repeats the last reading for this tap (a 50 ms-old level, invisible on a
+    // 20 Hz pump) instead of waiting for it. The cached reading is keyed by the
+    // tap set's generation, so a tap that has been RELEASED still answers
+    // "no signal" at once — the cache can repeat a level, never a tap.
+    const uint64_t gen = table->generation.load(std::memory_order_relaxed);
+    IAudio::InputMeterLevels cached;
+    bool haveCached = false;
+    {
+        const std::lock_guard<std::mutex> cacheLock(table->readerMutex);
+        auto c = table->readerCache.find(deviceId);
+        if (c != table->readerCache.end() && c->second.first == gen) {
+            cached = c->second.second;
+            haveCached = true;
+        }
     }
-    if (!meters_)
-        return IAudio::InputMeterLevels{};
-    const std::lock_guard<std::mutex> lock(meters_->mutex);
-    auto it = meters_->taps.find(deviceId);
-    if (it == meters_->taps.end())
-        return IAudio::InputMeterLevels{};
-    return it->second->latest;
+    std::unique_lock<std::mutex> lock(table->mutex, std::try_to_lock);
+    if (!lock.owns_lock())
+        return haveCached ? cached : IAudio::InputMeterLevels{};
+
+    auto it = table->taps.find(deviceId);
+    const IAudio::InputMeterLevels value =
+        it == table->taps.end() ? IAudio::InputMeterLevels{} : it->second->latest;
+    {
+        const std::lock_guard<std::mutex> cacheLock(table->readerMutex);
+        table->readerCache[deviceId] = { gen, value };
+    }
+    return value;
 }
 
 std::vector<uint32_t> WindowsAudio::ActiveInputMeters() const
@@ -737,6 +793,7 @@ Result<void> WindowsAudio::StartStreamTap(uint32_t tapId, const std::string &sou
     {
         const std::lock_guard<std::mutex> lock(streams_->mutex);
         auto &slot = streams_->taps[tapId];
+        streams_->generation.fetch_add(1, std::memory_order_release);
         if (slot && slot->running.load()
             && slot->streamSource == source && slot->streamKind == kind)
             return Ok();   // idempotent — this source is already live on this tap
@@ -1040,6 +1097,7 @@ Result<void> WindowsAudio::StartOutputMeter(uint32_t deviceId)
     {
         const std::lock_guard<std::mutex> lock(meters_->mutex);
         auto &slot = meters_->taps[deviceId];
+        meters_->generation.fetch_add(1, std::memory_order_release);   // a new tap id may be read now
         if (slot && slot->running.load() && slot->loopback)
             return Ok();   // idempotent — already running
         if (slot) {

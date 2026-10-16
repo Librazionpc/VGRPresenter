@@ -16,6 +16,7 @@
 #include "modules/rendering/RenderEngine.hpp"
 
 #include "services/EngineBridge.h"
+#include "services/EngineWorker.h"
 #include "services/EventBus.h"
 #include "models/OutputListModel.h"
 
@@ -24,6 +25,9 @@
 #include "modules/broadcast/BroadcastEngine.hpp"
 
 #include <QCoreApplication>
+#include <QDir>
+#include <QPointer>
+#include <QThreadPool>
 #include <QTimer>
 #include <QThread>
 #include <QAudioOutput>
@@ -410,11 +414,14 @@ void LiveOutputService::ndiWorkerSendFrame(void *providerVoid,
     const bool sent = provider->SendFrame(view).ok();
     const qint64 sendMs = clock.elapsed();
 
-    // Feedback to the GUI side (mutex-guarded members; the GUI reads them
-    // for the pill and its own rate watch).
-    std::lock_guard<std::mutex> lock(svc.ndiStateMutex_);
+    // Feedback to the GUI side — ATOMICS, not a lock. The pill and the rate
+    // watch read these from QML bindings, so a lock here would be a lock the
+    // GUI thread could be holding while it does something slow, taken on the
+    // FEED thread around every send. The counter is atomic and the two incident
+    // flags were only ever this thread's to decide (the GUI only clears them),
+    // so neither side waits for the other.
     if (sent) {
-        svc.ndiFramesSent_ = provider->FramesSent();
+        svc.ndiFramesSent_.store(provider->FramesSent(), std::memory_order_relaxed);
         if (!svc.ndiFirstFrameLogged_) {
             svc.ndiFirstFrameLogged_ = true;
             qCWarning(lcNdiProgress, "LiveOutputService: NDI frames flowing as '%s' — discovery on a receiving monitor can take 10-30s",
@@ -426,14 +433,13 @@ void LiveOutputService::ndiWorkerSendFrame(void *providerVoid,
         // the feed thread — the advertised rate never changes), so this only
         // has to say that the machine cannot hold the configured rate.
         if (sendMs > qMax(50, fps > 0.0f ? int(1000.0f / fps) : 100)) {
-            if (!svc.ndiSlowLogged_) {
-                svc.ndiSlowLogged_ = true;
-                svc.ndiFastStreak_ = 0;
+            if (!svc.ndiSlowLogged_.exchange(true, std::memory_order_relaxed)) {
+                svc.ndiFastStreak_.store(0, std::memory_order_relaxed);
                 qCWarning(lcNdiProgress, "LiveOutputService: NDI send is slow (%lld ms, sender '%s') — the feed skips the beats it overruns; check the network and the configured rate",
                          sendMs, provider->SenderName().c_str());
             }
-        } else if (++svc.ndiFastStreak_ >= 30) {
-            svc.ndiSlowLogged_ = false;   // sustained recovery re-arms the incident log
+        } else if (svc.ndiFastStreak_.fetch_add(1, std::memory_order_relaxed) + 1 >= 30) {
+            svc.ndiSlowLogged_.store(false, std::memory_order_relaxed);   // sustained recovery re-arms the incident log
         }
     } else if (!svc.ndiSendFailedLogged_) {
         svc.ndiSendFailedLogged_ = true;
@@ -443,7 +449,7 @@ void LiveOutputService::ndiWorkerSendFrame(void *providerVoid,
 }
 
 // One beat of the feed — FEED THREAD ONLY (the worker's own timer calls this,
-// and everything it touches is either thread-local or mutex-guarded).
+// and everything it touches is either thread-local or an atomic the GUI reads).
 //
 // This is where the feed's cadence is decided, and the whole point of the split
 // above: nothing the GUI thread does can move it. A tick that arrives inside the
@@ -452,11 +458,10 @@ void LiveOutputService::ndiWorkerSendFrame(void *providerVoid,
 // is exactly what a receiver counts as dropped frames.
 void LiveOutputService::ndiWorkerTick()
 {
-    NdiSendPlan plan;
-    {
-        std::lock_guard<std::mutex> lock(ndiPlanMutex_);
-        plan = ndiPlan_;
-    }
+    // The feed thread's OWN plan: handed over by handOverNdiPlan (a queued call
+    // installs it on THIS thread), so reading it takes no lock and cannot be
+    // made to wait on the GUI thread.
+    const NdiSendPlan plan = ndiFeedPlan_;
     // Nothing to feed (stopped, no enabled NDI row, the output gone): sleep the
     // clock rather than tick into an empty plan 30-60x/s, and drop the pacing
     // clock with it — the next feed is a NEW session and must not inherit this
@@ -484,47 +489,59 @@ void LiveOutputService::ndiWorkerTick()
     ndiWorkerSendFrame(static_cast<void *>(plan.provider), frame, plan.senderName, fps);
 }
 
-// The three NDI property readers — the worker writes the state, the GUI
-// (QML bindings + pollTick) reads it. One small mutex, never held across
-// the send itself.
+// The five NDI property readers — QML bindings and the 10 Hz poll, all on the
+// GUI thread. NOTHING TO WAIT FOR: the four pill fields are this thread's own
+// state (see the members), and the frame counter is an atomic the feed thread
+// publishes. These are the reads a Settings · Outputs pill animates with, so a
+// lock here was a lock in the app's most frequently evaluated bindings.
 bool LiveOutputService::ndiSending() const
 {
-    std::lock_guard<std::mutex> lock(ndiStateMutex_);
     return ndiSending_;
 }
 QString LiveOutputService::ndiSendingOutputName() const
 {
-    std::lock_guard<std::mutex> lock(ndiStateMutex_);
     return ndiSendingOutput_;
 }
 qulonglong LiveOutputService::ndiFramesSent() const
 {
-    std::lock_guard<std::mutex> lock(ndiStateMutex_);
-    return ndiFramesSent_;
+    return ndiFramesSent_.load(std::memory_order_relaxed);
 }
 bool LiveOutputService::ndiWarming() const
 {
-    std::lock_guard<std::mutex> lock(ndiStateMutex_);
     return ndiWarming_;
 }
 QString LiveOutputService::ndiWarmingOutputName() const
 {
-    std::lock_guard<std::mutex> lock(ndiStateMutex_);
     return ndiWarmingOutput_;
 }
 void LiveOutputService::setNdiWarming(bool on, const QString &name)
 {
-    bool changed = false;
-    {
-        std::lock_guard<std::mutex> lock(ndiStateMutex_);
-        if (ndiWarming_ != on || (on && ndiWarmingOutput_ != name)) {
-            ndiWarming_ = on;
-            ndiWarmingOutput_ = on ? name : QString();
-            changed = true;
-        }
-    }
-    if (changed)
-        emit ndiChanged();
+    // GUI thread only (see the members): a plain compare-and-assign, notifying
+    // only on a real change.
+    if (ndiWarming_ == on && (!on || ndiWarmingOutput_ == name))
+        return;
+    ndiWarming_ = on;
+    ndiWarmingOutput_ = on ? name : QString();
+    emit ndiChanged();
+}
+
+// Hand the plan to the feed thread and forget it here.
+//
+// The plan is a VALUE, and this is where it stops being the GUI thread's: the
+// queued call installs it in ndiFeedPlan_ on the feed thread, so from that
+// moment only that thread touches it. Nothing is shared, so nothing needs a
+// lock — and the GUI thread can never be made to wait for a feed in progress.
+// A poll that resolves the same plan again posts nothing (a steady feed would
+// otherwise queue ten identical hand-overs a second).
+void LiveOutputService::handOverNdiPlan(const NdiSendPlan &plan)
+{
+    if (ndiPlanPublished_ && plan == ndiSentPlan_)
+        return;
+    if (!ndiWorker_)
+        return;   // no feed thread: the feed thread's own default already means "nothing to feed"
+    ndiSentPlan_ = plan;
+    ndiPlanPublished_ = true;
+    QMetaObject::invokeMethod(ndiWorker_, [this, plan] { ndiFeedPlan_ = plan; }, Qt::QueuedConnection);
 }
 
 LiveOutputService::LiveOutputService(QObject *parent)
@@ -544,6 +561,38 @@ LiveOutputService::LiveOutputService(QObject *parent)
             (void)bps::live::LiveOutputController::Instance().StartIdlePreview();
     });
     previewTimer_->start();
+
+    // A tap OPEN is split (§3.9/§6.3 of docs/gui_thread_audit.md): the bridge
+    // accepts the claim here and now, opens the device on the engine worker, and
+    // reports a refusal a beat later. That refusal is this service's to unwind —
+    // the take/pip the operator just started must not sit on a placeholder that
+    // can never fill. Connected here because this service is the consumer that
+    // publishes the take optimistically; the Settings dialogs and the board rows
+    // ignore the signal and let their own warm-up placeholder stand.
+    connect(&EngineBridge::instance(), &EngineBridge::previewRefused,
+            this, &LiveOutputService::onPreviewRefused);
+}
+
+// The tap the operator asked for was refused by the device (not by resolution —
+// that refusal is still synchronous and unwound by the caller). Unwind whatever
+// this service had published for that label, with the reason the bridge recorded
+// read out BEFORE the unwind (the card's/slash's own failure text comes from
+// previewFailure, and a released label has no reason to give).
+void LiveOutputService::onPreviewRefused(const QString &label, const QString &kind)
+{
+    const QString why = EngineBridge::instance().previewFailure(label);
+    if (cardPreviews_.contains(label) && cardPreviews_.value(label).toMap()
+                                            .value(QStringLiteral("kind")).toString() == kind) {
+        endPreviewInput(label);   // same unwind a released card preview takes
+        qWarning("LiveOutputService: card preview of '%s' refused: %s",
+                 qUtf8Printable(label), qUtf8Printable(why));
+        return;
+    }
+    if (inputLabel_ != label || inputKind_ != kind)
+        return;   // not ours: another holder of this label took the refusal
+    qWarning("LiveOutputService: take of '%s' refused: %s — unwinding",
+             qUtf8Printable(label), qUtf8Printable(why));
+    clearInput();   // the SAME unwind the operator's own clear runs
 }
 
 LiveOutputService &LiveOutputService::instance()
@@ -1232,6 +1281,140 @@ void LiveOutputService::clearInput()
 }
 
 // ---------------------------------------------------------------------------
+// The MEDIA half of the env self-test (see runEnvSelfTest): the take path is
+// split across the thread boundary now — takeMedia() reads the file,
+// classifies it and decodes a still on the engine worker, then applies the
+// result on the interface thread a beat later (see the hop in takeMedia). Four
+// probes, each reading only what QML reads (the published properties), so the
+// contract is verifiable from a launch log alone:
+//
+//   1. a real still goes on air, with a NAME and a decoded FRAME (mediaRev
+//      moved) — proof the hop landed, the classifier matched and the decode
+//      reached the compositor/provider;
+//   2. a path that does not exist is REFUSED and leaves what is on air alone
+//      (the same refusal the synchronous version gave, now a beat later);
+//   3. take-then-clear: a take still in flight must NOT come back on air
+//      (the generation token, cleared by clearMedia);
+//   4. two takes back to back: the NEWEST wins, whichever decode finishes
+//      first — and never a mixture of the two.
+//
+// A PASS goes through the engine LOGGER (EngineBridge::write), not qInfo:
+// main.cpp's Qt message handler forwards warning and above only, so a qInfo
+// verdict never reaches build/logs/engine.log — the file a launch-log
+// self-test is read from. A FAIL stays a qWarning: loud, and toasted.
+static void selftestPass(const char *source, const QString &text)
+{
+    EngineBridge::write(QStringLiteral("info"), QString::fromLatin1(source),
+                        QStringLiteral("PASS: ") + text);
+}
+
+// The media probes run ONCE, whichever trigger comes first: the END of the input
+// chain (so the two phases never overlap — a media take and an input take are
+// mutually exclusive holds on the one compositor layer, last gesture wins, so a
+// media probe running underneath a takeInput would be cancelled by it and read
+// as a failure of the WRONG branch) or a late fallback, because that chain bails
+// out early on a machine with nothing to capture and the media verdicts must not
+// go down with it.
+static void runMediaTakeSelfTest();
+static std::atomic<bool> g_mediaSelftestDone{false};
+static void runMediaTakeSelfTestOnce()
+{
+    if (g_mediaSelftestDone.exchange(true))
+        return;
+    runMediaTakeSelfTest();
+}
+
+static void runMediaTakeSelfTest()
+{
+    auto *svc = &LiveOutputService::instance();
+    const auto verdict = [](const char *phase, bool ok, const QString &detail) {
+        const QString line = QStringLiteral("%1 — %2")
+                                 .arg(QString::fromLatin1(phase), detail);
+        if (ok)
+            selftestPass("Media selftest", line);
+        else
+            qWarning("LiveOutputService[selftest] MEDIA FAIL: %s — %s", phase, qUtf8Printable(detail));
+    };
+    // Real stills off this machine (Windows ships them everywhere): largest
+    // first, up to two, so probe 4 has a genuinely different second file.
+    QStringList stills;
+    for (const QString &dir : { QStringLiteral("C:/Windows/Web/Wallpaper/Windows"),
+                                QStringLiteral("C:/Windows/Web/Wallpaper/Theme1"),
+                                QStringLiteral("C:/Windows/Web/Wallpaper"),
+                                QStringLiteral("C:/Windows/Web/Screen") }) {
+        const QDir d(dir);
+        if (!d.exists())
+            continue;
+        for (const QString &n : d.entryList({ QStringLiteral("*.jpg"), QStringLiteral("*.png") },
+                                            QDir::Files, QDir::Size))
+            stills << d.filePath(n);
+    }
+    stills.removeDuplicates();
+    if (stills.isEmpty()) {
+        qWarning("LiveOutputService[selftest] MEDIA SKIP: no still on this machine to take");
+        return;
+    }
+    const QString pathA = stills.first();
+    const QString pathB = stills.size() > 1 ? stills.at(1) : QString();
+    const QString missing = QDir(QDir::tempPath()).filePath(QStringLiteral("vgr-selftest-no-such-file.png"));
+    const qulonglong revBefore = svc->mediaRev();
+    EngineBridge::write(QStringLiteral("info"), QStringLiteral("Media selftest"),
+                        QStringLiteral("phase: taking '%1'%2").arg(pathA,
+                            pathB.isEmpty() ? QStringLiteral(" (no second still for the newest-wins probe)")
+                                            : QString()));
+    svc->takeMedia(pathA, QString());
+    QTimer::singleShot(1500, svc, [verdict, pathA, pathB, revBefore, missing] {
+        auto *svc = &LiveOutputService::instance();
+        verdict("still on air",
+                svc->mediaOnAir() && svc->mediaPath() == pathA && !svc->mediaName().isEmpty()
+                    && !svc->mediaIsVideo() && svc->mediaState() == QLatin1String("playing")
+                    && svc->mediaRev() > revBefore,
+                QStringLiteral("onair=%1 path=%2 name=%3 rev=%4 (was %5)")
+                    .arg(svc->mediaOnAir() ? 1 : 0)
+                    .arg(svc->mediaPath() == pathA ? QStringLiteral("match") : svc->mediaPath())
+                    .arg(svc->mediaName())
+                    .arg(svc->mediaRev())
+                    .arg(revBefore));
+        // 2. A path that is not there: refused, and what is on air stays.
+        svc->takeMedia(missing, QString());
+        QTimer::singleShot(900, svc, [verdict, pathA, pathB, missing] {
+            auto *svc = &LiveOutputService::instance();
+            verdict("not-found refused", svc->mediaOnAir() && svc->mediaPath() == pathA,
+                    QStringLiteral("onair=%1 path=%2 (asked '%3')")
+                        .arg(svc->mediaOnAir() ? 1 : 0)
+                        .arg(svc->mediaPath() == pathA ? QStringLiteral("untouched") : svc->mediaPath())
+                        .arg(missing));
+            // 3. Take, then clear while the decode is still in flight.
+            svc->takeMedia(pathA, QString());
+            svc->clearMedia();
+            QTimer::singleShot(900, svc, [verdict, pathA, pathB] {
+                auto *svc = &LiveOutputService::instance();
+                verdict("clear cancels an in-flight take",
+                        !svc->mediaOnAir() && svc->mediaPath().isEmpty(),
+                        QStringLiteral("onair=%1 path='%2' (cleared during the take of '%3')")
+                            .arg(svc->mediaOnAir() ? 1 : 0)
+                            .arg(svc->mediaPath())
+                            .arg(pathA));
+                if (pathB.isEmpty())
+                    return;
+                // 4. Newest wins: the second take owns the layer even though the
+                //    first one's decode may land after it.
+                svc->takeMedia(pathA, QString());
+                svc->takeMedia(pathB, QString());
+                QTimer::singleShot(1800, svc, [verdict, pathB] {
+                    auto *svc = &LiveOutputService::instance();
+                    verdict("newest take wins", svc->mediaOnAir() && svc->mediaPath() == pathB,
+                            QStringLiteral("onair=%1 path=%2 (want '%3')")
+                                .arg(svc->mediaOnAir() ? 1 : 0)
+                                .arg(svc->mediaPath() == pathB ? QStringLiteral("newest") : svc->mediaPath())
+                                .arg(pathB));
+                    svc->clearMedia();   // the self-test leaves NO side effects
+                });
+            });
+        });
+    });
+}
+
 // Env-gated boot self-test: VGR_OUTPUT_INPUT_TEST=1 drives the WHOLE
 // taken-input chain automatically — enumerate → take the first real window
 // → wait through the tap's warm-up → read the provider's decode cache → log
@@ -1242,6 +1425,12 @@ void LiveOutputService::runEnvSelfTest()
 {
     if (!qEnvironmentVariableIsSet("VGR_OUTPUT_INPUT_TEST"))
         return;
+    // The MEDIA probes ride the same env var: the input chain hands over to them
+    // when it finishes, and this is the fallback for the machine where it gives
+    // up early ("no window or monitor source to take") — the media verdicts must
+    // not go down with it. Both triggers go through the one-shot gate, so the two
+    // chains never run at the same time (see runMediaTakeSelfTestOnce).
+    QTimer::singleShot(25000, &instance(), [] { runMediaTakeSelfTestOnce(); });
     QTimer::singleShot(2500, &instance(), [] {
         QString label;
         const QVariantList screen = EngineBridge::instance().screenDevices();
@@ -1257,10 +1446,30 @@ void LiveOutputService::runEnvSelfTest()
             }
         }
         if (label.isEmpty()) {
-            qWarning("LiveOutputService[selftest] FAIL: no window source to take");
+            // NO WINDOW TO TAKE is not the same as nothing to test: a DESKTOP
+            // capture rides the very same tap (the label resolves to a monitor id
+            // through the same table, and the same take, warm-up, re-activation
+            // and clear chain drives it) — and a bare desktop is exactly what a
+            // fresh machine or CI box has. Falling
+            // back to the first monitor keeps this chain COVERED there instead
+            // of ending in a FAIL that tests nothing.
+            for (const QVariant &v : screen) {
+                const QVariantMap d = v.toMap();
+                if (d.value("id").toString().startsWith(QStringLiteral("\\\\.\\DISPLAY"))) {
+                    label = d.value("label").toString();
+                    break;
+                }
+            }
+            if (!label.isEmpty())
+                qInfo("LiveOutputService[selftest] no window source — taking monitor '%s' instead",
+                      qUtf8Printable(label));
+        }
+        if (label.isEmpty()) {
+            qWarning("LiveOutputService[selftest] FAIL: no window or monitor source to take");
             return;
         }
-        qInfo("LiveOutputService[selftest] taking window '%s'", qUtf8Printable(label));
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("Input selftest"),
+                            QStringLiteral("taking '%1'").arg(label));
         instance().takeInput(label, QStringLiteral("screen"), QString());
         if (instance().inputLabel().isEmpty()) {
             qWarning("LiveOutputService[selftest] FAIL: take was refused");
@@ -1270,8 +1479,7 @@ void LiveOutputService::runEnvSelfTest()
             // The service's OWN live flag — flipped by the decode-cache poll,
             // i.e. proof the tap produced real pixels end to end.
             if (instance().inputLive())
-                qInfo("LiveOutputService[selftest] PASS: frames decoded for '%s'",
-                      qUtf8Printable(label));
+                selftestPass("Input selftest", QStringLiteral("frames decoded for '%1'").arg(label));
             else
                 qWarning("LiveOutputService[selftest] FAIL: no frames decoded for '%s'",
                          qUtf8Printable(label));
@@ -1289,7 +1497,8 @@ void LiveOutputService::runEnvSelfTest()
                 const bool held = instance().inputLabel() == label;
                 QTimer::singleShot(2500, &instance(), [label, held] {
                     if (held && instance().inputLive())
-                        qInfo("LiveOutputService[selftest] REACTIVATE PASS: same-source re-activation kept the tap, frames flowing");
+                        selftestPass("Input selftest",
+                                     QStringLiteral("re-activation kept the tap, frames flowing ('%1')").arg(label));
                     else
                         qWarning("LiveOutputService[selftest] REACTIVATE FAIL: held=%d live=%d",
                                  held ? 1 : 0, instance().inputLive() ? 1 : 0);
@@ -1326,13 +1535,18 @@ void LiveOutputService::runEnvSelfTest()
                         const int cc = snap.value("channelCount").toInt();
                         if (cc > 0) {
                             QVariantList peaks = snap.value("peaks").toList();
-                            qInfo("LiveOutputService[selftest] METER PASS: '%s' tap live, %d channels, peak=%.3f",
-                                  qUtf8Printable(audioLabel), cc,
-                                  peaks.isEmpty() ? 0.0 : peaks.first().toDouble());
+                            selftestPass("Meter selftest",
+                                         QStringLiteral("'%1' tap live, %2 channels, peak=%3")
+                                             .arg(audioLabel)
+                                             .arg(cc)
+                                             .arg(peaks.isEmpty() ? 0.0 : peaks.first().toDouble()));
                         } else
                             qWarning("LiveOutputService[selftest] METER FAIL: '%s' produced no snapshot (no signal)",
                                      qUtf8Printable(audioLabel));
                         EngineBridge::instance().stopInputMeter(audioLabel);
+                        // The input chain is done — hand the clock to the media
+                        // probes (one-shot: the fallback timer above stands down).
+                        runMediaTakeSelfTestOnce();
                     });
                 });
             });
@@ -1435,15 +1649,19 @@ void LiveOutputService::clearOnAirSlide()
 // service-side and the file's AUDIO rides the player's own WASAPI output —
 // the machine's mix, which the program-mix loopback tap already meters.
 // ---------------------------------------------------------------------------
-void LiveOutputService::takeMedia(const QString &path, const QString &name)
+// The DISK half of a take — it exists so that step can run on the worker
+// (see the hop in takeMedia). Everything in it touches a file: resolving the
+// path, asking whether it exists, classifying its extension and, for a still,
+// the decode. A slow/cold volume or a 4K JPEG is a wait the user can feel, and
+// that wait belongs to the disk, not to the thread that draws.
+LiveOutputService::MediaPreflight LiveOutputService::preflightMediaTake(const QString &path,
+                                                                       const QString &name)
 {
-    const QString clean = path.startsWith(QStringLiteral("file:///"))
+    MediaPreflight pre;
+    pre.clean = path.startsWith(QStringLiteral("file:///"))
         ? QUrl(path).toLocalFile() : path;
-    if (clean.isEmpty() || !QFileInfo::exists(clean)) {
-        qWarning("LiveOutputService: takeMedia: file not found: %s", qUtf8Printable(clean));
-        emit mediaChanged();
-        return;
-    }
+    if (pre.clean.isEmpty() || !QFileInfo::exists(pre.clean))
+        return pre;   // found = false: the apply half logs the refusal
 
     static const char *videoExts[] = { "mp4", "mov", "mkv", "avi", "webm", "m4v", "wmv" };
     static const char *imageExts[] = { "png", "jpg", "jpeg", "bmp", "gif", "webp" };
@@ -1452,22 +1670,73 @@ void LiveOutputService::takeMedia(const QString &path, const QString &name)
     // to be refused here.
     static const char *audioExts[] = { "mp3", "wav", "wave", "flac", "aac", "m4a", "m4b", "ogg", "oga",
                                        "opus", "wma", "aif", "aiff", "aifc", "mka", "amr", "ac3", "weba" };
-    const QString ext = QFileInfo(clean).suffix().toLower();
-    bool isVideo = false;
-    bool isImage = false;
-    bool isAudio = false;
+    const QString ext = QFileInfo(pre.clean).suffix().toLower();
     for (const char *e : videoExts)
-        if (ext == QLatin1String(e)) { isVideo = true; break; }
+        if (ext == QLatin1String(e)) { pre.isVideo = true; break; }
     for (const char *e : imageExts)
-        if (ext == QLatin1String(e)) { isImage = true; break; }
+        if (ext == QLatin1String(e)) { pre.isImage = true; break; }
     for (const char *e : audioExts)
-        if (ext == QLatin1String(e)) { isAudio = true; break; }
-    if (!isVideo && !isImage && !isAudio) {
+        if (ext == QLatin1String(e)) { pre.isAudio = true; break; }
+    pre.recognized = pre.isVideo || pre.isImage || pre.isAudio;
+    pre.found = true;
+    if (!pre.recognized)
+        return pre;
+
+    pre.name = name.isEmpty() ? QFileInfo(pre.clean).completeBaseName() : name;
+    // A still is decoded HERE, once, on the worker — it paints through the same
+    // provider as a video frame. A failed decode leaves the take up but
+    // frameless: image stays null and the apply half keeps the tile's
+    // placeholder honest instead of faking a frame.
+    if (pre.isImage)
+        pre.image = QImage(pre.clean);
+    return pre;
+}
+
+void LiveOutputService::takeMedia(const QString &path, const QString &name)
+{
+    // SUPERSESSION TOKEN. A take is now two hops (disk on the worker, apply
+    // back here), so a second drop can overtake the first one's decode. The
+    // newest take owns the layer: every older generation is dropped on sight,
+    // and the apply half re-checks on THIS thread before writing a member, so
+    // two results can never interleave into a mixed state.
+    const quint64 token = ++mediaTakeToken_;
+    // The hop: QFileInfo::exists + the extension classification + (for a still)
+    // the QImage decode — all disk work, and takeMedia is a Q_INVOKABLE
+    // reachable straight from a drop handler. What stays HERE is only the
+    // bookkeeping: the token bump above and the apply below, because every
+    // member an apply writes (mediaPlayer_/mediaSink_/mediaAudio_) is a QObject
+    // owned by this thread and QMediaPlayer must be created and driven on the
+    // thread that runs its event loop.
+    vgr::EngineWorker::instance().runOffThread([this, token, path, name] {
+        MediaPreflight pre = preflightMediaTake(path, name);
+        if (token != mediaTakeToken_.load())
+            return;   // superseded while the disk was being read — drop it here
+        vgr::EngineWorker::onInterfaceThread(this, [this, token, pre] {
+            if (token != mediaTakeToken_.load())
+                return;   // a newer take (or a clear) landed while this was queued
+            applyMediaTake(pre);
+        });
+    });
+}
+
+// The interface-thread half: the same body the take used to run inline, minus
+// everything that touched a file. It never blocks — the file is already read.
+void LiveOutputService::applyMediaTake(const MediaPreflight &pre)
+{
+    const QString &clean = pre.clean;
+    if (!pre.found) {
+        qWarning("LiveOutputService: takeMedia: file not found: %s", qUtf8Printable(clean));
+        emit mediaChanged();
+        return;
+    }
+    if (!pre.recognized) {
         qWarning("LiveOutputService: takeMedia: '%s' has an unrecognized extension",
                  qUtf8Printable(clean));
         emit mediaChanged();
         return;
     }
+    const bool isVideo = pre.isVideo;   // pre.isImage is the else branch below
+    const bool isAudio = pre.isAudio;
 
     // ONE compositor layer: taking media releases a held input take (the
     // two holds are mutually exclusive — the last gesture wins).
@@ -1520,7 +1789,7 @@ void LiveOutputService::takeMedia(const QString &path, const QString &name)
     }
 
     mediaPath_ = clean;
-    mediaName_ = name.isEmpty() ? QFileInfo(clean).completeBaseName() : name;
+    mediaName_ = pre.name;
     mediaIsVideo_ = isVideo;
     mediaIsAudio_ = isAudio;
     lastMediaFrame_ = QImage();   // warm-up: the tiles show their placeholder
@@ -1541,10 +1810,11 @@ void LiveOutputService::takeMedia(const QString &path, const QString &name)
         mediaState_ = QStringLiteral("playing");
         mediaPlayer_->play();
     } else {
-        // An IMAGE paints through the same provider: decode it once here (GUI
-        // thread, one file, no player involved). A failed decode leaves the
-        // take up but frameless — the tile's placeholder stays honest.
-        lastMediaFrame_ = QImage(clean);
+        // An IMAGE paints through the same provider. The decode already
+        // happened on the worker (preflightMediaTake); this is just the hand
+        // over. A failed decode leaves the take up but frameless — the tile's
+        // placeholder stays honest.
+        lastMediaFrame_ = pre.image;
         if (!lastMediaFrame_.isNull())
             mediaRev_++;
         pushMediaFrameToCompositor(lastMediaFrame_);
@@ -1560,6 +1830,11 @@ void LiveOutputService::takeMedia(const QString &path, const QString &name)
 
 void LiveOutputService::clearMedia()
 {
+    // Invalidate any take that is still decoding (see the token in takeMedia):
+    // a file that lands after this must not put itself back on air. Bumped
+    // BEFORE the on-air guard below — clearing an already-empty layer still has
+    // to cancel a take that is in flight.
+    ++mediaTakeToken_;
     if (!mediaOnAir_)
         return;
     if (mediaPlayer_)
@@ -1914,7 +2189,16 @@ void LiveOutputService::pollTick()
 // sender only ever pushed when the NDI row itself was active, so with a
 // projector on air the monitor kept showing whatever it had connected to
 // last — the self-test's synthetic frame.)
-void LiveOutputService::pushNdiFrame()
+//
+// THREADS (§6.6 of docs/gui_thread_audit.md): the resolution is SPLIT the way
+// the tap opens are. What belongs to THIS thread stays — the roster read (a QML
+// model), the bridge's PUBLISHED NDI verdict, the buffer NAME (a hash of the
+// row), the configured rate, and every piece of the pill's own state. What does
+// not is the ENGINE WALK: the display provider and the output's frame buffer are
+// engine singletons behind their own locks, and a 10 Hz poll taking them on the
+// thread that draws is exactly the inventory this audit exists to remove. The
+// walk runs on the pool and its answer comes back through applyNdiPlanProbe.
+void LiveOutputService::recheckNdiPlanOffThread()
 {
     // First ENABLED output whose kind is NDI wins (row order = roster order,
     // so the first NDI row is deterministic); a disabled one can't go live
@@ -1978,8 +2262,7 @@ void LiveOutputService::pushNdiFrame()
         // feature is switched back on (or the probe answers Ready), and the
         // next tick resumes sending. A probe still in flight takes this same
         // exit without a word — the answer is milliseconds away.
-        if (ndiSending_) {
-            std::lock_guard<std::mutex> lock(ndiStateMutex_);
+        if (ndiSending_) {          // the GUI thread's own state (see the members)
             ndiSending_ = false;
             ndiSendingOutput_.clear();
         }
@@ -1989,12 +2272,7 @@ void LiveOutputService::pushNdiFrame()
         return;
     }
 
-    auto *provider = []() -> bps::display::NdiDisplayProvider * {
-        auto p = bps::display::DisplayEngine::Instance().Provider("Ndi");
-        return p ? dynamic_cast<bps::display::NdiDisplayProvider *>(p.get()) : nullptr;
-    }();
-
-    if (!want || !provider) {
+    if (!want) {
         if (ndiSending_) {
             ndiSending_ = false;
             ndiSendingOutput_.clear();
@@ -2005,52 +2283,119 @@ void LiveOutputService::pushNdiFrame()
         return;
     }
 
-    // The frame: THIS output's own gated buffer when styled, else the
+    // The frame name: THIS output's own gated buffer when styled, else the
     // shared preview feed (FrameBufferRole's exact keying — qHash(name)).
-    // GUI side reads the LAST frame from the engine's buffer and hands a
-    // COPY to the worker (the engine reuses its buffer for the next frame,
-    // so the pixels must be owned across threads). QImage is implicitly
-    // shared — the detach inside the copy constructor is the one allocation.
     const QString styleId = model && ndiRow >= 0
         ? model->getOutput(ndiRow).value("styleId").toString() : QString();
     const std::string buffer = styleId.isEmpty()
         ? std::string(bps::live::LiveOutputController::kPreviewName)
         : QStringLiteral("__out_%1__").arg(qHash(ndiOutputName)).toStdString();
-    auto out = pr::RenderEngine::Instance().GetOutput(buffer);
-    if (!out.ok()) {
+    // The Output row's own name IS the network-visible NDI source name
+    // (re-resolved per poll; the sender's SDK identity is fixed at creation,
+    // so a mid-session rename lands next session). The rate advertised is the
+    // CONFIGURED Refresh rate — the same number the feed's clock is armed at —
+    // and it no longer drops to half under backpressure: a receiver is told the
+    // truth, and the beats a slow send overruns are simply skipped.
+    const QString senderName = ndiSenderDisplayName(ndiOutputName);
+    const float configuredFps = ndiConfiguredFps();
+    const float fps = configuredFps > 0.0f ? configuredFps : 30.0f;
+
+    if (ndiPlanProbeBusy_.exchange(true))
+        return;   // a walk is already in flight — it publishes, this poll does not
+
+    QPointer<LiveOutputService> guard(this);
+    QThreadPool::globalInstance()->start([guard, buffer, ndiOutputName, senderName, fps]() {
+        // THE ENGINE WALK, off the interface thread: the provider map and the
+        // render registry are engine singletons, and the frame buffer's own
+        // snapshot is taken under its lock — never on the thread that draws.
+        auto *provider = []() -> bps::display::NdiDisplayProvider * {
+            auto p = bps::display::DisplayEngine::Instance().Provider("Ndi");
+            return p ? dynamic_cast<bps::display::NdiDisplayProvider *>(p.get()) : nullptr;
+        }();
+        bool bufferOk = false;
+        bool enabled = false;
+        bool hasFrame = false;
+        std::shared_ptr<pr::FrameBufferOutput> fb;
+        if (provider) {
+            auto out = pr::RenderEngine::Instance().GetOutput(buffer);
+            if (out.ok()) {
+                fb = std::dynamic_pointer_cast<pr::FrameBufferOutput>(out.value());
+                bufferOk = fb != nullptr;
+            }
+            if (fb) {
+                enabled = fb->Enabled();
+                const auto peek = fb->LastFrameSnapshot();
+                hasFrame = peek && !peek->empty();
+            }
+        }
+        if (!guard)
+            return;   // the service is gone; there is nothing to publish onto
+        vgr::EngineWorker::onInterfaceThread(guard.data(),
+            [guard, provider, fb, bufferOk, enabled, hasFrame, ndiOutputName, senderName, fps]() {
+                if (LiveOutputService *self = guard.data())
+                    self->applyNdiPlanProbe(provider, fb, bufferOk, enabled, hasFrame,
+                                            ndiOutputName, senderName, fps);
+            });
+    });
+}
+
+// The walk's answer, back on the interface thread. Every branch here is one the
+// inline code used to take, in the same order, with the same note and toast:
+// no provider at all, a buffer the live loop has not registered yet, a buffer
+// that is not enabled, a buffer with no frame yet, and the real thing.
+void LiveOutputService::applyNdiPlanProbe(bps::display::NdiDisplayProvider *provider,
+                                          const std::shared_ptr<pr::FrameBufferOutput> &fb,
+                                          bool bufferOk, bool enabled, bool hasFrame,
+                                          const QString &outputName, const QString &senderName,
+                                          float fps)
+{
+    ndiPlanProbeBusy_ = false;
+    if (!live_) {
+        // Off air while the walk ran: the feed is stopping anyway, and a plan
+        // published now would arm a clock nobody is stopping again.
+        clearNdiPlan();
+        return;
+    }
+    if (!provider) {
+        if (ndiSending_) {
+            ndiSending_ = false;
+            ndiSendingOutput_.clear();
+            emit ndiChanged();
+        }
+        setNdiWarming(false, QString());   // the sending half is not even there
+        clearNdiPlan();
+        return;
+    }
+    if (!bufferOk) {
         // One-shot per outage: a missing buffer means the live loop hasn't
         // registered it yet (GO LIVE just pressed) — silence here read as
         // "NDI broken" when it was "NDI warming up".
         if (!ndiWaitLogged_) {
             ndiWaitLogged_ = true;
-            qCWarning(lcNdiProgress, "LiveOutputService: NDI output '%s' waiting for buffer '%s' (live loop warming up)",
-                     qUtf8Printable(ndiOutputName), buffer.c_str());
+            qCWarning(lcNdiProgress, "LiveOutputService: NDI output '%s' waiting for its buffer (live loop warming up)",
+                     qUtf8Printable(outputName));
             // EXPLICIT toast (not the qWarning→toast path — these progress
             // lines are category-suppressed in main.cpp): the operator needs
             // to know the feed is WARMING UP, not broken, when a receiver
             // shows nothing for the first second or two after GO LIVE. One
             // per outage, re-armed once frames flow.
             EventBus::instance().notify(
-                QStringLiteral("NDI output '%1' is warming up — waiting for the live loop's first frame. Sending starts automatically.").arg(ndiOutputName),
+                QStringLiteral("NDI output '%1' is warming up — waiting for the live loop's first frame. Sending starts automatically.").arg(outputName),
                 QStringLiteral("info"), QStringLiteral("NDI"), QStringLiteral("outputs.ndi.warmingUp"));
         }
         // The live loop has not registered the buffer yet (GO LIVE just
         // pressed): an enabled NDI row WANTS feeding and has no frame on the
         // wire — the inline "warming up" state Settings · Outputs shows.
-        setNdiWarming(true, ndiOutputName);
+        setNdiWarming(true, outputName);
         clearNdiPlan();
         if (ndiSending()) {
-            {
-                std::lock_guard<std::mutex> lock(ndiStateMutex_);
-                ndiSending_ = false;
-                ndiSendingOutput_.clear();
-            }
+            ndiSending_ = false;
+            ndiSendingOutput_.clear();
             emit ndiChanged();
         }
         return;
     }
-    auto fb = std::dynamic_pointer_cast<pr::FrameBufferOutput>(out.value());
-    if (!fb || !fb->Enabled()) {
+    if (!fb || !enabled) {
         clearNdiPlan();
         return;
     }
@@ -2060,42 +2405,30 @@ void LiveOutputService::pushNdiFrame()
     // the sending (see ndiWorkerTick). Nothing here touches pixels, and nothing
     // here can be late in a way the wire notices: the plan is republished every
     // poll, so a rename, a rate change or a disabled row lands within 100 ms.
-    //
-    // The Output row's own name IS the network-visible NDI source name
-    // (re-resolved per poll; the sender's SDK identity is fixed at creation,
-    // so a mid-session rename lands next session). The rate advertised is the
-    // CONFIGURED Refresh rate — the same number the feed's clock is armed at —
-    // and it no longer drops to half under backpressure: a receiver is told the
-    // truth, and the beats a slow send overruns are simply skipped.
     NdiSendPlan plan;
     plan.want = true;
     plan.provider = provider;
     plan.buffer = fb;
-    plan.senderName = ndiSenderDisplayName(ndiOutputName);
-    const float configuredFps = ndiConfiguredFps();
-    plan.fps = configuredFps > 0.0f ? configuredFps : 30.0f;
+    plan.senderName = senderName;
+    plan.fps = fps;
     setNdiPlan(plan);
 
     // The frame may not exist yet (GO LIVE just pressed): an enabled NDI row
     // wants feeding and has nothing on the wire — the inline "warming up"
     // state Settings · Outputs shows. One note and one toast per outage; the
     // feed thread starts sending by itself the moment a frame is there.
-    const auto peek = fb->LastFrameSnapshot();
-    if (!peek || peek->empty()) {
+    if (!hasFrame) {
         if (!ndiWaitLogged_) {
             ndiWaitLogged_ = true;
             qCWarning(lcNdiProgress, "LiveOutputService: NDI output waiting for the live loop's first rendered frame");
             EventBus::instance().notify(
-                QStringLiteral("NDI output '%1' is warming up — waiting for the live loop's first frame. Sending starts automatically.").arg(ndiOutputName),
+                QStringLiteral("NDI output '%1' is warming up — waiting for the live loop's first frame. Sending starts automatically.").arg(outputName),
                 QStringLiteral("info"), QStringLiteral("NDI"), QStringLiteral("outputs.ndi.warmingUp"));
         }
-        setNdiWarming(true, ndiOutputName);   // buffer exists, no frame yet
+        setNdiWarming(true, outputName);   // buffer exists, no frame yet
         if (ndiSending()) {
-            {
-                std::lock_guard<std::mutex> lock(ndiStateMutex_);
-                ndiSending_ = false;
-                ndiSendingOutput_.clear();
-            }
+            ndiSending_ = false;
+            ndiSendingOutput_.clear();
             emit ndiChanged();
         }
         return;
@@ -2105,14 +2438,11 @@ void LiveOutputService::pushNdiFrame()
     // send itself is the feed thread's job and may take a moment on its first
     // frame — the SDK sender is created there); the worker's own first-frame
     // log covers the frames-flowing beat.
-    {
-        std::lock_guard<std::mutex> lock(ndiStateMutex_);
-        ndiSendingOutput_ = ndiOutputName;   // the pill's LIVE row (rename-safe)
-        if (!ndiSending_) {
-            ndiSending_ = true;
-            qCWarning(lcNdiProgress, "LiveOutputService: NDI program sending started (%s)",
-                     qUtf8Printable(plan.senderName.isEmpty() ? QStringLiteral("VGR Program") : plan.senderName));
-        }
+    ndiSendingOutput_ = outputName;   // the pill's LIVE row (rename-safe)
+    if (!ndiSending_) {
+        ndiSending_ = true;
+        qCWarning(lcNdiProgress, "LiveOutputService: NDI program sending started (%s)",
+                 qUtf8Printable(senderName.isEmpty() ? QStringLiteral("VGR Program") : senderName));
     }
     ndiWaitLogged_ = false;            // frames are flowing — the waiting notes re-arm
     setNdiWarming(false, QString());   // on the wire: no longer warming
@@ -2123,26 +2453,23 @@ void LiveOutputService::pushNdiFrame()
 // dead by then — stop() stops the clock first).
 void LiveOutputService::stopNdiFeed()
 {
+    // The pill's own state is this thread's (see the members) — no lock, and
+    // nothing to wait for.
     bool changed = false;
-    {
-        std::lock_guard<std::mutex> lock(ndiStateMutex_);
-        if (ndiSending_) {
-            ndiSending_ = false;
-            ndiSendingOutput_.clear();
-            changed = true;
-        }
+    if (ndiSending_) {
+        ndiSending_ = false;
+        ndiSendingOutput_.clear();
+        changed = true;
     }
     if (changed)
         emit ndiChanged();
-    // Reset the incident state: the slow-send latch and the receiver telemetry
-    // belong to the live session that just ended — the next one starts clean
-    // (and re-reports its monitors from scratch). Under the same lock the feed
-    // thread writes them with: it can be mid-send right now.
-    {
-        std::lock_guard<std::mutex> lock(ndiStateMutex_);
-        ndiSlowLogged_ = false;
-        ndiFastStreak_ = 0;
-    }
+    // Reset the incident state: the slow-send latch and the rate watch belong to
+    // the live session that just ended — the next one starts clean (and
+    // re-reports its monitors from scratch). The feed thread decides these
+    // (it can be mid-send right now), which is why they are atomics: this clear
+    // never has to wait for it.
+    ndiSlowLogged_.store(false, std::memory_order_relaxed);
+    ndiFastStreak_.store(0, std::memory_order_relaxed);
     // The plan goes with the session: an empty plan is what stops the feed
     // thread's own clock (see ndiWorkerTick).
     clearNdiPlan();
@@ -2157,6 +2484,28 @@ void LiveOutputService::ensureNdiWorker()
     ndiThread_->setObjectName("ndi-send");
     ndiWorker_ = new QObject();          // context only; lives on ndiThread_
     ndiWorker_->moveToThread(ndiThread_);
+    // THE WORKER IS DESTROYED IN THE THREAD THAT OWNS IT. It is the parent of the
+    // feed's QTimer (`ndiSendTimer_`, created on this thread in setNdiPlan), and a
+    // QObject owns its children — so deleting the worker from the interface thread
+    // (what shutdownNdiWorker used to do) destroyed that timer from the wrong
+    // thread. Qt says so on every quit after a live session:
+    //     QObject::killTimer: Timers cannot be stopped from another thread
+    //     QObject::~QObject: Timers cannot be stopped from another thread
+    // finished() is emitted IN this thread as its loop ends, which is where
+    // deleteLater() still runs — so the worker takes itself and its timer down on
+    // its own side, and the GUI never reaches into it to destroy anything.
+    //
+    // finished() is the one hook that is guaranteed to run IN this thread as its
+    // loop ends, so the destruction hangs off that rather than off a teardown call
+    // queued from the GUI side: a queued call is NOT reliably drained before
+    // quit() ends the loop (measured — the teardown lambda this replaced never ran,
+    // while deleteLater off finished does), and a fix whose only evidence is an
+    // absent warning is one nobody can check later. Hence the line.
+    connect(ndiThread_, &QThread::finished, ndiWorker_, [this] {
+        qInfo("LiveOutputService: NDI worker teardown on the feed thread (its send clock exists=%d)",
+              ndiSendTimer_ != nullptr);
+        ndiWorker_->deleteLater();
+    });
     // AboutTo-quit ordering is handled by shutdownNdiWorker() from
     // main.cpp's aboutToQuit — BEFORE the engine's own teardown.
     ndiThread_->start();
@@ -2164,28 +2513,26 @@ void LiveOutputService::ensureNdiWorker()
 
 void LiveOutputService::clearNdiPlan()
 {
-    {
-        std::lock_guard<std::mutex> lock(ndiPlanMutex_);
-        ndiPlan_ = NdiSendPlan{};
-    }
     ndiClockArmed_ = false;   // no plan: the feed stops its own clock next beat
+    handOverNdiPlan(NdiSendPlan{});
 }
 
 void LiveOutputService::setNdiPlan(const NdiSendPlan &plan)
 {
-    {
-        std::lock_guard<std::mutex> lock(ndiPlanMutex_);
-        ndiPlan_ = plan;
-    }
+    // The thread that will run the feed has to exist before the plan is handed
+    // to it (arm first, then publish — the order the mutex version used, so the
+    // opening frame still does not wait for the next poll).
+    if (plan.want)
+        ensureNdiWorker();
+    handOverNdiPlan(plan);   // ...it has the plan before its first tick
     if (!plan.want) {
         ndiClockArmed_ = false;     // the feed thread stops its own clock
         return;
     }
     if (ndiClockArmed_)
         return;                     // the feed's clock is already running
-    ensureNdiWorker();
     if (!ndiWorker_)
-        return;
+        return;                     // no feed thread could be created: nothing to arm
     ndiClockArmed_ = true;
     // The clock is CREATED on the feed thread (a QTimer belongs to the thread
     // that runs it) and armed there; its interval follows the plan from inside
@@ -2244,6 +2591,14 @@ void LiveOutputService::shutdownNdiWorker()
 {
     if (!ndiThread_)
         return;
+    // Nothing is queued to the feed thread from here any more. It looks like the
+    // careful thing to do — hand the timer's teardown to the thread that owns it
+    // before the loop is told to quit — but it does not work: a call posted to a
+    // loop that is about to exit is not reliably drained (measured: the lambda this
+    // replaced never ran, on a quit 2 s after going live), so anything load-bearing
+    // would be silently skipped. The worker's destruction rides finished() instead
+    // (where it is created), which IS delivered in this thread as the loop ends.
+    // `quit()` only ends the loop; the worker's own teardown does the rest.
     ndiThread_->quit();
     // BOUNDED join: quit() only stops the worker's event loop — a send already
     // RUNNING cannot be interrupted, and an NDI SDK send on a stalled network
@@ -2257,21 +2612,28 @@ void LiveOutputService::shutdownNdiWorker()
         // thread dies with it. Re-parent so nothing here dangles.
         ndiWorker_->setParent(nullptr);
         ndiThread_->setParent(nullptr);
-        ndiWorker_ = nullptr;
-        ndiThread_ = nullptr;
-        ndiSendTimer_ = nullptr;   // its thread owns it; the process is exiting
-        ndiClockArmed_ = false;
+    ndiWorker_ = nullptr;
+    ndiThread_ = nullptr;
+    ndiSendTimer_ = nullptr;   // its thread owns it; the process is exiting
+    ndiClockArmed_ = false;
+    ndiPlanPublished_ = false;   // the plan went with the thread it was handed to
         qWarning("LiveOutputService: NDI send worker did not stop within 2s — leaving it detached rather than hanging the UI");
         return;
     }
-    // The worker's own QTimer dies with it (delete ndiWorker_ destroys its
-    // children) — drop the raw pointer with the object it belonged to.
+    // Nothing is deleted from here. The timer was deleted on the feed thread by
+    // the queued teardown above (or the loop exited first and the worker's own
+    // destruction took it — either way that destruction happens in the thread that
+    // owns it, which is the point), and the worker deletes ITSELF as its loop ends
+    // (the finished/deleteLater connect where it is created). So the GUI thread
+    // only drops the raw pointers, with the objects they belonged to.
     ndiSendTimer_ = nullptr;
-    delete ndiWorker_;      // plain context object; its thread is gone
     ndiWorker_ = nullptr;
     delete ndiThread_;      // `this`-parented, but explicit for clarity
     ndiThread_ = nullptr;
     ndiClockArmed_ = false;
+    // The plan lived on the thread that just went away: a later feed has to
+    // hand a fresh one over rather than be told it already did.
+    ndiPlanPublished_ = false;
 }
 
 void LiveOutputService::startNdiSendClock()
@@ -2281,7 +2643,7 @@ void LiveOutputService::startNdiSendClock()
     // tick. WHAT to send is resolved there (the roster is GUI-owned); WHEN is
     // the feed thread's own clock from that point on.
     ensureNdiWorker();
-    pushNdiFrame();
+    recheckNdiPlanOffThread();
 }
 
 void LiveOutputService::stopNdiSendClock()
@@ -2306,19 +2668,19 @@ void LiveOutputService::stopNdiSendClock()
 // re-resolves the first enabled NDI output (the roster is GUI-owned) and hands
 // the feed thread a fresh value — so a row enabled mid-live, a rename, a
 // disabled output or a changed Refresh rate all reach the wire within a poll,
-// with no clock to re-arm and nothing to keep in sync by hand. pushNdiFrame's
-// own !want paths publish an empty plan, which is what stops the feed.
+// with no clock to re-arm and nothing to keep in sync by hand. The empty-plan
+// paths publish nothing, which is what stops the feed.
 void LiveOutputService::pollTickRecheckNdi()
 {
     if (!live_)
         return;
-    pushNdiFrame();
+    recheckNdiPlanOffThread();
 }
 
 // ---- Output frame-rate watch -----------------------------------------------
 // One measured number drives two things, both off the GUI thread's 10Hz poll
-// (the counters live behind ndiStateMutex_, so nothing here touches the
-// worker's state directly):
+// (the counters are atomics the feed thread publishes, so nothing here touches
+// the worker's state directly — and nothing here waits on it):
 //
 //  1. a RUNTIME RATE-CHANGE toast — the feed stepping DOWN to (about) half
 //     under backpressure, or recovering to the configured rate. The halving
@@ -2472,13 +2834,11 @@ void LiveOutputService::armNdiSenderForSession()
     // next send on the worker recreates it under the new name. The worker is
     // created here if absent so the reset lands after any queued job on a
     // live session (event-loop order keeps the sequence right).
-    if (!ndiThread_) {
-        ndiThread_ = new QThread(this);
-        ndiThread_->setObjectName("ndi-send");
-        ndiWorker_ = new QObject();
-        ndiWorker_->moveToThread(ndiThread_);
-        ndiThread_->start();
-    }
+    // Same thread/worker pair as every other path — through the ONE constructor
+    // above rather than a copy of it: the worker's ownership rule (it deletes
+    // itself, and its timer with it, on its own thread) is stated once, and a
+    // second copy of this block is how one of them ends up without it.
+    ensureNdiWorker();
     const QString senderName = name.isEmpty() ? QStringLiteral("VGR Program") : name;
     QMetaObject::invokeMethod(ndiWorker_, [this, provider, name, senderName]() {
         if (!name.isEmpty())

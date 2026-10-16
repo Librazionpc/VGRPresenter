@@ -64,9 +64,17 @@ public:
     QVariantMap execution() const { return execution_; }
     bool running() const { return running_; }
 
-    // Re-reads the engine's flow registry (also called after a Load).
+    // Runs one of the four transport commands ("pause" | "resume" | "skip" |
+    // "stop") OFF the interface thread — the engine call happens on the worker,
+    // and the refreshed state comes back through refreshExecution.
+    void runTransportOffThread(const QString &what);
+
+    // Re-reads the engine's flow registry (also called after a Load). The read
+    // runs on the engine worker; the list lands here and emits flowsChanged.
     Q_INVOKABLE void refreshFlows();
-    // Loads a .vgr/json flow document; the new id toasts on success.
+    // Loads a .vgr/json flow document. True = ACCEPTED for loading: the load and
+    // its outcome (a toast, or the new flow on the list) arrive a moment later,
+    // since the engine call is off the interface thread.
     Q_INVOKABLE bool loadFlow(const QString &document);
     // Loads the built-in starter flow (idempotent — a re-load replaces it).
     Q_INVOKABLE void loadStarterFlow();
@@ -80,7 +88,8 @@ public:
     Q_INVOKABLE void skip();          // skip the current/waiting node
     Q_INVOKABLE void stop();
     Q_INVOKABLE void jumpTo(const QString &nodeId);
-    // Fire one action right now (the pane's quick-action buttons).
+    // Fire one action right now (the pane's quick-action buttons). True =
+    // accepted for firing; a refusal arrives as its toast, from the worker.
     Q_INVOKABLE bool executeAction(const QString &actionType, const QString &payload);
 
     // Waits out the poll pump before engine shutdown.

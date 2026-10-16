@@ -27,6 +27,44 @@ QtObject {
     // changes, and calls `then` if the user lets us proceed. Set by Main.qml (the
     // dialog lives there so it can appear over any screen). Unset = proceed.
     property var askUnsaved: null
+    // THE DOCUMENT JOBS IN FLIGHT, by token (see ShowService's queued document
+    // jobs): the engine writes the .vgr off the interface thread, so saveShow /
+    // saveShowAs / openShowFile answer LATER — through documentJobFinished — and
+    // this is where each request's own continuation waits. A token that is not in
+    // here was not asked for by this session (another screen's save, the autosave
+    // tick), so its verdict is somebody else's business.
+    property var _jobs: ({})
+    function _awaitJob(kind, token, then) {
+        if (!token || token <= 0) {
+            if (then)
+                then(false, ({}))
+            return
+        }
+        session._jobs[token] = { kind: kind, then: then }
+    }
+    // Held as a PROPERTY, not a child: this object is a QtObject, which has no
+    // default property to adopt children into (the same reason designBackend is
+    // written this way below).
+    property Connections _jobResults: Connections {
+        target: ShowService
+        function onDocumentJobFinished(token, kind, ok, error, payload) {
+            const job = session._jobs[token]
+            if (job === undefined)
+                return
+            delete session._jobs[token]
+            if (job.then)
+                job.then(ok, payload !== undefined && payload !== null ? payload : ({}))
+        }
+        // A job this session was waiting on was ABANDONED (ShowService's
+        // cancelDocumentJobs — another show was opened, the app is closing): its
+        // verdict is never coming, so the continuation is dropped here rather than
+        // left holding a token nothing will ever report. That is what the signal
+        // exists for; without it, a cancelled job would be indistinguishable from
+        // one that is merely slow, and the caller would wait forever.
+        function onDocumentJobCancelled(token, kind) {
+            delete session._jobs[token]
+        }
+    }
 
     // What the engine calls go to. Normally the open SHOW (ShowService); while the Edit screen is editing a DESIGN (an
     // overlay or a template from a library) it is that design (DesignBackend), which answers the same calls. Every slide and
@@ -314,15 +352,16 @@ QtObject {
         })
     }
 
+    // The open is a document job too: the file is read off the interface thread and
+    // the show is applied when its verdict lands (the read used to happen here,
+    // with the interface thread waiting on the disk).
     function openShow() {
         session.closeDesign()
         session.guardUnsaved(function () {
             const path = ShowService.pickShowToOpen()
             if (path === "")
                 return
-            const result = ShowService.openShowFile(path)
-            if (result.ok)
-                session.applyShow(result.show)
+            session.openPath(path)   // the guard has already been asked
         })
     }
 
@@ -330,37 +369,65 @@ QtObject {
     // unsaved-changes guard as the picker flow.
     function openShowPath(path) {
         session.closeDesign()
-        session.guardUnsaved(function () {
-            const result = ShowService.openShowFile(path)
-            if (result.ok)
-                session.applyShow(result.show)
+        session.guardUnsaved(function () { session.openPath(path) })
+    }
+
+    // The open itself, WITHOUT the guard: the picker flow has already asked (and
+    // asking twice is what re-guarding inside openShow would do — the second ask
+    // arrives with the show still dirty after "don't save").
+    function openPath(path) {
+        // Opening a show SUPERSEDES any read still queued for the last one: an
+        // earlier open (or a template load) that nobody will look at any more is
+        // abandoned instead of running ahead of the read this screen is waiting
+        // for — see ShowService's cancelDocumentJobs. Only READS go: a save the
+        // user asked for keeps its write, and this call is made from a
+        // continuation the save already reported to.
+        ShowService.cancelDocumentJobs(["open", "templateLoad"])
+        const token = ShowService.openShowFile(path)
+        session._awaitJob("open", token, function (ok, payload) {
+            if (ok && payload.show)
+                session.applyShow(payload.show)
         })
     }
 
-    // Returns true when the show ended up saved.
-    function saveShow() {
+    // Saves the show. `then(saved)` is called when the verdict lands — the write
+    // itself is queued (ShowService's queued document jobs), so nothing here can
+    // know the answer any sooner; a caller that must not continue until the file
+    // is on disk (the "save changes?" dialog, the close flow) passes `then` and
+    // waits. No `then` at all = fire and forget (the menu's Save, autosave).
+    function saveShow(then) {
         if (session.designMode) {   // a design saves as it goes: Save just makes sure the last edit is in
             session.flushAll()
-            return true
+            if (then)
+                then(true, ({}))
+            return
         }
-        if (!ShowService.hasShow)
-            return false
+        if (!ShowService.hasShow) {
+            if (then)
+                then(false, ({}))
+            return
+        }
         session.flushAll()
         if (ShowService.showPath === "")
-            return session.saveShowAs()
-        return ShowService.saveCurrentShow("")
+            return session.saveShowAs(then)
+        session._awaitJob("save", ShowService.saveCurrentShow(""), then)
     }
 
-    function saveShowAs() {
+    function saveShowAs(then) {
         if (session.designMode) {
             session.flushAll()
-            return true
+            if (then)
+                then(true, ({}))
+            return
         }
         session.ensureDocument()
         session.flushAll()
         const path = ShowService.pickShowSavePath(ShowService.showName)
-        if (path === "")
-            return false
-        return ShowService.saveCurrentShow(path)
+        if (path === "") {
+            if (then)
+                then(false, ({}))   // the user cancelled the picker
+            return
+        }
+        session._awaitJob("save", ShowService.saveCurrentShow(path), then)
     }
 }

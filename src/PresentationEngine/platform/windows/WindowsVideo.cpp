@@ -630,6 +630,40 @@ struct WindowsVideo::PreviewTable {
     std::mutex mutex;
     std::map<std::string, std::unique_ptr<PreviewTap>> taps;
 
+    // ---- Why a tap died, answered WITHOUT the table's lock -------------------
+    //
+    // `mutex` is taken by a capture worker around every open/close AND by the
+    // publishing hand-off, so a card asking "why is this tap dead?" used to queue
+    // behind a worker — the same shape as the audio meter's reader (see
+    // WindowsAudio's InputLevels, and §3.1 of docs/gui_thread_audit.md).
+    //
+    // The answer it wants is a STABLE fact: a tap's failure text is written once,
+    // when the tap dies, and the tap is then REMOVED from `taps`. So a reader that
+    // finds the table busy can repeat the text it last read, as long as the tap
+    // SET has not changed since. `generation` is what makes that a statement
+    // rather than a guess: it is bumped on every insertion and removal, and every
+    // cached answer carries the generation it was read under — so a tap that has
+    // since appeared or gone answers honestly (nothing) instead of being
+    // explained by a reason that belonged to a different tap. The cache itself
+    // sits under the reader's OWN mutex, which no worker can hold.
+    std::atomic<uint64_t> generation{0};
+
+    std::string LastFailure(const std::string &deviceId, uint64_t gen) const
+    {
+        const std::lock_guard<std::mutex> lock(failureMutex_);
+        const auto it = failureCache_.find(deviceId);
+        if (it == failureCache_.end() || it->second.first != gen)
+            return {};   // never read under this tap set: no honest answer yet
+        return it->second.second;
+    }
+
+    void RememberFailure(const std::string &deviceId, uint64_t gen,
+                         const std::string &reason) const
+    {
+        const std::lock_guard<std::mutex> lock(failureMutex_);
+        failureCache_[deviceId] = std::make_pair(gen, reason);
+    }
+
     // ---- Reaping: HOW A TAP DIES WITHOUT BLOCKING ITS CALLER -------------
     //
     // A PreviewTap joins its capture worker in its destructor, and that join
@@ -695,6 +729,9 @@ struct WindowsVideo::PreviewTable {
             it->second->shared->cv.notify_all();
             tap = std::move(it->second);
             taps.erase(it);
+            // The tap set moved: every cached failure answer is now stale (a
+            // reader must not explain a tap that is no longer here).
+            generation.fetch_add(1, std::memory_order_acq_rel);
         }
         Reap(std::move(tap));   // join OFF this thread — see Reap
     }
@@ -727,6 +764,7 @@ struct WindowsVideo::PreviewTable {
                 tap->shared->cv.notify_all();
             }
             all.swap(taps);
+            generation.fetch_add(1, std::memory_order_acq_rel);   // see PreviewFailure
         }
         for (auto &[id, tap] : all)
             Reap(std::move(tap));
@@ -752,6 +790,12 @@ private:
     // every stop-aware wait); this is a diagnostic interval, not a give-up
     // point, because there is nothing left to give up on — see Clear().
     static constexpr std::chrono::milliseconds kReapReport{2000};
+
+    // The reader-only half of LastFailure/RememberFailure: its mutex is taken by
+    // readers and by nothing a capture worker runs (see the generation comment
+    // above), so it can only ever be contended by the other reader.
+    mutable std::mutex failureMutex_;
+    mutable std::map<std::string, std::pair<uint64_t, std::string>> failureCache_;
 
     std::mutex reapMutex_;
     std::condition_variable reapCv_;
@@ -1516,6 +1560,7 @@ Result<void> WindowsVideo::StartScreenPreview(const std::string &monitorId)
         tap->shared->running.store(true);
         tap->worker = std::thread(&WindowsVideo::ScreenPreviewThread, std::ref(*tap));
         slot = std::move(tap);
+        previews_->generation.fetch_add(1, std::memory_order_acq_rel);   // see PreviewFailure
     }
     // Re-pointed source: the replaced tap leaves through the REAPER, not an
     // inline join — its capture worker may be parked in PrintWindow right now,
@@ -1570,6 +1615,9 @@ Result<void> WindowsVideo::StartPreview(const std::string &deviceId, const std::
         tap->shared->running.store(true);
         tap->worker = std::thread(&WindowsVideo::PreviewThread, std::ref(*tap));
         slot = std::move(tap);
+        // A reader's cached failure answer is only good for the tap set it was
+        // read under (see PreviewTable::generation).
+        previews_->generation.fetch_add(1, std::memory_order_acq_rel);
     }
     // Replaced tap: reaped, not joined in place — same reason as
     // StartScreenPreview's identical hand-off (a camera tap can be inside a
@@ -1618,7 +1666,18 @@ IVideo::DecodedFrame WindowsVideo::PreviewFramePixels(const std::string &deviceI
 
 std::string WindowsVideo::PreviewFailure(const std::string &deviceId) const
 {
-    const std::lock_guard<std::mutex> lock(previews_->mutex);
+    if (!previews_)
+        return {};
+    // THE READER NEVER WAITS. This is asked from a QML binding (a card's "can't
+    // reach" state, through EngineBridge::previewFailure) at the pump's rate,
+    // while a capture worker holds the table to open, close or hand over a tap —
+    // so the table is TRIED, not waited on, and a busy table answers from the last
+    // text read for this tap under the same tap set (see LastFailure: a bumped
+    // generation makes it answer nothing instead of guessing).
+    const uint64_t gen = previews_->generation.load(std::memory_order_acquire);
+    std::unique_lock<std::mutex> lock(previews_->mutex, std::try_to_lock);
+    if (!lock.owns_lock())
+        return previews_->LastFailure(deviceId, gen);
     auto it = previews_->taps.find(deviceId);
     if (it == previews_->taps.end())
         return {};
@@ -1628,7 +1687,12 @@ std::string WindowsVideo::PreviewFailure(const std::string &deviceId) const
     // same two-level hand-off as Frame()).
     if (!it->second->shared->failed.load())
         return {};
-    return it->second->shared->Failure();
+    const std::string reason = it->second->shared->Failure();
+    // Publish the answer for the next reader that arrives while the table is
+    // busy. Between two readers nothing else can change it — the text is frozen
+    // when the tap dies, and the tap's removal bumps the generation.
+    previews_->RememberFailure(deviceId, gen, reason);
+    return reason;
 }
 
 std::vector<std::string> WindowsVideo::ActivePreviews() const

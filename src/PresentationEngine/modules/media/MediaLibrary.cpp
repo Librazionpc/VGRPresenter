@@ -135,13 +135,20 @@ MediaLibrary::MediaLibrary(std::string storageFile) : storageFile_(std::move(sto
     indexFile_ = (cut == std::string::npos ? std::string() : storageFile_.substr(0, cut + 1)) + "media-index.json";
 }
 
-std::string MediaLibrary::Canonical(std::string_view path) const {
-    // An empty query matches nothing. Without this guard the fallback below
-    // would compare Norm("") against every stored folder — and any folder
+// The PAL half: resolve the path (a filesystem call, so callers run this with
+// NO lock held).
+std::string MediaLibrary::CanonicalKey(std::string_view path) const {
+    // An empty query matches nothing. Without this guard the lookup below
+    // would compare an empty key against every stored folder — and any folder
     // whose normalised form is also empty would be returned as a match.
     if (path.empty()) return {};
     auto absolute = platform::PlatformAccessor::Get().Filesystem().Absolute(path);
-    const std::string key = Norm(absolute.ok() ? absolute.value() : std::string(path));
+    return Norm(absolute.ok() ? absolute.value() : std::string(path));
+}
+
+// The in-memory half: the library's own spelling of the folder with this key.
+std::string MediaLibrary::MatchKey(const std::string& key) const {
+    if (key.empty()) return {};
     for (const std::string& f : order_)
         if (Norm(f) == key) return f;
     return {};
@@ -256,15 +263,20 @@ void MediaLibrary::SaveIndex(const std::string& text) const {
     (void)platform::PlatformAccessor::Get().Filesystem().WriteAtomic(indexFile_, text);
 }
 
-Result<void> MediaLibrary::Save() const {
+std::string MediaLibrary::BuildFoldersJsonLocked() const {
     json::Value::Array folders;
     for (const std::string& f : order_) folders.push_back(json::Value::String(f));
     json::Value::Object root;
     root["folders"] = json::Value(std::move(folders));
-    const std::string text = json::Value(std::move(root)).ToString();
+    return json::Value(std::move(root)).ToString();
+}
 
+Result<void> MediaLibrary::CommitFolders(const std::string& json) const {
+    if (storageFile_.empty() || json.empty()) return {};
     // ATOMIC: same document class as the index above (folder order, metadata).
-    return platform::PlatformAccessor::Get().Filesystem().WriteAtomic(storageFile_, text);
+    // PAL: callers call this AFTER releasing mutex_ (it used to be Save(), called
+    // from inside AddFolder's and RemoveFolder's locked scopes).
+    return platform::PlatformAccessor::Get().Filesystem().WriteAtomic(storageFile_, json);
 }
 
 Result<void> MediaLibrary::AddFolder(std::string_view path) {
@@ -275,27 +287,41 @@ Result<void> MediaLibrary::AddFolder(std::string_view path) {
     std::string folder = absolute.ok() ? absolute.value() : std::string(path);
     while (folder.size() > 3 && (folder.back() == '/' || folder.back() == '\\')) folder.pop_back();
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!Canonical(folder).empty())
-        return Error::Make(Err::AlreadyExists, kModule, "that folder is already in the library");
-    order_.push_back(folder);
-    if (auto saved = Save(); !saved.ok()) {
-        order_.pop_back();
+    const std::string key = Norm(folder);   // no PAL left to do under the lock
+    std::string json;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!MatchKey(key).empty())
+            return Error::Make(Err::AlreadyExists, kModule, "that folder is already in the library");
+        order_.push_back(folder);
+        json = BuildFoldersJsonLocked();
+    }
+    if (auto saved = CommitFolders(json); !saved.ok()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find(order_.begin(), order_.end(), folder);
+        if (it != order_.end()) order_.erase(it);
         return saved.error();
     }
     return {};
 }
 
 Result<void> MediaLibrary::RemoveFolder(std::string_view path) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const std::string folder = Canonical(path);
-    if (folder.empty())
-        return Error::Make(Err::NotFound, kModule, "that folder is not in the library");
-    order_.erase(std::find(order_.begin(), order_.end(), folder));
-    items_.erase(folder);
-    scanned_.erase(folder);
-    const std::string index = BuildIndexLocked();
-    auto saved = Save();
+    // The path resolution (PAL) and both writes (PAL) happen with the lock
+    // RELEASED; only the map edits above them are under it.
+    const std::string key = CanonicalKey(path);
+    std::string json, index;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const std::string folder = MatchKey(key);
+        if (folder.empty())
+            return Error::Make(Err::NotFound, kModule, "that folder is not in the library");
+        order_.erase(std::find(order_.begin(), order_.end(), folder));
+        items_.erase(folder);
+        scanned_.erase(folder);
+        json = BuildFoldersJsonLocked();
+        index = BuildIndexLocked();
+    }
+    auto saved = CommitFolders(json);
     SaveIndex(index);
     return saved;
 }
@@ -315,15 +341,16 @@ std::vector<LibraryFolder> MediaLibrary::Folders() const {
 }
 
 Result<size_t> MediaLibrary::Scan(std::string_view path) {
-    // Empty path: Canonical() answers {} for it, which the check below
-    // reports as "not in the library". Stated explicitly so the intent is
+    // Empty path: CanonicalKey()/MatchKey() answer {} for it, which the check
+    // below reports as "not in the library". Stated explicitly so the intent is
     // readable — an empty folder name is not a library folder.
     if (path.empty())
         return Error::Make(Err::NotFound, kModule, "that folder is not in the library");
+    const std::string key = CanonicalKey(path);   // PAL, resolved before any lock
     std::string folder;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        folder = Canonical(path);
+        folder = MatchKey(key);
     }
     if (folder.empty())
         return Error::Make(Err::NotFound, kModule, "that folder is not in the library");
@@ -357,20 +384,23 @@ Result<size_t> MediaLibrary::Scan(std::string_view path) {
     }   // a folder that has gone missing is scanned as empty
 
     const size_t count = found.size();
-    std::unique_lock<std::mutex> lock(mutex_);
-    if (Canonical(folder).empty())   // removed while it was being scanned
-        return Error::Make(Err::NotFound, kModule, "that folder is not in the library");
-    items_[folder] = std::move(found);
-    scanned_[folder] = true;
-    const std::string index = BuildIndexLocked();
-    lock.unlock();
+    std::string index;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (MatchKey(key).empty())   // removed while it was being scanned
+            return Error::Make(Err::NotFound, kModule, "that folder is not in the library");
+        items_[folder] = std::move(found);
+        scanned_[folder] = true;
+        index = BuildIndexLocked();
+    }
     SaveIndex(index);   // written outside the lock: it can be a few MB for a big library
     return count;
 }
 
 std::vector<LibrarySubfolder> MediaLibrary::Subfolders(std::string_view libraryFolder) const {
+    const std::string folderKey = CanonicalKey(libraryFolder);   // PAL, before the lock
     std::lock_guard<std::mutex> lock(mutex_);
-    const std::string root = Canonical(libraryFolder);
+    const std::string root = MatchKey(folderKey);
     std::vector<LibrarySubfolder> out;
     auto it = items_.find(root);
     if (root.empty() || it == items_.end()) return out;
@@ -421,11 +451,12 @@ std::vector<LibraryItem> MediaLibrary::Items(std::string_view folder) const {
         auto absolute = platform::PlatformAccessor::Get().Filesystem().Absolute(folder);
         absoluteFolder = absolute.ok() ? absolute.value() : std::string(folder);
     }
+    const std::string folderKey = folder.empty() ? std::string() : Norm(absoluteFolder);
 
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<LibraryItem> out;
     if (!folder.empty()) {
-        if (const std::string root = Canonical(folder); !root.empty()) {
+        if (const std::string root = MatchKey(folderKey); !root.empty()) {
             if (auto it = items_.find(root); it != items_.end()) out = it->second;
             return out;
         }

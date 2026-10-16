@@ -126,7 +126,17 @@ public:
     const std::string& StorageFile() const noexcept { return storageFile_; }
 
 private:
-    Result<void> SaveLocked() const;
+    // SPLIT IN TWO ON PURPOSE (the lock-scope rule this module was breaking):
+    // BuildStoreJsonLocked runs with mutex_ HELD and is pure serialization — no
+    // PAL, no provider, nothing that can block. CommitStore does the PAL write
+    // and must be called AFTER the lock is released: it used to be one helper
+    // (SaveLocked) called from inside every mutator's locked scope, which
+    // charged a disk write to the interface thread and parked the whole project
+    // tree behind it.
+    std::string BuildStoreJsonLocked() const;
+    // Writes the text BuildStoreJsonLocked() produced. PAL: NEVER call with
+    // mutex_ held. "" / no store path is a no-op.
+    Result<void> CommitStore(const std::string& json) const;
     Project* FindProject(std::string_view id);
     ProjectFolder* FindFolder(std::string_view id);
     bool IsInside(std::string_view folder, std::string_view ancestor) const;   // is `folder` `ancestor` or below it?

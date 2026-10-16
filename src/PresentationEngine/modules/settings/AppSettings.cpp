@@ -412,20 +412,27 @@ Result<void> AppSettings::Load() {
     return {};
 }
 
-Result<void> AppSettings::SaveLocked() const {
+std::string AppSettings::BuildJsonLocked() const {
     J::Object stored;
     for (const auto& [key, value] : values_) stored[key] = value;
     J::Object root;
     root["version"] = J::Number(1);
     root["settings"] = J(std::move(stored));
-    const std::string text = J(std::move(root)).ToString();
+    return J(std::move(root)).ToString();
+}
 
+Result<void> AppSettings::CommitJson(const std::string& json) const {
+    if (storageFile_.empty() || json.empty()) return {};
     // ATOMIC (PAL WriteAtomic): settings.json is read back on the next launch, so
     // an interrupted save must leave the PREVIOUS complete file in place rather
     // than a truncated or zero-filled one — the failure mode that made a
     // half-written kernel.json unrecoverable. The call also creates the parent
     // dir, which this block used to do by hand.
-    return platform::PlatformAccessor::Get().Filesystem().WriteAtomic(storageFile_, text);
+    //
+    // PAL: this is the write that used to run inside Set's locked scope (one call
+    // deep in SaveLocked) — a settings toggle paid for a disk write with the whole
+    // settings map parked behind it, on the interface thread.
+    return platform::PlatformAccessor::Get().Filesystem().WriteAtomic(storageFile_, json);
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +494,8 @@ Result<void> AppSettings::Set(std::string_view key, const J& value) {
     if (auto ok = Validate(*def, value); !ok.ok()) return ok;
 
     std::vector<Listener> toTell;
+    std::optional<J> previous;   // what a failed write puts back
+    std::string json;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = values_.find(key);
@@ -494,14 +503,18 @@ Result<void> AppSettings::Set(std::string_view key, const J& value) {
         if (current.ToString() == value.ToString()) return {};
 
         // Stored only while it differs from the default, so the file stays a short list of what the user changed.
-        const auto previous = it != values_.end() ? std::optional<J>(it->second) : std::nullopt;
+        previous = it != values_.end() ? std::optional<J>(it->second) : std::nullopt;
         if (value.ToString() == def->dflt.ToString()) values_.erase(std::string(key));
         else values_[std::string(key)] = value;
-        if (auto saved = SaveLocked(); !saved.ok()) {
-            if (previous) values_[std::string(key)] = *previous; else values_.erase(std::string(key));
-            return saved;
-        }
+        json = BuildJsonLocked();
         for (const auto& [id, l] : listeners_) toTell.push_back(l);
+    }
+    // The PAL write runs with the lock RELEASED; on failure the previous value
+    // goes back under it. Listeners are told after both, exactly as before.
+    if (auto saved = CommitJson(json); !saved.ok()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (previous) values_[std::string(key)] = *previous; else values_.erase(std::string(key));
+        return saved;
     }
     for (const Listener& l : toTell) l(std::string(key));
     return {};

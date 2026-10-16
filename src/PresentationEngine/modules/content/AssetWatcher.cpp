@@ -23,8 +23,15 @@ void AssetWatcher::RemoveRoot(std::string_view dir) {
 }
 
 std::vector<WatchChange> AssetWatcher::Poll() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // The diff runs under the lock; the CALLBACK does not. `callback_` is foreign
+    // code (ContentManager's handler — it publishes asset events and syncs the
+    // metadata store), and calling it with the watcher's own lock held is the
+    // lock-held-across-a-callback shape the lock-scope guard exists for: one slow
+    // or re-entrant handler turns this lock into an app-wide pile-up.
     std::vector<WatchChange> changes;
+    WatchCallback callback;
+    {
+    std::lock_guard<std::mutex> lock(mutex_);
     for (auto& [dir, root] : roots_) {
         auto entries = root.listFn ? root.listFn(dir) : std::nullopt;
         if (!entries) continue;
@@ -73,9 +80,10 @@ std::vector<WatchChange> AssetWatcher::Poll() {
 
         root.last = std::move(cur);
     }
-    if (callback_) {
-        for (const auto& c : changes) callback_(c);
+        callback = callback_;
     }
+    if (callback)
+        for (const auto& c : changes) callback(c);
     return changes;
 }
 

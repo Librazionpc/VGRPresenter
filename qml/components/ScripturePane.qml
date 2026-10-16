@@ -110,6 +110,11 @@ ReferencePane {
         // property already owns the change signal name `userDataChanged` — an
         // explicit signal of that name is a QML duplicate-signal error.)
         signal changed()
+        // The service's published SEARCH answer landed for that text (see
+        // ScriptureService's header). Forwarded so the shared pane can re-ask a query
+        // that went through the SYNC fallback — a tab whose adapter has no async
+        // search — which is the one shape that has no token to match.
+        signal searchCached(string text)
         property int userDataRevision: 0
     }
 
@@ -121,6 +126,14 @@ ReferencePane {
         // The async pill search's answer (searchAsync's token guard lives in
         // the pane — applySearchResults drops stale tokens).
         function onSearchResultsReady(token, rows) { pane.applySearchResults(token, rows) }
+        // The WORKER-BACKED corpus reads landed (ScriptureService's published
+        // books / chapter / resolve — see its header): the pane re-asks the two
+        // questions whose answer may have just changed (a hovered chapter's rows,
+        // whether the typed text is a reference). Both are cache reads by then.
+        function onChapterCached(bibleId, bookId, chapter) { pane.corpusCacheLanded() }
+        function onReferenceCached(bibleId, text) { pane.corpusCacheLanded() }
+        // The sync search()'s worker answer (the pane's fallback path re-asks on it).
+        function onSearchCached(text) { pane.adapter.searchCached(text) }
     }
 
     // GO LIVE: pane -> adapter -> live service.

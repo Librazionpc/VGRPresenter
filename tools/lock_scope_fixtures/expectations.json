@@ -1,0 +1,42 @@
+{
+  "_note": "What node tools/check_lock_scope.mjs --self-test must see when it scans this directory. The fixtures are the guard's only proof that its two silent rules (the helper rule, the same-mutex re-lock rule) still fire: a clean run on the real tree reads identically whether those rules work or have rotted. Label matching is by substring, so a reworded rule message does not silently disable its own test — it fails the build until the expectation (and the fixture's // expect: comment) is brought along.",
+  "flagged": [
+    {
+      "file": "cross_tu_caller.cpp",
+      "labelContains": "helper 'SaveStoreLocked'",
+      "why": "the callee's body is in cross_tu_helper.cpp and reaches the PAL; a file-local scan cannot see it, so this is the expectation that proves the whole-tree index is doing the work"
+    },
+    {
+      "file": "relock_same_class.cpp",
+      "labelContains": "self-deadlock: 'Refresh' re-locks 'mutex_'",
+      "why": "a locked method calls a sibling that locks the SAME mutex object — same class, non-recursive mutex, so the thread waits on a lock it already holds"
+    }
+  ],
+  "quiet": [
+    {
+      "file": "relock_ok_recursive.cpp",
+      "why": "same shape on a std::recursive_mutex, whose whole purpose is a second acquisition by the same thread"
+    },
+    {
+      "file": "relock_ok_other_class.cpp",
+      "why": "the callee locks ANOTHER class's equally-named mutex_ — same name, different object"
+    },
+    {
+      "file": "ambiguous_caller.cpp",
+      "why": "the callee's name has two definitions in scope, so the call must be reported as unresolved rather than guessed at (see unresolvedMin)"
+    },
+    {
+      "file": "cross_tu_helper.cpp",
+      "why": "the blocking body itself: reached only through cross_tu_caller.cpp, and holding no lock of its own"
+    },
+    {
+      "file": "ambiguous_one.cpp",
+      "why": "one of the two definitions of the ambiguous name"
+    },
+    {
+      "file": "ambiguous_two.cpp",
+      "why": "the other definition of the ambiguous name; resolving to either one would be a guess"
+    }
+  ],
+  "unresolvedMin": 1
+}

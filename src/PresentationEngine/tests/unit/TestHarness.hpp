@@ -18,6 +18,7 @@
 #include "core/resources/ResourceManager.hpp"
 #include "core/services/ServiceManager.hpp"
 #include "core/task_scheduler/TaskScheduler.hpp"
+#include "core/threading/JobTicket.hpp"
 #include "core/threading/ThreadPool.hpp"
 #include "core/assets/AssetManager.hpp"
 #include "core/database/DatabaseManager.hpp"

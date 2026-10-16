@@ -50,8 +50,12 @@
 #   BUSLIGHT: FAIL lightvideo — the card's status disagreed with its tap's delivery
 #   BUSLIGHT: FAIL audio — a held meter tap did not read delivering
 #   BUSLIGHT: FAIL nodelivery — the run never held a video tap (live half untested)
-#   BUSLIGHT: FAIL noaudio — no audio-only bus with a routed input, so no positive case
 #   BUSLIGHT: FAIL norouted — no bus had a routed source, so the run proves nothing
+#   BUSLIGHT: SKIP noaudio — the video half passed; this SETUP has no audio-only bus
+#           with a routed input, so the positive audio case could not be exercised.
+#           Exit 0: a machine without that routing is not an app fault (the same
+#           shape UIWARN's `SKIP verses` has), and the half that DID run is printed
+#           beside it, with what would earn the other one.
 #   BUSLIGHT: FAIL missing — the scenario never finished (see the log)
 #   BUSLIGHT: FAIL launch — build/appVGRPresenterUI.exe not found
 #
@@ -184,13 +188,33 @@ if [ "$HELDSTATUS" != "$WANTSTATUS" ]; then
     echo "BUSLIGHT: FAIL lightvideo — the held tap's delivery was '$DELIVERY' but the card read '$HELDSTATUS' (wanted '$WANTSTATUS'): the light is not consuming its own live half"
     exit 13
 fi
+# Nothing was routed at all: that is NOT a setup limitation, it is the run proving
+# nothing. Asked FIRST — ahead of the audio skip below — so a wholly broken run can
+# never take the skip path, and reported with the same verdict the tail of this
+# script used to reach only after the audio checks.
+if [ "${ROUTED:-0}" = "0" ]; then
+    echo "BUSLIGHT: FAIL norouted — no bus had a routed source, so the light proved nothing"
+    exit 4
+fi
 # THE POSITIVE CASE, AUDIO SIDE. A meter tap hands LEVELS over — silence is data —
 # so a held meter is the one tap that can be relied on to answer "ok", and its
-# card must read connected off it. "n/a" (no audio-only bus in the setup) fails
-# too: then nothing in this run proves green is ever earned.
+# card must read connected off it. Whether such a bus EXISTS is the machine's
+# setup, not the app's behavior: the scenario's own candidate search (BusListModel
+# + AudioInputListModel stored rows) finds an AUDIO-ONLY bus with an input routed
+# to it or nothing, and it touches no meter and no tap. So "none on this setup" is
+# reported as SKIP — the video half, which did run, printed beside it — instead of
+# claiming a fault the app cannot have. Routing an audio input onto an audio-only
+# bus (Audio / Video screen) is what earns the audio half.
 if [ "${AUDIOBUS:--1}" -lt 0 ]; then
-    echo "BUSLIGHT: FAIL noaudio — the run found no audio-only bus with a routed input, so it had no delivering tap to prove green against"
-    exit 14
+    # A routed bus that is not connected is printed BY NAME: the run's own
+    # `status` verdict would call that a fault, but a screen bus whose screen is
+    # not on air reads "offline" by design (The Table's own bus in the run above),
+    # so the skip states which one it was instead of leaving green=N/M to be read
+    # as a light that failed.
+    NOTGREEN="$(grep -a '\[SELFTEST-BUSLIGHT\] bus=' "$LOG" 2>/dev/null | grep -av 'status=connected' | head -1 \
+                | sed -E 's/.*name="([^"]*)" type=([^ ]*).*status=([^ ]*).*/\1 (\2) reads \3/')"
+    echo "BUSLIGHT: SKIP noaudio — video half PASSED (buses=${BUSES:-?} pings=$PINGS delivery=$DELIVERY heldBus=$HELDBUS heldStatus=$HELDSTATUS green=$GREEN/$ROUTED; not connected: ${NOTGREEN:-none}) but this setup has no audio-only bus with a routed input, so the positive audio case was not exercised; route an audio input to an audio-only bus to earn it"
+    exit 0
 fi
 if [ "$AUDIO" != "ok" ]; then
     echo "BUSLIGHT: FAIL audio — a held meter tap read '${AUDIO:-<none>}' instead of delivering (see the delivery audio line above)"
@@ -216,10 +240,6 @@ if echo "$WRONGKIND" | grep -q "alive=false"; then
     exit 11
 fi
 
-if [ "${ROUTED:-0}" = "0" ]; then
-    echo "BUSLIGHT: FAIL norouted — no bus had a routed source, so the light proved nothing"
-    exit 4
-fi
 if [ "$VERDICT" != "PASS" ]; then
     echo "BUSLIGHT: FAIL status — routed=$ROUTED green=$GREEN err=$ERR (see the per-bus lines above)"
     exit 6

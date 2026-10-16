@@ -190,6 +190,129 @@ ApplicationWindow {
                             EngineBridge.bootInUseDevices())
         }
     }
+    // ---- A recovered crash, and whether this machine could report one -------
+    // "Recovered from an unexpected shutdown last run — details were written to
+    // the crash log" is only half the story on a machine where the tooling that
+    // writes those details cannot run: the operator is being sent to a file with
+    // nothing in it, and nobody ever finds that out, because a crash that leaves
+    // no trace leaves nothing to find. So the startup forensics probe's verdict
+    // (CrashHandler.h's VerifyForensicsTooling, published through EngineBridge's
+    // crashTooling* properties) is delivered as a note beside the report it
+    // qualifies.
+    //
+    // The probe runs on a WORKER — it STARTS the debugger a real capture would
+    // attach and waits for it to answer — so its verdict is never in by the time
+    // the recovery notice goes out. Both orders are real, and both end in the
+    // same single note:
+    //   * verdict already known broken → noteCrashTooling() right after the
+    //     recovery notice below;
+    //   * verdict lands later (the usual one) → the Connections handler fires it
+    //     when it does.
+    // A session that recovered nothing says nothing: tooling that cannot capture
+    // a crash is a fact for Settings · General · Crash reports, not a warning to
+    // interrupt a launch with.
+    property bool crashRecoveryReported: false
+    property bool crashToolingNoted: false
+    // The note's text, in one place: the notice that carries it and the self-test
+    // that checks it was seen read the same string.
+    function crashToolingNoteText() {
+        return qsTr("Note: the tools that capture a crash on this machine are not working, so the report from that shutdown may be incomplete — %1")
+            .arg(EngineBridge.crashToolingProblem)
+    }
+    function noteCrashTooling() {
+        if (window.crashToolingNoted || !window.crashRecoveryReported)
+            return
+        if (EngineBridge.crashToolingState !== "incomplete")
+            return
+        window.crashToolingNoted = true
+        // "error", the level its sibling above carries — deliberately. A user who
+        // turned notices off (only errors interrupt then) is told their previous
+        // run crashed; leaving the note at warning level would drop the half of
+        // that story that says the report has nothing in it.
+        EventBus.notify(window.crashToolingNoteText(), "error", qsTr("Stability"), "ui.crash.tooling")
+    }
+    Connections {
+        target: EngineBridge
+        function onCrashToolingChanged() { window.noteCrashTooling() }
+    }
+
+    // ---- Startup-forensics verdict self-test (VGR_FORENSICS_TEST=1) ----------
+    // The two surfaces that verdict reaches, read back as the user meets them:
+    //   * the Settings · General "Crash reports" row — the pill's own text and
+    //     the detail LINE as drawn (looked up in the item tree, so a row that
+    //     binds the wrong property fails), and
+    //   * the note that rides a recovered crash — delivered at all, and present
+    //     in the notification centre, which is where the user reads it.
+    // The runner forces a broken tooling layout (VGR_FORENSICS_DIR at a folder
+    // with an empty analyze.bat beside it) and seeds one crash record, so both
+    // halves run the real probe and the real recovery path; state=/problem=/row=
+    // are printed as facts for the script to judge.
+    // Armed only with BOTH VGR_SELFTEST=1 and VGR_FORENSICS_TEST=1: a plain
+    // VGR_SELFTEST=1 run must never open Settings or quit early.
+    property int forensicsTries: 0
+    property int forensicsNoteTries: 0
+    property bool forensicsNoteSeen: false
+    Timer {
+        id: selfTestForensicsPoll
+        running: typeof SelfTestForensics !== "undefined" && SelfTestForensics
+        interval: 700
+        repeat: true
+        onTriggered: {
+            // A notice is on screen for a few seconds and then DISMISSED, so the
+            // note has to be caught while it is in the centre — the same place,
+            // and the same window of time, the user has to catch it in.
+            const note = window.crashToolingNoteText()
+            const items = NotificationCenter.items
+            for (let i = 0; i < items.length; ++i)
+                if (items[i].message === note)
+                    window.forensicsNoteSeen = true
+            // The probe STARTS a debugger on a worker, so the verdict is not in
+            // by the first frame: wait for it to stop saying "checking" (bounded
+            // — the probe itself is bounded).
+            if (EngineBridge.crashToolingState === "checking" && window.forensicsTries++ < 20)
+                return
+            // The note is delivered with the verdict, so give it a beat to be in
+            // the centre. It is only ever delivered in a session that recovered
+            // a crash, so a broken verdict without one waits this beat out and
+            // reports noted=false — which is the truth the script reads.
+            if (EngineBridge.crashToolingState === "incomplete"
+                && !window.forensicsNoteSeen && window.forensicsNoteTries++ < 6)
+                return
+            selfTestForensicsPoll.stop()
+            window.settingsSection = "general"
+            settingsScrim.visible = true
+            selfTestForensicsRead.restart()
+        }
+    }
+    Timer {
+        id: selfTestForensicsRead
+        interval: 1200          // let the General screen lay out and bind
+        onTriggered: {
+            const pill = SelfTest.findItem("selfTestCrashToolingPill")
+            const line = SelfTest.findItem("selfTestCrashToolingDetail")
+            console.log("[SELFTEST-FORENSICS] state=" + EngineBridge.crashToolingState
+                        + " problem=" + JSON.stringify(String(EngineBridge.crashToolingProblem))
+                        + " pill=" + (pill ? JSON.stringify(String(pill.text)) : "MISSING")
+                        + " detail=" + (line ? JSON.stringify(String(line.text)) : "MISSING")
+                        + " recovered=" + window.crashRecoveryReported
+                        + " noted=" + window.crashToolingNoted
+                        + " inToast=" + window.forensicsNoteSeen)
+            // ...and the card itself for the human: the row is the deliverable,
+            // and a passing run should leave something to look at rather than a
+            // line of text about it.
+            // Named after the state it drew, so both runs' pictures survive
+            // (the healthy case would otherwise overwrite the broken one).
+            SelfTest.grab("selfTestCardStability", "forensics_card_" + EngineBridge.crashToolingState + ".png")
+            // Let the grab's saveToFile() land before the process goes away.
+            selfTestForensicsDone.restart()
+        }
+    }
+    Timer {
+        id: selfTestForensicsDone
+        interval: 1200
+        onTriggered: SelfTest.quit()
+    }
+
     // ---- The missing-device notice (the other half of the boot sweep) -------
     // A device this setup was remembered with that is NOT on the machine this
     // time is worth saying out loud: the row that names it meters nothing /
@@ -327,10 +450,15 @@ ApplicationWindow {
             + ", uiScale " + window.uiScale.toFixed(3))
         // Previous-run crash report — exactly-once (rotated aside at read).
         if (typeof pendingCrashSummary !== "undefined" && pendingCrashSummary !== "") {
+            window.crashRecoveryReported = true
             EventBus.notify(
                 qsTr("Recovered from an unexpected shutdown last run (%1). Details were written to the crash log.")
                     .arg(pendingCrashSummary),
                 "error", qsTr("Stability"), "ui.crash.recovered")
+            // ...and, if the machine cannot capture a crash, say so with it (see
+            // noteCrashTooling): "details were written to the crash log" is not
+            // true where nothing is.
+            window.noteCrashTooling()
         }
         // Boot report with REAL platform facts. The device sweep is
         // ASYNCHRONOUS — the PAL's WASAPI / Media Foundation enumeration must not
@@ -660,7 +788,10 @@ ApplicationWindow {
     // "Save changes?" over any screen; the show session asks through it.
     UnsavedChangesDialog {
         id: unsavedDialog
-        saveAction: function () { return editScreen.saveShow() }
+        // function(then): the save is a QUEUED document job (ShowService), so the
+        // dialog is answered when the verdict lands rather than when the call
+        // returns — `then(saved)` is what tells it to proceed or stay put.
+        saveAction: function (then) { editScreen.saveShow(then) }
         // The show session asks through this dialog (a function-valued property
         // cannot be bound with Binding, so it is handed over once).
         Component.onCompleted: editScreen.session.askUnsaved = unsavedDialog.ask
@@ -935,6 +1066,16 @@ ApplicationWindow {
                            "selfTestCardPreferences", "selfTestCardBackups",
                            "selfTestCardNotifications", "selfTestCardLibraries",
                            "selfTestCardReset"]
+            // (selfTestCardStability — Settings · General's "Crash reports" card —
+            // is deliberately NOT in this set. The checker compares each card's
+            // RIGHT inset, and it does not measure like for like across control
+            // shapes: a right-anchored TOGGLE comes back at 25 while a
+            // right-anchored CHIP — an ActionRow button, or a pill — comes back
+            // at 40-47. That is why Libraries and Reset already fail here, and
+            // adding this card would only add a third line for the same reason.
+            // The row's own text and wording are covered instead by
+            // tools/selftest/run_forensics_test.sh, which reads them off the
+            // live item tree.)
             console.log("[SELFTEST-INSETS] grabbing", cards.length, "section cards")
             for (let i = 0; i < cards.length; ++i)
                 SelfTest.grab(cards[i], "insets_" + cards[i] + ".png")
@@ -3048,6 +3189,1017 @@ ApplicationWindow {
         }
     }
 
+    // ---- a mark on a verse (VGR_MARK_TEST=1) --------------------------------
+    // WHAT A NOTE OR HIGHLIGHT COSTS THE OPERATOR, measured in the RUNNING app.
+    // setNote/setHighlighted are Q_INVOKABLE on a QML singleton, so their cost is
+    // the INTERFACE thread's — and that path used to be a whole-corpus rewrite:
+    // read bibles.json, parse it, write it back, all under the engine lock every
+    // scripture read takes (a real dev store is 5.8 MB for one Bible). The engine
+    // tests pin the cheap half (one small sidecar file, corpus byte-identical)
+    // and put a number on it on a synthetic corpus; this drives the REAL app on
+    // the operator's OWN store, through the pane's own handlers:
+    //   * the star button's toggleHighlight(), timed on and off again;
+    //   * the note editor's saveNoteDraft(), timed added and removed again.
+    // A verse with NO mark on it is chosen, so undoing the marks restores exactly
+    // the state the scenario found — the store afterwards is the store before,
+    // which tools/selftest/run_mark_sidecar_test.sh checks byte for byte and
+    // counts against the engine log (sidecar writes up, corpus writes zero).
+    readonly property string markNoteText: "selftest mark note (removed again)"
+    property var markMs: ({ on: -1, off: -1, note: -1, noteOff: -1 })
+    property int markVerse: 0
+    property string markWhere: ""
+    property string markSkip: ""
+    property string markDetail: ""
+    function markPickVerse() {
+        const s = SelfTest.findItem("selfTestScripturePane")
+        if (!s || !s.book || s.chapterVerses.length === 0)
+            return 0
+        for (const v of s.chapterVerses) {
+            const m = s.markFor(v.number)
+            if (!m.highlight && !m.note)
+                return v.number
+        }
+        return 0
+    }
+    function markReport(restored) {
+        console.log("[SELFTEST-MARK] result where=" + window.markWhere
+                    + " skip='" + window.markSkip + "' verse=" + window.markVerse
+                    + " highlightOnMs=" + window.markMs.on
+                    + " highlightOffMs=" + window.markMs.off
+                    + " noteAddMs=" + window.markMs.note
+                    + " noteRemoveMs=" + window.markMs.noteOff
+                    + " restored=" + restored + " detail='" + window.markDetail + "'")
+    }
+    Timer {
+        id: selfTestMarkOpen
+        running: typeof SelfTestMark !== "undefined" && SelfTestMark
+        interval: 45000   // boot, the store restore and the background re-index
+        onTriggered: {
+            const s = SelfTest.findItem("selfTestScripturePane")
+            if (!s) {
+                window.markSkip = "scripture pane missing"
+                window.markReport(false)
+                SelfTest.quit()
+                return
+            }
+            s.searching = false
+            s.openBook(0, 1)   // the first Bible, its first book, chapter 1
+            selfTestMarkGo.restart()
+        }
+    }
+    Timer {
+        id: selfTestMarkGo
+        interval: 4000   // the chapter has to load before a verse can be marked
+        onTriggered: {
+            const s = SelfTest.findItem("selfTestScripturePane")
+            window.markWhere = String(s.sourceId) + " " + String(s.book.id)
+                                + " " + s.chapterNumber
+            window.markVerse = window.markPickVerse()
+            if (window.markVerse === 0) {
+                window.markSkip = "no unmarked verse in the open chapter"
+                window.markReport(false)
+                SelfTest.quit()
+                return
+            }
+            // ---- the star: the row control's own handler, as the interface
+            // thread feels it (the JSON build AND the write are inside it).
+            let t0 = Date.now()
+            s.toggleHighlight(window.markVerse)
+            window.markMs.on = Date.now() - t0
+            selfTestMarkOn.restart()
+        }
+    }
+    Timer {
+        id: selfTestMarkOn
+        interval: 700   // the pane's batched mark map lands on the next revision
+        onTriggered: {
+            const s = SelfTest.findItem("selfTestScripturePane")
+            if (s.markFor(window.markVerse).highlight !== true) {
+                window.markDetail = "the highlight never reached the pane"
+                window.markReport(false)
+                SelfTest.quit()
+                return
+            }
+            const t0 = Date.now()
+            s.toggleHighlight(window.markVerse)
+            window.markMs.off = Date.now() - t0
+            selfTestMarkOff.restart()
+        }
+    }
+    Timer {
+        id: selfTestMarkOff
+        interval: 700
+        onTriggered: {
+            const s = SelfTest.findItem("selfTestScripturePane")
+            if (s.markFor(window.markVerse).highlight === true) {
+                window.markDetail = "the highlight did not clear again"
+                window.markReport(false)
+                SelfTest.quit()
+                return
+            }
+            // ---- the note: the editor's own open/save pair, timed.
+            s.openNoteEditor(window.markVerse)
+            const t0 = Date.now()
+            s.saveNoteDraft(window.markNoteText)
+            window.markMs.note = Date.now() - t0
+            selfTestMarkNote.restart()
+        }
+    }
+    Timer {
+        id: selfTestMarkNote
+        interval: 700
+        onTriggered: {
+            const s = SelfTest.findItem("selfTestScripturePane")
+            if (s.markFor(window.markVerse).note !== window.markNoteText) {
+                window.markDetail = "the note never reached the pane"
+                window.markReport(false)
+                SelfTest.quit()
+                return
+            }
+            s.openNoteEditor(window.markVerse)
+            const t0 = Date.now()
+            s.saveNoteDraft("")   // empty = the delete gesture
+            window.markMs.noteOff = Date.now() - t0
+            selfTestMarkDone.restart()
+        }
+    }
+    Timer {
+        id: selfTestMarkDone
+        interval: 700
+        onTriggered: {
+            const s = SelfTest.findItem("selfTestScripturePane")
+            const m = s.markFor(window.markVerse)
+            if (m.highlight || m.note) {
+                window.markDetail = "the verse is still marked (highlight="
+                                    + !!m.highlight + " note='" + (m.note || "") + "')"
+                window.markReport(false)
+                SelfTest.quit()
+                return
+            }
+            window.markReport(true)
+            SelfTest.quit()
+        }
+    }
+
+    // ---- the list is divided BEFORE it is clicked (VGR_PRESPLIT_TEST=1) -----
+    // User call: "now the app should split not waiting until it click before
+    // spliting so it doesnt give the gui thread unnessry job during pressure time
+    // when presenting in church". The paragraph list used to be divided only for
+    // the passage the operator had ALREADY picked — the rows were built from the
+    // pick's own preview — so a long sermon paragraph read as one long line until
+    // it was clicked, and the division it needed landed on the interface thread at
+    // the exact moment the operator was presenting.
+    //
+    // Proved in the RUNNING app, with NO row clicked first: a sermon is opened, the
+    // pick is then EMPTIED (the state in which no pick can explain any row), and the
+    // rows the list actually renders (mainRows — the verse list's own model) must
+    // still carry the continuations the chapter was cut into: some paragraph shown as
+    // its own rows ("7", "7-1", "7-2"). Then one of those continuation rows is
+    // CLICKED for real, and the piece it names must be the piece the pane's preview
+    // moves to — the row the operator sees before touching anything and the row they
+    // get when they do have to be the same division, or one of the two is lying.
+    property var preSplitOpenRow: null
+    // Has the row to be clicked been brought on screen yet? The paragraph list is
+    // VIRTUALIZED (see ReferencePane's ListView): a row that is off screen is not
+    // built, so it has no center to click — the reveal below scrolls it there, the
+    // click waits for it to arrive, and only then is a click sent.
+    property bool preSplitRowReady: false
+    property var preSplitFacts: ({ rows: -1, split: -1, hadPick: false, openMs: -1 })
+    property var preSplitRestore: ({})
+    property double preSplitOpenAt: 0
+    property int preSplitTries: 0
+    property int preSplitClickTries: 0
+    property int preSplitWaitTicks: 0
+    // The row's own name (see ReferencePane's delegate): its label, spelled the same
+    // way, so a scenario can address the continuation row the operator is looking at
+    // rather than the first row that happens to carry the paragraph.
+    function preSplitRowName(row) {
+        if (!row)
+            return ""
+        return "selfTestVerseRow_" + Number(row.number)
+                + (row.continuation === true ? "-" + Number(row.partIndex) : "")
+    }
+    // The settings this run changed, put back exactly as they were found (the tab
+    // divides long paragraphs only when it is asked to — the shipped default is off,
+    // and the operator's own profile is not this scenario's to rewrite).
+    function preSplitRestoreSettings() {
+        if (window.preSplitRestore.split === undefined || window.preSplitRestore.words === undefined)
+            return
+        SettingsService.setValue("table.splitLongVerses", window.preSplitRestore.split)
+        SettingsService.setValue("table.wordsPerSlide", window.preSplitRestore.words)
+    }
+    Timer {
+        id: selfTestPreSplitOpen
+        running: typeof SelfTestPreSplit !== "undefined" && SelfTestPreSplit
+        // Boot AND the background sermon indexing, as the chapter-lock scenario
+        // waits them out.
+        interval: 45000
+        onTriggered: {
+            // THE PANE ON SCREEN FIRST. The dock shows one library tab at a time
+            // (`visible: media_tab_bar.currentPane === "table"`), and a pane that is not
+            // on screen has no VISIBLE row to click — while its model answers every
+            // question anyway, which is how this scenario once reported a fully divided
+            // list and then waited a minute for a row that was never on screen. The
+            // launch state is not the scenario's to rely on (it is whatever tab the
+            // operator left the dock on), so it puts the tab up itself, the way the
+            // quick-search scenarios do, and lets the pane lay out before opening.
+            window.currentView = "show"
+            showScreen.showInLibrary("table", "")
+            selfTestPreSplitOpened.restart()
+        }
+    }
+    Timer {
+        id: selfTestPreSplitOpened
+        interval: 1500   // a beat for the tab switch to lay the pane out
+        onTriggered: {
+            const p = SelfTest.findItem("selfTestTablePane")
+            if (!p || p.books.length === 0) {
+                console.log("[SELFTEST-PRESPLIT] table pane/books missing — no sermon to cut")
+                SelfTest.quit()
+                return
+            }
+            window.preSplitRestore = {
+                split: SettingsService.value("table.splitLongVerses"),
+                words: SettingsService.value("table.wordsPerSlide")
+            }
+            // A budget of 20 words guarantees a sermon paragraph divides (its own
+            // shipped number is 40, and its paragraphs run to hundreds).
+            SettingsService.setValue("table.splitLongVerses", true)
+            SettingsService.setValue("table.wordsPerSlide", 20)
+            p.searching = false
+            window.preSplitOpenAt = Date.now()
+            // A COLLECTION THE APP DID NOT RESTORE, deliberately: the dock comes back on
+            // whatever passage was last open, and that one is already read and cut (it is
+            // held from the boot). Opening IT would measure a lookup, not an open — the
+            // cold path is the one an operator takes when they click a different sermon,
+            // and it is the path with the head's cut, the remainder behind it and the
+            // neighbours to read. The report prints which book it landed on.
+            p.openBook(p.bookIndex === 0 ? 1 : 0, 1)
+            selfTestPreSplitPoll.restart()
+        }
+    }
+    // Wait for the rows to actually BE there: the chapter read is asynchronous, and the
+    // list builds its rows when it lands. The wait doubles as the measurement this whole
+    // report is about — how long after the open the rows are on screen, with nothing
+    // clicked — so the number in the log is the operator's own, not a timer's.
+    Timer {
+        id: selfTestPreSplitPoll
+        interval: 25
+        repeat: true
+        onTriggered: {
+            const p = SelfTest.findItem("selfTestTablePane")
+            if (!p || window.preSplitTries++ > 800)
+                return
+            // A row ITEM, not just the model: the verse list's own delegate is what the
+            // operator sees, so its existence is the list having been built.
+            if (p.chapterLoading || p.chapterVerses.length === 0
+                    || !SelfTest.findItem("selfTestVerseRow_1"))
+                return
+            // THE CUT ARRIVES IN TWO PIECES (SlideBuilder's head/remainder block): the head
+            // with the open — which is what the first number below measures — and the rest
+            // of the sermon a beat later, which is the half that divides a paragraph BELOW
+            // the fold (the reported bug, one screen down). So the division is allowed to
+            // settle before it is judged, and both readings are reported: what the operator
+            // saw the moment the sermon appeared, and what the whole list ended up as.
+            const splitNow = p.mainRows.filter((r) => r.continuation === true).length
+            if (window.preSplitFacts.openMs < 0) {
+                window.preSplitFacts.openMs = Date.now() - window.preSplitOpenAt
+                window.preSplitFacts.openSplit = splitNow
+            }
+            // Settled = the division has not moved for a comfortable beat, and the beat is
+            // longer than the second half takes to arrive (the remainder's own cut is tens
+            // of ms for a whole sermon, plus its delivery). Judging it the instant it stops
+            // changing for one tick would judge the HEAD, which is exactly the half that is
+            // not the whole story.
+            if (splitNow !== window.preSplitFacts.lastSplit) {
+                window.preSplitFacts.lastSplit = splitNow
+                window.preSplitFacts.lastChangeAt = Date.now()
+                window.preSplitTries = 0   // an arriving half resets the patience, not the poll
+                return
+            }
+            const lastChange = window.preSplitFacts.lastChangeAt || window.preSplitOpenAt
+            if (Date.now() - lastChange < 600)
+                return
+            window.preSplitFacts.finalSplit = splitNow
+            window.preSplitFacts.settledMs = Date.now() - window.preSplitOpenAt
+            selfTestPreSplitPoll.stop()
+            window.preSplitFacts.hadPick = p.selected.length > 0
+            // THE PICK IS EMPTIED FIRST, deliberately: it is the one state in which a
+            // pick cannot be what put the continuations on screen. (openBook selects
+            // the first paragraph, as clicking it would.)
+            p.selected = []
+            p.previewSlideIndex = 0
+            const rows = p.mainRows
+            const split = rows.filter((r) => r.continuation === true)
+            window.preSplitFacts.rows = rows.length
+            window.preSplitFacts.split = split.length
+            console.log("[SELFTEST-PRESPLIT] opened book=" + p.book.name + " " + p.chapterNumber
+                        + " rows=" + rows.length + " splitRows=" + split.length
+                        + " openMs=" + window.preSplitFacts.openMs
+                        + " openSplitRows=" + window.preSplitFacts.openSplit
+                        + " settledMs=" + window.preSplitFacts.settledMs
+                        + " pickedBefore=" + (window.preSplitFacts.hadPick ? 1 : 0)
+                        + " pickedNow=" + p.selected.length)
+            if (split.length === 0) {
+                console.log("[SELFTEST-PRESPLIT] result rows=" + rows.length
+                            + " splitRows=0 openMs=" + window.preSplitFacts.openMs
+                            + " — the list was NOT divided before the click")
+                window.preSplitRestoreSettings()
+                SelfTest.quit()
+                return
+            }
+            window.preSplitOpenRow = split[0]
+            // Bring the row ON SCREEN first — the scroll an operator does before
+            // clicking, and the only way a row that is not built can be clicked at
+            // all (see preSplitRowReady). The index it takes is the row's OWN: a
+            // divided chapter makes a paragraph's number and its row index different
+            // things, so the row is found by the pair the two lists share (number +
+            // piece) rather than by number alone.
+            window.preSplitRowReady = false
+            p.revealRow(p.mainRows.findIndex((r) => Number(r.number) === Number(split[0].number)
+                                               && Number(r.partIndex ?? 0) === Number(split[0].partIndex ?? 0)))
+            SelfTest.activate()
+            selfTestPreSplitClicked.restart()
+        }
+    }
+    // ---- THE LAYOUT PROBE SCENARIO (VGR_LAYOUT_TEST, tools/selftest/run_layout_probe.sh) ----
+    // Drives the two interactions the hang captures name — a filter typed into a library tab,
+    // and a pane switch — one per second, and reports for each step:
+    //
+    //   stallMax/stallSum  how long the INTERFACE thread was parked, measured from the thread
+    //                      itself: a 16 ms heartbeat timer that asks for the interval it wants
+    //                      and reports the overshoot. A DWrite/shape/relayout pile-up cannot
+    //                      hide from this the way it hides from a wall-clock stopwatch (the
+    //                      stopwatch measures the work, this measures the freeze), and the
+    //                      C++ FrameProbe in the same log is the same stall seen from the
+    //                      render thread as the gap between painted frames.
+    //   built/dropped      the delegates each list built and THREW AWAY during the step. This
+    //                      is what separates the two causes: a pane switch that shows
+    //                      builds=+N drops=+N is a view releasing and re-creating its items,
+    //                      while a filter that shows builds=+N drops=0 is a one-way rebuild
+    //                      (nothing was thrown away, the list just grew a new tail).
+    //   rows               how many rows each list's model holds after the step, so a rebuild
+    //                      of a 6-card library can't be confused with one of a 33-card one.
+    //
+    // The walk: a cold switch through every library tab; the SAME-WIDTH pane pairs (media /
+    // overlays / templates all share the narrowed dock width) against the WIDTH-CROSSING pairs
+    // (a reference tab takes the template column's whole width) — the two hypotheses for why a
+    // delegate is re-created, a hidden view or a moved cell; a filter typed into a design
+    // library and into the shows table; and the same pane walk again with everything warm.
+    property var layoutProbeSteps: [
+        { pane: "shows",     tag: "switch-shows-cold" },
+        { pane: "media",     tag: "switch-media-cold" },
+        { pane: "overlays",  tag: "switch-overlays-cold" },
+        { pane: "templates", tag: "switch-templates-cold" },
+        { pane: "table",     tag: "switch-table-cold" },
+        { pane: "scripture", tag: "switch-scripture-cold" },
+        { pane: "shows",     tag: "switch-shows-back" },
+        { pane: "overlays",  tag: "samewidth-overlays-1" },
+        { pane: "templates", tag: "samewidth-templates-1" },
+        { pane: "overlays",  tag: "samewidth-overlays-2" },
+        { pane: "templates", tag: "samewidth-templates-2" },
+        { pane: "table",     tag: "crosswidth-table-1" },
+        { pane: "templates", tag: "crosswidth-templates-1" },
+        { pane: "table",     tag: "crosswidth-table-2" },
+        { pane: "templates", tag: "crosswidth-templates-2" },
+        // The LIBRARY lists' filter, through the app's own entry point (the tab bar's
+        // search: showInLibrary is what its typing beat ends in — every pane reads the
+        // query as searches.<pane>): the shows table (680 rows), then the two design grids.
+        { pane: "shows",     query: "",  tag: "shows-filter-open" },
+        { pane: "shows",     query: "s", tag: "shows-filter-s" },
+        { pane: "shows",     query: "se", tag: "shows-filter-se" },
+        { pane: "shows",     query: "",  tag: "shows-filter-clear" },
+        { pane: "overlays",  query: "",  tag: "overlay-filter-open" },
+        { pane: "overlays",  query: "c", tag: "overlay-filter-c" },
+        { pane: "templates", query: "s", tag: "template-filter-s" },
+        { pane: "overlays",  query: "",  tag: "overlay-filter-clear" },
+        // The PASSAGE list's filter: the tab bar's query narrows the book list, and the
+        // pane's OWN box runs the citation search whose hits fill the hit rows.
+        { pane: "table",     query: "",      tag: "passage-filter-open" },
+        { pane: "table",     query: "faith", tag: "passage-filter-faith" },
+        { pane: "table",     query: "",      tag: "passage-filter-clear" },
+        { body: "table",     text: "faith",  search: true, tag: "passage-search-faith" },
+        { body: "table",     text: "faith",  search: true, tag: "passage-search-settle" },
+        { body: "table",     text: "",       search: true, tag: "passage-search-clear" },
+        // THE SCROLL PHASE (the scroll-cost probe). The steps above measure a SETTLE — a switch,
+        // a filter — one second each. The lag the operator actually reports ("scripture,
+        // templates and the table are sluggish when I scroll") is a DIFFERENT measurement: cost
+        // paid continuously, per frame, while rows enter and leave the viewport. So each step
+        // here scrolls ONE list through its whole content with a linear animation (700 ms, one
+        // and a half screens per second — a fast wheel drag) and the step reports:
+        //
+        //   frames/fps/avgFrameMs/worstFrameMs/jank33/jank50
+        //                    the frame times the app actually produced DURING the scroll, from a
+        //                    FrameAnimation on the interface thread — the same cadence the render
+        //                    thread paints at, so the C++ FrameProbe lines beside these agree with
+        //                    them. The first frame is skipped: its frameTime is the idle gap since
+        //                    the last painted frame, which is not a scroll cost.
+        //   built/dropped    the scrolled list's delegates, as a delta over the scroll window —
+        //                    rows the scroll created and rows it threw away.
+        //   *Evals           the row binding evaluations the same window cost: the reference
+        //                    pane's verse/book/chapter/source rows' own label/text bindings, and
+        //                    cardFitSolves — the design cards' fit solvers (11 bisections and
+        //                    re-measures each) run while cards are built. A list that scrolls with
+        //                    eval deltas of 0 is not paying binding work at all, whatever its
+        //                    frames say; one whose evals scale with the scroll distance is.
+        //   contentPx/viewPx/scrollPx
+        //                    how far the scroll actually went, so a short list (or one that could
+        //                    not scroll) cannot be read as a free one.
+        //
+        // Each scroll step still carries the heartbeat stall numbers: a scroll that parks the
+        // interface thread shows up there at the same time as in the frame times.
+        // Each scroll step names the SNAPSHOT KEYS of the list it scrolls (rows/built/dropped/
+        // evals), so the line reports that list's own numbers as scrollRows/scrollBuilt/
+        // scrollDropped/scrollEvals instead of leaving the reader to map a list name onto the
+        // per-list fields by hand. The deltas are the scroll window's: the line's "previous"
+        // snapshot is taken before the scroll starts (the beat timer runs first).
+        { pane: "shows",     scroll: "selfTestShowsList",            rows: "showsRows",    built: "showsBuilt",    dropped: "showsDropped",    evals: "showsEvals",    tag: "scroll-shows-rows" },
+        { pane: "table",     scroll: "selfTestVersesList-table",     rows: "refVerseRows", built: "refVerseBuilt", dropped: "refVerseDropped", evals: "refVerseEvals", tag: "scroll-table-verses" },
+        { pane: "scripture", scroll: "selfTestVersesList-scripture", rows: "refVerseRows", built: "refVerseBuilt", dropped: "refVerseDropped", evals: "refVerseEvals", tag: "scroll-scripture-verses" },
+        { pane: "scripture", scroll: "selfTestBooksList-scripture",  rows: "refBookRows",  built: "refBookBuilt",  dropped: "refBookDropped",  evals: "refBookEvals",  tag: "scroll-scripture-books" },
+        { pane: "scripture", scroll: "selfTestChaptersList-scripture", rows: "refChapterRows", built: "refChapterBuilt", dropped: "refChapterDropped", evals: "refChapterEvals", tag: "scroll-scripture-chapters" },
+        { pane: "templates", scroll: "selfTestDesignGrid-template",  rows: "templateRows", built: "templateBuilt", dropped: "templateDropped", evals: "cardFitSolves", tag: "scroll-templates-grid" },
+        { pane: "overlays",  scroll: "selfTestDesignGrid-overlay",   rows: "overlayRows",  built: "overlayBuilt",  dropped: "overlayDropped",  evals: "cardFitSolves", tag: "scroll-overlays-grid" },
+        { pane: "shows",     tag: "switch-shows-warm" },
+        { pane: "templates", tag: "switch-templates-warm" },
+        { pane: "table",     tag: "switch-table-warm" }
+    ]
+    property int layoutProbeStep: 0
+    property double layoutProbeT0: 0
+    property string layoutProbePending: ""
+    // The worst overshoot of a 16 ms timer on the interface thread this step, and the sum of
+    // them: the freeze itself, not the work that caused it.
+    property double layoutProbeStallMax: 0
+    property double layoutProbeStallSum: 0
+    property double layoutProbeBeat: 0
+    // The counters as they stood at the END of the previous step, so each line is a delta.
+    property var layoutProbePrev: null
+    // The step whose line has not been written yet, so the line can report the fields its own
+    // list carries (the scroll steps name them in the step itself — see layoutProbeSteps).
+    property var layoutProbePendingStep: null
+
+    function layoutProbePanes() {
+        return { media: SelfTest.findItem("selfTestMediaPane"),
+                 overlays: SelfTest.findItem("selfTestOverlaysPane"),
+                 templates: SelfTest.findItem("selfTestTemplatesPane"),
+                 table: SelfTest.findItem("selfTestTablePane"),
+                 scripture: SelfTest.findItem("selfTestScripturePane"),
+                 shows: SelfTest.findItem("selfTestShowsRows") }
+    }
+    // The two reference panes (The Table and Scripture) are the SAME component, so their
+    // counters are summed: a scroll of the sermon list and a scroll of the bible list land in
+    // the same field, and because the scroll phase scrolls ONE named list per step, the delta
+    // that moves is that list's — the line names the list it scrolled.
+    function layoutProbeRefSum(prop) {
+        const panes = window.layoutProbePanes()
+        let total = 0
+        for (const key of ["table", "scripture"]) {
+            const item = panes[key]
+            const value = item ? item[prop] : undefined
+            if (typeof value === "number" && value >= 0)
+                total += value
+        }
+        return total
+    }
+    // The reference panes' binding-evaluation totals, which live in a plain JS accumulator
+    // (ReferencePane.probeEvals — a QML property written from inside a binding is a reported
+    // binding loop, so the counters are JS fields and are read here rather than notified).
+    function layoutProbeRefEvals(key) {
+        const panes = window.layoutProbePanes()
+        let total = 0
+        for (const tag of ["table", "scripture"]) {
+            const item = panes[tag]
+            const value = (item && item.probeEvals) ? item.probeEvals[key] : undefined
+            if (typeof value === "number" && value >= 0)
+                total += value
+        }
+        return total
+    }
+    function layoutProbeEvalsOf(item, key) {
+        const value = (item && item.probeEvals) ? item.probeEvals[key] : undefined
+        return (typeof value === "number" && value >= 0) ? value : -1
+    }
+    function layoutProbeRefLen(prop) {
+        const panes = window.layoutProbePanes()
+        let total = 0
+        for (const key of ["table", "scripture"]) {
+            const item = panes[key]
+            const value = item ? item[prop] : undefined
+            if (value !== undefined && value !== null && value.length !== undefined)
+                total += value.length
+        }
+        return total
+    }
+    function layoutProbeRefChapters() {
+        const panes = window.layoutProbePanes()
+        let total = 0
+        for (const key of ["table", "scripture"]) {
+            const item = panes[key]
+            const chapters = item && item.book ? item.book.chapters : undefined
+            if (chapters && chapters.length !== undefined)
+                total += chapters.length
+        }
+        return total
+    }
+    function layoutProbeSnapshot() {
+        const p = window.layoutProbePanes()
+        const num = (o, name) => (o && o[name] !== undefined) ? o[name] : -1
+        const len = (o, name) => (o && o[name] !== undefined) ? o[name].length : -1
+        return {
+            showsRows: len(p.shows, "shownShows"),
+            showsBuilt: num(p.shows, "showsRowBuilds"), showsDropped: num(p.shows, "showsRowDrops"),
+            showsEvals: window.layoutProbeEvalsOf(p.shows, "rows"),
+            mediaRows: len(p.media, "gridItems"),
+            mediaBuilt: num(p.media, "gridRowBuilds"), mediaDropped: num(p.media, "gridRowDrops"),
+            overlayRows: len(p.overlays, "gridItems"),
+            overlayBuilt: num(p.overlays, "gridRowBuilds"), overlayDropped: num(p.overlays, "gridRowDrops"),
+            templateRows: len(p.templates, "gridItems"),
+            templateBuilt: num(p.templates, "gridRowBuilds"), templateDropped: num(p.templates, "gridRowDrops"),
+            verseRows: len(p.table, "mainRows"),
+            verseBuilt: num(p.table, "verseRowBuilds"), verseDropped: num(p.table, "verseRowDrops"),
+            hitBuilt: num(p.table, "hitRowBuilds"), hitDropped: num(p.table, "hitRowDrops"),
+            // The reference panes' OWN rows (both tabs summed) — the lists the scroll phase
+            // scrolls, and the ones the operator's report names (scripture, the table).
+            refVerseRows: window.layoutProbeRefLen("mainRows"),
+            refVerseBuilt: window.layoutProbeRefSum("verseRowBuilds"),
+            refVerseDropped: window.layoutProbeRefSum("verseRowDrops"),
+            refVerseEvals: window.layoutProbeRefEvals("verse"),
+            refBookRows: window.layoutProbeRefLen("visibleBooks"),
+            refBookBuilt: window.layoutProbeRefSum("bookRowBuilds"),
+            refBookDropped: window.layoutProbeRefSum("bookRowDrops"),
+            refBookEvals: window.layoutProbeRefEvals("book"),
+            refChapterRows: window.layoutProbeRefChapters(),
+            refChapterBuilt: window.layoutProbeRefSum("chapterRowBuilds"),
+            refChapterDropped: window.layoutProbeRefSum("chapterRowDrops"),
+            refChapterEvals: window.layoutProbeRefEvals("chapter"),
+            refSourceRows: window.layoutProbeRefLen("sources"),
+            refSourceBuilt: window.layoutProbeRefSum("sourceRowBuilds"),
+            refSourceDropped: window.layoutProbeRefSum("sourceRowDrops"),
+            refSourceEvals: window.layoutProbeRefEvals("source"),
+            // The design cards' own cost (both design grids summed): every text block of every
+            // card that gets built runs an 11-step fit bisection over a hidden twin Text, counted
+            // on the PANE each card reports to (a counter on the card would reset with the card).
+            cardFitSolves: Math.max(0, num(p.overlays, "gridFitSolves"))
+                           + Math.max(0, num(p.templates, "gridFitSolves"))
+        }
+    }
+    function layoutProbeLine(tag, ms) {
+        const now = window.layoutProbeSnapshot()
+        const prev = window.layoutProbePrev
+        const d = (key) => (prev === null || prev[key] < 0 || now[key] < 0) ? 0 : now[key] - prev[key]
+        window.layoutProbePrev = now
+        const list = (name, rowsKey, builtKey, droppedKey) =>
+            " " + name + "Rows=" + now[rowsKey]
+            + " " + name + "Built=+" + d(builtKey) + " " + name + "Dropped=+" + d(droppedKey)
+        // The reference panes' rows, with the binding evaluations each row cost as well as the
+        // builds and drops: `refVerseEvals` counts evaluations of the verse rows' own text
+        // binding, `refBookEvals`/`refChapterEvals`/`refSourceEvals` the label bindings of the
+        // three sidebar lists. They are printed on EVERY step (a pane switch and a filter are
+        // built and re-evaluated too), and the scroll phase's line is what ties them to frames.
+        const ref = (name, rowsKey, builtKey, droppedKey, evalsKey) =>
+            " ref" + name + "Rows=" + now[rowsKey]
+            + " ref" + name + "Built=+" + d(builtKey) + " ref" + name + "Dropped=+" + d(droppedKey)
+            + " ref" + name + "Evals=+" + d(evalsKey)
+        return "phase=" + tag + " ms=" + ms
+               + " stallMax=" + Math.round(window.layoutProbeStallMax)
+               + " stallSum=" + Math.round(window.layoutProbeStallSum)
+               + list("shows", "showsRows", "showsBuilt", "showsDropped")
+               + list("media", "mediaRows", "mediaBuilt", "mediaDropped")
+               + list("overlay", "overlayRows", "overlayBuilt", "overlayDropped")
+               + list("template", "templateRows", "templateBuilt", "templateDropped")
+               + list("verse", "verseRows", "verseBuilt", "verseDropped")
+               + " hitBuilt=+" + d("hitBuilt") + " hitDropped=+" + d("hitDropped")
+               + ref("Verse", "refVerseRows", "refVerseBuilt", "refVerseDropped", "refVerseEvals")
+               + ref("Book", "refBookRows", "refBookBuilt", "refBookDropped", "refBookEvals")
+               + ref("Chapter", "refChapterRows", "refChapterBuilt", "refChapterDropped", "refChapterEvals")
+               + ref("Source", "refSourceRows", "refSourceBuilt", "refSourceDropped", "refSourceEvals")
+               + " cardFitSolves=+" + d("cardFitSolves")
+               // A scroll step that never got going (a name that did not resolve, or a list with
+               // nothing to scroll) is reported here; one that ran writes its own record when the
+               // scroll stops (layoutProbeLogScroll).
+               + ((window.layoutProbePendingStep && window.layoutProbePendingStep.scroll !== undefined)
+                  ? window.layoutProbeScrollFields() : "")
+               + window.layoutProbeScrolledFields(prev, now, window.layoutProbePendingStep)
+    }
+
+    // The scrolled list's own deltas (the step names the snapshot keys): what that list built,
+    // threw away and evaluated over the window being reported. Empty on a step that did not
+    // scroll. `prev` is passed in because the two callers measure against different baselines:
+    // the step line against the previous step's end, the scroll's own record against its start.
+    function layoutProbeScrolledFields(prev, now, step) {
+        if (!step || step.scroll === undefined)
+            return ""
+        const d = (key) => (prev === null || prev[key] === undefined || prev[key] < 0 || now[key] < 0)
+                            ? 0 : now[key] - prev[key]
+        const rows = (key) => (now[key] !== undefined && now[key] >= 0) ? now[key] : -1
+        return " scrollRows=" + rows(step.rows)
+               + " scrollBuilt=+" + d(step.built) + " scrollDropped=+" + d(step.dropped)
+               + " scrollEvals=+" + d(step.evals)
+    }
+
+    // ---- the scroll phase's machinery (see the scroll steps in layoutProbeSteps) ----
+    // The scrolled list's name, its frame meter's running totals, and where the scroll started.
+    property string scrollListName: ""
+    // The STEP that armed this scroll, kept here rather than read off layoutProbePendingStep: a
+    // starved interface thread can delay the beat timer past the tick that advances the walk, and
+    // the record would then be tagged with the NEXT step's list (measured: a books-list record
+    // arriving while the chapters step was already pending).
+    property var scrollStep: null
+    property bool scrollFound: false
+    // Armed = THIS step's scroll is configured and running; logArmed = its stop is the one whose
+    // record belongs to this step. Two flags rather than one because the animation object is
+    // shared and a starved interface thread overlaps things: the stop of a PREVIOUS run (however
+    // it ended) must not write the current step's record, and only a scroll that actually started
+    // gets a record written on stop.
+    property bool scrollArmed: false
+    property bool scrollLogArmed: false
+    property int scrollTries: 0
+    property bool scrollMeterOn: false
+    property int scrollFrames: 0
+    property double scrollMs: 0        // the frame times the meter saw, summed (ms)
+    property double scrollWorstMs: 0
+    property int scrollJank33: 0       // frames longer than two 60 Hz frames — the ones a user sees
+    property int scrollJank50: 0
+    property double scrollSeconds: 0   // the meter's own window, from FrameAnimation.elapsedTime (seconds)
+    property double scrollWallMs: 0    // …and the wall clock the same run took, so a scroll the app
+                                       // produced NO frames during (meter window 0) still reads as
+                                       // the elapsed time it was, not as an instant one
+    property double scrollT0: 0
+    property double scrollStartY: 0
+    // The counter snapshot taken when the scroll started, so the scroll's own record can report
+    // its deltas without depending on when the step timer happened to fire (see LogScroll).
+    property var scrollPrevCounts: null
+
+    function scrollMeterReset() {
+        window.scrollFrames = 0
+        window.scrollMs = 0
+        window.scrollWorstMs = 0
+        window.scrollJank33 = 0
+        window.scrollJank50 = 0
+        window.scrollSeconds = 0
+        window.scrollWallMs = 0
+    }
+
+    // Scroll ONE list through its whole content, linearly, with the frame meter running. This is
+    // the measurement the phase exists for: the frame times the app produced while rows were
+    // entering and leaving the viewport, not a stopwatch around a positionViewAtIndex jump
+    // (which would time a single relayout and miss the cost of the rows themselves).
+    // Write the record for a scroll that is STILL IN FLIGHT, before anything can stop it
+    // unrecorded. The animation object is shared, so the next step's arming stops it — and that
+    // stop arrives with the next step's arming already in progress, i.e. after this step's
+    // `scrollLogArmed` was cleared, so the stop is swallowed and the scroll is never reported at
+    // all (measured: the scripture passage scroll ran, was armed, started, and wrote nothing).
+    // The window reported is the meter's elapsedTime so far: a partial window on purpose, because
+    // what it measured is what happened.
+    function layoutProbeFlushScroll() {
+        if (window.scrollStep === null)
+            return
+        window.scrollSeconds = selfTestScrollMeter.elapsedTime
+        window.scrollWallMs = window.scrollT0 > 0 ? Date.now() - window.scrollT0 : 0
+        window.scrollLogArmed = false
+        window.scrollArmed = false
+        window.layoutProbeLogScroll()
+    }
+
+    // A retrying armer: up to six attempts, 150 ms apart, because a list can be missing from the
+    // tree for a moment right after its pane is switched in (measured: the bible list was not
+    // found at 180 ms and was there a step later). Only after the attempts run out is a missing
+    // name reported as the step's finding — a scroll that could not be set up is worth reporting,
+    // but a race with a pane switch is not.
+    function layoutProbeStartScroll() {
+        if (window.scrollArmed || window.scrollStep === null)
+            return   // this step's scroll is already running, or already reported
+        const item = SelfTest.findItem(window.scrollListName)
+        const found = item !== null && item !== undefined
+        if (!found && ++window.scrollTries < 6)
+            return   // 6 × 150 ms, still inside the step: a pane switch can block the thread for ~hundreds of ms here
+        selfTestScrollStart.stop()
+        window.scrollMeterReset()
+        window.scrollPrevCounts = window.layoutProbeSnapshot()
+        window.scrollFound = found
+        if (!window.scrollFound) {
+            window.layoutProbeLogScroll()
+            return
+        }
+        window.scrollStartY = item.contentY
+        const maxY = Math.max(0, (item.contentHeight || 0) - (item.height || 0))
+        if (maxY <= 1) {
+            window.layoutProbeLogScroll()
+            return
+        }
+        // The shared animation is stopped first: if an earlier step's run is somehow still going,
+        // that stop must not be read as this step's end (scrollLogArmed is false until the line
+        // below), which is exactly how a stale stop once wrote a record with no scroll in it. An
+        // earlier scroll's own record was written when this step was issued (see FlushScroll) —
+        // it cannot be written here, because by now scrollStep IS this step.
+        selfTestScrollAnim.stop()
+        selfTestScrollAnim.target = item
+        selfTestScrollAnim.from = window.scrollStartY
+        selfTestScrollAnim.to = maxY
+        window.scrollArmed = true
+        window.scrollLogArmed = true
+        selfTestScrollAnim.start()
+    }
+
+    // The scroll fields themselves — what the frame meter saw, and how far the list actually
+    // moved. `listFound=0` means the step's objectName did not resolve (a broken name is the one
+    // failure that would otherwise read exactly like a list too short to scroll, so it gets its
+    // own field); `frames=0 listFound=1` with a real contentPx/viewPx means the list was there
+    // and had nothing to scroll.
+    function layoutProbeScrollFields() {
+        const item = window.scrollFound ? SelfTest.findItem(window.scrollListName) : null
+        const contentPx = item ? Math.round(item.contentHeight) : -1
+        const viewPx = item ? Math.round(item.height) : -1
+        const scrolled = item ? Math.round(item.contentY - window.scrollStartY) : 0
+        const seconds = window.scrollSeconds
+        const fps = (seconds > 0 && window.scrollFrames > 0) ? (window.scrollFrames / seconds) : 0
+        const avg = window.scrollFrames > 0 ? (window.scrollMs / window.scrollFrames) : 0
+        // The scrolled LIST's own row count where it has one (a view's `count`): the reference
+        // panes' scrollRows fields are the sum of BOTH tabs' rows, so this is the unambiguous
+        // "how long is the list that just scrolled" — -1 for the Flickable + Repeater sidebars,
+        // where contentPx is the only length there is.
+        const items = (item && item.count !== undefined) ? item.count : -1
+        return " scrollList=" + window.scrollListName
+               + " listFound=" + (window.scrollFound ? 1 : 0)
+               + " scrollItems=" + items
+               + " contentPx=" + contentPx + " viewPx=" + viewPx
+               + " scrollPx=" + scrolled + " scrollMs=" + Math.round(seconds * 1000)
+               + " scrollWallMs=" + Math.round(window.scrollWallMs)
+               + " frames=" + window.scrollFrames
+               + " fps=" + (Math.round(fps * 10) / 10)
+               + " avgFrameMs=" + (Math.round(avg * 10) / 10)
+               + " worstFrameMs=" + (Math.round(window.scrollWorstMs * 10) / 10)
+               + " jank33=" + window.scrollJank33 + " jank50=" + window.scrollJank50
+    }
+
+    // The scroll's OWN record, written when the scroll stops rather than at the step timer's next
+    // tick. A step whose list is slow to draw OVERRUNS the 1 s cadence (measured here: the
+    // templates grid's 37 cards took 7.1 s of a 1 s step), and a record taken at the tick would
+    // have been written before the scroll even began — which is exactly what the first cut of this
+    // reported (listFound=0, frames=0, and then the scroll quietly starting afterwards). Its
+    // counter deltas run from the snapshot taken at scroll START, so they are this scroll's
+    // whatever the tick timer did in between.
+    function layoutProbeLogScroll() {
+        const step = window.scrollStep
+        const now = window.layoutProbeSnapshot()
+        EngineBridge.log("info", "LayoutProbe",
+                         "phase=" + (step ? step.tag : "scroll-unknown")
+                         + " scrollStart=1"
+                         + window.layoutProbeScrollFields()
+                         + window.layoutProbeScrolledFields(window.scrollPrevCounts, now, step))
+        // The next step's line must measure its own step, not what the scroll left behind.
+        window.layoutProbePrev = now
+        // Only disarm the walk if this record IS the step the walk is on. A starved interface
+        // thread delivers a scroll's stop LATE — after the tick has already issued the next step —
+        // and clearing the arming unconditionally cancelled that next step's scroll entirely
+        // (measured: two scripture scrolls wrote no record at all, because their predecessor's
+        // late stop nulled the step they had just armed).
+        if (window.layoutProbePendingStep === step)
+            window.scrollStep = null
+    }
+    // The stall measurement itself: a timer on the interface thread asking for 16 ms. When the
+    // thread is parked in DirectWrite, in a relayout, or in a binding storm, this is late by
+    // exactly how long it was parked. Anything under 8 ms of overshoot is timer noise.
+    Timer {
+        id: selfTestLayoutHeartbeat
+        interval: 16
+        repeat: true
+        running: typeof SelfTestLayout !== "undefined" && SelfTestLayout
+        onTriggered: {
+            const now = Date.now()
+            const last = window.layoutProbeBeat
+            window.layoutProbeBeat = now
+            if (last <= 0)
+                return
+            const lost = (now - last) - 16
+            if (lost < 8)
+                return
+            window.layoutProbeStallSum += lost
+            if (lost > window.layoutProbeStallMax)
+                window.layoutProbeStallMax = lost
+        }
+    }
+    // The frame meter of the scroll phase: a FrameAnimation fires once per frame the app
+    // renders, on the interface thread, so `frameTime` is the frame the app just produced. It
+    // runs ONLY while a scroll step's animation does, so nothing else in the run pays for it.
+    //
+    // frameTime and elapsedTime are in SECONDS (Qt's own doc: "the time in seconds since the
+    // previous frame update") — converted to ms once, here, and the window comes from the
+    // meter's own elapsedTime rather than a second clock, so frames and duration are the same
+    // measurement.
+    //
+    // The FIRST frame's frameTime is skipped: it is the gap since whatever was last painted, so
+    // on an idle app it reads as seconds of "cost" that no scroll caused. The worst frame
+    // reported is therefore the worst frame the scroll itself produced.
+    FrameAnimation {
+        id: selfTestScrollMeter
+        running: window.scrollMeterOn
+        onTriggered: {
+            if (selfTestScrollMeter.currentFrame <= 1)
+                return
+            const dt = selfTestScrollMeter.frameTime * 1000
+            window.scrollFrames++
+            window.scrollMs += dt
+            if (dt > window.scrollWorstMs)
+                window.scrollWorstMs = dt
+            if (dt > 33)
+                window.scrollJank33++
+            if (dt > 50)
+                window.scrollJank50++
+        }
+    }
+    // The scroll itself: contentY, start to end, at a constant speed (linear). A wheel drag with
+    // no flick inertia — reproducible run to run, which is what makes two runs comparable.
+    NumberAnimation {
+        id: selfTestScrollAnim
+        property: "contentY"
+        duration: 700
+        easing.type: Easing.Linear
+        onStarted: {
+            window.scrollT0 = Date.now()
+            window.scrollMeterOn = true
+        }
+        onStopped: {
+            window.scrollMeterOn = false
+            window.scrollWallMs = window.scrollT0 > 0 ? Date.now() - window.scrollT0 : 0
+            window.scrollSeconds = selfTestScrollMeter.elapsedTime
+            if (window.scrollLogArmed) {
+                window.scrollLogArmed = false
+                window.scrollArmed = false
+                window.layoutProbeLogScroll()
+            }
+        }
+    }
+    // A short beat between the pane switch and the scroll: the switch's own first frames are the
+    // step before this one's cost, and a scroll started inside them would report both.
+    Timer {
+        id: selfTestScrollStart
+        interval: 150
+        repeat: true
+        onTriggered: window.layoutProbeStartScroll()
+    }
+    Timer {
+        id: selfTestLayoutProbe
+        interval: 1000
+        repeat: true
+        running: typeof SelfTestLayout !== "undefined" && SelfTestLayout
+        onTriggered: {
+            const pending = window.layoutProbePendingStep
+            const wasScroll = pending !== null && pending !== undefined && pending.scroll !== undefined
+            // Report the step that was just issued (its list has settled by now). A scroll step is
+            // NOT reported here: it writes its own record when the scroll stops (or when it turns
+            // out it cannot scroll) — logging it here as well would print it twice, one of them
+            // before the scroll had run.
+            if (window.layoutProbePending !== "" && !wasScroll)
+                EngineBridge.log("info", "LayoutProbe",
+                                 window.layoutProbeLine(window.layoutProbePending,
+                                                        Date.now() - window.layoutProbeT0))
+            else if (wasScroll) {
+                // …unless this step never got a record at all: a starved interface thread can hold
+                // the beat timer past the whole step (measured: two scripture scrolls wrote nothing).
+                // One record per scroll step, always — a scroll that could not even start is a
+                // finding, not a gap.
+                if (window.scrollStep !== null && !window.scrollArmed) {
+                    EngineBridge.log("info", "LayoutProbe",
+                                     window.layoutProbeLine(window.layoutProbePending,
+                                                            Date.now() - window.layoutProbeT0))
+                    selfTestScrollStart.stop()
+                    window.scrollStep = null
+                }
+                // The next step's line still has to measure its own step, not what the scroll left
+                // behind, so the baseline moves here even though nothing was printed.
+                window.layoutProbePrev = window.layoutProbeSnapshot()
+            }
+            window.scrollMeterOn = false
+            window.layoutProbeStallMax = 0
+            window.layoutProbeStallSum = 0
+            if (window.layoutProbeStep >= window.layoutProbeSteps.length) {
+                const now = window.layoutProbeSnapshot()
+                EngineBridge.log("info", "LayoutProbe",
+                                 "phase=done showsRows=" + now.showsRows + " showsBuilt=" + now.showsBuilt
+                                 + " mediaRows=" + now.mediaRows + " mediaBuilt=" + now.mediaBuilt
+                                 + " overlayRows=" + now.overlayRows + " overlayBuilt=" + now.overlayBuilt
+                                 + " templateRows=" + now.templateRows + " templateBuilt=" + now.templateBuilt
+                                 + " verseRows=" + now.verseRows + " verseBuilt=" + now.verseBuilt
+                                 + " hitBuilt=" + now.hitBuilt)
+                SelfTest.quit()
+                return
+            }
+            const step = window.layoutProbeSteps[window.layoutProbeStep++]
+            window.layoutProbePending = step.tag
+            window.layoutProbePendingStep = step
+            window.layoutProbeT0 = Date.now()
+            // The library dock has to be the view on screen for any of this to lay out
+            // (see the presplit scenario's own note on the launch state).
+            if (window.layoutProbeStep === 1)
+                window.currentView = "show"
+            if (step.pane !== undefined)
+                showScreen.showInLibrary(step.pane, step.query === undefined ? "" : step.query)
+            else if (step.body !== undefined) {
+                // The pane's OWN search box (see the pane-highlight scenario): the magnifier's
+                // click reveals it, then the query is typed into it.
+                const pane = SelfTest.findItem(step.body === "table" ? "selfTestTablePane" : "selfTestScripturePane")
+                if (pane && step.search === true)
+                    pane.searching = true
+                const box = SelfTest.findItem("selfTestSearchBox-" + step.body)
+                if (box)
+                    box.text = step.text
+            }
+            if (step.scroll !== undefined) {
+                // Armed here, started by the beat timer below: the meter's totals are reset with
+                // the step so the record that follows is this scroll's alone. A still-unrecorded
+                // scroll from the previous step is written out first (see FlushScroll).
+                window.layoutProbeFlushScroll()
+                window.scrollListName = step.scroll
+                window.scrollStep = step
+                window.scrollFound = false
+                window.scrollArmed = false
+                window.scrollLogArmed = false
+                window.scrollTries = 0
+                window.scrollMeterReset()
+                selfTestScrollStart.restart()
+            }
+        }
+    }
+
+    // The click has to actually LAND before it can be judged (a synthetic click needs the
+    // window focused, which takes a moment), so this waits for the pick it should have
+    // made instead of assuming it arrived.
+    Timer {
+        id: selfTestPreSplitClicked
+        interval: 250
+        repeat: true
+        onTriggered: {
+            const p = SelfTest.findItem("selfTestTablePane")
+            const row = window.preSplitOpenRow
+            const name = window.preSplitRowName(row)
+            // Click ONCE THE ROW IS ON SCREEN — the reveal above is a scroll, and a
+            // scroll takes a frame or two before the row exists to be clicked. Waiting
+            // for itemVisible (rather than clicking blind) is also what rejects a
+            // RECYCLED row of the same name: the list keeps the rows it has finished
+            // with in a reuse pool, and those are invisible.
+            if (!window.preSplitRowReady) {
+                if (!SelfTest.itemVisible(name)) {
+                    // BOUNDED, and it says what it is waiting on: a row that never came on
+                    // screen used to park here for ever, which reads as a hanging run
+                    // instead of a failure. 240 ticks is a minute; the wait itself is the
+                    // reveal being a scroll (a frame or two), so anything long is a
+                    // finding, not patience.
+                    const waited = ++window.preSplitWaitTicks
+                    if (waited % 40 === 0)
+                        console.log("[SELFTEST-PRESPLIT] still waiting for " + name
+                                    + " to be on screen: model=" + p.mainRows.length
+                                    + " rows=" + p.chapterVerses.length
+                                    + " rowAt=" + p.mainRows.findIndex((r) => Number(r.number) === Number(row.number)
+                                                                       && Number(r.partIndex ?? 0) === Number(row.partIndex ?? 0))
+                                    + " paneVisible=" + p.visible
+                                    + " paneSize=" + Math.round(p.width) + "x" + Math.round(p.height)
+                                    + " row1Visible=" + SelfTest.itemVisible("selfTestVerseRow_1")
+                                    + " exists=" + (SelfTest.findItem(name) ? 1 : 0)
+                                    + " selected=" + p.selected.join(","))
+                    if (waited > 240) {
+                        selfTestPreSplitClicked.stop()
+                        console.log("[SELFTEST-PRESPLIT] result rows=" + window.preSplitFacts.rows
+                                    + " splitRows=" + window.preSplitFacts.split
+                                    + " openMs=" + window.preSplitFacts.openMs
+                                    + " openSplitRows=" + window.preSplitFacts.openSplit
+                                    + " finalSplitRows=" + window.preSplitFacts.finalSplit
+                                    + " settledMs=" + window.preSplitFacts.settledMs
+                                    + " agreement=false notclicked=" + name)
+                        window.preSplitRestoreSettings()
+                        SelfTest.quit()
+                    }
+                    return
+                }
+                SelfTest.clickItem(name)
+                window.preSplitRowReady = true
+                return   // judged from the next tick, once the click has arrived
+            }
+            if (p.selected.indexOf(Number(row.number)) < 0 && window.preSplitClickTries++ < 60)
+                return
+            selfTestPreSplitClicked.stop()
+            let part = -1
+            for (const piece of p.previewSlideParts || [])
+                if (Number(piece.number) === Number(row.number))
+                    part = Number(piece.partIndex ?? 0)
+            const agreed = p.selected.indexOf(Number(row.number)) >= 0 && part === Number(row.partIndex)
+            console.log("[SELFTEST-PRESPLIT] clicked " + window.preSplitRowName(row)
+                        + " selected=" + p.selected.join(",") + " previewPart=" + part)
+            window.preSplitRestoreSettings()
+            console.log("[SELFTEST-PRESPLIT] result rows=" + window.preSplitFacts.rows
+                        + " splitRows=" + window.preSplitFacts.split
+                        + " openMs=" + window.preSplitFacts.openMs
+                        + " openSplitRows=" + window.preSplitFacts.openSplit
+                        + " finalSplitRows=" + window.preSplitFacts.finalSplit
+                        + " settledMs=" + window.preSplitFacts.settledMs
+                        + " pickedBefore=" + (window.preSplitFacts.hadPick ? 1 : 0)
+                        + " clickedPart=" + Number(row.partIndex)
+                        + " previewPart=" + part
+                        + " agreement=" + agreed)
+            SelfTest.quit()
+        }
+    }
+
     // ---- app-wide search ranking (VGR_RANK_TEST=1) --------------------------
     // User report: "compelling that you recieve" listed Bible verses that carry
     // only "you that", with the sermon that says "and compelling and compulsory,
@@ -3057,6 +4209,17 @@ ApplicationWindow {
     // of the typed words each one carries, so the ranking is readable from a log
     // rather than a screenshot.
     readonly property string rankQuery: "compelling that you recieve"
+    // The diagnostic's own async search request counter (see the read timer below).
+    property int diagSearchToken: 0
+    // The hover stage's own state (see rankStartHover): which row the real cursor
+    // was parked on, and what its preview read.
+    property var rankHover: ({ index: -1, kind: "-", chars: -1 })
+    // The verse-hitting query the hover stage falls back to (see rankStartHover):
+    // the ranked query is a user report's wording, and this machine's run of it
+    // returned sermons only, while the preview under test is the VERSE one.
+    readonly property string rankHoverQuery: "holy ghost"
+    property bool rankHoverResearched: false
+    property int rankHoverTries: 0
     function rankWords() {
         const source = quickSearch.highlightSource !== "" ? quickSearch.highlightSource : window.rankQuery
         return source.toLowerCase().match(/[a-z0-9]+/g) || []
@@ -3104,13 +4267,530 @@ ApplicationWindow {
             // search that never ran.)
             console.log("[SELFTEST-RANK] diag query='" + quickSearch.query + "' pending="
                         + quickSearch.searchPending + " bibleLoading=" + SearchService.bibleLoading
-                        + " bibles=" + SearchService.bibles.length
-                        + " syncRows=" + SearchService.search(window.rankQuery, 4, false).length)
+                        + " bibles=" + SearchService.bibles.length)
             for (let i = 0; i < rows.length; ++i)
                 console.log("[SELFTEST-RANK] row" + i + "=" + rows[i])
             const first = quickSearch.results.length > 0 ? quickSearch.results[0] : null
             console.log("[SELFTEST-RANK] result top=" + (first ? first.kind : "-")
                         + " topTitle=" + (first ? String(first.title).substring(0, 60) : "-"))
+            // The "does the SERVICE answer the same query" half of the
+            // diagnostic, asked ASYNCHRONOUSLY. This line used to carry
+            // `syncRows=` from a synchronous SearchService.search() inside a
+            // console.log — the whole aggregation (Bible reference, the shows
+            // library, The Table's paragraph scan) on the interface thread, to
+            // print a number. It froze the very thread the scenario exists to
+            // measure. The service's own answer now arrives on resultsReady
+            // (below) and is logged there; the wait is bounded either way, so a
+            // service that never answers still ends the scenario.
+            // The SERVICE half of the diagnostic, and the hover stage, both wait
+            // for their own answers now (see rankDiagCall / rankStartHover).
+            window.rankStartHover()
+        }
+    }
+    // THE HOVER PREVIEW, parked and read without ever leaving the row. The trap this
+    // covers: SearchService.fullVerse is a PUBLISHED read — it answers "" while its
+    // worker read is in flight — and the dialog had no verseCached handler at all,
+    // so a row that took that empty answer showed only its snippet for as long as
+    // the pointer stayed on it (leaving and coming back worked, which is what made
+    // it easy to miss). One REAL cursor move, then two reads with the pointer
+    // unmoved: probe1 is the verdict, probe2 the confirmation.
+    // The first row of the current results that has a LOCATION (a Bible verse or a
+    // sermon paragraph) — `wantBible` restricts it to SearchService's own published
+    // read, which is the one this check is about.
+    function rankPickRow(wantBible) {
+        const results = quickSearch.results
+        for (let i = 0; i < results.length; ++i) {
+            const r = results[i]
+            const located = (r.kind === "bible" || r.kind === "table")
+                             && r.bookId !== undefined && r.bookId !== ""
+            // NOTE: every Bible verse row already carries its own verse text —
+            // readSearch seeds `fullText` from the engine — so a candidate cannot be
+            // narrowed to "one whose preview will be fetched". The published read is
+            // asked on hover regardless, and the seed is what the row shows while its
+            // answer is in flight (see the entry's fullText binding).
+            if (located && (!wantBible || r.kind === "bible"))
+                return i
+        }
+        return -1
+    }
+    function rankStartHover() {
+        let pick = window.rankPickRow(true)
+        if (pick < 0 && !window.rankHoverResearched) {
+            // The ranked query returned no verse of its own: ASK FOR ONE, because a
+            // sermon paragraph previews through the library while a verse previews
+            // through the published read under test. The ranked query's rows are
+            // already logged and are not logged again, so the harness's ranking
+            // checks still read exactly the rows they did before.
+            window.rankHoverResearched = true
+            window.rankHoverTries = 0
+            quickSearch.query = window.rankHoverQuery
+            quickSearch.refresh()
+            selfTestRankHoverQuery.restart()   // then wait for the ROWS, not a clock
+            return
+        }
+        if (pick < 0)
+            pick = window.rankPickRow(false)   // no Bible in this setup: any located row
+        window.rankHover = ({ index: pick, kind: pick >= 0 ? String(quickSearch.results[pick].kind) : "-",
+                              chars: -1 })
+        if (pick < 0) {
+            // Say WHAT came back, not just that nothing did: an empty list (the query
+            // answered nothing), rows with no location, and rows that already carry
+            // their passage are three different reasons for the same silence.
+            const rs = quickSearch.results
+            let shape = ""
+            for (let i = 0; i < rs.length && i < 4; ++i)
+                shape += " [" + i + ":" + rs[i].kind + " book='" + String(rs[i].bookId ?? "")
+                         + " full=" + String(rs[i].fullText ?? "").length + "]"
+            console.log("[SELFTEST-RANK] hover none — no located row came back for '"
+                        + window.rankHoverQuery + "' either (rows=" + rs.length + shape
+                        + " bibles=" + SearchService.bibles.length + ")")
+            window.rankDiagCall()
+            return
+        }
+        const c = SelfTest.itemCenter("selfTestQuickRow" + pick)
+        SelfTest.move(c.x, c.y)   // a genuine OS hover, the same shape the cursor test uses
+        selfTestRankHover.restart()
+    }
+    // Reads the hovered row's own preview off its item — a length, not a boolean, so
+    // the log says WHICH answer the row took (a snippet is tens of characters).
+    function rankHoverProbe(tag) {
+        const item = SelfTest.findItem("selfTestQuickRow" + window.rankHover.index)
+        const text = item ? String(item.fullText ?? "") : ""
+        // Did the hover LAND? The row says so the same way the UI does (its own
+        // handler moves the dialog's selection), and a preview read off a row the
+        // pointer is not on proves nothing about the re-ask — it would just be the
+        // row's seed. Read here, at probe time, not right after the move: the OS
+        // hover event is delivered a beat later.
+        const landed = quickSearch.current === window.rankHover.index
+        // The row's own seed, so the log says whether the preview came from the
+        // published read or from the passage the search already handed the row.
+        const seeded = String(quickSearch.results[window.rankHover.index].fullText ?? "").length
+        console.log("[SELFTEST-RANK] hover " + tag + " row=" + window.rankHover.index
+                    + " kind=" + window.rankHover.kind + " landed=" + landed
+                    + " chars=" + text.length + " seeded=" + seeded
+                    + " filled=" + (text.length > 0))
+        return text.length
+    }
+    function rankDiagCall() {
+        window.diagSearchToken++
+        SearchService.searchAsync(window.rankQuery, 4, window.diagSearchToken, false)
+        selfTestRankDiagWait.restart()
+    }
+    // Wait for the fallback query's ROWS rather than for a clock: refresh() clears
+    // the list and sets searchPending, and a pick taken while it is empty (or while
+    // the old rows are still up) would either find nothing or park the cursor on a
+    // delegate the arriving answer is about to rebuild — which re-asks the preview
+    // by itself and would let this check pass without the re-ask it exists for.
+    Timer {
+        id: selfTestRankHoverQuery
+        interval: 1000
+        repeat: true
+        onTriggered: {
+            if (quickSearch.searchPending)
+                return                              // the answer is not in yet
+            if (++window.rankHoverTries < 8) {
+                selfTestRankHoverQuery.stop()
+                window.rankStartHover()
+                return
+            }
+            // Gave up waiting (a Bible still loading at 45 s is the likely reason):
+            // say so and let the scenario finish, so the harness reports a missing
+            // row rather than a timeout with no line explaining it.
+            selfTestRankHoverQuery.stop()
+            console.log("[SELFTEST-RANK] hover none — '" + window.rankHoverQuery
+                        + "' returned no rows within " + window.rankHoverTries + "s")
+            window.rankDiagCall()
+        }
+    }
+    Timer {
+        id: selfTestRankHover
+        interval: 4000
+        onTriggered: {
+            window.rankHoverProbe("probe1")
+            selfTestRankHoverAgain.restart()
+        }
+    }
+    Timer {
+        id: selfTestRankHoverAgain
+        interval: 3000
+        onTriggered: {
+            const chars = window.rankHoverProbe("probe2")
+            console.log("[SELFTEST-RANK] hover result filled=" + (chars > 0))
+            window.rankDiagCall()
+        }
+    }
+    Timer {
+        id: selfTestRankDiagWait
+        interval: 5000
+        onTriggered: {
+            console.log("[SELFTEST-RANK] serviceRows=timeout (no answer within 5s)")
+            SelfTest.quit()
+        }
+    }
+    Connections {
+        target: SearchService
+        function onResultsReady(token, rows) {
+            if (token !== window.diagSearchToken)
+                return
+            console.log("[SELFTEST-RANK] serviceRows=" + rows.length
+                        + " (the service's own answer for the same query)")
+            selfTestRankDiagWait.stop()
+            SelfTest.quit()
+        }
+    }
+
+    // ---- The show document JOBS: save / open / peek / timer / copy ----------
+    // (VGR_SHOWIO_TEST=1 only.) ShowService's document reads and writes are QUEUED
+    // (see its header): each answers with a TOKEN and reports its verdict later, as
+    // documentJobFinished. Neither compilation nor a clean boot can tell that
+    // contract from a broken one — a save that never writes its file and a save
+    // whose verdict never arrives both look exactly like nothing happening. So this
+    // drives the whole chain with REAL files and prints every verdict:
+    //   save   the working show to a file, then read back dirty/file/slides;
+    //   open   that file back through the call the show screen uses;
+    //   peek   it the way the centre page does — a miss must answer `pending`, the
+    //          answer must land on the published revision, and a WRITE to it must
+    //          drop that answer so the next read is the new file (the timer);
+    //   timer  apply it, then read the peek again and expect the timer in it;
+    //   copy   the recovery copy, the one write nobody asked for.
+    property var showIo: ({ savePath: "showio_probe.vgr", copyPath: "showio_probe_recovery.vgr",
+                            saveToken: 0, openToken: 0, timerToken: 0, copyToken: 0,
+                            saveOk: false, openOk: false, peekOk: false, timerSeen: false,
+                            timerPeekPending: false })
+    function showIoLog(step, text) { console.log("[SELFTEST-SHOWIO] step=" + step + " " + text) }
+    function showIoBegin() {
+        // Two slides, then straight to the save: a new show is dirty until it has a file.
+        ShowService.newShowDocument("ShowIO probe")
+        ShowService.addSlide({ title: "Probe one" })
+        ShowService.addSlide({ title: "Probe two" })
+        window.showIo.saveToken = ShowService.saveCurrentShow(window.showIo.savePath)
+    }
+    function showIoSaveLanded(ok) {
+        window.showIo.saveOk = ok
+        const show = ShowService.currentShow
+        window.showIoLog("save", "ok=" + ok + " path='" + String(ShowService.showPath) + "'"
+                         + " dirty=" + ShowService.showDirty
+                         + " file=" + SettingsService.fileExists(window.showIo.savePath)
+                         + " slides=" + (show.slides ? show.slides.length : -1))
+        window.showIo.openToken = ShowService.openShowFile(window.showIo.savePath)
+    }
+    function showIoOpenLanded(ok, slides) {
+        window.showIo.openOk = ok
+        window.showIoLog("open", "ok=" + ok + " slides=" + slides)
+        const first = ShowService.peekShow(window.showIo.savePath)
+        window.showIoLog("peek1", "ok=" + first.ok + " pending=" + (first.pending === true))
+        selfTestShowIoPeek.restart()
+    }
+    function showIoPeekLanded() {
+        const rev = ShowService.peekRevision
+        const second = ShowService.peekShow(window.showIo.savePath)
+        const slides = second.show ? second.show.slides : []
+        window.showIo.peekOk = second.ok === true && slides.length > 0
+        window.showIoLog("peek2", "ok=" + second.ok + " slides=" + slides.length + " revision=" + rev)
+        window.showIo.timerToken = ShowService.setNextTimer(window.showIo.savePath, 5)
+    }
+    function showIoTimerLanded(ok) {
+        window.showIoLog("timer", "ok=" + ok)
+        // The timer edit is a WRITE to the show: the published peek of it must be
+        // gone, so this read is either a fresh miss or the new answer — never the
+        // old one.
+        const after = ShowService.peekShow(window.showIo.savePath)
+        window.showIo.timerPeekPending = (after.pending === true)
+        window.showIoLog("peek3", "ok=" + after.ok + " pending=" + (after.pending === true))
+        selfTestShowIoPeekAgain.restart()
+    }
+    function showIoTimerReadLanded() {
+        const last = ShowService.peekShow(window.showIo.savePath)
+        const slides = last.show ? last.show.slides : []
+        const applied = slides.length > 0 && slides.every((s) => Math.round(s.nextTimer ?? 0) === 5)
+        window.showIo.timerSeen = applied
+        window.showIoLog("peek4", "ok=" + last.ok + " slides=" + slides.length + " timerApplied=" + applied)
+        window.showIo.copyToken = ShowService.saveShowCopy(window.showIo.copyPath)
+    }
+    function showIoCopyLanded(ok) {
+        window.showIoLog("copy", "ok=" + ok + " file=" + SettingsService.fileExists(window.showIo.copyPath))
+        window.showIoLog("result", "save=" + window.showIo.saveOk + " open=" + window.showIo.openOk
+                         + " peek=" + window.showIo.peekOk + " timer=" + window.showIo.timerSeen
+                         + " timerPeekPending=" + window.showIo.timerPeekPending + " copy=" + ok)
+        // Quit from its OWN tick, never from inside the job-verdict handler.
+        // MEASURED, not assumed: with `SelfTest.quit()` called straight from this
+        // handler the interface thread's 5 s heartbeat (engine.log,
+        // `UI event-loop heartbeat at … ms`) kept ticking for the ~80 s the probe
+        // watched after the verdict — so the loop never returned — while the same
+        // call from this timer returns it within a second (engine.log's
+        // `app event loop returned with code 0`). The verdict is delivered on a
+        // QUEUED call from the engine worker, and a quit issued inside that
+        // delivery is what does not take; the hop is the shape every other
+        // scenario here already quits through, so nothing new is being asked of
+        // the app for this one.
+        selfTestShowIoQuit.restart()
+    }
+    Connections {
+        target: ShowService
+        function onDocumentJobFinished(token, kind, ok, error, payload) {
+            if (!(typeof SelfTestShowIo !== "undefined" && SelfTestShowIo))
+                return
+            if (kind === "save" && token === window.showIo.saveToken)
+                window.showIoSaveLanded(ok)
+            else if (kind === "open" && token === window.showIo.openToken)
+                window.showIoOpenLanded(ok, (payload && payload.show && payload.show.slides) ? payload.show.slides.length : -1)
+            else if (kind === "timer" && token === window.showIo.timerToken)
+                window.showIoTimerLanded(ok)
+            else if (kind === "saveCopy" && token === window.showIo.copyToken)
+                window.showIoCopyLanded(ok)
+        }
+    }
+    Timer {
+        id: selfTestShowIo
+        running: typeof SelfTestShowIo !== "undefined" && SelfTestShowIo
+        interval: 18000   // boot, then the engine's stores
+        onTriggered: window.showIoBegin()
+    }
+    Timer { id: selfTestShowIoPeek; interval: 2500; onTriggered: window.showIoPeekLanded() }
+    Timer { id: selfTestShowIoPeekAgain; interval: 2500; onTriggered: window.showIoTimerReadLanded() }
+    Timer { id: selfTestShowIoQuit; interval: 500; onTriggered: SelfTest.quit() }
+
+    // ---- The QUIT path: unsaved show + a live output + the window close ------
+    // (VGR_QUIT_TEST=1 only.) Closing the window is the one user path that ends the
+    // process, and no build can see it: the unsaved-changes guard has to REFUSE the
+    // first close (or the user loses the show), the answer has to close it for real
+    // (or the app never quits), the save that gates that close is a QUEUED document
+    // job whose verdict decides whether the window may go, and an output is LIVE
+    // while the teardown runs — the case every "it hangs when I close it" report is
+    // about. This drives that chain and prints each step; the harness
+    // (tools/selftest/run_quit_test.sh) reads these lines, the engine's own `Exit`
+    // timings for each aboutToQuit step, and how long the process then took to go.
+    property var quitProbe: ({ seedToken: 0, seeded: false, armed: false, refused: false,
+                               dialogUp: false, saveClicked: false, live: false })
+    function quitLog(step, text) { console.log("[SELFTEST-QUIT] step=" + step + " " + text) }
+    function quitBegin() {
+        // A show with a FILE to begin with: the close-time save must not need the
+        // native save-path picker (a modal OS dialog cannot be driven from here),
+        // and being dirty again afterwards is what makes the guard speak.
+        ShowService.newShowDocument("Quit probe")
+        ShowService.addSlide({ title: "Saved one" })
+        ShowService.addSlide({ title: "Saved two" })
+        window.quitProbe.seedToken = ShowService.saveCurrentShow("quit_probe.vgr")
+        window.quitLog("seed", "token=" + window.quitProbe.seedToken)
+    }
+    function quitSeeded(ok) {
+        window.quitProbe.seeded = ok
+        window.quitLog("seeded", "ok=" + ok + " file=" + SettingsService.fileExists("quit_probe.vgr"))
+        // Unsaved again, and an output that is really live when the teardown starts.
+        ShowService.addSlide({ title: "Unsaved" })
+        LiveOutputService.goLive()
+        window.quitProbe.live = LiveOutputService.live
+        window.quitProbe.armed = true
+        window.quitLog("armed", "hasShow=" + ShowService.hasShow + " dirty=" + ShowService.showDirty
+                       + " live=" + LiveOutputService.live + " path='" + ShowService.showPath + "'")
+        selfTestQuitClose.restart()
+    }
+    function quitClose() {
+        // The real path: Window.close() runs the window's onClosing guard, which is
+        // where "save changes?" lives (see onClosing in this file).
+        window.close()
+        window.quitProbe.refused = window.visible === true && window.closeConfirmed === false
+        window.quitProbe.dialogUp = unsavedDialog.shown === true
+        window.quitLog("close1", "visible=" + window.visible + " refused=" + window.quitProbe.refused
+                       + " dialog=" + window.quitProbe.dialogUp)
+        selfTestQuitAnswer.restart()
+    }
+    function quitAnswer() {
+        // The dialog FADES IN (ModalCard's opacity behavior, 130 ms), and a card at
+        // opacity 0 is not a visible item — so the button probe belongs here, after
+        // the fade, not in the line that closed the window. MEASURED: probing it
+        // there read `saveButton=false` on a dialog that was up and clickable.
+        window.quitProbe.saveClicked = SelfTest.itemVisible("unsavedChangesDialog_save")
+        window.quitLog("answer", "how=click saveButton=" + window.quitProbe.saveClicked
+                       + " saving=" + unsavedDialog.saving)
+        // Answer it the way the user does — a real synthetic click on the dialog's
+        // Save. Logged BEFORE the click, deliberately: when the click lands, the
+        // verdict that follows closes the window and the app is gone before any
+        // later step could report (measured: the next timer never fired), so the
+        // only safe place for this scenario's "I answered" evidence is here.
+        SelfTest.clickItem("unsavedChangesDialog_save")
+        selfTestQuitAnswered.restart()
+    }
+    function quitAnswered() {
+        // A synthetic click needs the window to be foreground and can simply not
+        // land (run_rank_test.sh's hover check has the same limitation and says so
+        // rather than pretending). If the dialog is still up, answer through the one
+        // function its Save button runs — and SAY which way it was answered: a
+        // fallback taken silently is how a button that does nothing reads as a pass.
+        if (unsavedDialog.shown) {
+            window.quitLog("fallback", "how=confirm (the click did not land) saving=" + unsavedDialog.saving)
+            unsavedDialog.confirm()
+            selfTestQuitConfirmed.restart()
+            return
+        }
+        window.quitLog("closed", "the dialog is gone — the answer's save landed and closed the window")
+    }
+    function quitConfirmed() {
+        // Only reached when the click did not land and the dialog answered instead:
+        // the queued save's verdict is what closes the window, so this says whether
+        // that happened rather than assuming it.
+        window.quitLog("after", "dialogVisible=" + unsavedDialog.shown
+                       + " closeConfirmed=" + window.closeConfirmed + " visible=" + window.visible)
+    }
+    Connections {
+        target: ShowService
+        function onDocumentJobFinished(token, kind, ok) {
+            if (!(typeof SelfTestQuit !== "undefined" && SelfTestQuit))
+                return
+            if (kind !== "save")
+                return
+            if (token === window.quitProbe.seedToken) {
+                window.quitSeeded(ok)
+            } else if (window.quitProbe.armed) {
+                // The close-time save's verdict, the one that gates the close.
+                window.quitLog("saved", "ok=" + ok + " file=" + SettingsService.fileExists("quit_probe.vgr")
+                               + " closeConfirmed=" + window.closeConfirmed)
+            }
+        }
+    }
+    Timer {
+        id: selfTestQuit
+        running: typeof SelfTestQuit !== "undefined" && SelfTestQuit
+        interval: 18000   // boot, then the engine's stores
+        onTriggered: window.quitBegin()
+    }
+    Timer { id: selfTestQuitClose; interval: 900; onTriggered: window.quitClose() }
+    Timer { id: selfTestQuitAnswer; interval: 900; onTriggered: window.quitAnswer() }
+    Timer { id: selfTestQuitAnswered; interval: 1500; onTriggered: window.quitAnswered() }
+    Timer { id: selfTestQuitConfirmed; interval: 1500; onTriggered: window.quitConfirmed() }
+    Timer {
+        id: selfTestQuitWatchdog
+        running: typeof SelfTestQuit !== "undefined" && SelfTestQuit
+        interval: 45000
+        onTriggered: {
+            window.quitLog("timeout", "the window never closed — quitting so the harness reports the hang")
+            SelfTest.quit()
+        }
+    }
+
+    // ---- GO LIVE latency as the load grows -----------------------------------
+    // (VGR_LIVELAT_TEST=1 only.) "Going live takes a few seconds, and it gets worse
+    // as the service goes on" is a latency report with a SHAPE: what matters is not
+    // one go-live but the trend as slides, blocks and outputs pile up. So this drives
+    // a LADDER of live sessions, each bigger than the last, and prints when each one
+    // started; run_live_latency_test.sh reads the engine's own frame lines against
+    // those to get the two numbers that describe the shape:
+    //   first frame  `live output started` -> the first frame distributed
+    //   cadence      frames per second while that session was live
+    // ...and fails when either crosses the budget it was given (the ladder default
+    // is 1 slide/2 blocks, then 7/3, then 20/5 — big enough that a per-frame cost
+    // that grows with the work shows up as a trend instead of noise).
+    property var liveLat: ({ step: 0 })
+    function liveLatLog(step, text) { console.log("[SELFTEST-LIVELAT] step=" + step + " " + text) }
+    function liveLatLadder() {
+        const raw = String(typeof SelfTestLiveLatLadder !== "undefined" ? SelfTestLiveLatLadder : "")
+        const rungs = []
+        raw.split(",").forEach((part) => {
+            const bits = part.split(":")
+            const slides = parseInt(bits[0], 10)
+            if (slides > 0)
+                rungs.push({ slides: slides, blocks: parseInt(bits[1], 10) || 1 })
+        })
+        return rungs.length > 0 ? rungs
+                                : [ { slides: 1, blocks: 2 }, { slides: 7, blocks: 3 }, { slides: 20, blocks: 5 } ]
+    }
+    function liveLatRun() {
+        window.liveLat.step++
+        const rungs = window.liveLatLadder()
+        if (window.liveLat.step > rungs.length) {
+            window.liveLatLog("done", "cycles=" + rungs.length)
+            selfTestLiveLatQuit.restart()
+            return
+        }
+        const rung = rungs[window.liveLat.step - 1]
+        // A fresh document at this rung's size, and the BLOCKS matter: they are the
+        // per-frame work (SceneBuilder composites every one of them), so the ladder
+        // grows the thing the render loop pays for, not just the slide count.
+        ShowService.newShowDocument("LiveLat " + rung.slides)
+        for (let i = 0; i < rung.slides; ++i) {
+            const slideId = ShowService.addSlide({ title: "Lat " + (i + 1) })
+            for (let b = 0; b < rung.blocks; ++b) {
+                ShowService.addBlock(slideId, { kind: "text", text: "block " + b,
+                                                x: 60 + b * 40, y: 60 + b * 30,
+                                                width: 700, height: 90 })
+            }
+        }
+        const t0 = Date.now()
+        LiveOutputService.goLive()
+        const press = Date.now() - t0
+        window.liveLatLog("cycle", "n=" + window.liveLat.step + " slides=" + rung.slides
+                          + " blocks=" + (rung.slides * rung.blocks)
+                          + " goLiveCall=" + press + "ms live=" + LiveOutputService.live)
+        selfTestLiveLatStop.restart()
+    }
+    function liveLatStop() {
+        LiveOutputService.stop()
+        window.liveLatLog("stopped", "n=" + window.liveLat.step)
+        selfTestLiveLatNext.restart()
+    }
+    Timer {
+        id: selfTestLiveLat
+        running: typeof SelfTestLiveLat !== "undefined" && SelfTestLiveLat
+        interval: 18000   // boot, then the engine's stores
+        onTriggered: window.liveLatRun()
+    }
+    Timer { id: selfTestLiveLatStop; interval: 4000; onTriggered: window.liveLatStop() }
+    Timer { id: selfTestLiveLatNext; interval: 800; onTriggered: window.liveLatRun() }
+    Timer { id: selfTestLiveLatQuit; interval: 500; onTriggered: SelfTest.quit() }
+
+    // ---- The Scripture pane's columns, as the app really fills them -----------
+    // (VGR_SCRIPTURE_TEST=1 only.) User report, looking at the Scripture tab: the
+    // Bibles column lists the installed Bible, and the books / chapters / verses
+    // columns stay EMPTY — with no error anywhere, because an empty column is the
+    // same pixels whether the outline read is still in flight, was declined, or
+    // came back empty. Those three are very different faults, so this prints the
+    // pane's own state AND what the service answers for the same Bible id, twice:
+    // once as the tab comes up, and once after the pane re-asks exactly the way a
+    // tab switch makes it (syncSources). A pane that shows books on the SECOND
+    // sample but not the first is a notify that never reached it; one that shows
+    // none on either is the read itself.
+    function scriptureProbe(tag) {
+        const p = SelfTest.findItem("selfTestScripturePane")
+        if (!p) {
+            console.log("[SELFTEST-SCRIPTURE] " + tag + " pane missing")
+            return
+        }
+        const id = String(p.sourceId ?? "")
+        console.log("[SELFTEST-SCRIPTURE] " + tag
+                    + " sources=" + (p.sources ? p.sources.length : -1)
+                    + " sourceId='" + id + "'"
+                    + " paneBooks=" + (p.books ? p.books.length : -1)
+                    + " visibleBooks=" + (p.visibleBooks ? p.visibleBooks.length : -1)
+                    + " chapterVerses=" + (p.chapterVerses ? p.chapterVerses.length : -1)
+                    + " serviceBibles=" + ScriptureService.bibles.length
+                    + " serviceBooks=" + (id !== "" ? ScriptureService.books(id).length : -1))
+    }
+    Timer {
+        id: selfTestScripture
+        running: typeof SelfTestScripture !== "undefined" && SelfTestScripture
+        interval: 22000   // boot, the Bible restore and the sermon indexing
+        onTriggered: {
+            window.currentView = "show"
+            showScreen.showInLibrary("scripture", "")
+            selfTestScriptureFirst.restart()
+        }
+    }
+    Timer {
+        id: selfTestScriptureFirst
+        interval: 8000    // the pane's own reads land while the tab comes up
+        onTriggered: {
+            window.scriptureProbe("first")
+            const p = SelfTest.findItem("selfTestScripturePane")
+            if (p)
+                p.syncSources()   // what a tab switch does to this pane
+            selfTestScriptureSecond.restart()
+        }
+    }
+    Timer {
+        id: selfTestScriptureSecond
+        interval: 5000
+        onTriggered: {
+            window.scriptureProbe("re-ask")
             SelfTest.quit()
         }
     }
@@ -3206,6 +4886,12 @@ ApplicationWindow {
         running: typeof SelfTestPaneHighlight !== "undefined" && SelfTestPaneHighlight
         interval: 45000   // boot + the background sermon indexing
         onTriggered: {
+            // The dock has to be SHOWING this pane for the pane's own surfaces — the hint
+            // line this scenario asserts on — to be on screen at all: the launch view is
+            // whatever the session left behind, so the pane is shown rather than assumed
+            // (the posture the presplit and layout-probe scenarios state in their own notes).
+            window.currentView = "show"
+            showScreen.showInLibrary("table", "")
             const p = SelfTest.findItem("selfTestTablePane")
             if (!p) {
                 console.log("[SELFTEST-PANEHL] table pane missing")
@@ -3278,7 +4964,9 @@ ApplicationWindow {
             const hint = window.paneHint(p)
             // The hint LINE on screen, not just its payload: the user's doubt was
             // whether the typo fixer is in THIS box at all.
-            const hintItem = SelfTest.findItem("selfTestPaneSearchHint")
+            // THIS pane's hint, by its own name: the name is per-tab because both tabs' hints
+            // are alive at once, and the bare name read the other tab's (empty) line.
+            const hintItem = SelfTest.findItem("selfTestPaneSearchHint-table")
             const hintShown = hintItem ? (hintItem.visible && hintItem.text !== "") : false
             console.log("[SELFTEST-PANEHL] pass2 query='" + window.paneTypoQuery
                         + "' hint='" + hint + "' hintShown=" + hintShown
@@ -3303,6 +4991,213 @@ ApplicationWindow {
     // flight (the pattern run_exact_test.sh learned), so quit one beat later.
     Timer {
         id: selfTestPaneHighlightDone
+        interval: 2000
+        onTriggered: SelfTest.quit()
+    }
+
+    // ---- Do the pane's result lists build a VIEWPORT, not the whole model? ----
+    // (VGR_PANEROWS_TEST=1 only.) The user's ask, right after the paragraph list
+    // was virtualized: "Make the reference pane's search-results list virtualized
+    // as well, since a two-character query can still build about a thousand rows
+    // at once." A row COUNT cannot answer that — a long list is fine, building it
+    // in one go is not — so this scenario measures the two things only a windowed
+    // list does, for each of the three lists the pane owns (the tab search's
+    // citation matches, the pill search's hits, and the hover peek's sermon
+    // paragraphs):
+    //
+    //   * with the rows on screen, `built` stays a viewport's worth (built << rows), and
+    //   * scrolling to the END materializes the LAST row — a windowed list must, or
+    //     the tail of a 641-match query would be unreachable.
+    //
+    // It drives the REAL path: the two-character query is TYPED into the tab bar's
+    // box (the provider runs per keystroke, as it does under a user's fingers), the
+    // hover is the pane's own peekSuggestion(), and the pill's field is set the way
+    // the pane-highlight scenario sets it. Library-independent: each list's two
+    // numbers are read off its own counters and compared to each other, so a small
+    // library still decides it — a list too short for the question to mean anything
+    // says so instead of passing.
+    readonly property string paneRowsQuery: "th"   // the user's two characters
+    property var paneRowsFacts: ({})
+
+    // A list's counters, read together (a missing counter is -1, so a pane that
+    // lost them can never be read as "built nothing").
+    function paneRowsRead(which) {
+        const p = SelfTest.findItem("selfTestTablePane")
+        if (!p)
+            return { rows: -1, built: -1 }
+        const n = (name) => (p[name] === undefined ? -1 : p[name])
+        if (which === "match")
+            return { rows: p.citationMatches.length, built: n("matchRowBuilds") }
+        if (which === "hit")
+            return { rows: p.searchResults.length, built: n("hitRowBuilds") }
+        return { rows: p.peekVerses.length, built: n("peekRowBuilds") }
+    }
+    // Scroll to the END of the list the mode shows — the same object the user's
+    // wheel moves, so the measurement is about the list, not a lookalike.
+    function paneRowsScroll(which) {
+        const facts = window.paneRowsFacts[which]
+        const list = SelfTest.findItem(which === "match" ? "selfTestPaneMatchList"
+                                     : which === "hit" ? "selfTestPaneHitList"
+                                                        : "selfTestPanePeekList")
+        if (list && facts && facts.rows > 0)
+            list.positionViewAtIndex(facts.rows - 1, ListView.End)
+    }
+    // The LAST row's delegate, by the name its delegate carries — itemVisible and
+    // not "exists", because a RECYCLED row of the same name is one the user cannot
+    // see (the pre-split scenario learned this the hard way).
+    function paneRowsLastRow(which, rows) {
+        const name = which === "match" ? "selfTestMatchRow_" + (rows - 1)
+                   : which === "hit" ? "selfTestHitRow_" + (rows - 1)
+                                      : "selfTestPeekRow_" + (rows - 1)
+        return SelfTest.itemVisible(name)
+    }
+    // One line per list per phase: `kept` = as the list stands when the query's
+    // rows are on screen; `scrolled` = after the scroll to its last row. The runner
+    // reads these, so the field names are the contract.
+    function paneRowsLog(which, phase) {
+        const now = window.paneRowsRead(which)
+        const facts = window.paneRowsFacts
+        if (facts[which] === undefined)
+            facts[which] = { rows: now.rows, built: now.built, scrolledBuilt: -1, lastRow: false }
+        if (phase === "scrolled") {
+            facts[which].scrolledBuilt = now.built
+            facts[which].lastRow = window.paneRowsLastRow(which, facts[which].rows)
+        }
+        const f = facts[which]
+        console.log("[SELFTEST-PANEROWS] " + which + " " + phase + " rows=" + f.rows
+                    + " built=" + f.built + " scrolledBuilt=" + f.scrolledBuilt
+                    + " lastRow=" + f.lastRow)
+    }
+    // The pane's search box field, as the pane-highlight scenario drives it (the
+    // field's own debounce runs the search).
+    function paneRowsPillBox() {
+        return SelfTest.findItem("selfTestSearchBox-table")
+    }
+    // The match whose sermon is LONGEST (the peek's own worst case — a 500-paragraph
+    // sermon is what the hover actually has to open). Falls back to the first row.
+    function paneRowsLongestMatch(p) {
+        let best = 0
+        let bestRows = -1
+        const count = Math.min(12, p.citationMatches.length)
+        for (let i = 0; i < count; ++i) {
+            const row = p.citationMatches[i]
+            const ref = row ? row.ref : null
+            if (!ref || !(ref.chapter > 0))
+                continue
+            const rows = p.adapter.chapter(p.sourceId, ref.bookId, ref.chapter)
+            const n = rows ? rows.length : 0
+            if (n > bestRows) {
+                bestRows = n
+                best = i
+            }
+        }
+        console.log("[SELFTEST-PANEROWS] peek target=" + best + " of " + p.citationMatches.length
+                    + " matches (that sermon's paragraphs=" + bestRows + ")")
+        return best
+    }
+    Timer {
+        id: selfTestPaneRows
+        running: typeof SelfTestPaneRows !== "undefined" && SelfTestPaneRows
+        interval: 40000   // boot + the background sermon indexing (the pane-highlight wait)
+        onTriggered: {
+            const p = SelfTest.findItem("selfTestTablePane")
+            if (!p) {
+                console.log("[SELFTEST-PANEROWS] table pane missing")
+                SelfTest.quit()
+                return
+            }
+            SelfTest.activate()
+            window.currentView = "show"             // the library dock has to be the view on screen
+            showScreen.showInLibrary("table", "")   // the tab, nothing typed yet
+            p.searching = false                     // no pill search: the MATCHES list is the one on screen
+            // The user's own two characters, typed into the TAB BAR's box: the
+            // provider runs on every keystroke, exactly as it does for a hand.
+            SelfTest.focusItem("selfTestSearchInput")
+            SelfTest.type(window.paneRowsQuery)
+            selfTestPaneRowsMatch.restart()
+        }
+    }
+    Timer {
+        id: selfTestPaneRowsMatch
+        interval: 5000   // the provider answers per keystroke; this is the pane laying out
+        onTriggered: {
+            window.paneRowsLog("match", "kept")
+            window.paneRowsScroll("match")
+            selfTestPaneRowsMatchEnd.restart()
+        }
+    }
+    Timer {
+        id: selfTestPaneRowsMatchEnd
+        interval: 2000   // the scroll has to land, and the rows it brought in build
+        onTriggered: {
+            window.paneRowsLog("match", "scrolled")
+            const p = SelfTest.findItem("selfTestTablePane")
+            // The HOVER the matches list exists for (no floating preview: the
+            // sermon opens in the pane's own right half).
+            p.peekSuggestion(window.paneRowsLongestMatch(p))
+            selfTestPaneRowsPeek.restart()
+        }
+    }
+    Timer {
+        id: selfTestPaneRowsPeek
+        interval: 3000   // the sermon's paragraphs land and lay out
+        onTriggered: {
+            window.paneRowsLog("peek", "kept")
+            window.paneRowsScroll("peek")
+            selfTestPaneRowsPeekEnd.restart()
+        }
+    }
+    Timer {
+        id: selfTestPaneRowsPeekEnd
+        interval: 2000
+        onTriggered: {
+            window.paneRowsLog("peek", "scrolled")
+            // The pill's own search, the OTHER result list in this pane (the same
+            // two characters, so the two lists are answering one query).
+            const p = SelfTest.findItem("selfTestTablePane")
+            p.searching = true
+            p.exact = false
+            const box = window.paneRowsPillBox()
+            if (!box) {
+                console.log("[SELFTEST-PANEROWS] pane search box missing")
+                window.paneRowsReport()
+                return
+            }
+            box.text = window.paneRowsQuery
+            selfTestPaneRowsHits.restart()
+        }
+    }
+    Timer {
+        id: selfTestPaneRowsHits
+        interval: 18000   // the whole-library scan behind the pill's search (the pane-highlight wait)
+        onTriggered: {
+            window.paneRowsLog("hit", "kept")
+            window.paneRowsScroll("hit")
+            selfTestPaneRowsHitsEnd.restart()
+        }
+    }
+    Timer {
+        id: selfTestPaneRowsHitsEnd
+        interval: 2000
+        onTriggered: window.paneRowsReport()
+    }
+    // The scenario's own closing line (the runner's marker) + the pixels of the
+    // state it measured.
+    function paneRowsReport() {
+        const f = window.paneRowsFacts
+        window.paneRowsLog("hit", "scrolled")
+        SelfTest.grab("selfTestTablePane", "panerows_pane.png")
+        const line = (which) => (f[which] ? (f[which].rows + "/" + f[which].built + "/"
+                                             + f[which].scrolledBuilt + "/" + f[which].lastRow)
+                                          : "-/-")
+        console.log("[SELFTEST-PANEROWS] result query='" + window.paneRowsQuery
+                    + "' matches=" + line("match") + " peek=" + line("peek")
+                    + " hits=" + line("hit"))
+        selfTestPaneRowsDone.restart()
+    }
+    // quit() one beat after the grab request (see the pane-highlight scenario).
+    Timer {
+        id: selfTestPaneRowsDone
         interval: 2000
         onTriggered: SelfTest.quit()
     }

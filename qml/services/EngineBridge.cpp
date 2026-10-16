@@ -42,6 +42,8 @@
 #include <cmath>
 #include <mutex>
 
+#include "services/EngineWorker.h"
+
 #include <atomic>
 
 namespace {
@@ -213,7 +215,7 @@ bool EngineBridge::boot()
     // Real hardware roster, straight from the PAL — the AV board's device
     // selects read audioDevices/screenDevices instead of mock lists, and the
     // hot-plug subscriptions above keep them current from here on.
-    enumerateDevices();
+    enumerateDevicesOffThread();
 
     // (The firewall ask no longer reads a persisted flag here — it gates on
     // the rule itself; see requestNdiFirewallAccess.)
@@ -268,7 +270,7 @@ bool EngineBridge::boot()
         const bool sdiOn = sdiState.ok() && sdiState.value() == bps::adaptive::FeatureState::Enabled;
         bps::broadcast::BroadcastEngine::Instance().SetSdiEnabled(sdiOn);
     }
-    emit pluginFeaturesChanged();
+    refreshPluginFeaturesOffThread();
 
     // REPLAY the kernel's CURRENT state into the relay. The Booting → Running
     // transition was published on the engine's bus DURING Boot() — before any
@@ -355,6 +357,20 @@ QStringList EngineBridge::bootLog() const
 QString EngineBridge::health() const
 {
     return QString::fromStdString(bps::Kernel::Instance().GetHealth().detail);
+}
+
+// The startup forensics verdict's ONE writer (see the header). It runs on the
+// interface thread — the probe's queued answer from CrashHandler.cpp — which is
+// the thread QML reads the properties from, so there is nothing to synchronise.
+// Both strings are compared first: a re-publish must not re-lay-out a settings
+// row or re-fire the note that rides the crash-recovery notice.
+void EngineBridge::publishCrashTooling(const QString &state, const QString &problems)
+{
+    if (state == crashToolingState_ && problems == crashToolingProblem_)
+        return;
+    crashToolingState_ = state;
+    crashToolingProblem_ = problems;
+    emit crashToolingChanged();
 }
 
 void EngineBridge::shutdown()
@@ -525,6 +541,76 @@ std::vector<std::string> namesOf(const QStringList &labels)
 // Device APIs can block in COM and hardware drivers, especially Media
 // Foundation's per-camera capability probe. Keep those calls off the GUI
 // thread and publish only value snapshots back on the UI thread.
+// The SDI (DeckLink) probe, off the interface thread. Its cost is the vendor
+// SDK resolve plus a COM walk per provider — and unlike the NDI side it used to
+// run INLINE inside the device sweep, so every device refresh paid it: the
+// Settings · Plugins toggle, a display-mode change, the boot sweep, an
+// Audio & Video picker opening. It is queued on the SAME enumeration pool the
+// platform walk uses, so the two never race for a device probe and the SDI
+// roster publishes in the order the sweep was taken; coalesced by
+// sdiProbeBusy_; and the roster + verdict land the way the NDI probe's do — a
+// queued invokeMethod that publishes on the interface thread and emits one
+// devicesChanged, so the readers (sdiAvailable/sdiStatus/sdiDevices and the
+// Outputs screen's SDI rows) see one consistent answer.
+void EngineBridge::probeSdiAsync()
+{
+    if (deviceEnumerationStopping_)
+        return;   // shutdown gate: no new device work once teardown started
+    bool expected = false;
+    if (!sdiProbeBusy_.compare_exchange_strong(expected, true))
+        return;   // a probe is already in flight; it publishes fresh state itself
+
+    QPointer<EngineBridge> guard(this);
+    deviceEnumerationPool_.start([guard]() {
+        auto &broadcast = bps::broadcast::BroadcastEngine::Instance();
+        bool available = false;
+        QString status;
+        QVariantList found;
+        // Enumerating devices costs a COM walk per provider probe — only when
+        // the provider reports available.
+        auto sdiProvider = broadcast.Probe("sdi");
+        if (sdiProvider.ok() && sdiProvider.value() == bps::broadcast::ProviderState::Available) {
+            auto devices = broadcast.EnumerateSdiDevices();
+            if (devices.ok() && !devices.value().empty()) {
+                available = true;
+                for (const auto &d : devices.value()) {
+                    QVariantMap row;
+                    row.insert(QStringLiteral("name"), qstr(d.displayName));
+                    row.insert(QStringLiteral("model"), qstr(d.modelName));
+                    row.insert(QStringLiteral("index"), d.index);
+                    row.insert(QStringLiteral("supportsCapture"), d.supportsCapture);
+                    row.insert(QStringLiteral("supportsOutput"), d.supportsOutput);
+                    found.append(row);
+                }
+            } else if (devices.ok()) {
+                status = QStringLiteral("No DeckLink device found on this machine.");
+            } else {
+                status = QString::fromStdString(devices.error().message);
+            }
+        } else if (sdiProvider.ok()) {
+            status = QStringLiteral("The DeckLink runtime (Desktop Video) isn't installed on this computer.");
+        } else {
+            status = QString::fromStdString(sdiProvider.error().message);
+        }
+
+        // Publish on the interface thread: these members back Q_PROPERTY reads
+        // and devicesChanged is a GUI-thread signal. invokeMethod's context
+        // object drops the call if this bridge is gone by then (shutdown), and
+        // the flag is cleared HERE so a bridge that outlives the probe always
+        // re-arms.
+        QMetaObject::invokeMethod(guard, [guard, available, status, found = std::move(found)]() mutable {
+            if (!guard)
+                return;
+            EngineBridge *self = guard.data();
+            self->sdiAvailable_ = available;
+            self->sdiStatus_ = status;
+            self->sdiDevices_ = std::move(found);
+            self->sdiProbeBusy_ = false;
+            emit self->devicesChanged();
+        }, Qt::QueuedConnection);
+    });
+}
+
 void EngineBridge::enumeratePlatformDevicesAsync()
 {
     if (deviceEnumerationStopping_)
@@ -654,7 +740,7 @@ void EngineBridge::enumeratePlatformDevicesAsync()
         // Window Capture): id "win:<hwnd>", label = the window title. The
         // pane/thumb path already resolves roster labels → ids, so window
         // capture rides the exact same tap + provider chain as displays.
-        // Re-enumerated on every enumerateDevices (dialog opens) — stale
+        // Re-enumerated on every enumerateDevicesOffThread (dialog opens) — stale
         // hwnd ids self-heal on the next pick.
         for (const auto &w : platform.Video().EnumerateWindows()) {
             const QString title = qstr(w.title);
@@ -805,7 +891,7 @@ void EngineBridge::enumeratePlatformDevicesAsync()
                     // exactly what "the meters never move" looked like.
                     for (auto it = self->requestedMeters_.constBegin();
                          it != self->requestedMeters_.constEnd(); ++it)
-                        self->resolveAndStartMeter(it.key());
+                        self->resolveAndStartMeterOffThread(it.key());
                     emit self->devicesChanged();
                 }
                 const bool refreshAgain = self->deviceEnumerationPending_
@@ -873,7 +959,7 @@ void EngineBridge::updateBootSummary()
     }
 }
 
-void EngineBridge::enumerateDevices()
+void EngineBridge::enumerateDevicesOffThread()
 {
     lastEnumerationMs_ = QDateTime::currentMSecsSinceEpoch();
     lastAudioEnumerationMs_ = lastEnumerationMs_;
@@ -942,45 +1028,27 @@ void EngineBridge::enumerateDevices()
         // ---- SDI (DeckLink) — the same honest-runtime treatment as NDI ----
         // The engine's SDI provider resolves the SDK at runtime; an absent
         // library/hardware reads unavailable with its reason, never a mock
-        // roster. Enumerating devices costs a COM walk per provider probe —
-        // only when the provider reports available.
+        // roster. The probe itself (a per-provider COM walk) is QUEUED — see
+        // probeSdiAsync — because it ran INLINE here until it did not: a
+        // settings visit, a display-mode change, the boot sweep and a plugins
+        // toggle each paid a vendor SDK resolve on the thread that draws, which
+        // is the class of wait this whole surface is being cleared of.
+        //
+        // The "sdi" feature switch stays synchronous and gates the probe: it is
+        // ONE atomic read (BroadcastEngine::SdiEnabled), and it has to answer
+        // now, for two reasons. With the plugin off (the default) there is
+        // nothing to probe at all — the absent-library failure used to toast
+        // "Stream provider unavailable" on every refresh, and the status line
+        // says where to flip it; and a deliberate OFF must blank the rows the
+        // moment it is flipped rather than behind a probe already in flight
+        // (sdiProbeBusy_ coalesces, so a queued OFF could be swallowed).
         sdiDevices_.clear();
         sdiAvailable_ = false;
         sdiStatus_.clear();
-        auto &broadcast2 = bps::broadcast::BroadcastEngine::Instance();
-        // The "sdi" feature switch gates the whole probe: with the plugin
-        // off (the default), no DeckLink SDK resolve happens at all — the
-        // absent-library failure used to toast "Stream provider unavailable"
-        // on every device refresh. The status line says where to flip it.
-        if (!broadcast2.SdiEnabled()) {
+        if (bps::broadcast::BroadcastEngine::Instance().SdiEnabled())
+            probeSdiAsync();
+        else
             sdiStatus_ = QStringLiteral("SDI is switched off (Settings · Plugins).");
-            emit devicesChanged();
-            return;
-        }
-        auto sdiProvider = broadcast2.Probe("sdi");
-        if (sdiProvider.ok() && sdiProvider.value() == bps::broadcast::ProviderState::Available) {
-            auto devices = broadcast2.EnumerateSdiDevices();
-            if (devices.ok() && !devices.value().empty()) {
-                sdiAvailable_ = true;
-                for (const auto &d : devices.value()) {
-                    QVariantMap row;
-                    row.insert(QStringLiteral("name"), qstr(d.displayName));
-                    row.insert(QStringLiteral("model"), qstr(d.modelName));
-                    row.insert(QStringLiteral("index"), d.index);
-                    row.insert(QStringLiteral("supportsCapture"), d.supportsCapture);
-                    row.insert(QStringLiteral("supportsOutput"), d.supportsOutput);
-                    sdiDevices_.append(row);
-                }
-            } else if (devices.ok()) {
-                sdiStatus_ = QStringLiteral("No DeckLink device found on this machine.");
-            } else {
-                sdiStatus_ = QString::fromStdString(devices.error().message);
-            }
-        } else if (sdiProvider.ok()) {
-            sdiStatus_ = QStringLiteral("The DeckLink runtime (Desktop Video) isn't installed on this computer.");
-        } else {
-            sdiStatus_ = QString::fromStdString(sdiProvider.error().message);
-        }
     }
     emit devicesChanged();
 }
@@ -1088,22 +1156,49 @@ QString EngineBridge::ndiDownloadUrl() const
 // toggle reads/writes THAT state, so "Active/Installed" is the engine's own
 // fact — and a flipped switch actually turns the subsystem on or off (the
 // broadcast stack honors the "ndi" entry, see ndiRuntimeUsable() and
-// enumerateDevices()' gated discovery below).
+// enumerateDevicesOffThread()' gated discovery below).
 // ============================================================================
+// The PUBLISHED registry snapshot (see pluginFeatures_ in the header): the read
+// answers from this member, and refreshPluginFeaturesOffThread() is the only
+// writer — it walks the runtime on the pool and publishes on the interface
+// thread. The screen's toggle, the boot sync and the replay above all call it
+// instead of emitting, so what a binding reads is a list this thread already
+// owns (an engine registry read is a lock and a copy, and the Plugins screen
+// re-reads it on every notify).
 QVariantList EngineBridge::pluginFeatures() const
 {
-    QVariantList out;
+    return pluginFeatures_;
+}
+
+void EngineBridge::refreshPluginFeaturesOffThread()
+{
     if (!booted())
-        return out;
-    for (const auto &f : bps::adaptive::AdaptiveRuntime::Instance().Features()) {
-        out.append(QVariantMap{
-            {QStringLiteral("id"), QString::fromStdString(f.id)},
-            {QStringLiteral("name"), QString::fromStdString(f.name)},
-            {QStringLiteral("enabled"), f.state == bps::adaptive::FeatureState::Enabled},
-            {QStringLiteral("defaultEnabled"), f.enabledByDefault},
-        });
-    }
-    return out;
+        return;
+    bool expected = false;
+    if (!pluginFeaturesProbeBusy_.compare_exchange_strong(expected, true))
+        return;   // a snapshot is already on its way
+    QPointer<EngineBridge> guard(this);
+    QThreadPool::globalInstance()->start([guard]() {
+        QVariantList rows;
+        for (const auto &f : bps::adaptive::AdaptiveRuntime::Instance().Features()) {
+            rows.append(QVariantMap{
+                {QStringLiteral("id"), QString::fromStdString(f.id)},
+                {QStringLiteral("name"), QString::fromStdString(f.name)},
+                {QStringLiteral("enabled"), f.state == bps::adaptive::FeatureState::Enabled},
+                {QStringLiteral("defaultEnabled"), f.enabledByDefault},
+            });
+        }
+        if (!guard)
+            return;
+        QMetaObject::invokeMethod(guard, [guard, rows]() {
+            EngineBridge *self = guard.data();
+            if (!self)
+                return;
+            self->pluginFeaturesProbeBusy_ = false;
+            self->pluginFeatures_ = rows;
+            emit self->pluginFeaturesChanged();
+        }, Qt::QueuedConnection);
+    });
 }
 
 void EngineBridge::setPluginFeatureEnabled(const QString &featureId, bool enabled)
@@ -1127,9 +1222,12 @@ void EngineBridge::setPluginFeatureEnabled(const QString &featureId, bool enable
         applyNdiFeatureState(enabled);
     else if (featureId.compare(QLatin1String("sdi"), Qt::CaseInsensitive) == 0) {
         bps::broadcast::BroadcastEngine::Instance().SetSdiEnabled(enabled);
-        enumerateDevices();
+        enumerateDevicesOffThread();
     }
-    emit pluginFeaturesChanged();
+    // The switch is flipped in the engine; the screen re-reads the PUBLISHED
+    // snapshot when the worker's walk of the registry lands (see
+    // refreshPluginFeaturesOffThread), not from an inline read here.
+    refreshPluginFeaturesOffThread();
 }
 
 // The "ndi" feature's runtime effect. Disabling pushes the gate down into
@@ -1144,7 +1242,7 @@ void EngineBridge::applyNdiFeatureState(bool enabled)
     // Re-run discovery so the roster reflects the flip immediately (both
     // ways: refill on ON, empty on OFF).
     ndiRetries_ = 0;
-    enumerateDevices();
+    enumerateDevicesOffThread();
     if (enabled) {
         // Re-arm every card/dialog/board preview that was torn down by the
         // last OFF — LiveOutputService resyncs the OUTPUT take on its own,
@@ -1166,8 +1264,21 @@ void EngineBridge::applyNdiFeatureState(bool enabled)
     // outranks any held preview; a re-enable re-takes from the UI).
     if (broadcast.NdiStatus().state
         == bps::broadcast::BroadcastEngine::NdiRuntimeStatus::State::Ready) {
+        // The disconnects are NDI SDK calls, so they are QUOTED like every other
+        // receiver release on this surface (stopNdiPreview and
+        // stopAllVideoPreviews do the same): the feature flag and the tables are
+        // this thread's, the SDK call is not. The posts are FIFO, so a re-enable
+        // that re-takes one of these receivers cannot overtake its teardown.
+        QStringList recvIds;
+        recvIds.reserve(ndiTaps_.size());
         for (const QString &recvId : ndiTaps_.values())
-            (void)broadcast.DisconnectReceiver(recvId.toStdString());
+            recvIds << recvId;
+        if (!recvIds.isEmpty())
+            vgr::EngineWorker::instance().runOffThread([recvIds]() {
+                auto &eng = bps::broadcast::BroadcastEngine::Instance();
+                for (const QString &recvId : recvIds)
+                    (void)eng.DisconnectReceiver(recvId.toStdString());
+            });
     }
     for (const QString &name : ndiTaps_.keys()) {   // keys() copies — removal-safe
         previewOwners_.remove(name);
@@ -1178,7 +1289,7 @@ void EngineBridge::applyNdiFeatureState(bool enabled)
     // LiveOutputService drops the OUTPUT take itself (the tiles' inputLabel
     // clears and the compositor layer comes off with it). Discovery was
     // already re-run above (before this teardown) — SetNdiEnabled(false)
-    // already emptied it, so a second enumerateDevices() here re-did the
+    // already emptied it, so a second enumerateDevicesOffThread() here re-did the
     // exact same work for nothing.
     LiveOutputService::instance().clearNdiInput();
 }
@@ -1256,83 +1367,124 @@ void EngineBridge::refreshNdiConnections()
 
 namespace { constexpr const char *kNdiFirewallRule = "VGR Presenter NDI"; }
 
-QString EngineBridge::requestNdiFirewallAccess()
+// BOTH firewall entry points end here — the `OffThread` in the name is the
+// convention this surface already uses (openTapOffThread), and it is earned: the
+// probe is a hidden `netsh` CHILD PROCESS and the add is an ELEVATED one, so
+// neither belongs between a click and the next paint. `ask` is the whole
+// difference between the two entry points: false only probes
+// (checkNdiFirewallRule), true probes and then requests the rule
+// (requestNdiFirewallAccess). Everything the answer touches afterwards — the log
+// lines, the anti-nag latch and the signal — is published on the interface
+// thread, in the order the worker reported it.
+void EngineBridge::probeNdiFirewallOffThread(bool ask)
 {
-    if (!bps::platform::PlatformAccessor::Installed()) {
-        EngineBridge::write(QStringLiteral("warning"), QStringLiteral("NDI firewall"),
-                            QStringLiteral("platform network layer unavailable — cannot check or add the rule"));
-        return QStringLiteral("unavailable");
-    }
-    auto &net = bps::platform::PlatformAccessor::Get().Network();
-    const std::string app = QCoreApplication::applicationFilePath().toStdString();
-    const std::string desc = "Allows other computers to receive this app's NDI video";
-    using Access = bps::platform::INetwork::FirewallAccess;
-    using Outcome = bps::platform::INetwork::FirewallRequestOutcome;
+    vgr::EngineWorker::instance().runOffThread([this, ask]() {
+        QString outcome;
+        QStringList lines;
+        if (!bps::platform::PlatformAccessor::Installed()) {
+            // No firewall concept to grant on this platform. Silent for the
+            // timer's probe (the old synchronous check said nothing either); the
+            // request path gets its one line.
+            outcome = QStringLiteral("unavailable");
+            if (ask)
+                lines << QStringLiteral("platform network layer unavailable — cannot check or add the rule");
+        } else {
+            auto &net = bps::platform::PlatformAccessor::Get().Network();
+            const std::string app = QCoreApplication::applicationFilePath().toStdString();
+            const std::string desc = "Allows other computers to receive this app's NDI video";
+            using Access = bps::platform::INetwork::FirewallAccess;
+            using Outcome = bps::platform::INetwork::FirewallRequestOutcome;
 
-    // The firewall RULE ITSELF is the saved permission, not a settings flag:
-    // probe first (one hidden netsh child, only until access is confirmed)
-    // and stay quiet when the rule already exists. This also self-heals — a
-    // user who refused the OS prompt once gets asked again next time it
-    // matters, instead of a persisted flag silencing the ask forever.
-    if (net.ProbeInboundAccess(app, kNdiFirewallRule) == Access::Allowed) {
-        if (!ndiFirewallPrompted_) {
-            ndiFirewallPrompted_ = true;   // session-only anti-nag (see header)
-            emit ndiFirewallPromptedChanged();
+            // The firewall RULE ITSELF is the saved permission, not a settings
+            // flag: probe first (one hidden netsh child, only until access is
+            // confirmed) and stay quiet when the rule already exists. This also
+            // self-heals — a user who refused the OS prompt once gets asked again
+            // next time it matters, instead of a persisted flag silencing the ask
+            // forever.
+            if (net.ProbeInboundAccess(app, kNdiFirewallRule) == Access::Allowed) {
+                outcome = QStringLiteral("allowed");
+                if (ask)
+                    lines << QStringLiteral("rule already present — no prompt needed");
+            } else if (!ask) {
+                // The retry timer's question only — "is it there yet?" — and the
+                // answer is no. Nothing is written for it: the timer asks every 2 s
+                // while a UAC dialog is open, and the old synchronous check wrote
+                // nothing either (a line per ask would be pure noise in engine.log).
+                outcome = QStringLiteral("missing");
+            } else {
+                // Every attempt is observable now: the elevated step's refusals are
+                // fire-and-forget, so without these lines a request that didn't land
+                // was indistinguishable from one that did.
+                std::string diag;
+                const Outcome result = net.RequestInboundAccess(app, kNdiFirewallRule, desc, &diag);
+                const QStringList raw = QString::fromStdString(diag).split('\n', Qt::SkipEmptyParts);
+                for (const QString &line : raw)
+                    lines << line.trimmed();
+                const char *text = "failed";
+                switch (result) {
+                    case Outcome::Added:       text = "added";       break;
+                    case Outcome::Prompted:    text = "prompt";      break;   // verdict lands async
+                    case Outcome::Denied:      text = "denied";      break;
+                    case Outcome::Failed:      text = "failed";      break;
+                    case Outcome::Unavailable: text = "unavailable"; break;
+                }
+                outcome = QLatin1String(text);
+                lines << QStringLiteral("request outcome: %1").arg(outcome);
+            }
         }
-        EngineBridge::write(QStringLiteral("info"), QStringLiteral("NDI firewall"),
-                            QStringLiteral("rule already present — no prompt needed"));
-        return QStringLiteral("allowed");
-    }
 
-    // Ask at most once per session (the QML gates on ndiFirewallPrompted,
-    // which is deliberately NOT persisted any more — see above).
+        const bool allowed = outcome == QStringLiteral("allowed");
+        const bool healthy = allowed || outcome == QStringLiteral("added")
+                             || outcome == QStringLiteral("prompt");
+        vgr::EngineWorker::onInterfaceThread(this, [this, ask, outcome, allowed, healthy, lines]() {
+            for (const QString &line : lines)
+                EngineBridge::write(healthy ? QStringLiteral("info") : QStringLiteral("warning"),
+                                    QStringLiteral("NDI firewall"), line);
+            // The rule IS the permission (see above): once it is in place there is
+            // nothing left to ask for this session, so the anti-nag flag latches —
+            // which is exactly what the old synchronous fast path did on its way
+            // out. The retry timer's probe lands here too, one fewer `netsh` child
+            // than asking again would cost.
+            if (allowed && !ndiFirewallPrompted_) {
+                ndiFirewallPrompted_ = true;
+                emit ndiFirewallPromptedChanged();
+            }
+            if (ask)
+                emit ndiFirewallAccessResult(outcome);
+            else
+                emit ndiFirewallRuleChecked(allowed);
+        });
+    });
+}
+
+// The elevated add (Windows: UAC) resolves AFTER the request was made (the user
+// still has the consent dialog up) — and the answer to "is the rule there yet?"
+// is one more `netsh` child process, so it is queued exactly like the ask and
+// arrives on ndiFirewallRuleChecked instead of in a return value.
+void EngineBridge::checkNdiFirewallRule()
+{
+    probeNdiFirewallOffThread(false);
+}
+
+// The one-time ask (see the header). The anti-nag gate is closed HERE, before the
+// ask is queued, so a screen opened twice — or a second engine row — cannot post
+// two elevated children; the probe, the add and the log lines all happen off this
+// thread, and the outcome the return value used to carry arrives on
+// ndiFirewallAccessResult.
+void EngineBridge::requestNdiFirewallAccess()
+{
     if (!ndiFirewallPrompted_) {
-        ndiFirewallPrompted_ = true;
+        ndiFirewallPrompted_ = true;   // session-only anti-nag (see header)
         emit ndiFirewallPromptedChanged();
     }
-
-    // Every attempt is observable now: the elevated step's refusals are
-    // fire-and-forget, so without these lines a request that didn't land
-    // was indistinguishable from one that did.
-    std::string diag;
-    const Outcome outcome = net.RequestInboundAccess(app, kNdiFirewallRule, desc, &diag);
-    const QStringList lines = QString::fromStdString(diag).split('\n', Qt::SkipEmptyParts);
-    for (const QString &line : lines)
-        EngineBridge::write(QStringLiteral("info"), QStringLiteral("NDI firewall"), line.trimmed());
-
-    const char *text = "failed";
-    switch (outcome) {
-        case Outcome::Added:       text = "added";       break;
-        case Outcome::Prompted:    text = "prompt";      break;   // verdict lands async
-        case Outcome::Denied:      text = "denied";      break;
-        case Outcome::Failed:      text = "failed";      break;
-        case Outcome::Unavailable: text = "unavailable"; break;
-    }
-    EngineBridge::write(outcome == Outcome::Added || outcome == Outcome::Prompted
-                            ? QStringLiteral("info") : QStringLiteral("warning"),
-                        QStringLiteral("NDI firewall"),
-                        QStringLiteral("request outcome: %1").arg(QLatin1String(text)));
-    return QLatin1String(text);
+    probeNdiFirewallOffThread(true);
 }
 
-// The elevated add (Windows: UAC) resolves AFTER requestNdiFirewallAccess()
-// returned (the user still has the consent dialog up). This re-probes so the
-// UI can confirm success and stop retrying once the rule is actually there.
-bool EngineBridge::checkNdiFirewallRule()
-{
-    if (!bps::platform::PlatformAccessor::Installed())
-        return false;
-    auto &net = bps::platform::PlatformAccessor::Get().Network();
-    const std::string app = QCoreApplication::applicationFilePath().toStdString();
-    return net.ProbeInboundAccess(app, kNdiFirewallRule)
-           == bps::platform::INetwork::FirewallAccess::Allowed;
-}
-
-// The primary display's REAL size, out of the roster enumerateDevices() just
+// The primary display's REAL size, out of the roster enumerateDevicesOffThread() just
 // refilled — so the number is the engine platform layer's own (IMonitor),
 // refreshed with every hot-plug event, not a second enumeration of its own.
 //
-// Two things the caller must know about the roster (see enumerateDevices): it
+// Two things the caller must know about the roster (see enumerateDevicesOffThread): it
 // also carries open application WINDOWS (id "win:<hwnd>", size 0) — skipped
 // here, since only real displays have a size — and the primary flag lives on the
 // monitor entries. When nothing is flagged primary (a PAL with no primary
@@ -1359,7 +1511,7 @@ void EngineBridge::recheckNdi()
 {
     lastEnumerationMs_ = 0;
     ndiRetries_ = 0;
-    enumerateDevices();
+    enumerateDevicesOffThread();
 }
 
 void EngineBridge::refreshDevices()
@@ -1380,7 +1532,7 @@ void EngineBridge::refreshDevices()
     if (!wasFiltered && lastEnumerationMs_ > 0 && now - lastEnumerationMs_ < kMinRefreshGapMs)
         return;
     ndiRetries_ = 0;
-    enumerateDevices();
+    enumerateDevicesOffThread();
 }
 
 void EngineBridge::refreshAudioDevices()
@@ -1393,7 +1545,7 @@ void EngineBridge::refreshAudioDevices()
     if (!wasFiltered && lastAudioEnumerationMs_ > 0 && now - lastAudioEnumerationMs_ < kMinRefreshGapMs)
         return;
     lastAudioEnumerationMs_ = now;
-    enumerateDevices();
+    enumerateDevicesOffThread();
 }
 
 bool EngineBridge::labelWanted(const QStringList &wanted, const QString &label)
@@ -1465,7 +1617,7 @@ void EngineBridge::requestUsedDevices(const QStringList &audioLabels,
     // The boot sweep. `boot()` already enumerated once (monitors only, nothing
     // configured yet); this is the sweep that actually carries the used set, and
     // the pool coalesces the two when they collide.
-    enumerateDevices();
+    enumerateDevicesOffThread();
 }
 
 // ============================================================================
@@ -1513,10 +1665,17 @@ bool EngineBridge::resolveDeviceTap(const QString &deviceLabel, uint32_t *device
     return false;
 }
 
-void EngineBridge::resolveAndStartMeter(const QString &deviceLabel)
+// The LABEL half of a device-meter start, on the caller's thread; the DEVICE
+// half is queued at the end of it — hence the name (the openTapOffThread
+// convention). What must not happen here is the open itself: StartInputMeter
+// REPLACES a live tap by joining the endpoint's previous capture thread and
+// spawning a new one, so every dialog opening over the AV board paid a WASAPI
+// teardown + rebuild between a click and the next paint, on the thread that
+// draws. The resolution stays, because it walks the CACHED roster (audioDevices_
+// is this thread's state) and the refusals it can produce are this thread's to
+// log.
+void EngineBridge::resolveAndStartMeterOffThread(const QString &deviceLabel)
 {
-    auto &audio = bps::platform::PlatformAccessor::Get().Audio();
-
     const QString want = deviceLabel.trimmed();
     // NO DEFAULT-INPUT MODE. An empty label used to resolve to the platform's
     // default input, so a dialog opened with nothing picked (or a card whose
@@ -1541,20 +1700,47 @@ void EngineBridge::resolveAndStartMeter(const QString &deviceLabel)
     // Already tapped: this call is the per-enumeration / per-sync
     // re-resolution, so there is nothing new to announce.
     const bool alreadyLive = inputLabels_.contains(deviceId);
-    if (audio.StartInputMeter(deviceId, want.toStdString()).ok()) {
-        inputLabels_[deviceId] = want;
-        // ONE line per device tap, the mirror of the video chain's "first
-        // preview frame": it is what makes "the meters don't move" answerable
-        // from engine.log alone (no tap line = nothing ever asked for a tap;
-        // a line with no signal behind it = the device itself is silent).
-        if (!alreadyLive)
-            write(QStringLiteral("info"), QStringLiteral("AudioMeters"),
-                  QStringLiteral("input meter tap live for '%1' (wavein:%2)")
-                      .arg(want)
-                      .arg(deviceId));
-    } else
-        qWarning("EngineBridge: input meter tap failed to start for '%s' (wavein:%u)",
-                 qUtf8Printable(want), deviceId);
+    // The claim is published BEFORE the open, so the tap has an owner the moment
+    // it exists: a release that lands while the worker is opening (a dialog closed
+    // straight after it opened) finds this entry, queues the matching close — and
+    // the posts are FIFO, so a tap opened and released inside one gesture can
+    // never be left running.
+    inputLabels_[deviceId] = want;
+    // The device call, QUEUED. The id and the label travel by value; the answer
+    // comes back on the interface thread, because inputLabels_ (the table a
+    // release resolves a label through) and the log line are both this thread's
+    // state.
+    vgr::EngineWorker::instance().runOffThread([this, deviceId, want, alreadyLive]() {
+        auto &audio = bps::platform::PlatformAccessor::Get().Audio();
+        const auto started = audio.StartInputMeter(deviceId, want.toStdString());
+        const bool ok = started.ok();
+        const QString why = ok ? QString() : QString::fromStdString(started.error().message);
+        vgr::EngineWorker::onInterfaceThread(this, [this, deviceId, want, alreadyLive, ok, why]() {
+            if (inputLabels_.value(deviceId) != want)
+                return;   // released (and its close queued) while we were opening it
+            if (!ok) {
+                // The tap does not exist: drop the claim so a later release does
+                // not chase one that was never there — and say why LOUDLY, in
+                // order with the rest of the session's meter lines (a refused tap
+                // is the difference between "the meter is broken" and "that
+                // device would not open").
+                inputLabels_.remove(deviceId);
+                qWarning("EngineBridge: input meter tap failed to start for '%s' "
+                         "(wavein:%u): %s",
+                         qUtf8Printable(want), deviceId, qUtf8Printable(why));
+                return;
+            }
+            // ONE line per device tap, the mirror of the video chain's "first
+            // preview frame": it is what makes "the meters don't move" answerable
+            // from engine.log alone (no tap line = nothing ever asked for a tap;
+            // a line with no signal behind it = the device itself is silent).
+            if (!alreadyLive)
+                write(QStringLiteral("info"), QStringLiteral("AudioMeters"),
+                      QStringLiteral("input meter tap live for '%1' (wavein:%2)")
+                          .arg(want)
+                          .arg(deviceId));
+        });
+    });
 }
 
 void EngineBridge::startInputMeter(const QString &deviceLabel)
@@ -1562,7 +1748,7 @@ void EngineBridge::startInputMeter(const QString &deviceLabel)
     if (!bps::platform::PlatformAccessor::Installed())
         return;
     const QString want = deviceLabel.trimmed();
-    // The refused case (see resolveAndStartMeter): a hold on "no device" must
+    // The refused case (see resolveAndStartMeterOffThread): a hold on "no device" must
     // not enter requestedMeters_ either — that map is what anyInputMetering
     // (the MonitorWall's audio button) and the pump's lifetime read, so an
     // empty hold would light the button with nothing tapped.
@@ -1581,7 +1767,7 @@ void EngineBridge::startInputMeter(const QString &deviceLabel)
     // visible hitch each time a dialog opened). A device that vanished and
     // came back is still re-bound, by the enumeration callback.
     if (firstHold)
-        resolveAndStartMeter(want);
+        resolveAndStartMeterOffThread(want);
     emit audioMeteringChanged();   // the overlay gates on ANY audio metering
     ensureMeterPump();
 }
@@ -1682,17 +1868,13 @@ void EngineBridge::stopInputMeter(const QString &deviceLabel)
     if (--it.value() > 0)
         return;   // another consumer (board row / other dialog) still holds it open
     requestedMeters_.erase(it);
-    // Stop the tap under its label (labels map 1:1 to ids while the device
-    // is present; a vanished device's tap already died with its endpoint).
-    if (bps::platform::PlatformAccessor::Installed()) {
-        auto &audio = bps::platform::PlatformAccessor::Get().Audio();
-        for (auto it = inputLabels_.constBegin(); it != inputLabels_.constEnd(); ++it) {
-            if (it.value() == want) {
-                (void)audio.StopInputMeter(it.key());
-                break;
-            }
-        }
-    }
+    // Which tap id belongs to this label? Labels map 1:1 to ids while the device
+    // is present (a vanished device's tap already died with its endpoint), and the
+    // table is this thread's — so the LOOKUP happens here and only the close is
+    // queued (StopInputMeter joins the capture thread the open started).
+    const uint32_t tapId = inputLabels_.key(want, 0);
+    if (tapId != 0)
+        stopInputMeterOffThread(tapId);
     for (auto it = inputLabels_.begin(); it != inputLabels_.end();) {
         if (it.value() == want)
             it = inputLabels_.erase(it);
@@ -1719,11 +1901,9 @@ void EngineBridge::stopAllInputMeters()
     // Stream meters share this pump — only stop it when nothing else needs it.
     if (inputMeterPump_ && requestedStreams_.isEmpty())
         inputMeterPump_->stop();
-    if (bps::platform::PlatformAccessor::Installed()) {
-        auto &audio = bps::platform::PlatformAccessor::Get().Audio();
-        for (const uint32_t id : audio.ActiveInputMeters())
-            (void)audio.StopInputMeter(id);
-    }
+    // Even the LIST of live taps is a PAL call, so that half is queued whole —
+    // see stopAllInputMetersOffThread. Nothing on this thread waits for it.
+    stopAllInputMetersOffThread();
     inputLabels_.clear();
     if (!inputLevels_.isEmpty()) {
         inputLevels_.clear();
@@ -1825,12 +2005,12 @@ bool EngineBridge::inputSourceAlive(const QString &label, const QString &kind)
     if (!lightAsks_.contains(ask) && lightAsks_.size() < 16)
         lightAsks_ << ask;
     // ...QUEUED, never inline. This probe is called FROM a QML binding (the bus
-    // status light), and enumerateDevices() ends by emitting devicesChanged —
+    // status light), and enumerateDevicesOffThread() ends by emitting devicesChanged —
     // synchronously, on its NDI half. A binding that triggers the very signal
     // whose handler bumps the revision it reads is a binding loop, and QML says
     // so out loud ("Binding loop detected for property busStatus"). Deferring by
     // one event-loop turn keeps the ask and lets the binding finish first.
-    QMetaObject::invokeMethod(this, [this]() { enumerateDevices(); }, Qt::QueuedConnection);
+    QMetaObject::invokeMethod(this, [this]() { enumerateDevicesOffThread(); }, Qt::QueuedConnection);
     return false;
 }
 
@@ -1891,7 +2071,16 @@ qint64 EngineBridge::previewPullAgeMs(const QString &label) const
 QString EngineBridge::previewFailure(const QString &deviceLabel)
 {
     const QString label = deviceLabel.trimmed();
-    if (label.isEmpty() || !bps::platform::PlatformAccessor::Installed())
+    if (label.isEmpty())
+        return {};
+    // A REFUSED OPEN leaves no PAL tap behind, so the platform has nothing to
+    // explain — the bridge's own record of the refusal (previewOpenRefusals_) is
+    // the only answer there is. Asked FIRST for exactly that reason: after a
+    // refusal the id table is empty BECAUSE nothing opened, and the id check
+    // below would turn the one case that has a reason into a bare "no tap".
+    if (const auto it = previewOpenRefusals_.constFind(label); it != previewOpenRefusals_.constEnd())
+        return it.value();
+    if (!bps::platform::PlatformAccessor::Installed())
         return {};
     const QString devId = previewIds_.value(label);
     if (devId.isEmpty())
@@ -2057,7 +2246,9 @@ bool EngineBridge::startVideoPreview(const QString &deviceLabel, const QString &
 {
     if (!bps::platform::PlatformAccessor::Installed())
         return false;
-    auto &video = bps::platform::PlatformAccessor::Get().Video();
+    // NOTE: no PAL fetch here any more — the device call this used to make on
+    // this thread is queueTapOpen's job now, and asking for the accessor from a
+    // warm-up path is exactly the shape the split removed.
 
     // Resolve the roster label → device id from the CACHED roster
     // (videoDevices_, refreshed at boot/hot-plug). Do not enumerate
@@ -2105,16 +2296,14 @@ bool EngineBridge::startVideoPreview(const QString &deviceLabel, const QString &
     previewModes_[want] = effectiveMode;
     if (!needRestart)
         return true;
-    (void)video.StopPreview(id.toStdString());
-    if (!video.StartPreview(id.toStdString(), effectiveMode.toStdString(),
-                            want.toStdString()).ok()) {
-        qWarning("EngineBridge: camera preview tap failed for '%s'", qUtf8Printable(want));
-        return false;
-    }
-    // A NEW tap starts with the warm-up grace on its clock (see inputDelivery):
-    // opening a camera takes a moment, and "no frame yet" is not "no frames".
-    previewDeliveredAt_[id] = QDateTime::currentMSecsSinceEpoch();
-    return true;
+    // The DEVICE half goes to the worker, as one job: close the old tap (a
+    // re-point / camera switch) and open the new one. Both are PAL calls that
+    // take the preview table's mutex, and the interface thread must not queue
+    // behind a capture worker that is inside it (that mutex is the measured
+    // hang of §3.8). One job, and one FIFO worker, is also what keeps the order:
+    // a close can never overtake the open it belongs to.
+    openTapOffThread(want, QStringLiteral("camera"), owner, id, effectiveMode);
+    return true;   // ACCEPTED — the open is queued (see the header)
 }
 
 void EngineBridge::stopVideoPreview(const QString &deviceLabel, const QString &owner)
@@ -2134,16 +2323,54 @@ void EngineBridge::stopVideoPreview(const QString &deviceLabel, const QString &o
     previewPulledAt_.remove(id);    // ...nor its "something was watching" clock
     if (id.isEmpty() || !bps::platform::PlatformAccessor::Installed())
         return;
-    (void)bps::platform::PlatformAccessor::Get().Video().StopPreview(id.toStdString());
+    // The PAL close HOPS (see the header): stopping a camera tap joins its drain
+    // thread and tears down a Media Foundation source reader, and this is reached
+    // from the take/clear gestures — the thread that draws must not wait for it.
+    // The tables above are this bridge's own, GUI-thread-owned state and stay
+    // here; the worker only closes the device. Posts are FIFO, so a close can
+    // never overtake the open of the same tap.
+    vgr::EngineWorker::instance().runOffThread([id] {
+        (void)bps::platform::PlatformAccessor::Get().Video().StopPreview(id.toStdString());
+    });
 }
 
 // ---- Live SCREEN preview -------------------------------------------------
 // Same label-first, owner-counted discipline as the camera taps, keyed by
 // the monitor's roster label. The label resolves through the CACHED
-// screenDevices_ roster (refreshed at boot / enumerateDevices) to the
+// screenDevices_ roster (refreshed at boot / enumerateDevicesOffThread) to the
 // monitor id ("\\\.\DISPLAY1"); the tap lives in the PAL's shared preview
 // table and frames flow back through the SAME videopreview provider —
 // monitor ids can never collide with camera symlinks.
+// The published half of inputSourceReachable's media-kind question (see the
+// header). One worker hop per path, at most one in flight, and the reader only
+// ever reads this map: a path with no answer yet reads as not reachable for the
+// millisecond the probe takes, and the devicesChanged below corrects the card.
+bool EngineBridge::mediaPathReachable(const QString &path)
+{
+    // Re-asked this often, so a file deleted while the app is up still flips (the
+    // synchronous QFileInfo::exists this replaces re-statted on every evaluation).
+    constexpr qint64 kMediaProbeTtlMs = 5000;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const bool known = mediaPathExists_.contains(path);
+    const bool stale = !known || now - mediaPathCheckedAt_.value(path, 0) > kMediaProbeTtlMs;
+    if (stale && !mediaPathProbePending_.contains(path)) {
+        mediaPathProbePending_.insert(path);
+        vgr::EngineWorker::instance().runOffThread([this, path] {
+            const bool exists = QFileInfo::exists(path);   // the one filesystem question
+            vgr::EngineWorker::onInterfaceThread(this, [this, path, exists] {
+                mediaPathProbePending_.remove(path);
+                mediaPathCheckedAt_.insert(path, QDateTime::currentMSecsSinceEpoch());
+                const bool changed = !mediaPathExists_.contains(path)
+                                     || mediaPathExists_.value(path) != exists;
+                mediaPathExists_.insert(path, exists);
+                if (changed)
+                    emit devicesChanged();   // the card re-reads its state on this
+            });
+        });
+    }
+    return known && mediaPathExists_.value(path);
+}
+
 bool EngineBridge::inputSourceReachable(const QString &label, const QString &kind)
 {
     // QUIET probe using the current cached roster (plus, for a Media-kind
@@ -2154,9 +2381,12 @@ bool EngineBridge::inputSourceReachable(const QString &label, const QString &kin
     const QString want = label.trimmed();
     // The label as a FILE — a Media-kind source names a video/audio file, not a
     // device, so its "is it still there" question has nothing to do with any
-    // roster: it is a path, and the answer is the path's own.
-    const auto fileIsThere = [&want]() {
-        return !want.isEmpty() && QFileInfo::exists(want);
+    // roster: it is a path, and the answer is the path's own. ASKED ON A WORKER
+    // and published (see mediaPathReachable): this is reached from a QML binding,
+    // and a path on a share that has gone away used to park the interface thread
+    // for the whole SMB timeout, per card, per evaluation.
+    const auto fileIsThere = [this, &want]() {
+        return !want.isEmpty() && mediaPathReachable(want);
     };
     if (kind == QLatin1String("media"))
         return fileIsThere();
@@ -2218,7 +2448,8 @@ bool EngineBridge::startScreenPreview(const QString &monitorLabel, const QString
     if (diag) {
         QStringList roster;
         for (const QVariant &v : screenDevices_)
-            roster << v.toMap().value("label").toString();            qInfo("EngineBridge[diag] startScreenPreview want='%s' owner=%s roster=%s",
+            roster << v.toMap().value("label").toString();
+        qInfo("EngineBridge[diag] startScreenPreview want='%s' owner=%s roster=%s",
               qUtf8Printable(want), qUtf8Printable(owner), qUtf8Printable(roster.join(" | ")));
     }
     QString id;
@@ -2237,7 +2468,7 @@ bool EngineBridge::startScreenPreview(const QString &monitorLabel, const QString
         // refresh and let the caller retry once devicesChanged is emitted;
         // never run EnumWindows/monitor enumeration inside a take or render UI.
         if (!deviceEnumerationBusy_)
-            enumerateDevices();
+            enumerateDevicesOffThread();
         qWarning("EngineBridge: no cached display named '%s' to preview yet", qUtf8Printable(want));
         return false;
     }
@@ -2248,32 +2479,15 @@ bool EngineBridge::startScreenPreview(const QString &monitorLabel, const QString
                   qUtf8Printable(previewIds_.value(want)));
         return true;
     }
-    auto startTap = [this](const QString &tapId) {
-        return bps::platform::PlatformAccessor::Get().Video()
-                   .StartScreenPreview(tapId.toStdString()).ok();
-    };
-    const bool ok = startTap(id);
-    if (ok) {
-        previewIds_[want] = id;
-        // Warm-up grace on this tap's clock (see inputDelivery).
-        previewDeliveredAt_[id] = QDateTime::currentMSecsSinceEpoch();
-        qInfo("EngineBridge: screen tap '%s' -> id '%s' started", qUtf8Printable(want),
-              qUtf8Printable(id));
-        return true;
-    }
-    // Start FAILED: release this owner's claim too — a claim with no tap means
-    // no later startScreenPreview for this label can ever try again.
-    qWarning("EngineBridge: screen preview tap failed for '%s'", qUtf8Printable(want));
-    auto it = previewOwners_.find(want);
-    if (it != previewOwners_.end()) {
-        it->remove(owner);
-        if (it->isEmpty())
-            previewOwners_.erase(it);
-    }
+    // The id is decided HERE (this thread's own table, which the stop path and
+    // the frame provider read), and the tap's start is queued: what the
+    // interface thread must not wait for is the PAL's preview-table mutex.
+    previewIds_[want] = id;
+    openTapOffThread(want, QStringLiteral("screen"), owner, id, QString());
     // The thumbnail may have been built BEFORE this label existed in the
     // roster (its provider request would have warned "no tap") — the nonce
     // bump happens on the QML side; nothing to do here.
-    return false;
+    return true;   // ACCEPTED — the tap start is queued (see the header)
 }
 
 void EngineBridge::stopScreenPreview(const QString &monitorLabel, const QString &owner)
@@ -2292,24 +2506,26 @@ void EngineBridge::stopScreenPreview(const QString &monitorLabel, const QString 
     previewPulledAt_.remove(id);    // ...nor its "something was watching" clock
     if (id.isEmpty() || !bps::platform::PlatformAccessor::Installed())
         return;
-    (void)bps::platform::PlatformAccessor::Get().Video().StopScreenPreview(id.toStdString());
+    // Same hop as stopVideoPreview: the close is PAL work (it stops the capture
+    // worker that may be parked in PrintWindow and releases the DIBs).
+    vgr::EngineWorker::instance().runOffThread([id] {
+        (void)bps::platform::PlatformAccessor::Get().Video().StopScreenPreview(id.toStdString());
+    });
 }
 
 void EngineBridge::stopAllVideoPreviews()
 {
-    if (bps::platform::PlatformAccessor::Installed()) {
-        auto &video = bps::platform::PlatformAccessor::Get().Video();
-        for (const QString &id : previewIds_.values())
-            (void)video.StopPreview(id.toStdString());
-    }
-    previewIds_.clear();
-    previewModes_.clear();
-    previewOwners_.clear();
-    previewLastFrame_.clear();   // every tap died with this call — held frames must not resurrect
-    previewDeliveredAt_.clear();  // ...and no tap may keep its delivery stamp either
-    // The NDI receivers are ENGINE objects, not PAL taps — the AV screen's
-    // teardown releases them here too, so a settings-screen close can never
-    // leak a live network receiver.
+    // The SAME seam as the per-tap closes (§3.9): the bridge's tables are its
+    // own GUI-thread state and are cleared HERE, and every device the caller
+    // just released goes to the worker in ONE job. This runs from the Audio &
+    // Video screen's Component.onDestruction — the instant the operator clicks
+    // another Settings page — so it is exactly the call that must not sit in a
+    // capture worker's way. The ids are COPIED out before the post (the worker
+    // must not read the tables), and the posts are FIFO, so nothing here can
+    // overtake the opens queued before it.
+    const QStringList tapIds = previewIds_.values();
+    QStringList recvIds;
+    // The NDI receivers are ENGINE objects, not PAL taps.
     // Gated on the ATOMIC feature switch, NOT NdiStatus(). NdiStatus() takes
     // the BroadcastEngine mutex and runs a live vendor-SDK probe, and this runs
     // on the GUI thread from a QML handler (AudioVideoScreen's teardown) — the
@@ -2317,11 +2533,27 @@ void EngineBridge::stopAllVideoPreviews()
     // provider mutex behind NDI SDK work. NdiEnabled() is a lock-free atomic;
     // when it is on, the receiver set is exactly what we are tearing down, and
     // DisconnectReceiver on an absent id is a no-op.
-    if (bps::broadcast::BroadcastEngine::Instance().NdiEnabled()) {
-        for (const QString &recvId : ndiTaps_.values())
-            (void)bps::broadcast::BroadcastEngine::Instance().DisconnectReceiver(
-                recvId.toStdString());
+    if (bps::broadcast::BroadcastEngine::Instance().NdiEnabled())
+        recvIds = ndiTaps_.values();
+    if (!tapIds.isEmpty() || !recvIds.isEmpty()) {
+        vgr::EngineWorker::instance().runOffThread([tapIds, recvIds] {
+            if (bps::platform::PlatformAccessor::Installed()) {
+                auto &video = bps::platform::PlatformAccessor::Get().Video();
+                for (const QString &id : tapIds)
+                    (void)video.StopPreview(id.toStdString());
+            }
+            for (const QString &recvId : recvIds)
+                (void)bps::broadcast::BroadcastEngine::Instance()
+                    .DisconnectReceiver(recvId.toStdString());
+        });
     }
+    previewIds_.clear();
+    previewModes_.clear();
+    previewOwners_.clear();
+    previewLastFrame_.clear();   // every tap died with this call — held frames must not resurrect
+    previewDeliveredAt_.clear();  // ...and no tap may keep its delivery stamp either
+    // The receivers were released with the taps above (a settings-screen close
+    // must not leak a live network receiver), so the table only clears here.
     ndiTaps_.clear();
 }
 
@@ -2352,31 +2584,129 @@ bool EngineBridge::startNdiPreview(const QString &sourceName, const QString &own
                  qUtf8Printable(want));
         return false;
     }
-    auto &broadcast = bps::broadcast::BroadcastEngine::Instance();
-    auto recv = broadcast.CreateNdiReceiver(want.toStdString());
-    if (!recv.ok()) {
-        // Runtime absent / SDK load failure / receiver refused: undo the
-        // owner claim so a later start (after recheckNdi()) can try again,
-        // and surface the reason in the log (the UI keeps its warm-up
-        // placeholder — never a fake feed).
-        qWarning("EngineBridge: NDI receiver failed for '%s': %s",
-                 qUtf8Printable(want), recv.error().message.c_str());
-        auto it = previewOwners_.find(want);
-        if (it != previewOwners_.end()) {
-            it->remove(owner);
-            if (it->isEmpty())
-                previewOwners_.erase(it);
+    // The receiver is created on the worker (the NDI runtime loads the vendor
+    // SDK there); its id comes back with the verdict and is published into
+    // ndiTaps_ by applyTapOpen, on this thread. A refusal (runtime absent / SDK
+    // load failure) releases the claim there and arrives as previewRefused().
+    openTapOffThread(want, QStringLiteral("ndi"), owner, want, QString());
+    return true;   // ACCEPTED — the receiver attach is queued (see the header)
+}
+
+// The two halves of a split tap open (§3.9/§6.3 of docs/gui_thread_audit.md):
+// everything the bridge itself owns stays on the interface thread, and only the
+// device call hops. The worker is FIFO, so the queue preserves the order the
+// caller asked in — a stop posted after an open runs after it, and a re-point's
+// close runs before its open.
+void EngineBridge::openTapOffThread(const QString &label, const QString &kind,
+                                    const QString &owner, const QString &deviceId,
+                                    const QString &mode)
+{
+    vgr::EngineWorker::instance().runOffThread([this, label, kind, owner, deviceId, mode] {
+        QString reason;
+        QString recvId;
+        if (!bps::platform::PlatformAccessor::Installed()) {
+            // Shutdown (or a boot that never installed one): nothing to open.
+            reason = QStringLiteral("the platform is not installed");
+        } else if (kind == QLatin1String("ndi")) {
+            auto &broadcast = bps::broadcast::BroadcastEngine::Instance();
+            auto recv = broadcast.CreateNdiReceiver(label.toStdString());
+            if (recv.ok())
+                recvId = qstr(recv.value());   // engine id (std::string) → QString
+            else
+                reason = QString::fromStdString(recv.error().message);
+        } else {
+            auto &video = bps::platform::PlatformAccessor::Get().Video();
+            if (kind == QLatin1String("screen")) {
+                if (auto r = video.StartScreenPreview(deviceId.toStdString()); !r.ok())
+                    reason = QString::fromStdString(r.error().message);
+            } else {
+                // Camera: a re-point or a camera switch replaces the tap, so the
+                // old one is closed first — in this same job, so the close cannot
+                // be reordered against the open.
+                (void)video.StopPreview(deviceId.toStdString());
+                if (auto r = video.StartPreview(deviceId.toStdString(), mode.toStdString(),
+                                                label.toStdString()); !r.ok())
+                    reason = QString::fromStdString(r.error().message);
+            }
         }
-        return false;
+        // Never touch the bridge's tables from here — this is the worker thread.
+        vgr::EngineWorker::onInterfaceThread(this, [this, label, kind, owner, deviceId, recvId, reason] {
+            applyTapOpen(label, kind, owner, deviceId, recvId, reason);
+        });
+    });
+}
+
+void EngineBridge::applyTapOpen(const QString &label, const QString &kind, const QString &owner,
+                                const QString &deviceId, const QString &recvId, const QString &reason)
+{
+    // The tap's key for the delivery stamps: the device id for a camera/screen
+    // tap, the SOURCE NAME for an NDI receiver (see ndiTaps_'s comment on why
+    // the second key space is the raw name).
+    const QString key = kind == QLatin1String("ndi") ? label : deviceId;
+    if (reason.isEmpty()) {
+        // The claim can be gone by now: the operator picked another source (or
+        // released this one) while the device was being opened. The tap this job
+        // just created is then nobody's, and it must not outlive the gesture —
+        // for a camera/screen tap the queued stop already closed it (the posts
+        // are FIFO), and for NDI the receiver has no owner to close it, so it
+        // dies here. Either way it is not published.
+        if (!previewOwners_.value(label).contains(owner)) {
+            if (kind == QLatin1String("ndi")) {
+                qInfo("EngineBridge: NDI receiver '%s' released while opening — closed unused",
+                      qUtf8Printable(label));
+                vgr::EngineWorker::instance().runOffThread([recvId] {
+                    (void)bps::broadcast::BroadcastEngine::Instance()
+                        .DisconnectReceiver(recvId.toStdString());
+                });
+            }
+            previewDeliveredAt_.remove(key);
+            previewLastFrame_.remove(key);
+            return;
+        }
+        if (kind == QLatin1String("ndi")) {
+            ndiTaps_.insert(label, recvId);
+            qInfo("EngineBridge: NDI receiver '%s' -> %s started", qUtf8Printable(label),
+                  qUtf8Printable(recvId));
+        } else {
+            qInfo("EngineBridge: %s tap '%s' -> id '%s' started",
+                  kind == QLatin1String("screen") ? "screen" : "camera",
+                  qUtf8Printable(label), qUtf8Printable(deviceId));
+        }
+        // A NEW tap starts with the warm-up grace on its clock (see
+        // inputDelivery): opening a camera takes a moment, and "no frame yet"
+        // is not "no frames". Stamped at the verdict rather than at the claim,
+        // so the grace window measures the tap, not the queue.
+        previewDeliveredAt_[key] = QDateTime::currentMSecsSinceEpoch();
+        previewOpenRefusals_.remove(label);   // the last refusal is answered
+        return;
     }
-    const QString recvId = qstr(recv.value());   // engine id (std::string) → QString
-    ndiTaps_.insert(want, recvId);
-    // Warm-up grace on the receiver's clock (see inputDelivery): an NDI feed has
-    // a network between it and its first frame.
-    previewDeliveredAt_[want] = QDateTime::currentMSecsSinceEpoch();
-    qInfo("EngineBridge: NDI receiver '%s' -> %s started", qUtf8Printable(want),
-          qUtf8Printable(recvId));
-    return true;
+
+    // REFUSED — window closed / device busy / SDK load failure. This owner's
+    // claim goes back: a claim with no tap would block every later start for
+    // this label (the same unwind the synchronous failure used to do), and the
+    // take that asked for it hears about it through previewRefused below.
+    qWarning("EngineBridge: %s preview tap REFUSED for '%s': %s",
+             kind == QLatin1String("ndi") ? "NDI"
+             : kind == QLatin1String("screen") ? "screen" : "camera",
+             qUtf8Printable(label), qUtf8Printable(reason));
+    auto it = previewOwners_.find(label);
+    if (it != previewOwners_.end()) {
+        it->remove(owner);
+        if (it->isEmpty())
+            previewOwners_.erase(it);
+    }
+    if (kind != QLatin1String("ndi")) {
+        // A camera/screen id that names no open tap is a lie the provider and
+        // the stop path would both read; an NDI receiver never got an id here.
+        previewIds_.remove(label);
+        previewModes_.remove(label);
+    }
+    previewLastFrame_.remove(key);
+    previewDeliveredAt_.remove(key);
+    previewOpenRefusals_[label] = reason;
+    // The reason stays readable through previewFailure(label) for as long as the
+    // caller holds its claim — which is exactly the beat this signal is for.
+    emit previewRefused(label, kind);
 }
 
 void EngineBridge::stopNdiPreview(const QString &sourceName, const QString &owner)
@@ -2393,8 +2723,17 @@ void EngineBridge::stopNdiPreview(const QString &sourceName, const QString &owne
     previewLastFrame_.remove(want);   // receiver gone — the held frame must not resurrect
     previewDeliveredAt_.remove(want); // ...and neither may its delivery stamp
     previewPulledAt_.remove(want);    // ...nor its "something was watching" clock
-    if (!recvId.isEmpty() && booted())
-        (void)bps::broadcast::BroadcastEngine::Instance().DisconnectReceiver(recvId.toStdString());
+    if (recvId.isEmpty() || !booted())
+        return;
+    // The disconnect HOPS: it goes through the BroadcastEngine to the vendor SDK,
+    // which is the one call here that belongs to another subsystem entirely. The
+    // receiver id was taken from this bridge's own table above, so the worker
+    // needs nothing else — and its queue is FIFO, so a receiver cannot be told to
+    // disconnect before it was created.
+    vgr::EngineWorker::instance().runOffThread([recvId] {
+        (void)bps::broadcast::BroadcastEngine::Instance()
+            .DisconnectReceiver(recvId.toStdString());
+    });
 }
 
 QImage EngineBridge::previewNdiFrameFor(const QString &sourceName)
@@ -2606,7 +2945,7 @@ void EngineBridge::startRelay()
     auto deviceChange = [self](const char *topic, QString title, QString message) {
         QMetaObject::invokeMethod(self, [self, topic = QString::fromLatin1(topic),
                                          title = std::move(title), message = std::move(message)]() mutable {
-            self->enumerateDevices();
+            self->enumerateDevicesOffThread();
             self->ingestEngineEvent(topic, QVariantMap{
                 {QStringLiteral("level"), QStringLiteral("info")},
                 {QStringLiteral("title"), title},
@@ -2921,14 +3260,25 @@ QVariantList EngineBridge::recentEngineEvents(int max) const
 // path in the UI: it lands in inputLevels under its own label and the mixer
 // drains it like any other source.
 // ============================================================================
-bool EngineBridge::ensureStreamTap(const QString &label, const QString &kind,
-                                   const QString &source)
+// The GUI-thread half of a stream tap: the gates, the refusal retry clock and
+// the id claim — all of it this thread's own state. Returns the id whose device
+// call the caller must queue (openStreamTapOffThread), or 0 when there is
+// nothing to open: an empty label, no platform, a tap already open for this row
+// (a decoder is never restarted under its own meters) or a refusal still inside
+// its retry window.
+//
+// The claim is recorded BEFORE the decoder exists, so a second call for the same
+// row sees it open and the meters keep the id they were handed for the few
+// milliseconds the worker takes; a refused open is undone by the marshalled
+// verdict, which is the same "accepted, then corrected" contract the video taps
+// use (see applyTapOpen).
+uint32_t EngineBridge::claimStreamTap(const QString &label, const QString &kind,
+                                     const QString &source)
 {
     if (label.isEmpty() || !bps::platform::PlatformAccessor::Installed())
-        return false;
+        return 0;
     if (streamTapIds_.contains(label))
-        return true;   // already open — a decoder is never restarted under its own meters
-    auto &audio = bps::platform::PlatformAccessor::Get().Audio();
+        return 0;   // already open — a decoder is never restarted under its own meters
     const QString src = source.trimmed().isEmpty() ? label : source.trimmed();
     // A REFUSED open is retried on a slow beat, not on every call: the mix's
     // source refresh runs ~20×/s while rendering, so a row whose media file is
@@ -2938,50 +3288,123 @@ bool EngineBridge::ensureStreamTap(const QString &label, const QString &kind,
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     const auto refused = streamRefusedAt_.constFind(refusedKey);
     if (refused != streamRefusedAt_.constEnd() && nowMs - refused.value() < 10000)
-        return false;
+        return 0;
     const uint32_t tapId = bps::platform::IAudio::kStreamTapBase + nextStreamTap_++;
-    const auto started = audio.StartStreamTap(tapId, src.toStdString(), kind.toStdString());
-    if (!started.ok()) {
-        streamRefusedAt_[refusedKey] = nowMs;
-        // The HONEST refusal — a file that is not there (or an NDI runtime that
-        // is not loaded) gets no tap at all: the row meters silence rather than
-        // a level nothing produced. Logged loudly, because from the UI a refused
-        // tap and a genuinely silent source look identical.
-        write(QStringLiteral("warning"), QStringLiteral("AudioMeters"),
-              QStringLiteral("stream meter refused for '%1' (%2, opens '%3'): %4 "
-                             "(retried every 10 s while the row stays routed)")
-                  .arg(label, kind, src)
-                  .arg(QString::fromStdString(started.error().message)));
-        return false;
-    }
-    streamRefusedAt_.remove(refusedKey);
     streamTapIds_[label] = tapId;
     streamKinds_[label] = kind;
     streamSources_[label] = src;
-    write(QStringLiteral("info"), QStringLiteral("AudioMeters"),
-          QStringLiteral("stream meter tap live for '%1' (%2, id %3, opens '%4')")
-              .arg(label, kind)
-              .arg(tapId)
-              .arg(src));
-    return true;
+    return tapId;
 }
 
-void EngineBridge::releaseStreamTap(const QString &label)
+// The DEVICE half of a stream tap, queued: opening one starts a demuxer and a
+// decoder (a media file's audio track) or an NDI receive — cost that belongs to
+// the file and the vendor runtime, never to the thread that draws. The verdict
+// is marshalled back here, where the refusal drops the claim it was handed and
+// says why in the row's own log.
+void EngineBridge::openStreamTapOffThread(const QString &label, const QString &kind,
+                                          const QString &source, uint32_t tapId)
+{
+    vgr::EngineWorker::instance().runOffThread([this, label, kind, source, tapId]() {
+        auto &audio = bps::platform::PlatformAccessor::Get().Audio();
+        const auto started = audio.StartStreamTap(tapId, source.toStdString(), kind.toStdString());
+        const bool ok = started.ok();
+        const QString why = ok ? QString() : QString::fromStdString(started.error().message);
+        vgr::EngineWorker::onInterfaceThread(this, [this, label, kind, source, tapId, ok, why]() {
+            const QString refusedKey = label + QLatin1Char('\n') + kind;
+            if (!ok) {
+                // ONLY if this claim is still the live one: the row may have been
+                // re-picked (and re-claimed) while the worker was opening, and that
+                // newer tap must not be dropped by this older verdict.
+                if (streamTapIds_.value(label) != tapId)
+                    return;
+                streamTapIds_.remove(label);
+                streamKinds_.remove(label);
+                streamSources_.remove(label);
+                streamRefusedAt_[refusedKey] = QDateTime::currentMSecsSinceEpoch();
+                // The HONEST refusal — a file that is not there (or an NDI runtime
+                // that is not loaded) gets no tap at all: the row meters silence
+                // rather than a level nothing produced. Logged loudly, because from
+                // the UI a refused tap and a genuinely silent source look identical.
+                write(QStringLiteral("warning"), QStringLiteral("AudioMeters"),
+                      QStringLiteral("stream meter refused for '%1' (%2, opens '%3'): %4 "
+                                     "(retried every 10 s while the row stays routed)")
+                          .arg(label, kind, source)
+                          .arg(why));
+                return;
+            }
+            // Still the row's current tap? A re-pick during the open claims a new
+            // id and queues this one's close behind it — a line for that id would
+            // name a tap the row no longer uses.
+            if (streamTapIds_.value(label) != tapId)
+                return;
+            streamRefusedAt_.remove(refusedKey);
+            write(QStringLiteral("info"), QStringLiteral("AudioMeters"),
+                  QStringLiteral("stream meter tap live for '%1' (%2, id %3, opens '%4')")
+                      .arg(label, kind)
+                      .arg(tapId)
+                      .arg(source));
+        });
+    });
+}
+
+// The close, queued for the same reason the open is (StopStreamTap joins the
+// decoder its open started). The "closed" line is written when the worker says
+// it landed, so it records what happened instead of announcing an intention.
+void EngineBridge::closeStreamTapOffThread(uint32_t tapId, const QString &label)
+{
+    vgr::EngineWorker::instance().runOffThread([this, tapId, label]() {
+        if (bps::platform::PlatformAccessor::Installed())
+            (void)bps::platform::PlatformAccessor::Get().Audio().StopStreamTap(tapId);
+        vgr::EngineWorker::onInterfaceThread(this, [this, label]() {
+            write(QStringLiteral("info"), QStringLiteral("AudioMeters"),
+                  QStringLiteral("stream meter tap closed for '%1'").arg(label));
+        });
+    });
+}
+
+// The two closes behind stopInputMeter/stopAllInputMeters, both queued for the
+// same reason the open is: a StopInputMeter joins the capture thread its open
+// started, which is a device call and not interface-thread work. The single
+// close takes the id this thread already resolved; the whole-roster close asks
+// the PAL which device taps are live itself, because that read is a PAL call
+// too.
+void EngineBridge::stopInputMeterOffThread(uint32_t deviceId)
+{
+    vgr::EngineWorker::instance().runOffThread([deviceId]() {
+        if (!bps::platform::PlatformAccessor::Installed())
+            return;   // platform torn down (shutdown) — nothing to stop
+        (void)bps::platform::PlatformAccessor::Get().Audio().StopInputMeter(deviceId);
+    });
+}
+
+void EngineBridge::stopAllInputMetersOffThread()
+{
+    vgr::EngineWorker::instance().runOffThread([]() {
+        if (!bps::platform::PlatformAccessor::Installed())
+            return;
+        auto &audio = bps::platform::PlatformAccessor::Get().Audio();
+        for (const uint32_t id : audio.ActiveInputMeters())
+            (void)audio.StopInputMeter(id);
+    });
+}
+
+uint32_t EngineBridge::releaseStreamTap(const QString &label)
 {
     const auto known = streamTapIds_.find(label);
     if (known == streamTapIds_.end())
-        return;
+        return 0;
     // STILL HELD? A UI consumer (requestedStreams_) or the playout mix (a claim
     // naming this same tap) keeps it open — one decoder, one row.
     if (requestedStreams_.contains(label))
-        return;
-    if (bps::platform::PlatformAccessor::Installed())
-        (void)bps::platform::PlatformAccessor::Get().Audio().StopStreamTap(known.value());
-    write(QStringLiteral("info"), QStringLiteral("AudioMeters"),
-          QStringLiteral("stream meter tap closed for '%1'").arg(label));
+        return 0;
+    // The tables are this thread's, so the release is decided and recorded here
+    // and only the PAL close is queued by the caller (see
+    // closeStreamTapOffThread).
+    const uint32_t tapId = known.value();
     streamTapIds_.erase(known);
     streamKinds_.remove(label);
     streamSources_.remove(label);
+    return tapId;
 }
 
 void EngineBridge::startStreamMeter(const QString &label, const QString &kind,
@@ -2996,9 +3419,12 @@ void EngineBridge::startStreamMeter(const QString &label, const QString &kind,
     const bool firstHold = !requestedStreams_.contains(want);
     ++requestedStreams_[want];
     if (firstHold) {
-        streamKinds_[want] = kind;
-        streamSources_[want] = source;
-        ensureStreamTap(want, kind, source);
+        // The claim is this thread's, the decoder open is the engine worker's —
+        // the two names say which half is which (claimStreamTap /
+        // openStreamTapOffThread).
+        const uint32_t tapId = claimStreamTap(want, kind, source);
+        if (tapId != 0)
+            openStreamTapOffThread(want, kind, source, tapId);
     } else {
         // A re-hold with a DIFFERENT source (the row was re-picked) must move
         // the decoder: the old tap goes, a new one opens on the new file.
@@ -3006,8 +3432,10 @@ void EngineBridge::startStreamMeter(const QString &label, const QString &kind,
         if (streamSources_.value(want) != src || streamKinds_.value(want) != kind) {
             const auto old = streamTapIds_.take(want);
             if (old != 0)
-                (void)bps::platform::PlatformAccessor::Get().Audio().StopStreamTap(old);
-            ensureStreamTap(want, kind, source);
+                closeStreamTapOffThread(old, want);
+            const uint32_t tapId = claimStreamTap(want, kind, source);
+            if (tapId != 0)
+                openStreamTapOffThread(want, kind, source, tapId);
         }
     }
     ensureMeterPump();
@@ -3023,7 +3451,12 @@ void EngineBridge::stopStreamMeter(const QString &label)
     if (--it.value() > 0)
         return;   // another card or dialog still holds this row open
     requestedStreams_.erase(it);
-    releaseStreamTap(want);
+    // The DECISION to close is this thread's (the tables above are read to decide
+    // what happens next); the close itself is queued — see
+    // closeStreamTapOffThread.
+    const uint32_t tapId = releaseStreamTap(want);
+    if (tapId != 0)
+        closeStreamTapOffThread(tapId, want);
     if (requestedMeters_.isEmpty() && requestedStreams_.isEmpty()) {
         if (inputMeterPump_)
             inputMeterPump_->stop();

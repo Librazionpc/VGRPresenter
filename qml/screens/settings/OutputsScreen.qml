@@ -25,52 +25,86 @@ Item {
     // in place (or if the user refused the OS prompt, once they revisit)
     // this re-fires exactly when it should and never otherwise. The
     // elevated verdict is confirmed by a short retry timer.
+    //
+    // BOTH HALVES ARE ASYNC. Asking is a hidden `netsh` child process and so
+    // is every probe of the retry timer — work that must not ride inside a
+    // click — so the outcome arrives on ndiFirewallAccessResult and each
+    // tick's verdict on ndiFirewallRuleChecked. These two handlers are the
+    // whole of what used to be "read the return value".
     property bool firewallPending: false
     // Probe cap: each tick runs a netsh child process — unbounded retries
     // while a UAC dialog sits unanswered (or was denied) would spawn one
     // every 2 s for as long as this screen stays open. 15 tries (~30 s)
     // then give up with an honest notice; the manual re-run remains in
-    // this screen.
+    // this screen. Counted on the ASK side as well as against an answer, so
+    // a lagging verdict can never overshoot the cap.
     property int firewallProbes: 0
+    function giveUpNdiFirewall() {
+        if (!root.firewallPending)
+            return
+        root.firewallPending = false
+        firewallConfirmTimer.stop()
+        EventBus.notify(qsTr("Still waiting on the Windows Firewall decision — NDI output may not reach other computers until it is allowed. Re-run from Settings · Outputs."),
+                        "warning", qsTr("NDI firewall"), "outputs.ndi.firewall.pending")
+    }
+    function handleNdiFirewallRule(allowed) {
+        if (!root.firewallPending)
+            return   // a verdict for a probe the screen already gave up on
+        if (allowed) {
+            root.firewallPending = false
+            firewallConfirmTimer.stop()
+            EventBus.notify(qsTr("Windows Firewall now allows NDI receivers to connect — other computers can find this app's output."),
+                            "success", qsTr("NDI ready"), "outputs.ndi.firewall.added")
+            return
+        }
+        if (root.firewallProbes >= 15)
+            root.giveUpNdiFirewall()
+    }
+    function handleNdiFirewallResult(outcome) {
+        if (outcome === "allowed")
+            return   // rule already in place: no banner, no toast, nothing to grant
+        if (outcome === "added") {
+            EventBus.notify(qsTr("Windows Firewall is set — NDI receivers on other computers can connect."),
+                            "success", qsTr("NDI ready"), "outputs.ndi.firewall.added")
+        } else if (outcome === "prompt") {
+            root.firewallPending = true
+            root.firewallProbes = 0
+            EventBus.notify(qsTr("Allow the Windows Firewall request so other computers can receive this app's NDI output."),
+                            "info", qsTr("NDI ready"), "outputs.ndi.firewall.prompt")
+        } else if (outcome === "denied" || outcome === "failed") {
+            EventBus.notify(qsTr("Windows Firewall wasn't set — NDI output may not reach other computers. Re-run it from Settings · Outputs."),
+                            "warning", qsTr("NDI firewall"), "outputs.ndi.firewall.failed")
+        }
+        // "unavailable" (non-Windows): silent — no firewall concept to grant.
+    }
+    Connections {
+        target: EngineBridge
+        function onNdiFirewallAccessResult(outcome) { root.handleNdiFirewallResult(outcome) }
+        function onNdiFirewallRuleChecked(allowed) { root.handleNdiFirewallRule(allowed) }
+    }
     Timer {
         id: firewallConfirmTimer
         interval: 2000
         repeat: true
         running: root.firewallPending
         onTriggered: {
-            root.firewallProbes++
-            if (EngineBridge.checkNdiFirewallRule()) {
-                root.firewallPending = false
-                EventBus.notify(qsTr("Windows Firewall now allows NDI receivers to connect — other computers can find this app's output."),
-                                "success", qsTr("NDI ready"), "outputs.ndi.firewall.added")
-                firewallConfirmTimer.stop()
-            } else if (root.firewallProbes >= 15) {
-                root.firewallPending = false
-                EventBus.notify(qsTr("Still waiting on the Windows Firewall decision — NDI output may not reach other computers until it is allowed. Re-run from Settings · Outputs."),
-                                "warning", qsTr("NDI firewall"), "outputs.ndi.firewall.pending")
-                firewallConfirmTimer.stop()
+            // The CAP is enforced on the asking side: a probe whose verdict is
+            // still in flight must not let the timer spawn another child
+            // process every 2 s (the answer side gives up as well, so the
+            // notice goes out whichever arrives first).
+            if (root.firewallProbes >= 15) {
+                root.giveUpNdiFirewall()
+                return
             }
+            root.firewallProbes++
+            EngineBridge.checkNdiFirewallRule()   // verdict → ndiFirewallRuleChecked
         }
     }
     function maybeRequestNdiFirewall() {
         if (EngineBridge.ndiFirewallPrompted)
             return
-        const result = EngineBridge.requestNdiFirewallAccess()
-        if (result === "allowed")
-            return   // rule already in place: no banner, no toast, nothing to grant
-        if (result === "added") {
-            EventBus.notify(qsTr("Windows Firewall is set — NDI receivers on other computers can connect."),
-                            "success", qsTr("NDI ready"), "outputs.ndi.firewall.added")
-        } else if (result === "prompt") {
-            root.firewallPending = true
-            root.firewallProbes = 0
-            EventBus.notify(qsTr("Allow the Windows Firewall request so other computers can receive this app's NDI output."),
-                            "info", qsTr("NDI ready"), "outputs.ndi.firewall.prompt")
-        } else if (result === "denied" || result === "failed") {
-            EventBus.notify(qsTr("Windows Firewall wasn't set — NDI output may not reach other computers. Re-run it from Settings · Outputs."),
-                            "warning", qsTr("NDI firewall"), "outputs.ndi.firewall.failed")
-        }
-        // "unavailable" (non-Windows): silent — no firewall concept to grant.
+        // The outcome lands on ndiFirewallAccessResult (see above).
+        EngineBridge.requestNdiFirewallAccess()
     }
 
     // Add-dialog form state (VGRPresenter · Settings · Outputs · Add).

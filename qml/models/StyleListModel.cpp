@@ -3,6 +3,7 @@
 #include "FamilySlots.h"
 #include "OutputListModel.h"
 #include "services/EngineBridge.h"
+#include "services/EngineWorker.h"
 #include "modules/project/StyleStore.hpp"
 #include "platform/PlatformAccessor.hpp"
 
@@ -10,6 +11,7 @@
 #include <QJSEngine>
 #include <QScreen>
 #include <QDir>
+#include <QFile>
 #include <algorithm>
 #include <cstdio>
 
@@ -113,6 +115,10 @@ void StyleListModel::reloadFromStore()
         item.templateKey = QString::fromStdString(s.templateKey);
         item.backgroundColor = QString::fromStdString(s.backgroundColor);
         item.backgroundImage = QString::fromStdString(s.backgroundImage);
+        // One stat per style, once per roster load — instead of one per read of
+        // the styleBackground role (see StyleItem::backgroundImageExists).
+        item.backgroundImageExists =
+            !item.backgroundImage.isEmpty() && QFile::exists(item.backgroundImage);
         item.clearBackgroundOnText = s.clearBackgroundOnText;
         // Walked through the ONE family table (FamilySlots.h): the engine's slot
         // order is the storage order, so the families do not need spelling out
@@ -371,9 +377,37 @@ void StyleListModel::setBackgroundImage(int index, const QString &path)
         return;
 
     m_styles[index].backgroundImage = normalized;
+    // Optimistic: assume the path the picker handed us is there, and let the
+    // stat below correct it a moment later. The check HOPS to the engine worker
+    // because a style's background can live on a network share, and a stat on a
+    // share that has gone away parks the interface thread for the whole SMB
+    // timeout — the picker accepts any path the user can reach, so this is the
+    // one place the app must not ask the filesystem synchronously.
+    m_styles[index].backgroundImageExists = !normalized.isEmpty();
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { BackgroundImageRole });
     save();
+
+    if (normalized.isEmpty())
+        return;   // "no background" is already the whole truth
+    const int row = index;
+    vgr::EngineWorker::instance().runOffThread([this, row, normalized] {
+        const bool exists = QFile::exists(normalized);
+        vgr::EngineWorker::onInterfaceThread(this, [this, row, normalized, exists] {
+            // The row may have moved, been removed, or been pointed somewhere else
+            // while the stat was in flight: only publish it when this is still
+            // THAT row and still THAT path.
+            if (row < 0 || row >= m_styles.size())
+                return;
+            if (m_styles.at(row).backgroundImage != normalized)
+                return;
+            if (m_styles.at(row).backgroundImageExists == exists)
+                return;
+            m_styles[row].backgroundImageExists = exists;
+            const QModelIndex rowChanged = this->index(row);
+            emit dataChanged(rowChanged, rowChanged, { BackgroundImageRole });
+        });
+    });
 }
 
 void StyleListModel::setShowTemplate(int index, const QString &contentType, bool on)
@@ -447,6 +481,9 @@ QVariantMap StyleListModel::getStyle(int index) const
         { "templateKey", item.templateKey },
         { "backgroundColor", item.backgroundColor },
         { "backgroundImage", item.backgroundImage },
+        // The cached stat, so a reader never touches the disk to decide this
+        // (StyleItem::backgroundImageExists).
+        { "hasImage", item.backgroundImageExists },
         { "clearBackgroundOnText", item.clearBackgroundOnText },
         { "showOverlay", item.showOverlay },   // its own axis, not a family slot
         { "category", item.category },

@@ -951,7 +951,13 @@ void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sce
         ++overlayIdx;
         const std::string layer = ov.placeUnderSlide ? "media" : "overlay";
         const std::string tag = std::format("ov{}_", overlayIdx);
-        AddStageBlocks(engine, sceneId, ov.blocks, size, tag, layer);
+        // Builds into the cross-engine RenderEngine while g_overlayCacheMutex is
+        // held, on purpose: the object ids registered just below are the ONLY
+        // way a later call removes what an earlier one added (AddObject has no
+        // upsert), so a concurrent build of the same scene interleaving here
+        // would leave duplicate overlay objects on the output. The lock is what
+        // makes the build and its bookkeeping one step.
+        AddStageBlocks(engine, sceneId, ov.blocks, size, tag, layer);   // lock-ok: the overlay cache lock is what makes this build and its objectIds bookkeeping atomic (no upsert in AddObject)
         for (size_t i = 0; i < ov.blocks.size(); ++i) {
             const std::string id = std::format("{}{}", tag, i + 1);
             cache.objectIds.push_back(id);

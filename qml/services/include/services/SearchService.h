@@ -1,8 +1,10 @@
 #pragma once
 
+#include <QHash>
 #include <QList>
 #include <QObject>
 #include <QPointer>
+#include <QSet>
 #include <atomic>
 #include <QString>
 #include <QStringList>
@@ -82,10 +84,14 @@ public:
     // words split ("holyspirit" -> "holy spirit"). One { typed, resolved, weight }
     // entry per word that DIFFERS from its resolution, in order; empty when the
     // query is already well-spelled (the common case: zero UI, zero cost).
-    // SYNCHRONOUS (kept for callers that already sit on a worker); the GUI-facing
-    // path is resolveWordsAsync below — each misspelled token scans the whole
-    // ~91k-word vocabulary, a multi-token garble on the GUI thread was the
-    // search-freeze.
+    //
+    // SYNCHRONOUS AND PUBLISHED, like every other read here: it answers from the
+    // last worker read of that text, and `[]` means "nobody has read this yet" as
+    // much as it means "nothing to correct" — wordsCached announces the answer
+    // that fills it, so a caller that cannot wait re-asks on that (the same
+    // contract verseCached gives fullVerse). A WORKER must call readResolveWords
+    // instead (the private half): it has no signal to wait on, and a miss there
+    // silently drops the correction the caller asked for.
     Q_INVOKABLE QVariantList resolveWords(const QString &text) const;
     // ASYNC resolveWords: answers as wordsResolved(token, rows); only the
     // LATEST request's token is answered (same contract as searchAsync).
@@ -107,6 +113,14 @@ public:
     // (development builds) the KJV shipped in the source tree. Needs the engine booted.
     Q_INVOKABLE void loadBibles();
 
+    // Re-reads the installed Bible ids and announces them with bibleChanged. This
+    // is what a caller that INSTALLED a Bible asks for: the published list is only
+    // re-walked when it is empty, so hand-emitting bibleChanged would tell every
+    // binding to re-read a list that still holds the ids from before the install.
+    // The walk and the notify both happen off the caller's thread (a worker answers,
+    // the signal lands with it).
+    Q_INVOKABLE void refreshBibles();
+
     // Installs one Bible file now (json / xml / osis / usfm / txt). Returns false
     // (and toasts the error) when the import fails or another one is already
     // running; the work happens on a worker thread — bibleImporting/
@@ -124,10 +138,51 @@ signals:
     void resultsReady(int token, const QVariantList &rows);
     // An async word resolution (resolveWordsAsync) finished: the token matches.
     void wordsResolved(int token, const QVariantList &rows);
+    // A hover preview's verse text landed (see fullVerse): the dialog re-asks for
+    // the row it is still showing, and now reads it from the published cache.
+    void verseCached(const QString &bibleId, const QString &bookId, int chapter, int verse);
+    // A published SEARCH answer landed (the sync `search()`'s worker read). The
+    // sync entry point has no token to match — `[]` there means "not run yet" as
+    // much as "no rows" — so its callers re-ask on this. searchAsync's answer
+    // arrives on resultsReady instead and needs no second signal.
+    void searchCached(const QString &text);
+    // A published word resolution landed (the sync `resolveWords()`'s worker read),
+    // for the same reason: the sync entry answers `[]` on a miss, so a caller that
+    // used it re-asks here. resolveWordsAsync answers on wordsResolved instead.
+    void wordsCached(const QString &text);
 
 private:
     explicit SearchService(QObject *parent = nullptr);
     static QStringList candidateBibleFiles();
+
+    // ---- THE PUBLISHED BIBLE READS -----------------------------------------
+    // `bibles`, `search`, `resolveWords` and `fullVerse` used to ask the ENGINE on
+    // the interface thread. `bibles` is a property binding (re-evaluated on every
+    // bibleChanged) and the other three are asked per row, per hover and per
+    // keystroke. Each answer is now READ ONCE on a worker and kept here as the
+    // published value: the entry point is a lookup, a miss queues the read, and
+    // the notify that lands with it (bibleChanged, verseCached) is what makes the
+    // UI re-read. The "read*" half is the old body, called on a worker — which is
+    // exactly where searchAsync and resolveWordsAsync already ran it.
+    QStringList readBibles() const;
+    QVariantList readResolveWords(const QString &text) const;
+    QString readFullVerse(const QString &bibleId, const QString &bookId, int chapter, int verse) const;
+    QVariantList readSearch(const QString &rawText, int perKind, bool exactWords) const;
+
+    static QString verseCacheKey(const QString &bibleId, const QString &bookId, int chapter, int verse);
+    void refreshBiblesOffThread() const;
+    void refreshResolveWordsOffThread(const QString &text) const;
+    void refreshFullVerseOffThread(const QString &bibleId, const QString &bookId, int chapter, int verse) const;
+    void refreshAggregateOffThread(const QString &text, int perKind, bool exactWords) const;
+
+    mutable QStringList biblesCache_;
+    mutable bool biblesInFlight_ = false;
+    mutable QHash<QString, QVariantList> wordsCache_;      // typed text -> resolved words
+    mutable QSet<QString> wordsInFlight_;
+    mutable QHash<QString, QString> verseCache_;           // bible/book/chapter:verse -> full text
+    mutable QSet<QString> verseInFlight_;
+    mutable QHash<QString, QVariantList> aggregateCache_;  // the whole query, as its key
+    mutable QSet<QString> aggregateInFlight_;
     std::atomic<int> latestResolveToken_{0};   // resolveWordsAsync: newest request wins
 
     QPointer<QThread> loader_;

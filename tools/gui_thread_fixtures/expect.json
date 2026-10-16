@@ -1,0 +1,15 @@
+{
+  "note": "The verdicts tools/check_gui_thread_blocks.mjs must produce for fixture_shapes.{h,cpp}, checked by its self-test before every scan (the shape tools/lock_scope_fixtures established for the lock guard — see AGENTS.md). Each entry names the case it pins: (1) a helper that reads the engine INSIDE QThread::create must stay quiet — it runs on the worker, so no caller inherits it; (2) the same read INLINE must be reported as soft, or the span rule has swallowed a real wait; (3) an entry point whose own body queues the device call and keeps only bookkeeping is exempt (the twelve cleared in audit §6.5 rely on exactly this); (4) a `gui-ok:` with no reason is a finding and now gates; (5) a reasoned waiver whose call no longer blocks is STALE and gates; (6) a helper that posts its device work and returns contributes no chain to its caller (audit §6.6); (7) `lastFrame = QImage()` is a reset, not a load; (8) `QImage(path)` is a load and must still be reported; (9) an engine read inside a `QThreadPool::globalInstance()->start([…]{…})` lambda is off-thread and must stay quiet.",
+  "verdicts": [
+    "soft FixtureImageLoad::loadFrame",
+    "soft FixtureInlineHelper::inlineCaller",
+    "waiver FixtureBareWaiver::bareWaiver"
+  ],
+  "stale": [
+    "FixtureStaleWaiver::staleWaiver"
+  ],
+  "bare": [
+    "FixtureBareWaiver::bareWaiver"
+  ],
+  "exempt": 1
+}

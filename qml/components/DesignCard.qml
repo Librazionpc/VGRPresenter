@@ -17,6 +17,9 @@ Item {
     property date now: new Date()
     // "overlay" makes the card draggable into a project (a template is not something a project holds); empty = not draggable.
     property string dragKind: ""
+    // Passed straight through to the preview's own `probeSink`: the library pane that wants the
+    // card's fit-solver count (see DesignPreview.probeSink and the layout probe's scroll phase).
+    property var probeSink: null
 
     readonly property real previewHeight: Math.round((width - 12) * 9 / 16)
     readonly property bool hovered: hover.hovered
@@ -98,6 +101,7 @@ Item {
                 blocks: root.design.blocks !== undefined ? root.design.blocks : []
                 background: root.design.background !== undefined ? root.design.background : "transparent"
                 now: root.now
+                probeSink: root.probeSink
             }
 
             // The accent colour the design was given.

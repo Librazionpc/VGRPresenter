@@ -117,6 +117,22 @@ public:
     Result<std::vector<UserNote>> Notes(std::string_view bibleId) const;
     Result<void> SetHighlight(std::string_view bibleId, const PassageRef& ref, bool on);
     Result<std::vector<PassageRef>> Highlights(std::string_view bibleId) const;
+    // --- What a mark on a verse costs, measured ---------------------------------
+    // The split above is only worth having if it is actually cheap, and "cheap"
+    // is a wall-clock claim: a highlight click is a Q_INVOKABLE on a QML
+    // singleton, so its cost lands on the INTERFACE thread. The write records its
+    // own two halves (the JSON built under the lock, the PAL write after it), and
+    // the app logs them on every mark — the number a reader needs is the one the
+    // running app measured, not one a comment asserts. A test asserts on the same
+    // numbers (tests_bible.cpp: bible-mark-timing).
+    struct UserDataWriteStats {
+        long long lastBuildMs = -1;   // building the sidecar JSON (lock held)
+        long long lastWriteMs = -1;   // WriteAtomic of the sidecar (lock released)
+        size_t lastWriteBytes = 0;    // the sidecar's size
+        size_t writes = 0;            // writes since boot
+    };
+    UserDataWriteStats LastUserDataWrite() const;
+
     Result<void> AddCollection(std::string_view name);
     Result<void> AddToCollection(std::string_view collection, const PassageRef& ref);
     Result<std::vector<PassageRef>> Collection(std::string_view collection) const;
@@ -146,23 +162,57 @@ private:
     // Installed-bible store (see SetStorePath): whole-store JSON rewrite per
     // import/remove — a bible is ~4 MB of verse text, well within the same
     // write-per-change budget the library stores already pay.
-    Result<void> SaveStoreLocked();
+    //
+    // SPLIT IN TWO ON PURPOSE (the lock-scope rule this module was breaking):
+    // the JSON is BUILT under the lock and WRITTEN by the caller after it drops
+    // it (see WriteStoreFile). The corpus is megabytes of verse text and
+    // WriteAtomic is a PAL call: holding mutex_ across it parked every thread
+    // that needs a chapter behind a disk write — the lock-the-guard-cannot-see
+    // shape, because the wrap sat one call deep inside this helper.
+    // "" = nothing to write (no store path). Serializing cannot fail, so there
+    // is no Result here: the caller writes the text or does not.
+    std::string BuildStoreJsonLocked();
+    // Writes the text BuildStoreJsonLocked() produced. PAL: NEVER call with
+    // mutex_ held. Verified + atomic, so a failure leaves the previous file.
+    Result<void> WriteStoreFile(const std::string& json);
     // Consumes the ALREADY-PARSED store document. The file read, the parse and
     // the set-aside of a damaged store all happen BEFORE the engine lock is
     // taken (see Initialize), so no PAL call runs inside the locked scope.
-    Result<size_t> LoadStoreLocked(const json::Value& root);
+    // `userRoot` is the ALREADY-PARSED user-data sidecar, or null when there is
+    // none — in which case user data is read from the corpus document itself
+    // (schema <= 2) and Initialize() migrates it into a sidecar.
+    Result<size_t> LoadStoreLocked(const json::Value& root, const json::Value* userRoot);
 
     // JSON (de)serialization of one bible (metadata + books + chapters).
     json::Value BibleToJsonLocked(const BibleVersion& bible) const;
     BibleVersion BibleFromJsonLocked(const json::Value& node) const;
-    // User-data persistence (docs/specs/24 §User Data): notes, highlights, and
-    // collections ride in the SAME store file as the bibles (schema 2) and pay
-    // the same write-per-change budget. Mutex-HELD by contract (they touch
-    // RefKey and the user-data maps only). WriteUserDataLocked appends the
-    // user-data arrays into the store's root OBJECT (the JSON lib exposes
-    // operator[] on the object map, never on Value).
+    // User-data persistence (docs/specs/24 §User Data): notes, highlights and
+    // collections live in a SIDECAR file beside the corpus (userDataPath_), so
+    // a highlight toggle writes kilobytes instead of reading, parsing and
+    // rewriting the whole corpus under the engine lock. Mutex-HELD by contract
+    // (they touch RefKey and the user-data maps only); BuildUserDataJsonLocked
+    // is the sidecar document, WriteUserDataFile is its PAL write and is called
+    // with the lock RELEASED. WriteUserDataLocked appends the user-data arrays
+    // into the corpus root OBJECT -- used only while the corpus is still the
+    // data's only home (schema 2, see userDataFileWritten_), the JSON lib
+    // exposing operator[] on the object map and never on Value.
     void WriteUserDataLocked(json::Value::Object& root);
     void ReadUserDataLocked(const json::Value& root);
+    std::string BuildUserDataJsonLocked();
+    // The sidecar write's own numbers (see UserDataWriteStats): written by the two
+    // halves of a mark, read by LastUserDataWrite() and by the log line the app
+    // prints for each one.
+    std::atomic<long long> lastUserDataBuildMs_{-1};
+    std::atomic<long long> lastUserDataWriteMs_{-1};
+    std::atomic<size_t> lastUserDataBytes_{0};
+    std::atomic<size_t> userDataWrites_{0};
+    // PAL: NEVER call with mutex_ held (same rule as WriteStoreFile).
+    Result<void> WriteUserDataFile(const std::string& json);
+    // Writes the sidecar a caller built under the lock and, only on success,
+    // records that the sidecar is now the user data's home. Called with the lock
+    // RELEASED (a PAL write is inside); failures are logged, never fatal — the
+    // corpus keeps carrying the data until this succeeds.
+    void PersistUserDataSidecar(const std::string& json);
     // RESTORE of the flattened verse list from the stored chapters: the store
     // keeps only the canonical shape (GetChapter/Outline read `chapters`), so
     // rebuild `verses` in book order — Import()'s own shape — never a per-read
@@ -174,9 +224,14 @@ private:
     // One reference <-> JSON object for the user-data arrays (single place).
     static json::Value RefToJson(const PassageRef& ref);
     static PassageRef RefFromJson(const json::Value& node);
-    // Re-write the store with the current user data (mutex HELD; no-op without
-    // a store path — the unit-test default keeps everything in memory).
-    Result<void> SaveUserDataLocked();
+    // Records that the sidecar is now the user data's home: from here on the
+    // corpus document stops carrying the user-data arrays (schema 3). Flipped
+    // only AFTER a sidecar write succeeded, so a failed write can never be the
+    // reason a note disappears.
+    std::atomic<bool> userDataFileWritten_{ false };
+    // Set while installing a corpus that CARRIED the user data (schema <= 2):
+    // Initialize() then writes the sidecar from memory, once, off the lock.
+    std::atomic<bool> userDataFromCorpus_{ false };
 
     // Books for resolution: the target Bible's table, or the first installed
     // Bible's table when bibleId is empty.
@@ -189,11 +244,14 @@ private:
     std::thread reindexThread_;
     std::vector<std::shared_ptr<IBibleProvider>> providers_;
     std::map<std::string, BibleVersion, std::less<>> bibles_;
-    // Where the store lives: imported bibles AND user data (notes, highlights,
-    // collections — one JSON, one write-per-change). "" = persistence off
-    // (unit tests). Set by the Kernel boot before Initialize()'s restore
+    // Where the store lives: imported bibles (the CORPUS file). "" = persistence
+    // off (unit tests). Set by the Kernel boot before Initialize()'s restore
     // reads it.
     std::string storePath_;
+    // The user-data sidecar (<corpus>.userdata.json, e.g. bibles.userdata.json)
+    // — notes, highlights, collections, written on every mark. Derived from
+    // storePath_ ("" = off).
+    std::string userDataPath_;
     // User data — never inside Scripture (docs/specs/24 §User Data).
     std::map<std::string, std::vector<UserNote>, std::less<>> notes_;       // bible|ref
     std::map<std::string, std::vector<PassageRef>, std::less<>> highlights_; // bibleId

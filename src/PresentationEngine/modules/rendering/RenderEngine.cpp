@@ -645,12 +645,22 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
     auto scene = scenes_.GetScene(sceneId);
     if (!scene.ok()) return scene.error();
 
+    // The frame ITSELF and the two diagnostics events outlive the lock: the
+    // events are published after renderMutex_ is released (a subscriber may
+    // re-enter the engine, and this lock is held for a whole frame), so what
+    // they carry is read out here and the frame is handed back outside.
+    RgbaImage frame;
+    double frameMs = 0.0;
+    bool dropped = false;
+    uint32_t commandCount = 0;
+    uint64_t frameNumber = 0;
     // One frame at a time: the backend framebuffer and the lazy texture uploads
     // (DrawObject → gpu_.AcquireTexture) are not safe under concurrent renders.
+    {
     std::lock_guard<std::mutex> frameLock(renderMutex_);
 
     const auto frameStart = std::chrono::steady_clock::now();
-    const uint64_t frameNum = frameCounter_.fetch_add(1) + 1;
+    frameNumber = frameCounter_.fetch_add(1) + 1;
     scene.value()->BumpFrame();
 
     // Layout: size the backend to the scene.
@@ -742,7 +752,6 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
     if (auto r = backend_->EndFrame(); !r.ok()) return r.error();
 
     // Readback + distribute to outputs.
-    RgbaImage frame;
     if (opts.capture || opts.distribute) {
         auto rb = backend_->Readback();
         if (!rb.ok()) return rb.error();
@@ -754,7 +763,7 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
     if (opts.distribute) {
         Frame out;
         out.sceneId = std::string(sceneId);
-        out.frame = frameNum;
+        out.frame = frameNumber;
         out.width = frame.width;
         out.height = frame.height;
         out.pixels = frame.pixels;
@@ -767,18 +776,21 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
     // Diagnostics + frame budget (60 FPS target ⇒ 16.67 ms; drops logged).
     const auto frameEnd = std::chrono::steady_clock::now();
     lastFrameMs_ = std::chrono::duration<double, std::milli>(frameEnd - frameStart).count();
-    if (lastFrameMs_ > 16.67) {
-        ++frameDrops_;
-        (void)EventBus::Instance().Publish(events::RenderFrameDropped{
-            std::string(sceneId), lastFrameMs_, 16.67});
-    }
+    frameMs = lastFrameMs_;
+    dropped = frameMs > 16.67;
+    if (dropped) ++frameDrops_;
     uploader_.Pump();
     frameGraph_.BeginFrame();
     frameGraph_.EndFrame();
+    commandCount = static_cast<uint32_t>(cmds.size());
+    }   // renderMutex_ released here
 
+    // Published with the render lock RELEASED (see the note where it is taken).
+    if (dropped)
+        (void)EventBus::Instance().Publish(events::RenderFrameDropped{
+            std::string(sceneId), frameMs, 16.67});
     (void)EventBus::Instance().Publish(events::RenderFrameRendered{
-        std::string(sceneId), frameNum, lastFrameMs_,
-        static_cast<uint32_t>(cmds.size())});
+        std::string(sceneId), frameNumber, frameMs, commandCount});
     return frame;
 }
 

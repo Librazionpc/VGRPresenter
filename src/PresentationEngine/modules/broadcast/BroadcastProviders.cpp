@@ -588,21 +588,35 @@ public:
     ProviderKind Kind() const noexcept override { return ProviderKind::Sdi; }
 
     Result<ProviderState> Probe() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (libHandle_) return ProviderState::Available;
-        auto r = LoadApi();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (libHandle_) return ProviderState::Available;
+        }
+        // The load itself is a PAL call (a DLL load and symbol lookup can block on
+        // a slow disk or share) and runs OUTSIDE the lock — see LoadApi.
+        auto r = EnsureApi();
         if (!r.ok()) return r.error();
         return ProviderState::Available;
     }
 
     std::vector<SdiDeviceInfo> EnumerateSdiDevices() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // The vendor SDK's own calls below are FOREIGN code — the iterator, the
+        // per-device name query and the releases all talk to the capture hardware
+        // and can block — so the lock is taken only long enough to read the
+        // function pointer out, and the enumeration runs unlocked. Same posture
+        // ShutdownProvider already takes for the DLL unload.
+        using CreateIteratorFn = long (*)(void**);
+        CreateIteratorFn createIterator = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto probe = EnsureApi();
+            if (!probe.ok()) return {};
+            createIterator = createIterator_;
+        }
         std::vector<SdiDeviceInfo> out;
-        auto probe = EnsureApi();
-        if (!probe.ok()) return out;
-        if (!createIterator_) return out;
+        if (!createIterator) return out;
         void* iterRaw = nullptr;
-        long hr = createIterator_(&iterRaw);
+        long hr = createIterator(&iterRaw);
         if (hr != kSdkOk || !iterRaw) return out;
         auto* iter = static_cast<DeckLinkIterator*>(iterRaw);
         for (int idx = 0; ; ++idx) {
@@ -653,8 +667,15 @@ public:
     }
 
 private:
+    // Both of these take the lock ONLY around the member state they own: the
+    // vendor DLL load, the symbol lookup and the unload are PAL calls that can
+    // block, so they run outside it. (The old shape held the lock across them,
+    // and re-entered it from Probe — which is why the lock is not recursive.)
     Result<void> EnsureApi() {
-        if (libHandle_) return Ok();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (libHandle_) return Ok();
+        }
         return LoadApi();
     }
 
@@ -665,15 +686,19 @@ private:
         if (!h.ok())
             return Error::Make(Err::Broadcast_SdkLoadFailed, kSdiModule,
                                "DeckLink SDK not installed: " + h.error().message);
-        libHandle_ = h.value();
-        auto s = loader.Symbol(libHandle_, "CreateDeckLinkIteratorInstance");
+        auto handle = h.value();
+        auto s = loader.Symbol(handle, "CreateDeckLinkIteratorInstance");
         if (!s.ok()) {
-            (void)loader.Unload(libHandle_);
-            libHandle_ = nullptr;
+            (void)loader.Unload(handle);
             return Error::Make(Err::Broadcast_SdkLoadFailed, kSdiModule,
                                "DeckLink SDK present but iterator entry point missing");
         }
-        createIterator_ = reinterpret_cast<CreateIteratorFn>(s.value());
+        auto iterator = reinterpret_cast<CreateIteratorFn>(s.value());
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            libHandle_ = handle;
+            createIterator_ = iterator;
+        }
         return Ok();
     }
 

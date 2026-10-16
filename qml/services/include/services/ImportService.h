@@ -60,10 +60,18 @@ public:
     Q_INVOKABLE QVariantMap importText(const QString &text, const QString &name = QString(),
                                        const QString &category = QString());
     // The same, reading the text from the clipboard.
-    Q_INVOKABLE QVariantMap importClipboard();
+    // ASYNC: the PAL's clipboard open WAITS OUT another process's write (a
+    // screenshot posts a full-screen bitmap, which takes a moment), and a
+    // screenshot's PNG encode is tens of megabytes of pixels — so the read and
+    // the encode run on a worker and the answer arrives on clipboardImported.
+    // The library notify and the emits still happen on the interface thread.
+    Q_INVOKABLE void importClipboard();
 
 signals:
     void imported(int shows, int bibles);
+    // The answer to importClipboard: the same map importText/finish build,
+    // delivered when the worker's read (and any screenshot save) is done.
+    void clipboardImported(const QVariantMap &result);
     // The full answer of a finished importFiles run (same map finish() builds).
     void finished(const QVariantMap &answer);
     // One per show saved during the sweep (drives the progress bar).
@@ -73,6 +81,10 @@ signals:
 
 private:
     explicit ImportService(QObject *parent = nullptr);
+    // What the clipboard read produced (defined in the .cpp): the worker's
+    // whole answer, carried by value to the interface thread.
+    struct ClipboardPick;
+    void applyClipboardRead(const ClipboardPick &pick);
     void setProgress(qreal fraction, const QString &status);
 
     bool m_busy = false;

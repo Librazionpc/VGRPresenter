@@ -466,9 +466,9 @@ void TestBiblePersistence() {
 
 // ---------------------------------------------------------------------------
 // User-data persistence: notes, highlights, and collections survive a full
-// engine restart when a store path is set (they ride the same JSON file as
-// the bibles, schema 2) and stay in memory without one — the parity The
-// Table's library has had all along (docs/specs/24 §User Data).
+// engine restart when a store path is set (they ride their OWN file beside the
+// corpus — bibles.userdata.json, schema 3) and stay in memory without one — the parity
+// The Table's library has had all along (docs/specs/24 §User Data).
 // ---------------------------------------------------------------------------
 void TestBibleUserDataPersist() {
     auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
@@ -500,8 +500,9 @@ void TestBibleUserDataPersist() {
     CHECK(eng.AddCollection("Advent").ok());
     CHECK(eng.AddToCollection("Advent", colRef.value()).ok());
 
-    // The user-data save rewrites the ONE store file, so the bible itself
-    // must still read back (the disk-merge kept its bibles array).
+    // The mark wrote its OWN file: the sidecar holds the notes, and the corpus
+    // is left exactly as the import wrote it (the bible must still read back).
+    CHECK(fs.Exists(root + "/bibles.userdata.json"));
     CHECK(fs.Exists(store));
     CHECK(eng.BibleCount() == 1);
     CHECK(eng.Metadata("PRZ").ok() && eng.Metadata("PRZ").value().name == "Userdata Bible");
@@ -552,6 +553,312 @@ void TestBibleUserDataPersist() {
     CHECK(eng.Start().ok());
     CHECK(eng.BibleCount() == 0);
     CHECK(eng.Notes("PRZ").value().empty());
+
+    CHECK(eng.Stop().ok());
+    CHECK(eng.Shutdown().ok());
+    (void)fs.RemoveAll(root);
+}
+
+// ---------------------------------------------------------------------------
+// A MARK ON A VERSE WRITES THE SIDECAR, NOT THE CORPUS.
+//
+// setNote/setHighlighted are Q_INVOKABLE on a QML singleton, so their cost is
+// the INTERFACE thread's, and the path used to be: read the corpus from disk,
+// parse it (megabytes of verse text — a real dev store is 5.8 MB for one Bible)
+// and write it back, all under the engine lock every scripture read takes. The
+// guarantee this test pins is the cheap one to check and the expensive one to
+// lose: after the schema-3 switch a mark touches ONE small file, and the corpus
+// must be BYTE-IDENTICAL afterwards — not merely re-readable, because a rewrite
+// that happened to produce the same bytes would still have paid the parse, the
+// write and the lock.
+// ---------------------------------------------------------------------------
+void TestBibleMarkWritesOnlyTheSidecar() {
+    auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    const std::string root = "/tmp/bps_bible_mark_scope";
+    const std::string store = root + "/bibles.json";
+    const std::string sidecar = root + "/bibles.userdata.json";
+    (void)fs.RemoveAll(root);
+
+    auto& eng = bb::BibleEngine::Instance();
+    const char* xml =
+        "<bible abbrev=\"PRZ\" name=\"Mark Bible\">"
+        "<book bnum=\"1\" bsname=\"GEN\" bname=\"Genesis\">"
+        "<chapter number=\"1\">"
+        "<verse number=\"1\">In the beginning God created the heaven and the earth.</verse>"
+        "<verse number=\"2\">And the earth was without form and void.</verse>"
+        "<verse number=\"3\">And God said, Let there be light.</verse>"
+        "</chapter></book></bible>";
+
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.Start().ok());
+    eng.SetStorePath(store);
+    CHECK(eng.Import(xml, "xml", bb::ImportOptions{std::string("PRZ"), std::string(), false, false}).ok());
+    CHECK(fs.Exists(store));
+    // No mark has happened yet: no sidecar, so the corpus is still the data's
+    // only home and carries the (empty) user-data arrays.
+    CHECK(!fs.Exists(sidecar));
+    auto corpusBefore = fs.ReadText(store);
+    CHECK(corpusBefore.ok());
+
+    // ---- a note: the sidecar appears, the corpus does not move a byte ----
+    auto ref = eng.ResolveReference("Genesis 1:1", "PRZ");
+    CHECK(ref.ok());
+    CHECK(eng.AddNote("PRZ", ref.value(), "mark me").ok());
+    CHECK(fs.Exists(sidecar));
+    auto corpusAfter = fs.ReadText(store);
+    CHECK(corpusAfter.ok() && corpusAfter.value() == corpusBefore.value());
+    // The sidecar carries the note and NO verse text (it is kilobytes, not the
+    // corpus: that is the whole point of the split).
+    auto side = fs.ReadText(sidecar);
+    CHECK(side.ok() && side.value().find("mark me") != std::string::npos);
+    CHECK(side.ok() && side.value().find("In the beginning") == std::string::npos);
+
+    // ---- and a highlight rides the same file, leaving the corpus alone ----
+    auto hi = eng.ResolveReference("Genesis 1:2", "PRZ");
+    CHECK(hi.ok());
+    CHECK(eng.SetHighlight("PRZ", hi.value(), true).ok());
+    auto corpusStill = fs.ReadText(store);
+    CHECK(corpusStill.ok() && corpusStill.value() == corpusBefore.value());
+
+    // ---- restart: the sidecar is the home and both marks come back ----
+    CHECK(eng.Stop().ok());
+    CHECK(eng.Shutdown().ok());
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.Start().ok());
+    auto notes = eng.Notes("PRZ", ref.value());
+    CHECK(notes.ok() && notes.value().size() == 1);
+    CHECK(notes.ok() && notes.value().front().text == "mark me");
+    CHECK(eng.Highlights("PRZ").value().size() == 1);
+
+    // ---- a CORPUS write now stops carrying user data (schema 3) ----
+    CHECK(eng.RemoveBible("PRZ").ok());
+    auto corpusFinal = fs.ReadText(store);
+    CHECK(corpusFinal.ok() && corpusFinal.value().find("\"notes\"") == std::string::npos);
+    CHECK(eng.BibleCount() == 0);
+
+    CHECK(eng.Stop().ok());
+    CHECK(eng.Shutdown().ok());
+    (void)fs.RemoveAll(root);
+}
+
+// ---------------------------------------------------------------------------
+// WHAT A MARK COSTS, IN MILLISECONDS — the number the sidecar split is FOR.
+//
+// The test above pins the cheap-to-check half (one small file, corpus
+// byte-identical). This one puts a wall-clock figure on it, because "a mark no
+// longer rewrites the corpus" is a claim about TIME: setNote/setHighlighted are
+// Q_INVOKABLE on a QML singleton, so their cost is the interface thread's, and
+// what the operator feels is milliseconds, not bytes.
+//
+// Measured on a corpus the size of a real one (the dev store is 5.8 MB for one
+// Bible), the two numbers are the evidence, side by side:
+//   * `corpus rewrite` — read the store and write it back: what the OLD path
+//     paid per mark (it read the corpus, parsed it and rewrote it, all under the
+//     engine lock every scripture read takes);
+//   * `mark` — what the path pays now (build the sidecar JSON, write kilobytes).
+//
+// The bounds are deliberately loose — a wall-clock figure on a shared machine is
+// evidence, not a specification — and are there only to catch a regression back
+// to the corpus write: the mark must come in far under the rewrite, and under a
+// bound a multi-megabyte rewrite cannot meet by accident. The printed figures
+// are the real output (stderr, greppable as `[mark-timing]`).
+// ---------------------------------------------------------------------------
+void TestBibleMarkTiming() {
+    auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    const std::string root = "/tmp/bps_bible_mark_timing";
+    const std::string store = root + "/bibles.json";
+    const std::string sidecar = root + "/bibles.userdata.json";
+    (void)fs.RemoveAll(root);
+
+    // A corpus of ordinary proportions: 66 books x 20 chapters x 26 verses,
+    // verses of realistic length. (~4 MB on disk, ~34,000 verses.)
+    const std::string verseText =
+        "And it came to pass in those days, when there was no king in Israel, that the word "
+        "of the Lord was precious, and there was no open vision among the people. ";
+    std::string xml = "<bible abbrev=\"TMR\" name=\"Timing Bible\">";
+    std::string book;
+    for (int b = 1; b <= 66; ++b) {
+        book = "<book bnum=\"" + std::to_string(b) + "\" bsname=\"B" + std::to_string(b) +
+               "\" bname=\"Book " + std::to_string(b) + "\">";
+        for (int c = 1; c <= 20; ++c) {
+            book += "<chapter number=\"" + std::to_string(c) + "\">";
+            for (int v = 1; v <= 26; ++v)
+                book += "<verse number=\"" + std::to_string(v) + "\">" + verseText + "</verse>";
+            book += "</chapter>";
+        }
+        book += "</book>";
+        xml += book;
+    }
+    xml += "</bible>";
+
+    auto& eng = bb::BibleEngine::Instance();
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.Start().ok());
+    eng.SetStorePath(store);
+    CHECK(eng.Import(xml, "xml",
+                     bb::ImportOptions{std::string("TMR"), std::string(), false, false})
+              .ok());
+    std::string().swap(xml);   // the corpus is on disk now; the string is not the point
+
+    auto corpus = fs.ReadText(store);
+    CHECK(corpus.ok());
+    const size_t corpusBytes = corpus.value().size();
+    CHECK(corpusBytes > 1000000);   // the corpus has to be worth measuring
+
+    const auto now = [] { return std::chrono::steady_clock::now(); };
+    const auto us = [](auto a) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(a).count();
+    };
+
+    // ---- what the old path paid: read the corpus, write it back ----
+    long long rewriteUs = 0;
+    for (int i = 0; i < 3; ++i) {
+        const auto t0 = now();
+        auto text = fs.ReadText(store);
+        CHECK(text.ok());
+        CHECK(fs.WriteAtomic(store, text.value()).ok());
+        rewriteUs += us(now() - t0) / 3;
+    }
+
+    // ---- what a mark pays now: toggle a highlight on and off, 20 times ----
+    auto ref = eng.ResolveReference("Genesis 1:1", "TMR");
+    CHECK(ref.ok());
+    const int kMarks = 20;
+    long long markTotalUs = 0;
+    long long markWorstUs = 0;
+    const auto before = fs.ReadText(store);
+    for (int i = 0; i < kMarks; ++i) {
+        const auto t0 = now();
+        CHECK(eng.SetHighlight("TMR", ref.value(), i % 2 == 0).ok());
+        const long long one = us(now() - t0);
+        markTotalUs += one;
+        if (one > markWorstUs) markWorstUs = one;
+    }
+    const long long markUs = markTotalUs / kMarks;
+
+    // The corpus did not move a byte through any of the marks (the same guarantee
+    // the other test pins by content; here it also means the timing above is the
+    // mark path and nothing else).
+    const auto after = fs.ReadText(store);
+    CHECK(after.ok() && before.ok() && after.value() == before.value());
+
+    // ---- the engine's own numbers agree with the file (the log line is not a
+    // separate claim: it reports these) ----
+    auto side = fs.ReadText(sidecar);
+    CHECK(side.ok());
+    const auto stats = eng.LastUserDataWrite();
+    CHECK(stats.writes >= static_cast<size_t>(kMarks));
+    CHECK(stats.lastWriteMs >= 0 && stats.lastBuildMs >= 0);
+    CHECK(stats.lastWriteBytes == side.value().size());
+
+    std::fprintf(stderr,
+                 "[mark-timing] corpus %.2f MB, sidecar %.1f KB | corpus rewrite %.1f ms | "
+                 "mark %.3f ms (worst %.3f ms) | ratio %.0fx\n",
+                 static_cast<double>(corpusBytes) / (1024.0 * 1024.0),
+                 static_cast<double>(side.value().size()) / 1024.0,
+                 static_cast<double>(rewriteUs) / 1000.0,
+                 static_cast<double>(markUs) / 1000.0,
+                 static_cast<double>(markWorstUs) / 1000.0,
+                 static_cast<double>(rewriteUs) / static_cast<double>(markUs ? markUs : 1));
+
+    // A mark must be far cheaper than the rewrite it replaced, and cheap enough
+    // in absolute terms that no corpus write of this size can be hiding in it.
+    // The margin is 3x, not the 12x measured here: this number is evidence from a
+    // shared machine (a background build moves it), and the point of the bound is
+    // to catch the regression — a mark that reads, parses or rewrites the corpus
+    // again lands at or above the rewrite — not to re-state the speedup. The real
+    // figure is the one printed above.
+    CHECK(markUs * 3 < rewriteUs);
+    CHECK(markUs < 50000);   // < 50 ms on the interface thread
+    // The sidecar is kilobytes; the corpus is megabytes. If those ever swap, the
+    // split has been undone whatever the timings say.
+    CHECK(side.value().size() * 100 < corpusBytes);
+
+    CHECK(eng.Stop().ok());
+    CHECK(eng.Shutdown().ok());
+    (void)fs.RemoveAll(root);
+}
+
+// ---------------------------------------------------------------------------
+// The schema-2 -> schema-3 MIGRATION: a store an older build left behind has
+// the user data INSIDE the corpus. The boot must read it from there, write the
+// sidecar, and keep the notes across restarts — without ever losing them to a
+// failed write (which is why the corpus keeps carrying the data until the
+// sidecar write succeeds, and why this test checks the second restart too).
+// ---------------------------------------------------------------------------
+void TestBibleUserDataMigration() {
+    auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    const std::string root = "/tmp/bps_bible_usermigrate";
+    const std::string store = root + "/bibles.json";
+    const std::string sidecar = root + "/bibles.userdata.json";
+    (void)fs.RemoveAll(root);
+
+    auto& eng = bb::BibleEngine::Instance();
+    const char* xml =
+        "<bible abbrev=\"PRZ\" name=\"Migration Bible\">"
+        "<book bnum=\"1\" bsname=\"GEN\" bname=\"Genesis\">"
+        "<chapter number=\"1\">"
+        "<verse number=\"1\">In the beginning God created the heaven and the earth.</verse>"
+        "<verse number=\"2\">And the earth was without form and void.</verse>"
+        "</chapter></book></bible>";
+
+    // ---- an older build's store: the corpus plus the user-data arrays in it
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.Start().ok());
+    eng.SetStorePath(store);
+    CHECK(eng.Import(xml, "xml", bb::ImportOptions{std::string("PRZ"), std::string(), false, false}).ok());
+    auto base = fs.ReadText(store);
+    CHECK(base.ok());
+    const size_t close = base.value().find_last_of('}');
+    CHECK(close != std::string::npos);
+    const std::string legacy = base.value().substr(0, close)
+        + ",\"notes\":[{\"bible\":\"PRZ\",\"id\":\"note-legacy\",\"ref\":{\"bookId\":\"GEN\","
+          "\"chapter\":1,\"verseStart\":1,\"verseEnd\":1},\"text\":\"from the old file\","
+          "\"createdMs\":1,\"modifiedMs\":1}]"
+        + ",\"highlights\":[{\"bible\":\"PRZ\",\"ref\":{\"bookId\":\"GEN\",\"chapter\":1,"
+          "\"verseStart\":2,\"verseEnd\":2}}]}";
+    CHECK(fs.WriteAtomic(store, legacy).ok());
+    CHECK(!fs.Exists(sidecar));
+
+    // ---- boot: the corpus's user data is read from there and migrated out ----
+    CHECK(eng.Stop().ok());
+    CHECK(eng.Shutdown().ok());
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.Start().ok());
+    CHECK(eng.BibleCount() == 1);
+    auto ref = eng.ResolveReference("Genesis 1:1", "PRZ");
+    auto hiRef = eng.ResolveReference("Genesis 1:2", "PRZ");
+    CHECK(ref.ok() && hiRef.ok());
+    auto migrated = eng.Notes("PRZ", ref.value());
+    CHECK(migrated.ok() && migrated.value().size() == 1);
+    CHECK(migrated.ok() && migrated.value().front().text == "from the old file");
+    CHECK(eng.Highlights("PRZ").value().size() == 1);
+    CHECK(fs.Exists(sidecar));   // the migration wrote the sidecar at boot
+    auto side = fs.ReadText(sidecar);
+    CHECK(side.ok() && side.value().find("from the old file") != std::string::npos);
+
+    // ---- a second restart reads the SIDECAR (and does not rewrite it) ----
+    CHECK(eng.Stop().ok());
+    CHECK(eng.Shutdown().ok());
+    CHECK(eng.Initialize().ok());
+    CHECK(eng.Start().ok());
+    auto again = eng.Notes("PRZ", ref.value());
+    CHECK(again.ok() && again.value().size() == 1);
+    CHECK(again.ok() && again.value().front().text == "from the old file");
+    CHECK(eng.Highlights("PRZ").value().size() == 1);
+    auto sideAgain = fs.ReadText(sidecar);
+    CHECK(sideAgain.ok() && sideAgain.value() == side.value());
+
+    // ---- no corpus WRITE happened in between: the file is byte-identical to
+    // the legacy document we planted, stale user-data copy and all (that copy is
+    // dead weight, not drift — the sidecar wins on every read) ----
+    auto corpus = fs.ReadText(store);
+    CHECK(corpus.ok() && corpus.value() == legacy);
+
+    // ---- and the next corpus write is the one that drops the stale copy ----
+    CHECK(eng.RemoveBible("PRZ").ok());
+    auto pruned = fs.ReadText(store);
+    CHECK(pruned.ok() && pruned.value().find("\"notes\"") == std::string::npos);
 
     CHECK(eng.Stop().ok());
     CHECK(eng.Shutdown().ok());
@@ -890,4 +1197,47 @@ void TestBookFill() {
           && !pf::FamilyAnswersToken(pf::ContentFamily::Table, "nonsense_token")
           && !pf::FamilyAnswersToken(pf::ContentFamily::Table, "table_code_paragraph")   // a typo, not a key
           && !pf::FamilyAnswersToken(pf::ContentFamily::Scripture, "scripture_texts"));
+
+    // ---- ONE ITEM OF A CHAPTER, WITHOUT READING THE CHAPTER AGAIN ----------------
+    //
+    // The chapter a tab cuts ahead of a click (SlideBuilder::warmChapter) is read ONCE,
+    // and each of its items is narrowed out of that one read. The narrowing must answer
+    // exactly what a per-item read would have — a warm split and a click that missed the
+    // warm can never be allowed to disagree. The subtle half is the parallel columns: a
+    // version that does not carry the item contributes NO column at all, which is what
+    // the per-item read reports too (it drops a column it filtered to nothing).
+    {
+        pf::BookSource chapter = src;
+        chapter.items = { verse(1, "One."), verse(2, "Two."), verse(3, "Three.") };
+        pf::ParallelBible other;
+        other.name = "Other Version (OTH)";
+        other.bookAbbr = "OTH";
+        other.items = { verse(1, "Uno."), verse(3, "Tres.") };   // no wording for verse 2
+        chapter.parallels = { other };
+        CHECK(pf::ItemOf(chapter, 2).items.size() == 1 && pf::ItemOf(chapter, 2).items[0].text == "Two.");
+        CHECK(pf::ItemOf(chapter, 2).parallels.empty());           // dropped, not left empty
+        CHECK(pf::ItemOf(chapter, 3).parallels.size() == 1
+              && pf::ItemOf(chapter, 3).parallels[0].items.size() == 1
+              && pf::ItemOf(chapter, 3).parallels[0].items[0].text == "Tres.");
+        // the chapter's own facts (the book, the version, the family) travel with the item
+        CHECK(pf::ItemOf(chapter, 2).book == chapter.book
+              && pf::ItemOf(chapter, 2).versionName == chapter.versionName
+              && pf::ItemOf(chapter, 2).family == chapter.family);
+        // an item the chapter does not have is nothing to fill, not a broken slide
+        CHECK(pf::ItemOf(chapter, 99).items.empty());
+        // ...and the SLICE FILLS AS THE PER-ITEM READ DOES — the assertion the whole
+        // warm split rests on: same slides, same text, same reference.
+        pf::BookSource singleItem = chapter;
+        singleItem.items = { chapter.items[1] };
+        singleItem.parallels.clear();
+        const auto fromSlice = pf::FillBookSlides(tmpl, pf::ItemOf(chapter, 2), {});
+        const auto fromRead = pf::FillBookSlides(tmpl, singleItem, {});
+        CHECK(fromSlice.size() == 1 && fromRead.size() == 1);
+        if (!fromSlice.empty() && !fromRead.empty()) {
+            CHECK(fromSlice[0].blocks[0].text == fromRead[0].blocks[0].text);
+            CHECK(fromSlice[0].blocks[1].text == fromRead[0].blocks[1].text);
+            CHECK(fromSlice[0].body == fromRead[0].body);
+            CHECK(fromSlice[0].reference == fromRead[0].reference);
+        }
+    }
 }

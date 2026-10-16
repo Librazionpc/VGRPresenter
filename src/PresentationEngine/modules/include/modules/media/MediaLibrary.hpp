@@ -106,14 +106,25 @@ public:
     std::vector<LibraryItem> Search(std::string_view text, std::string_view folder = {}) const;
 
 private:
-    Result<void> Save() const;
+    // SPLIT IN TWO ON PURPOSE (the lock-scope rule this module was breaking):
+    // BuildFoldersJsonLocked runs with mutex_ HELD and is pure serialization;
+    // CommitFolders does the PAL write and is called with the lock RELEASED. They
+    // used to be one helper (Save) called from inside the mutators' locked scope.
+    std::string BuildFoldersJsonLocked() const;
+    // Writes the folder list. PAL: NEVER call with mutex_ held. "" / no store
+    // path is a no-op.
+    Result<void> CommitFolders(const std::string& json) const;
     // Writes the remembered index of what is in each folder. Best effort: failing to keep it
-    // only costs a slower next start.
+    // only costs a slower next start. PAL: call with the lock RELEASED.
     void SaveIndex(const std::string& text) const;
     std::string BuildIndexLocked() const;   // the index as JSON; mutex_ must be held
-    // The library's own spelling of `path` if it is a folder in the library (comparison
-    // ignores case and separator style), else empty.
-    std::string Canonical(std::string_view path) const;
+    // The comparison key of `path` (Absolute, then case/separator folding). PAL:
+    // resolving the path is a filesystem call, so it runs with NO lock held.
+    std::string CanonicalKey(std::string_view path) const;
+    // The library's own spelling of the folder whose KEY matches (comparison
+    // ignores case and separator style), else empty. Pure in-memory lookup, safe
+    // under the lock — this is the half of the old Canonical() that may run there.
+    std::string MatchKey(const std::string& key) const;
 
     std::string storageFile_;
     std::string indexFile_;    // beside storageFile_

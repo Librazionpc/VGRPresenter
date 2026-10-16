@@ -225,8 +225,10 @@ Result<void> RecordingEngine::Shutdown() {
     }
     // Stop() finalizes containers; give it a lock-free window.
     (void)Stop();
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // Bus work (unsubscribing), so it runs with NO engine lock held: a
+    // subscriber that re-enters this engine would otherwise wait on mutex_.
     UnwireEvents();
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     sessions_.clear();
     replays_.clear();
     connectedDevices_.clear();
@@ -1306,6 +1308,11 @@ Result<void> RecordingEngine::Tick(int64_t advanceMs) {
     // Replay buffers that just became ready, published AFTER the lock closes.
     struct ReadyPing { std::string rid, nodeId; int64_t capacityMs; };
     std::vector<ReadyPing> replayReady;
+    // Scheduled work that came due: taken out of the schedule under the lock and
+    // RUN after it closes — StartRecording/StopRecording open and close provider
+    // containers (docs/specs/28 §38).
+    std::vector<std::pair<std::string, std::string>> dueStarts;
+    std::vector<std::string> dueStops;
     {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!running_.load())
@@ -1343,16 +1350,21 @@ Result<void> RecordingEngine::Tick(int64_t advanceMs) {
     // Scheduled starts/stops (docs/specs/28 §38).
     auto sit = scheduledStarts_.begin();
     while (sit != scheduledStarts_.end() && sit->first <= now) {
-        auto [pid, nid] = sit->second;
-        (void)StartRecording(pid, nid);
+        dueStarts.push_back(sit->second);
         sit = scheduledStarts_.erase(sit);
     }
     auto sop = scheduledStops_.begin();
     while (sop != scheduledStops_.end() && sop->first <= now) {
-        (void)StopRecording(sop->second, "scheduled");
+        dueStops.push_back(sop->second);
         sop = scheduledStops_.erase(sop);
     }
     }   // release mutex_ — provider calls below must not run under it
+
+    // Scheduled work that came due: run here, with the lock released (both open
+    // or close a provider container — real work, and re-entrant into this
+    // engine, which is exactly what must not happen under mutex_).
+    for (const auto& [pid, nid] : dueStarts) (void)StartRecording(pid, nid);
+    for (const auto& id : dueStops) (void)StopRecording(id, "scheduled");
 
     // Replay-ready notices: dispatched here, with mutex_ released, like every
     // other bus dispatch in this engine.

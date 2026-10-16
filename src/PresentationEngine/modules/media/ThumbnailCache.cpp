@@ -89,32 +89,49 @@ Result<std::string> ThumbnailCache::Ensure(std::string_view mediaPathView, Media
     const std::string outPath = CachePath(mediaPath, size, step);
     if (Fresh(outPath, mediaPath)) return outPath;
 
-    std::unique_lock<std::mutex> lock(mutex_);
-    // Someone else is already making this exact picture: wait for them, then use theirs.
-    while (inFlight_.count(outPath)) cv_.wait(lock);
-    if (Fresh(outPath, mediaPath)) return outPath;
+    // THE LOCK ONLY GUARDS THE BOOKKEEPING. Every PAL call in this function —
+    // both freshness probes, the stale-file remove and Generate() itself — runs
+    // with mutex_ RELEASED. It used to be one lock held across all of them (the
+    // decode is the slowest thing here, and the interface thread asks for
+    // thumbnails), which is the shape the lock-scope guard exists for.
+    //
+    // The loop is the dedupe, kept exactly as it was: wait for anyone already
+    // making this picture, look again (their file may be the answer now), and
+    // only then claim it — atomically with the in-flight check that the claim
+    // depends on.
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            // Someone else is already making this exact picture: wait for them.
+            while (inFlight_.count(outPath)) cv_.wait(lock);
+        }
+        if (Fresh(outPath, mediaPath)) return outPath;   // theirs landed while we waited
 
-    if (auto failed = failedAt_.find(outPath); failed != failedAt_.end()) {
-        if (std::chrono::steady_clock::now() - failed->second < kRetryAfterFailure)
-            return Error::Make(Err::IoError, kModule, "this picture could not be made a moment ago");
-        failedAt_.erase(failed);
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (inFlight_.count(outPath)) continue;   // claimed between the probe and here
+        if (auto failed = failedAt_.find(outPath); failed != failedAt_.end()) {
+            if (std::chrono::steady_clock::now() - failed->second < kRetryAfterFailure)
+                return Error::Make(Err::IoError, kModule, "this picture could not be made a moment ago");
+            failedAt_.erase(failed);
+        }
+        inFlight_.insert(outPath);
+        cv_.wait(lock, [this] { return active_ < maxConcurrent_; });   // a free decode slot
+        ++active_;
+        lock.unlock();
+        break;
     }
-
-    inFlight_.insert(outPath);
-    cv_.wait(lock, [this] { return active_ < maxConcurrent_; });   // a free decode slot
-    ++active_;
-    lock.unlock();
 
     (void)fs.Remove(outPath);   // stale (older than its source), or absent
     Result<void> made = Generate(mediaPath, kind, size, step, outPath);
 
-    lock.lock();
-    --active_;
-    inFlight_.erase(outPath);
-    if (made.ok()) failedAt_.erase(outPath);
-    else failedAt_[outPath] = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        --active_;
+        inFlight_.erase(outPath);
+        if (made.ok()) failedAt_.erase(outPath);
+        else failedAt_[outPath] = std::chrono::steady_clock::now();
+    }
     cv_.notify_all();
-    lock.unlock();
 
     if (!made.ok()) return made.error();
     return outPath;

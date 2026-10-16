@@ -58,6 +58,31 @@ class EngineBridge : public QObject
     // also surfaces as a toast), or a failure would leave the splash up
     // forever.
     Q_PROPERTY(QString bootError READ bootError NOTIFY bootErrorChanged)
+    // ---- The startup forensics verdict (see CrashHandler.h) ------------------
+    // Whether THIS machine's crash/hang capture chain actually runs, checked at
+    // every launch by VerifyForensicsTooling(). It is here, next to the other
+    // verdicts about a launch (bootError, bootLog, health), because this is the
+    // object CrashHandler already reports its one line through — and because
+    // the log line is not enough: a crash that produced no evidence is read by
+    // nobody, and the person who can say "this one left no trace" is the one in
+    // front of the screen.
+    //
+    // "checking"   the probe is still running. It STARTS a debugger and waits
+    //              for it to answer, so it is never immediate — this is the
+    //              state at first paint, normally for a few hundred ms.
+    // "ready"      the chain works: a crash or hang from this run can be
+    //              captured and read.
+    // "incomplete" it does not. crashToolingProblem names the broken parts and
+    //              what each one costs.
+    // "skipped"    the probe was switched off for this launch
+    //              (VGR_SKIP_FORENSICS_CHECK), so nothing is known either way —
+    //              a different answer from "still looking".
+    Q_PROPERTY(QString crashToolingState READ crashToolingState NOTIFY crashToolingChanged)
+    // What is broken, in the probe's own words — the parts joined with "; " when
+    // several are (no bundled gdb and none on PATH, a debugger that cannot load,
+    // an empty analyze.bat, an unwritable crash folder). "" in every state but
+    // "incomplete".
+    Q_PROPERTY(QString crashToolingProblem READ crashToolingProblem NOTIFY crashToolingChanged)
     // Real hardware, enumerated by the engine's own platform layer (audio
     // via the PAL's IAudio — WinMM waveIn/waveOut on Windows — displays via
     // IMonitor) — the AV settings dialogs' device selects feed from these
@@ -173,6 +198,19 @@ public:
     Q_INVOKABLE QString bootError() const;
     Q_INVOKABLE QStringList bootLog() const;
     Q_INVOKABLE QString health() const;
+
+    // The forensics verdict as QML binds it (see the crashTooling* properties
+    // above). Plain member reads: the members have exactly ONE writer
+    // (publishCrashTooling below, on the interface thread), so a binding is not
+    // a place to wait for a lock.
+    QString crashToolingState() const { return crashToolingState_; }
+    QString crashToolingProblem() const { return crashToolingProblem_; }
+    // The probe's answer, handed over by CrashHandler.cpp's
+    // VerifyForensicsTooling(). INTERFACE THREAD ONLY: the probes themselves run
+    // on a worker (they spawn a process), and this is the queued hop that
+    // publishes the verdict they produced.
+    void publishCrashTooling(const QString &state, const QString &problems);
+
     // NOTE: there is no QML-side "which subsystems are degraded" list any more.
     // boot() replays one warning toast per degraded subsystem (see the
     // SubsystemDegraded replay below) and folds the count into bootSummary(),
@@ -195,9 +233,15 @@ public:
     // Re-enumerate the platform's audio + display devices (QML-invokable so
     // a screen can force a refresh when it opens). Safe before boot — yields
     // empty lists when the PAL has no backend installed.
+    //
+    // THREADS: the sweep is QUEUED (see enumerateDevicesOffThread) — this call
+    // decides (throttle, staleness, filter) and the engine workers make every
+    // device call, so a picker opening, a hot-plug or a display-mode change
+    // never walks hardware on the thread that draws.
     Q_INVOKABLE void refreshDevices();
     // Refresh only capture/render devices; does not enumerate cameras,
-    // displays, open windows, or network sources on the GUI thread.
+    // displays, open windows, or network sources on the GUI thread — nor on
+    // this one: the same queued sweep, behind the audio-only throttle.
     Q_INVOKABLE void refreshAudioDevices();
 
     // ---- The USED-device set (boot sweep filter) -------------------------
@@ -218,6 +262,8 @@ public:
     // should not be paid for at boot. A used device that is gone this time is
     // announced once (the missing-device notice), which is the other half of
     // remembering it.
+    // The boot sweep this may trigger is QUEUED like every other (see
+    // enumerateDevicesOffThread): handing the set over never walks hardware.
     Q_INVOKABLE void requestUsedDevices(const QStringList &audioLabels,
                                         const QStringList &videoLabels,
                                         const QStringList &displayNames);
@@ -245,6 +291,15 @@ public:
     // with no pick opened a real capture session on the default microphone,
     // lit the MonitorWall's audio button (anyInputMetering) and animated every
     // strip that reads a snapshot. A tap belongs to a device the user chose.
+    //
+    // THREADS: opening and closing a tap is a DEVICE call — StartInputMeter
+    // joins the endpoint's previous capture thread and starts a WASAPI session,
+    // StopInputMeter ends it — so only the bookkeeping stays on the caller's
+    // thread (the refcount, this thread's label table, the pump, the logout)
+    // and the device half is queued: resolveAndStartMeterOffThread here,
+    // stopInputMeterOffThread / stopAllInputMetersOffThread below. A refusal is
+    // marshalled back, so a device that says no still gets its reason into
+    // engine.log and leaves no phantom row behind.
     Q_INVOKABLE void startInputMeter(const QString &deviceLabel);
     // Stop one device's tap (identified by the label it was started with).
     Q_INVOKABLE void stopInputMeter(const QString &deviceLabel);
@@ -269,6 +324,11 @@ public:
     // PATH (the row's caption may be just a filename, so pass the path when the
     // row has one). A refused source (no such file, no NDI runtime) leaves the
     // row with NO tap — it meters silence, never a fabricated level.
+    //
+    // THREADS: the same split as the device meters above. The claim (which tap
+    // id, whether this row already has one, the refusal retry clock) is made
+    // here; the decoder open and close are queued — see
+    // openStreamTapOffThread / closeStreamTapOffThread.
     Q_INVOKABLE void startStreamMeter(const QString &label, const QString &kind,
                                       const QString &source = QString());
     // Release one row's stream tap (label-keyed, like the device meters).
@@ -288,10 +348,15 @@ public:
     // reconciles its own hold independently (mode re-picks, camera switches).
     // A start is idempotent per owner; the tap dies only when its LAST owner
     // releases. Defaults keep plain QML calls working.
-    // Returns whether the tap is (now) running — the internal card previews
-    // and LiveOutputService's take both surface a refused label honestly
-    // (the slashed "unreachable" state) instead of a placeholder that can
-    // never fill.
+    // 'Returns" means ACCEPTED: the label resolved from the cached roster and
+    // this owner's claim is recorded — the device open itself is queued to the
+    // engine worker (see openTapOffThread / §3.9 and §6.3 of
+    // docs/gui_thread_audit.md), because opening a camera or re-pointing a tap
+    // is a wait that belongs to the driver, not to the thread that draws. A
+    // label that cannot resolve is still refused HERE and now (false); a device
+    // that refuses a beat later reaches the QML layer as previewRefused(), so
+    // the card previews and LiveOutputService's take unwind then instead of
+    // parking a placeholder that can never fill.
     Q_INVOKABLE bool startVideoPreview(const QString &deviceLabel, const QString &mode,
                                        const QString &owner = QStringLiteral("dialog"));
     // Release one device's preview tap (label-keyed, like the meter taps).
@@ -308,9 +373,12 @@ public:
     // the vendor SDK); frames are pulled non-blocking on demand by
     // previewNdiFrameFor()/the videopreview provider and converted
     // UYVY/BGRA → RGBA, so QML's existing image pipeline needs no changes.
-    // Returns whether a receiver is (now) attached; a tap held while the
-    // NDI runtime is unavailable reports the refusal through its empty
-    // frames (the warm-up placeholder stays honest).
+    // Accepted-or-refused on the same terms as startVideoPreview: `true` means
+    // the claim is recorded and the receiver is being attached on the engine
+    // worker (the NDI runtime load is the wait being removed); a runtime that
+    // refuses it arrives as previewRefused(). Until then the tap simply has no
+    // receiver, so its frames stay empty and the warm-up placeholder stays
+    // honest — which is also what an unavailable runtime looks like today.
     Q_INVOKABLE bool startNdiPreview(const QString &sourceName,
                                      const QString &owner = QStringLiteral("dialog"));
     // Release one NDI receiver (label-keyed, like the camera taps). The
@@ -335,18 +403,21 @@ public:
     // monitor's roster label; frames flow through the same
     // image://videopreview/<label>?<nonce> provider path. The pane pumps
     // the nonce; the PAL BitBlts the monitor named by the resolved id.
-    // Returns whether the tap is (now) running — LiveOutputService's take
-    // surfaces a refused label honestly instead of showing a warm-up
-    // placeholder that can never fill.
+    // Accepted-or-refused on the same terms as startVideoPreview: resolving the
+    // label to a live window/monitor happens here (false if nothing answers to
+    // it), the tap's start happens on the engine worker, and a window that
+    // closed in between arrives as previewRefused() so the take unwinds a beat
+    // later instead of showing a warm-up placeholder that can never fill.
     Q_INVOKABLE bool startScreenPreview(const QString &monitorLabel,
-                                        const QString &owner = QStringLiteral("dialog"));    Q_INVOKABLE void stopScreenPreview(const QString &monitorLabel,
                                         const QString &owner = QStringLiteral("dialog"));
+    Q_INVOKABLE void stopScreenPreview(const QString &monitorLabel,
+                                       const QString &owner = QStringLiteral("dialog"));
     // QUIET reachability probe — the SAME resolution chain startScreenPreview
     // uses (cached roster → live windows → monitors; camera: cached roster →
     // live enumerate) but SILENT: the Media card previews gate their tap
     // start on this, so a CLOSED WINDOW shows the card's slashed "No signal"
     // state instead of toasting. GUI-thread only (like enumerateDevices).
-    Q_INVOKABLE bool inputSourceReachable(const QString &label, const QString &kind);
+    Q_INVOKABLE bool inputSourceReachable(const QString &label, const QString &kind);   // gui-ok: published state only — a media path is probed on the engine worker (mediaPathReachable), the rest is cached-roster scans, and the only PAL touch left is PlatformAccessor::Installed(), a static flag read
     // The current meter snapshots (label → { peaks[], rms[], channelCount,
     // layout, ... }) — the Media pane's audio cards read their device's
     // peaks for the live level state window (same list the AV dialogs use).
@@ -385,7 +456,7 @@ public:
     // screen with nothing anywhere to say why (see IVideo::PreviewFailure). Empty
     // for a label with no tap, and for NDI (its receiver reports through its
     // frames, not a reason).
-    Q_INVOKABLE QString previewFailure(const QString &deviceLabel);
+    Q_INVOKABLE QString previewFailure(const QString &deviceLabel);   // gui-ok: the PAL call is WindowsVideo::PreviewFailure, which try_locks the tap table and repeats its last answer keyed by a table generation — it never waits on a capture worker (§3.8)
     // THE STATUS LIGHT'S OWN PROBE — the cached roster first, and if that cannot
     // answer, a PING: one device refresh that NAMES this source, queued, so the
     // light comes right by itself. This is what "the probe gate should not affect
@@ -459,7 +530,18 @@ public:
     QString ndiVersion() const { return ndiVersion_; }
     QString ndiDownloadUrl() const;
     // The feature registry snapshot + the switch (see pluginFeatures).
+    //
+    // The snapshot is PUBLISHED, not read-through: `pluginFeatures_` has exactly
+    // one writer (refreshPluginFeaturesOffThread, on the interface thread, from
+    // the worker's walk of the runtime), so a binding re-evaluating this
+    // property reads a list this thread already owns instead of taking the
+    // AdaptiveRuntime's own lock (the read was the last engine-singleton fetch
+    // left in the bridge's property surface).
     QVariantList pluginFeatures() const;
+    // Re-walk the registry on the pool and publish + notify when it lands:
+    // called at boot, by the relay's replay and by the switch, in place of the
+    // emit that used to follow an inline read. Coalesced (one walk at a time).
+    void refreshPluginFeaturesOffThread();
     Q_INVOKABLE void setPluginFeatureEnabled(const QString &featureId, bool enabled);
     bool sdiAvailable() const { return sdiAvailable_; }
     QString sdiStatus() const { return sdiStatus_; }
@@ -475,13 +557,21 @@ public:
     // Windows shows it when the app first opens a listening socket, but a
     // missed/cancelled dialog silently blocks INBOUND NDI connections
     // forever (outbound receive keeps working — input w/o output). Runs the
-    // app once on the network profile with inbound rules added. Returns:
-    // "added" | "denied" | "failed" | "unavailable".
-    Q_INVOKABLE QString requestNdiFirewallAccess();
+    // app once on the network profile with inbound rules added.
+    //
+    // ASYNC, and both halves of that are device work: the probe is a hidden
+    // `netsh` child process and the add is an ELEVATED one, so neither belongs
+    // on the interface thread (see probeNdiFirewallOffThread). The answer comes
+    // back on ndiFirewallAccessResult with the vocabulary the return value used
+    // to carry: "added" | "allowed" | "prompt" | "denied" | "failed" |
+    // "unavailable".
+    Q_INVOKABLE void requestNdiFirewallAccess();
     // Did the elevated rule add from requestNdiFirewallAccess() land? The
-    // request returns "prompt" and the verdict arrives asynchronously (the
-    // user answers UAC) — the UI calls this from a short retry timer.
-    Q_INVOKABLE bool checkNdiFirewallRule();
+    // request answers "prompt" and the verdict arrives afterwards (the user
+    // answers UAC) — the UI asks this from a short retry timer, and the answer
+    // now lands on ndiFirewallRuleChecked(bool) instead of in a return value,
+    // because asking is one more `netsh` child process.
+    Q_INVOKABLE void checkNdiFirewallRule();
     // True once the ask has fired this SESSION (deliberately not persisted:
     // the firewall rule itself is the saved permission — see
     // requestNdiFirewallAccess; a refused OS prompt re-asks next session).
@@ -524,6 +614,8 @@ signals:
     void stackChanged();
     void bootedChanged();
     void bootErrorChanged();
+    // The startup forensics verdict arrived (or changed) — see crashToolingState.
+    void crashToolingChanged();
     // Fired for every ENGINE-side event relayed into the UI process — kernel
     // state changes, display/recording/render/media/broadcast failures and
     // recoveries, undo/redo performed, ... (the curated set in
@@ -556,12 +648,40 @@ signals:
     void ndiFirewallPromptedChanged();
     void audioMeteringChanged();
 
+    // ---- The queued NDI-firewall answers (see the two invokables) ----------
+    // ndiFirewallAccessResult carries the outcome the request used to return;
+    // ndiFirewallRuleChecked is the retry timer's verdict. Both are emitted on
+    // the interface thread, from the marshalled reply of the `netsh` job.
+    void ndiFirewallAccessResult(const QString &outcome);
+    void ndiFirewallRuleChecked(bool allowed);
+
+    // A queued tap OPEN came back refused (see openTapOffThread): the label resolved
+    // and the claim was recorded, but the device itself said no — a window that
+    // closed between the resolution and the open, a camera the driver would not
+    // hand over, an NDI receiver the runtime could not attach. `kind` is
+    // "camera"/"screen"/"ndi". This is the "accepted, then corrected" contract:
+    // the caller (LiveOutputService's take and card previews) has already
+    // published the take optimistically, and unwinds it here, a beat later, with
+    // the reason still readable from previewFailure(label).
+    void previewRefused(const QString &label, const QString &kind);
+
 private:
     explicit EngineBridge(QObject *parent = nullptr);
     Q_DISABLE_COPY(EngineBridge)
 
+    // The published feature-registry snapshot (see pluginFeatures): written ONLY
+    // by the marshalled answer in refreshPluginFeaturesOffThread, read by the
+    // property binding — this thread on both sides.
+    QVariantList pluginFeatures_;
+    std::atomic<bool> pluginFeaturesProbeBusy_{false};   // one walk in flight
+
     QString bootError_;
     QString bootSummary_;
+    // ---- The startup forensics verdict (see the crashTooling* properties) ----
+    // "checking" until the probe answers, so a Settings row opened before it
+    // does shows the wait rather than an empty verdict.
+    QString crashToolingState_ = QStringLiteral("checking");
+    QString crashToolingProblem_;
     QStringList bootInUse_;
     QString logPath_;
     QThreadPool deviceEnumerationPool_;
@@ -577,9 +697,48 @@ private:
     void startRelay();
     void stopRelay();
 
+    // ---- The OPEN half of a tap, split along the thread boundary ----------
+    // §3.9/§6.3 of docs/gui_thread_audit.md. A tap start is TWO jobs: the
+    // bridge's own bookkeeping (resolving the label from the cached roster, the
+    // owner/id/mode tables — all GUI-thread state the entry points and the
+    // previews' readers share) and the DEVICE call. The bookkeeping stays on the
+    // caller's thread; the device call is QUEUED here, because what the interface
+    // thread must never do is take the PAL's preview-table mutex — the one a
+    // capture worker holds while it opens, closes or publishes a tap (measured:
+    // §3.8's hang, and the whole reason the CLOSES were split first). `kind`
+    // picks the call: "camera" → re-point (close, then StartPreview),
+    // "screen" → StartScreenPreview (validates the window, starts the grabber),
+    // "ndi" → CreateNdiReceiver (the NDI runtime loads the vendor SDK).
+    // NAMED FOR THE HOP ON PURPOSE (`OffThread`): the name is what tells the
+    // guard — and the next reader — that the device call inside it runs on the
+    // engine worker, so the three tap-open entry points are off-thread by
+    // construction rather than by a waiver.
+    void openTapOffThread(const QString &label, const QString &kind, const QString &owner,
+                          const QString &deviceId, const QString &mode);
+    // What that verdict does back on THIS thread: publish the tap (a receiver id
+    // exists only for NDI — a camera/screen id was decided before the hop), or
+    // release the claim again, record WHY in previewOpenRefusals_ and emit
+    // previewRefused. Runs on the interface thread; `recvId` is empty unless an
+    // NDI receiver was created, `reason` empty unless the open was refused.
+    void applyTapOpen(const QString &label, const QString &kind, const QString &owner,
+                      const QString &deviceId, const QString &recvId, const QString &reason);
+
     // Platform discovery runs on a worker; roster properties are updated on
     // the GUI thread after the worker returns.
-    void enumerateDevices();
+    //
+    // NAMED FOR THE HOP ON PURPOSE (`OffThread`, the openTapOffThread
+    // convention): the sweep's DECISION and its roster bookkeeping stay on this
+    // thread and every device call it starts is QUEUED — the platform walk on
+    // deviceEnumerationPool_ (enumeratePlatformDevicesAsync), the NDI runtime
+    // probe on the global pool (probeNdiAsync), the SDI provider probe plus its
+    // per-provider COM walk on that same enumeration pool (probeSdiAsync), and
+    // each requested meter re-resolved against the fresh roster on the engine
+    // worker (resolveAndStartMeterOffThread). What stays synchronous is the
+    // gate and the publish: an atomic `SdiEnabled()` read, an in-memory feature
+    // registry read, and this thread's own QVariantLists. That is why the five
+    // device-refresh entry points calling it are off-thread by construction
+    // instead of by a waiver.
+    void enumerateDevicesOffThread();
     void enumeratePlatformDevicesAsync();
     void updateBootSummary();
     // NDI runtime probe + source discovery OFF the GUI thread (runs on the
@@ -589,6 +748,18 @@ private:
     // the "I've installed it — check again" button ran the whole load inline
     // and took the app down. Coalesced by ndiProbeBusy_.
     void probeNdiAsync();
+    // The SDI (DeckLink) half of the same treatment. Resolving the vendor SDK
+    // and walking its devices is a COM activation per provider — the one device
+    // call the device sweep still made INLINE on the interface thread, so every
+    // refresh that reached it (a settings visit, a display-mode change, a
+    // plugins toggle, the boot sweep) parked the window behind a driver. It is
+    // queued on the enumeration pool now, coalesced by sdiProbeBusy_, and the
+    // roster + verdict land through a queued invokeMethod and one devicesChanged
+    // exactly like the NDI probe's.
+    void probeSdiAsync();
+    // The "sdi" feature gate's own read is one atomic load and stays here on
+    // purpose: a deliberate OFF must blank the rows the moment it is flipped,
+    // and a coalescing probe (sdiProbeBusy_) must never swallow that verdict.
     QVariantList audioDevices_;
     QVariantList screenDevices_;
     QVariantList videoDevices_;
@@ -622,7 +793,17 @@ private:
     // kill the board row's own meter). Labels resolve again on
     // re-enumeration so hot-plug re-binds.
     QMap<QString, int> requestedMeters_;
-    void resolveAndStartMeter(const QString &deviceLabel);
+    // NAMED FOR THE HOP ON PURPOSE (the openTapOffThread convention): the label
+    // is resolved against the CACHED roster on this thread (audioDevices_ is
+    // GUI-thread state) and the PAL open is queued on the engine worker. The
+    // result is marshalled back here to publish the label table and the one
+    // loud tap line — see the .cpp for why the open must not be inline.
+    void resolveAndStartMeterOffThread(const QString &deviceLabel);
+    // The two closes, queued for the same reason: a StopInputMeter joins the
+    // capture thread the open started. stopAllInputMetersOffThread asks the PAL
+    // which device taps are live itself — that roster read is a PAL call too.
+    void stopInputMeterOffThread(uint32_t deviceId);
+    void stopAllInputMetersOffThread();
     // The 50 ms meter pump the device taps ride — created once, started whenever
     // anything holds a meter.
     void ensureMeterPump();
@@ -644,9 +825,21 @@ private:
     QMap<QString, qint64> streamRefusedAt_;
     // An EXISTING tap is reused (never replaced): a stream tap is a decoder, so
     // a second hold must not restart the row's audio mid-sentence.
-    bool ensureStreamTap(const QString &label, const QString &kind, const QString &source);
+    // The GUI-thread half of a stream tap: the gates, the refusal retry clock
+    // and the id claim — all of it this thread's own state. Returns the id to
+    // hand to openStreamTapOffThread, or 0 when there is nothing to open.
+    uint32_t claimStreamTap(const QString &label, const QString &kind, const QString &source);
+    // The DEVICE half, queued on the engine worker: the decoder open (a file's
+    // audio track, or an NDI receive) and the close. A refusal is marshalled
+    // back so the id claim is dropped here and the loud reason is written on
+    // this thread — the row keeps metering silence, exactly as the old
+    // synchronous refusal left it.
+    void openStreamTapOffThread(const QString &label, const QString &kind,
+                                const QString &source, uint32_t tapId);
+    void closeStreamTapOffThread(uint32_t tapId, const QString &label);
     // Stop a stream tap that nobody holds any more (a UI hold or the mix).
-    void releaseStreamTap(const QString &label);
+    // Returns the tap id the caller must close, 0 when it is still held.
+    uint32_t releaseStreamTap(const QString &label);
 
     // One tick of the shared meter pump: the input taps' published snapshots.
     void pumpMeterSnapshot();
@@ -654,6 +847,13 @@ private:
     // ---- Live video preview state ---------------------------------------
     QMap<QString, QString> previewModes_;   // roster label → requested mode pick
     QMap<QString, QString> previewIds_;     // roster label → engine device id
+    // label → WHY the last queued tap OPEN for it was refused (no entry = the
+    // last one was accepted). Written on the interface thread by applyTapOpen,
+    // read by previewFailure: a refused open leaves no PAL tap to explain
+    // itself, and the bridge is the only one that knows the reason. Erased when
+    // the next start for that label is accepted, so a stale reason can never
+    // outlive the refusal it describes.
+    QHash<QString, QString> previewOpenRefusals_;
     // Owner set per label — who currently holds a tap on this camera. The
     // tap dies only when its last owner releases; start/stop are idempotent
     // per owner so repeated reconcile calls can't leak or over-release.
@@ -699,6 +899,10 @@ private:
     // while one is in flight coalesces into the running probe instead of
     // stacking a second runtime load/discovery pass.
     std::atomic<bool> ndiProbeBusy_{false};
+    // One SDI probe at a time (see probeSdiAsync), the NDI flag's twin: a second
+    // refresh while a probe is in flight coalesces into it rather than stacking
+    // a second vendor-SDK resolve and COM walk on the enumeration pool.
+    std::atomic<bool> sdiProbeBusy_{false};
     // The SDK's connected-receiver query can block while NDI is sending, so
     // the 1 Hz live telemetry refresh is coalesced onto the worker pool too.
     //
@@ -715,6 +919,13 @@ private:
     // 0 overflows the destination [-Wstringop-overflow=]').
     bool ndiConnectionProbeBusy_ = false;
     int ndiConnectedReceivers_ = -1;   // SDK connection count, poll-refreshed
+    // The firewall surface's ONE device job, queued by both entry points and
+    // named for the hop (openTapOffThread's convention): the probe is a hidden
+    // `netsh` child process and the add an elevated one. `ask` is the whole
+    // difference between the two entry points — false only probes
+    // (checkNdiFirewallRule), true probes and then requests the rule
+    // (requestNdiFirewallAccess).
+    void probeNdiFirewallOffThread(bool ask);
     bool ndiFirewallPrompted_ = false;   // once per install (settings-backed)
     qint64 lastEnumerationMs_ = 0;   // throttles refreshDevices()
     qint64 lastAudioEnumerationMs_ = 0; // throttles the audio-only picker refresh
@@ -733,6 +944,23 @@ private:
     // mislabelled source is distinguishable in engine.log from a device that is
     // genuinely gone. See inputSourceAlive.
     QSet<QString> lightProbeLogged_;
+    // ---- Published media-path existence (see inputSourceReachable) ----------
+    //
+    // A "media" label IS a file path, and asking the filesystem about it from a
+    // QML binding parked the interface thread on whatever that path resolves to:
+    // on a share that has gone away, the whole SMB timeout, per card, on every
+    // binding evaluation. The question is asked on the engine worker instead and
+    // the answer is PUBLISHED here, where the reader picks it up on its next
+    // evaluation. A path with no published answer yet reads as NOT reachable for
+    // the few milliseconds the probe takes, and the bump below corrects the card
+    // — a card must never report "fine" for a file that is gone, and the wrong
+    // direction costs one tick of a slash that clears itself.
+    // The answer is re-asked after kMediaProbeTtlMs so a file deleted while the
+    // app is up still flips within seconds, the way the synchronous stat did.
+    QHash<QString, bool> mediaPathExists_;       // GUI thread only
+    QHash<QString, qint64> mediaPathCheckedAt_;  // when each answer was published
+    QSet<QString> mediaPathProbePending_;        // in flight — one probe per path
+    bool mediaPathReachable(const QString &path);
     // When each OPEN tap last handed over a real frame, by tap key (the device id
     // for camera/screen taps, the source name for NDI receivers — the same key
     // previewLastFrame_ uses). Written where the frame is actually fetched and

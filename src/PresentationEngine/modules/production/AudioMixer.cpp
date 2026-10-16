@@ -50,7 +50,7 @@ void PanGains(const VolumeControl &busVol, float &left, float &right)
 
 // The per-channel ROUTING mask a source row's matrix writes for ONE bus: bit
 // <c> set = that row's channel c is routed into this bus
-// ("uiRouteMask:<busNodeId>", written by AudioInputListModel::pushRoutingToGraph).
+// ("uiRouteMask:<busNodeId>", written by AudioInputListModel::pushRoutingOffThread).
 // 0 = NO MASK = the whole source feeds the bus, which is what an older graph, a
 // bus-dialog route or a video row carries — the honest default, never a silence
 // nobody asked for.

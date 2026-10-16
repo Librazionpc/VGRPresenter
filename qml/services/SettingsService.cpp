@@ -20,6 +20,7 @@
 #include <QProcess>
 #include <QQmlEngine>
 #include <QSettings>
+#include <QThread>
 #include <QStandardPaths>
 #include <QTranslator>
 #include <QUrl>
@@ -162,7 +163,7 @@ void SettingsService::load()
         if (!sandbox.isEmpty())
             dataDir_ = sandbox.toStdString();
     }
-    settings_ = std::make_unique<bs::AppSettings>(platform.Filesystem().Join(dataDir_, "settings.json"));
+    settings_ = std::make_shared<bs::AppSettings>(platform.Filesystem().Join(dataDir_, "settings.json"));
     if (auto loaded = settings_->Load(); !loaded.ok())
         report(tr("Your settings could not be read (%1). The defaults are in use.").arg(qstr(loaded.error().message)), QStringLiteral("warning"));
 
@@ -170,8 +171,14 @@ void SettingsService::load()
     (void)bs::ApplyToEngine(*settings_, bps::adaptive::AdaptiveRuntime::Instance());
     settings_->Subscribe([this](const std::string &key) {
         refreshValues();
-        if (auto applied = bs::ApplyToEngine(*settings_, bps::adaptive::AdaptiveRuntime::Instance()); !applied.ok())
-            report(tr("The engine could not apply that setting (%1).").arg(qstr(applied.error().message)));
+        // The ENGINE apply is not interface-thread work (see
+        // applyEngineSettingsAsync): ApplyToEngine reaches AdaptiveRuntime,
+        // whose apply lock the resource sampler can hold for as long as a
+        // pressure decision takes — long enough that a settings WRITE was
+        // recorded parked in it on the interface thread, the window frozen
+        // behind the write (hang-3912 and its siblings). The write stays here;
+        // the push follows on a worker, coalesced so a slider drag is one
+        // apply, not one per tick.
         if (key == "startup.launchAtLogin")
             applyLaunchAtLogin();
         else if (key == "appearance.language")
@@ -326,32 +333,65 @@ void SettingsService::refreshHardware()
         else
             ++audio.outputs;
     }
-    const bs::HardwareReport report = bs::CurrentHardwareReport(audio);
-    QVariantList rows;
-    for (const bs::HardwareRow &r : report.rows)
-        rows.append(QVariantMap{ { QStringLiteral("key"), qstr(r.key) }, { QStringLiteral("label"), qstr(r.label) },
-                                 { QStringLiteral("value"), qstr(r.value) }, { QStringLiteral("ok"), r.ok } });
-    hardwareRows_ = rows;
+    // The REPORT samples the machine (bs::CurrentHardwareReport reads CPU times
+    // and memory), and this runs every time Settings · Smart Config opens and on
+    // every Apply — so the sample and the QA pass behind it run on the worker,
+    // and the rows land here a moment later. Same rule as the audio roster below:
+    // nothing that measures the machine belongs on the thread that draws.
+    runOffThread([this, audio] {
+        const bs::HardwareReport report = bs::CurrentHardwareReport(audio);
+        QVariantList rows;
+        for (const bs::HardwareRow &r : report.rows)
+            rows.append(QVariantMap{ { QStringLiteral("key"), qstr(r.key) }, { QStringLiteral("label"), qstr(r.label) },
+                                     { QStringLiteral("value"), qstr(r.value) }, { QStringLiteral("ok"), r.ok } });
 
-    QVariantList advice;
-    for (const bs::AdviceRow &a : report.advice)
-        advice.append(QVariantMap{ { QStringLiteral("key"), qstr(a.key) }, { QStringLiteral("severity"), qstr(a.severity) },
-                                   { QStringLiteral("text"), qstr(a.text) } });
-    hardwareAdvice_ = advice;
+        QVariantList advice;
+        for (const bs::AdviceRow &a : report.advice)
+            advice.append(QVariantMap{ { QStringLiteral("key"), qstr(a.key) }, { QStringLiteral("severity"), qstr(a.severity) },
+                                       { QStringLiteral("text"), qstr(a.text) } });
 
-    recommendedProfile_ = qstr(report.recommendedProfile);
-    hardwareHeadline_ = qstr(report.headline);
-    hardwareDetail_ = qstr(report.detail);
-    hardwareAdviceSummary_ = qstr(report.adviceSummary);
-    emit hardwareChanged();
+        const QString profile = qstr(report.recommendedProfile);
+        const QString headline = qstr(report.headline);
+        const QString detail = qstr(report.detail);
+        const QString adviceSummary = qstr(report.adviceSummary);
+        QMetaObject::invokeMethod(this, [this, rows, advice, profile, headline, detail, adviceSummary] {
+            hardwareRows_ = rows;
+            hardwareAdvice_ = advice;
+            recommendedProfile_ = profile;
+            hardwareHeadline_ = headline;
+            hardwareDetail_ = detail;
+            hardwareAdviceSummary_ = adviceSummary;
+            emit hardwareChanged();
+        }, Qt::QueuedConnection);
+    });
 }
 
 void SettingsService::applyRecommendedProfile()
 {
-    if (recommendedProfile_.isEmpty())
-        refreshHardware();
-    if (!recommendedProfile_.isEmpty())
+    // The report that names the profile is built on the worker (see
+    // refreshHardware), so this neither asks for it synchronously nor waits for
+    // it: when the report is already here, the profile goes straight in; when it
+    // is not, one worker sample names it and the apply follows it back.
+    if (!recommendedProfile_.isEmpty()) {
         setValue(QStringLiteral("resources.profile"), recommendedProfile_);
+        return;
+    }
+    runOffThread([this] {
+        bs::AudioCounts audio;
+        for (const QVariant &v : EngineBridge::instance().audioDevices()) {
+            if (v.toMap().value(QStringLiteral("isInput")).toBool())
+                ++audio.inputs;
+            else
+                ++audio.outputs;
+        }
+        const QString profile = qstr(bs::CurrentHardwareReport(audio).recommendedProfile);
+        if (profile.isEmpty())
+            return;
+        QMetaObject::invokeMethod(this, [this, profile] {
+            recommendedProfile_ = profile;
+            setValue(QStringLiteral("resources.profile"), profile);
+        }, Qt::QueuedConnection);
+    });
 }
 
 QVariantMap SettingsService::capsFor(const QString &profile) const
@@ -464,6 +504,65 @@ void SettingsService::applyLaunchAtLogin()
 }
 
 // ---------------------------------------------------------------------------
+// Off the interface thread
+// ---------------------------------------------------------------------------
+
+// One place this service hands work to a worker. `fn` must capture what it
+// needs BY VALUE: nothing inside it may dereference a member of this service,
+// because the worker outlives the call that started it. Answers come back
+// through QMetaObject::invokeMethod(this, ..., Qt::QueuedConnection), which Qt
+// drops if the service is gone by then — the one guarantee that matters while
+// the app is shutting down with a copy still in flight.
+void SettingsService::runOffThread(std::function<void()> fn)
+{
+    auto *runner = QThread::create(std::move(fn));
+    connect(runner, &QThread::finished, runner, &QObject::deleteLater);
+    runner->start();
+}
+
+// Pushes the store at the engine, off the interface thread.
+//
+// ApplyToEngine is a chain: it sets presentation styles and calls
+// AdaptiveRuntime::SetPreference -> ApplyOptimization, which takes the
+// adaptive runtime's apply lock. The resource SAMPLER takes that same lock
+// while it evaluates a pressure decision, so the interface thread's settings
+// write used to wait for a background thread's decision — the app's own hang
+// dumps caught exactly that (hang-3912: SettingsService::setValue ->
+// AppSettings::Set -> ApplyToEngine -> AdaptiveRuntime::SetPreference ->
+// lock, with the window frozen behind it).
+//
+// The write itself stays synchronous (the store is in memory and QML binds to
+// its values), the APPLY hops to a worker, and bursts coalesce: a write that
+// lands while an apply is running is picked up by a second pass, so the last
+// value wins rather than being dropped.
+void SettingsService::applyEngineSettingsAsync()
+{
+    auto settings = settings_;   // shared: the worker holds the store alive
+    if (!settings)
+        return;
+    applyRequested_.store(true);
+    if (applyQueued_.exchange(true))
+        return;                  // a run is in flight; it will pick this up
+    runOffThread([this, settings] {
+        for (;;) {
+            applyRequested_.store(false);
+            auto applied = bs::ApplyToEngine(*settings, bps::adaptive::AdaptiveRuntime::Instance());
+            if (!applied.ok()) {
+                const QString error = qstr(applied.error().message);
+                QMetaObject::invokeMethod(this, [this, error] {
+                    report(tr("The engine could not apply that setting (%1).").arg(error));
+                }, Qt::QueuedConnection);
+            }
+            // A write that landed WHILE this apply was running is not lost:
+            // apply again from the newest values, then settle.
+            if (!applyRequested_.load())
+                break;
+        }
+        applyQueued_.store(false);
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Backups & recovery
 // ---------------------------------------------------------------------------
 
@@ -474,124 +573,168 @@ QString SettingsService::backupDirectory() const
     return qstr(bps::platform::PlatformAccessor::Get().Filesystem().Join(dataDir_, "backups"));
 }
 
-bool SettingsService::openBackupDirectory() const
+void SettingsService::openBackupDirectory()
 {
     const QString dir = backupDirectory();
     if (dir.isEmpty())
-        return false;
-    auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
-    if (!fs.Exists(dir.toStdString()))   // never taken a backup: show an empty folder
-        (void)fs.CreateDirectories(dir.toStdString());
-    return QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+        return;
+    const std::string folder = dir.toStdString();
+    runOffThread([this, dir, folder] {
+        auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
+        if (!fs.Exists(folder))   // never taken a backup: show an empty folder
+            (void)fs.CreateDirectories(folder);
+        // The shell hand-off is the interface thread's business (it is a
+        // window operation) and it returns at once — nothing is waited for.
+        QMetaObject::invokeMethod(this, [dir] {
+            (void)QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+        }, Qt::QueuedConnection);
+    });
 }
 
-bool SettingsService::showBackupInFolder(const QString &path) const
+void SettingsService::showBackupInFolder(const QString &path)
 {
     if (path.isEmpty())
-        return false;
+        return;
     // Same posture as the other backup paths: only something this store's own
     // folder holds is revealed.
     const QString dir = backupDirectory();
     if (dir.isEmpty() || !path.startsWith(dir + QLatin1Char('/')))
-        return false;
-    if (!QFileInfo::exists(path))
-        return false;
+        return;
+    const std::string file = path.toStdString();
+    runOffThread([this, dir, path, file] {
+        if (!bps::platform::PlatformAccessor::Get().Filesystem().IsRegularFile(file))
+            return;
+        // The shell hand-off runs on the interface thread (it is a window
+        // operation, and startDetached does not wait for what it starts).
+        QMetaObject::invokeMethod(this, [dir, path] {
 #if defined(Q_OS_WIN)
-    // Explorer's /select highlights the file in its folder.
-    return QProcess::startDetached(QStringLiteral("explorer.exe"),
-                                   { QStringLiteral("/select,") + QDir::toNativeSeparators(path) });
+            // Explorer's /select highlights the file in its folder.
+            (void)QProcess::startDetached(QStringLiteral("explorer.exe"),
+                                           { QStringLiteral("/select,") + QDir::toNativeSeparators(path) });
 #elif defined(Q_OS_MACOS)
-    // Finder's -R reveals (selects) the file.
-    return QProcess::startDetached(QStringLiteral("open"), { QStringLiteral("-R"), path });
+            // Finder's -R reveals (selects) the file.
+            (void)QProcess::startDetached(QStringLiteral("open"), { QStringLiteral("-R"), path });
 #else
-    // No portable "select a file" on Linux desktops — opening the enclosing
-    // folder is still the honest answer to "where is this one?".
-    return QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+            // No portable "select a file" on Linux desktops — opening the
+            // enclosing folder is still the honest answer to "where is this one?".
+            (void)QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
 #endif
+        }, Qt::QueuedConnection);
+    });
 }
 
-QString SettingsService::backupShow(const QString &showFile)
+void SettingsService::backupShow(const QString &showFile)
 {
     if (!settings_ || showFile.isEmpty())
-        return {};
-    const bs::BackupStore store(backupDirectory().toStdString());
-    auto made = store.CreateIfChanged(showFile.toStdString());
-    if (!made.ok() || made.value().empty())
-        return {};
-    // Older copies of this show beyond "Keep last" go.
-    std::string show = QFileInfo(showFile).completeBaseName().toStdString();
-    (void)store.Prune(show, static_cast<size_t>(settings_->GetInt("backups.keepLast")));
-    return qstr(made.value());
+        return;
+    // Everything the worker needs, read ONCE here (see runOffThread).
+    const std::string dir = backupDirectory().toStdString();
+    const std::size_t keepLast = static_cast<std::size_t>(settings_->GetInt("backups.keepLast"));
+    const std::string file = showFile.toStdString();
+    const std::string show = QFileInfo(showFile).completeBaseName().toStdString();
+    runOffThread([this, dir, keepLast, file, show] {
+        const bs::BackupStore store(dir);
+        auto made = store.CreateIfChanged(file);
+        const bool copied = made.ok() && !made.value().empty();
+        // Older copies of this show beyond "Keep last" go.
+        if (copied)
+            (void)store.Prune(show, keepLast);
+        QMetaObject::invokeMethod(this, [this, copied] {
+            emit backupMade(copied ? 1 : 0);
+            emit backupsChanged();
+        }, Qt::QueuedConnection);
+    });
 }
 
-QVariantList SettingsService::backupsOf(const QString &showName) const
+void SettingsService::requestBackups(const QString &showName)
 {
-    QVariantList out;
     if (dataDir_.empty())
-        return out;
-    const bs::BackupStore store(backupDirectory().toStdString());
-    for (const bs::BackupInfo &b : store.List(showName.toStdString()))
-        out.append(QVariantMap{ { QStringLiteral("path"), qstr(b.path) }, { QStringLiteral("stamp"), qstr(b.stamp) },
-                                { QStringLiteral("sizeBytes"), static_cast<qlonglong>(b.sizeBytes) } });
-    return out;
+        return;
+    const std::string dir = backupDirectory().toStdString();
+    const std::string name = showName.toStdString();
+    runOffThread([this, dir, name] {
+        const bs::BackupStore store(dir);
+        QVariantList out;
+        for (const bs::BackupInfo &b : store.List(name))
+            out.append(QVariantMap{ { QStringLiteral("path"), qstr(b.path) }, { QStringLiteral("stamp"), qstr(b.stamp) },
+                                    { QStringLiteral("sizeBytes"), static_cast<qlonglong>(b.sizeBytes) } });
+        QMetaObject::invokeMethod(this, [this, name, out] {
+            emit backupsListed(qstr(name), out);
+        }, Qt::QueuedConnection);
+    });
 }
 
-QVariantList SettingsService::allBackups() const
+void SettingsService::requestAllBackups()
 {
-    QVariantList out;
     if (dataDir_.empty())
-        return out;
-    const bs::BackupStore store(backupDirectory().toStdString());
-    for (const bs::BackupInfo &b : store.List()) {   // no show filter = every show's
-        const QString show = qstr(b.show);
-        // A category backup's file name is the category itself ("settings",
-        // "overlays", "templates"); anything else is a show's copy.
-        const QString category = (show == QLatin1String("settings") || show == QLatin1String("overlays")
-                                  || show == QLatin1String("templates")) ? show : QStringLiteral("show");
-        out.append(QVariantMap{ { QStringLiteral("path"), qstr(b.path) }, { QStringLiteral("show"), show },
-                                { QStringLiteral("category"), category },
-                                { QStringLiteral("stamp"), qstr(b.stamp) },
-                                { QStringLiteral("sizeBytes"), static_cast<qlonglong>(b.sizeBytes) } });
-    }
-    return out;
+        return;
+    const std::string dir = backupDirectory().toStdString();
+    runOffThread([this, dir] {
+        const bs::BackupStore store(dir);
+        QVariantList out;
+        for (const bs::BackupInfo &b : store.List()) {   // no show filter = every show's
+            const QString show = qstr(b.show);
+            // A category backup's file name is the category itself ("settings",
+            // "overlays", "templates"); anything else is a show's copy.
+            const QString category = (show == QLatin1String("settings") || show == QLatin1String("overlays")
+                                      || show == QLatin1String("templates")) ? show : QStringLiteral("show");
+            out.append(QVariantMap{ { QStringLiteral("path"), qstr(b.path) }, { QStringLiteral("show"), show },
+                                    { QStringLiteral("category"), category },
+                                    { QStringLiteral("stamp"), qstr(b.stamp) },
+                                    { QStringLiteral("sizeBytes"), static_cast<qlonglong>(b.sizeBytes) } });
+        }
+        QMetaObject::invokeMethod(this, [this, out] { emit allBackupsListed(out); }, Qt::QueuedConnection);
+    });
 }
 
-int SettingsService::backupCategories()
+void SettingsService::backupCategories()
 {
     if (!settings_ || dataDir_.empty())
-        return 0;
-    const auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
-    const bs::BackupStore store(backupDirectory().toStdString());
-    const auto keepLast = static_cast<size_t>(settings_->GetInt("backups.keepLast"));
+        return;
+    const std::string dir = backupDirectory().toStdString();
+    const std::string dataDir = dataDir_;
+    const std::size_t keepLast = static_cast<std::size_t>(settings_->GetInt("backups.keepLast"));
     struct Category { const char *key; const char *file; const char *name; };
     const Category categories[] = {
         { "backups.includeSettings", "settings.json", "settings" },
         { "backups.includeOverlays",  "overlays.json",  "overlays" },
         { "backups.includeTemplates", "templates.json", "templates" },
     };
-    int made = 0;
-    for (const Category &c : categories) {
-        if (!settings_->GetBool(c.key))
-            continue;
-        const std::string file = fs.Join(dataDir_, c.file);
-        if (!fs.IsRegularFile(file))
-            continue;   // never written yet — nothing to copy
-        if (auto copy = store.CreateIfChanged(file); copy.ok() && !copy.value().empty())
-            ++made;
-        (void)store.Prune(c.name, keepLast);
-    }
-    return made;
+    // Which categories are on, read here (the worker touches no member).
+    std::vector<std::pair<std::string, std::string>> selected;   // { file, name }
+    for (const Category &c : categories)
+        if (settings_->GetBool(c.key))
+            selected.emplace_back(c.file, c.name);
+    runOffThread([this, dir, dataDir, keepLast, selected] {
+        const auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
+        const bs::BackupStore store(dir);
+        int made = 0;
+        for (const auto &[file, name] : selected) {
+            const std::string source = fs.Join(dataDir, file);
+            if (!fs.IsRegularFile(source))
+                continue;   // never written yet — nothing to copy
+            if (auto copy = store.CreateIfChanged(source); copy.ok() && !copy.value().empty())
+                ++made;
+            (void)store.Prune(name, keepLast);
+        }
+        QMetaObject::invokeMethod(this, [this, made] {
+            emit backupMade(made);
+            emit backupsChanged();
+        }, Qt::QueuedConnection);
+    });
 }
 
-bool SettingsService::restoreCategoryBackup(const QString &backupPath)
+void SettingsService::restoreCategoryBackup(const QString &backupPath)
 {
     if (backupPath.isEmpty() || dataDir_.empty())
-        return false;
+        return;
     // Only a path inside this store's own folder is accepted (the same posture
     // deleteBackup takes), so a stray path can never be copied over anything.
     const QString dir = backupDirectory();
-    if (dir.isEmpty() || !backupPath.startsWith(dir + QLatin1Char('/')))
-        return false;
+    if (dir.isEmpty() || !backupPath.startsWith(dir + QLatin1Char('/'))) {
+        emit restoreFinished(false, QString());
+        return;
+    }
     // The backup's base name is "<name>__<stamp>": resolve the live file it is a
     // copy of, and refuse anything that is not one of the three categories.
     const QString stem = QFileInfo(backupPath).completeBaseName();
@@ -604,49 +747,71 @@ bool SettingsService::restoreCategoryBackup(const QString &backupPath)
         live = QStringLiteral("overlays.json");
     else if (name == QLatin1String("templates"))
         live = QStringLiteral("templates.json");
-    else
-        return false;   // a show backup goes through restoreBackup instead
-    auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
-    const std::string target = fs.Join(dataDir_, live.toStdString());
-    // Over the live file, ATOMICALLY (CopyAtomic): copy into a sibling temp and
-    // rename it on top. This used to delete the live file FIRST and then copy the
-    // backup in — so a failure between the two steps left the user with no
-    // settings file at all, and an interrupted copy left a truncated one, on the
-    // exact path a restore is meant to rescue.
-    if (auto copied = fs.CopyAtomic(backupPath.toStdString(), target); !copied.ok()) {
-        report(qstr(copied.error().message));
-        return false;
+    else {
+        emit restoreFinished(false, QString());   // a show backup goes through restoreBackup
+        return;
     }
-    // Bring what reads the file back in line with what was restored.
-    if (name == QLatin1String("settings")) {
-        // Re-read the store, then apply it the same way load() does (minus
-        // re-subscribing, which was done once): the engine's adaptive runtime
-        // and the start-with-Windows / language side effects follow the restored
-        // values, and every binding behind `changed` re-reads.
-        (void)settings_->Load();
-        (void)bs::ApplyToEngine(*settings_, bps::adaptive::AdaptiveRuntime::Instance());
-        refreshValues();
-        applyLaunchAtLogin();
-        applyLanguage();
-        emit changed();
-    } else if (name == QLatin1String("overlays")) {
-        DesignLibraryService::overlays().reload();
-    } else {
-        DesignLibraryService::templates().reload();
-    }
-    return true;
+    const std::string source = backupPath.toStdString();
+    const std::string target =
+        bps::platform::PlatformAccessor::Get().Filesystem().Join(dataDir_, live.toStdString());
+    auto settings = settings_;   // shared: the worker holds the store alive
+    runOffThread([this, source, target, name, settings] {
+        auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
+        // Over the live file, ATOMICALLY (CopyAtomic): copy into a sibling temp
+        // and rename it on top. This used to delete the live file FIRST and then
+        // copy the backup in — so a failure between the two steps left the user
+        // with no settings file at all, and an interrupted copy left a truncated
+        // one, on the exact path a restore is meant to rescue.
+        auto copied = fs.CopyAtomic(source, target);
+        if (!copied.ok()) {
+            const QString error = qstr(copied.error().message);
+            QMetaObject::invokeMethod(this, [this, name, error] {
+                report(error);
+                emit restoreFinished(false, name);
+            }, Qt::QueuedConnection);
+            return;
+        }
+        // The re-read is a file read, so it belongs here too (only the values
+        // and the bindings they feed have to wait for the interface thread).
+        if (settings && name == QLatin1String("settings"))
+            (void)settings->Load();
+        QMetaObject::invokeMethod(this, [this, name] {
+            // Bring what reads the file back in line with what was restored.
+            if (name == QLatin1String("settings")) {
+                refreshValues();
+                applyLaunchAtLogin();
+                applyLanguage();
+                emit changed();
+                // The engine's copy of the restored values, off-thread and
+                // coalesced (see applyEngineSettingsAsync).
+                applyEngineSettingsAsync();
+            } else if (name == QLatin1String("overlays")) {
+                DesignLibraryService::overlays().reload();
+            } else {
+                DesignLibraryService::templates().reload();
+            }
+            emit restoreFinished(true, name);
+        }, Qt::QueuedConnection);
+    });
 }
 
-bool SettingsService::deleteBackup(const QString &path)
+void SettingsService::deleteBackup(const QString &path)
 {
     if (dataDir_.empty() || path.isEmpty())
-        return false;
-    const bs::BackupStore store(backupDirectory().toStdString());
-    if (auto removed = store.Remove(path.toStdString()); !removed.ok()) {
-        report(qstr(removed.error().message));
-        return false;
-    }
-    return true;
+        return;
+    const std::string dir = backupDirectory().toStdString();
+    const std::string victim = path.toStdString();
+    runOffThread([this, dir, victim] {
+        const bs::BackupStore store(dir);
+        auto removed = store.Remove(victim);
+        const QString error = removed.ok() ? QString() : qstr(removed.error().message);
+        QMetaObject::invokeMethod(this, [this, error] {
+            if (!error.isEmpty())
+                report(error);
+            else
+                emit backupsChanged();
+        }, Qt::QueuedConnection);
+    });
 }
 
 QString SettingsService::recoveryPath() const
@@ -657,26 +822,45 @@ QString SettingsService::recoveryPath() const
     return qstr(bs::RecoveryStore(fs.Join(dataDir_, "recovery")).Path());
 }
 
-bool SettingsService::noteRecovery(const QString &showName, const QString &originalPath)
+void SettingsService::noteRecovery(const QString &showName, const QString &originalPath)
 {
     if (dataDir_.empty())
-        return false;
-    const auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
-    return bs::RecoveryStore(fs.Join(dataDir_, "recovery")).Note(showName.toStdString(), originalPath.toStdString()).ok();
+        return;
+    const std::string dataDir = dataDir_;
+    const std::string name = showName.toStdString();
+    const std::string original = originalPath.toStdString();
+    runOffThread([dataDir, name, original] {
+        const auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
+        (void)bs::RecoveryStore(fs.Join(dataDir, "recovery")).Note(name, original);
+    });
 }
 
-QVariantMap SettingsService::pendingRecovery() const
+void SettingsService::requestPendingRecovery()
 {
-    if (dataDir_.empty())
-        return {};
-    const auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
-    const auto info = bs::RecoveryStore(fs.Join(dataDir_, "recovery")).Info();
-    if (!info)
-        return {};
-    return { { QStringLiteral("path"), qstr(info->path) }, { QStringLiteral("showName"), qstr(info->showName) },
-             { QStringLiteral("originalPath"), qstr(info->originalPath) } };
+    if (dataDir_.empty()) {
+        emit pendingRecoveryReady({});
+        return;
+    }
+    const std::string dataDir = dataDir_;
+    runOffThread([this, dataDir] {
+        const auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
+        const auto info = bs::RecoveryStore(fs.Join(dataDir, "recovery")).Info();
+        QVariantMap out;
+        if (info)
+            out = { { QStringLiteral("path"), qstr(info->path) }, { QStringLiteral("showName"), qstr(info->showName) },
+                    { QStringLiteral("originalPath"), qstr(info->originalPath) } };
+        QMetaObject::invokeMethod(this, [this, out] { emit pendingRecoveryReady(out); }, Qt::QueuedConnection);
+    });
 }
 
+// SYNCHRONOUS ON PURPOSE, and the only filesystem call in this file that still
+// runs on the interface thread (see the declaration's gui-ok note): it is the
+// CLEAN-EXIT path. A worker would be the wrong shape here — the app is about to
+// end, so a clear that has not finished leaves the recovery marker behind and
+// the next launch offers work the user already answered. The wait is two small
+// removals inside the store's own folder (the copy and its note — see
+// RecoveryStore::Clear), and by the time it runs there is no interface thread
+// left to protect.
 void SettingsService::clearRecovery()
 {
     if (dataDir_.empty())
@@ -685,36 +869,53 @@ void SettingsService::clearRecovery()
     (void)bs::RecoveryStore(fs.Join(dataDir_, "recovery")).Clear();
 }
 
-bool SettingsService::restoreBackup(const QString &backupPath, const QString &target)
+void SettingsService::restoreBackup(const QString &backupPath, const QString &target)
 {
     if (backupPath.isEmpty() || target.isEmpty())
-        return false;
-    // NOT const: the filesystem member functions are non-const (unlike
-    // Exists/Join, which are const), so a const reference cannot call them.
-    auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
-    // Never over an existing file: a restore ADDS a show, it does not replace one.
-    if (fs.Exists(target.toStdString())) {
-        report(tr("There is already a file with that name."));
-        return false;
-    }
-    // ATOMIC (CopyAtomic): the recovered show appears complete or not at all — a
-    // half-copied show file here would be presented to the user as their backup.
-    if (auto copied = fs.CopyAtomic(backupPath.toStdString(), target.toStdString()); !copied.ok()) {
-        report(qstr(copied.error().message));
-        return false;
-    }
-    return true;
+        return;
+    const std::string source = backupPath.toStdString();
+    const std::string dest = target.toStdString();
+    const QString label = target;
+    runOffThread([this, source, dest, label] {
+        auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
+        // Never over an existing file: a restore ADDS a show, it does not replace one.
+        if (fs.Exists(dest)) {
+            QMetaObject::invokeMethod(this, [this, label] {
+                report(tr("There is already a file with that name."));
+                emit restoreFinished(false, label);
+            }, Qt::QueuedConnection);
+            return;
+        }
+        // ATOMIC (CopyAtomic): the recovered show appears complete or not at all
+        // — a half-copied show file here would be presented to the user as their
+        // backup.
+        auto copied = fs.CopyAtomic(source, dest);
+        const QString error = copied.ok() ? QString() : qstr(copied.error().message);
+        QMetaObject::invokeMethod(this, [this, error, label] {
+            if (!error.isEmpty())
+                report(error);
+            emit restoreFinished(error.isEmpty(), label);
+        }, Qt::QueuedConnection);
+    });
 }
 
-bool SettingsService::restoreRecovery(const QString &target)
+void SettingsService::restoreRecovery(const QString &target)
 {
     if (dataDir_.empty())
-        return false;
-    const auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
-    auto restored = bs::RecoveryStore(fs.Join(dataDir_, "recovery")).RestoreTo(target.toStdString());
-    if (!restored.ok())
-        report(qstr(restored.error().message));
-    return restored.ok();
+        return;
+    const std::string dataDir = dataDir_;
+    const std::string dest = target.toStdString();
+    const QString label = target;
+    runOffThread([this, dataDir, dest, label] {
+        const auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
+        auto restored = bs::RecoveryStore(fs.Join(dataDir, "recovery")).RestoreTo(dest);
+        const QString error = restored.ok() ? QString() : qstr(restored.error().message);
+        QMetaObject::invokeMethod(this, [this, error, label] {
+            if (!error.isEmpty())
+                report(error);
+            emit restoreFinished(error.isEmpty(), label);
+        }, Qt::QueuedConnection);
+    });
 }
 
 bool SettingsService::fileExists(const QString &path) const

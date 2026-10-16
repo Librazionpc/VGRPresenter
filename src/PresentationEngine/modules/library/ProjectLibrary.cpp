@@ -204,7 +204,7 @@ Result<void> ProjectLibrary::Load() {
     return {};
 }
 
-Result<void> ProjectLibrary::SaveLocked() const {
+std::string ProjectLibrary::BuildStoreJsonLocked() const {
     J::Array folders, projects;
     for (const ProjectFolder& f : folders_) {
         J::Object o;
@@ -229,11 +229,21 @@ Result<void> ProjectLibrary::SaveLocked() const {
     root["folders"] = J(std::move(folders));
     root["projects"] = J(std::move(projects));
 
+    return J(std::move(root)).ToString();
+}
+
+Result<void> ProjectLibrary::CommitStore(const std::string& json) const {
+    if (storageFile_.empty() || json.empty()) return Ok();
     // ATOMIC: the project library index is the map to every project the user has;
     // a half-written one orphans all of them. WriteAtomic creates the parent dir
     // and swaps the new document in.
+    //
+    // PAL: this is the write that used to run INSIDE every mutator's lock (it
+    // hid one call deep in SaveLocked), so a disk write sat on the interface
+    // thread with the project tree parked behind it. Callers build the document
+    // under the lock and commit it here, after the lock is gone.
     auto& fs = platform::PlatformAccessor::Get().Filesystem();
-    return fs.WriteAtomic(storageFile_, J(std::move(root)).ToString());
+    return fs.WriteAtomic(storageFile_, json);
 }
 
 Project* ProjectLibrary::FindProject(std::string_view id) {
@@ -308,30 +318,54 @@ Result<Project> ProjectLibrary::Get(std::string_view id) const {
 }
 
 Result<std::string> ProjectLibrary::Create(std::string_view name, std::string_view parentFolder) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!parentFolder.empty() && !FindFolder(parentFolder)) return Missing("folder", parentFolder);
-    Project p;
-    p.id = NextId("project");
-    p.name = Trim(name).empty() ? std::string("New project") : Trim(name).substr(0, 200);
-    p.parent = std::string(parentFolder);
-    p.created = p.modified = p.used = Now();
-    const std::string id = p.id;
-    projects_.push_back(std::move(p));
-    if (auto saved = SaveLocked(); !saved.ok()) { projects_.pop_back(); return saved.error(); }
+    std::string json;
+    std::string id;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!parentFolder.empty() && !FindFolder(parentFolder)) return Missing("folder", parentFolder);
+        Project p;
+        p.id = NextId("project");
+        p.name = Trim(name).empty() ? std::string("New project") : Trim(name).substr(0, 200);
+        p.parent = std::string(parentFolder);
+        p.created = p.modified = p.used = Now();
+        id = p.id;
+        projects_.push_back(std::move(p));
+        json = BuildStoreJsonLocked();
+    }
+    // The write is the only part that can fail, and it happens with the lock
+    // RELEASED; the undo re-takes it and removes THIS project by id (never
+    // "whatever is last", which is what pop_back() would mean once the lock is
+    // not held across the write).
+    if (auto saved = CommitStore(json); !saved.ok()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(projects_.begin(), projects_.end(), [&](const Project& p) { return p.id == id; });
+        if (it != projects_.end()) projects_.erase(it);
+        return saved.error();
+    }
     return id;
 }
 
 Result<std::string> ProjectLibrary::CreateFolder(std::string_view name, std::string_view parentFolder) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!parentFolder.empty() && !FindFolder(parentFolder)) return Missing("folder", parentFolder);
-    ProjectFolder f;
-    f.id = NextId("folder");
-    f.name = Trim(name).empty() ? std::string("New folder") : Trim(name).substr(0, 200);
-    f.parent = std::string(parentFolder);
-    f.created = Now();
-    const std::string id = f.id;
-    folders_.push_back(std::move(f));
-    if (auto saved = SaveLocked(); !saved.ok()) { folders_.pop_back(); return saved.error(); }
+    std::string json;
+    std::string id;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!parentFolder.empty() && !FindFolder(parentFolder)) return Missing("folder", parentFolder);
+        ProjectFolder f;
+        f.id = NextId("folder");
+        f.name = Trim(name).empty() ? std::string("New folder") : Trim(name).substr(0, 200);
+        f.parent = std::string(parentFolder);
+        f.created = Now();
+        id = f.id;
+        folders_.push_back(std::move(f));
+        json = BuildStoreJsonLocked();
+    }
+    if (auto saved = CommitStore(json); !saved.ok()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(folders_.begin(), folders_.end(), [&](const ProjectFolder& f) { return f.id == id; });
+        if (it != folders_.end()) folders_.erase(it);
+        return saved.error();
+    }
     return id;
 }
 
@@ -339,51 +373,75 @@ Result<void> ProjectLibrary::Rename(std::string_view id, std::string_view name) 
     const std::string trimmed = Trim(name);
     if (trimmed.empty()) return Invalid("a name cannot be empty");
     if (trimmed.size() > 200) return Invalid("that name is too long");
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (Project* p = FindProject(id)) { p->name = trimmed; Touch(*p); return SaveLocked(); }
-    if (ProjectFolder* f = FindFolder(id)) { f->name = trimmed; return SaveLocked(); }
-    return Missing("project or folder", id);
+    std::string json;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (Project* p = FindProject(id)) { p->name = trimmed; Touch(*p); json = BuildStoreJsonLocked(); }
+        else if (ProjectFolder* f = FindFolder(id)) { f->name = trimmed; json = BuildStoreJsonLocked(); }
+        else return Missing("project or folder", id);
+    }
+    return CommitStore(json);
 }
 
 Result<std::string> ProjectLibrary::Duplicate(std::string_view projectId) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    Project* source = FindProject(projectId);
-    if (!source) return Missing("project", projectId);
-    Project copy = *source;
-    copy.id = NextId("project");
-    copy.name = source->name + " (copy)";
-    copy.created = copy.modified = copy.used = Now();
-    copy.archived = false;
-    const std::string id = copy.id;
-    projects_.push_back(std::move(copy));
-    if (auto saved = SaveLocked(); !saved.ok()) { projects_.pop_back(); return saved.error(); }
+    std::string json;
+    std::string id;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Project* source = FindProject(projectId);
+        if (!source) return Missing("project", projectId);
+        Project copy = *source;
+        copy.id = NextId("project");
+        copy.name = source->name + " (copy)";
+        copy.created = copy.modified = copy.used = Now();
+        copy.archived = false;
+        id = copy.id;
+        projects_.push_back(std::move(copy));
+        json = BuildStoreJsonLocked();
+    }
+    if (auto saved = CommitStore(json); !saved.ok()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(projects_.begin(), projects_.end(), [&](const Project& p) { return p.id == id; });
+        if (it != projects_.end()) projects_.erase(it);
+        return saved.error();
+    }
     return id;
 }
 
 Result<void> ProjectLibrary::Move(std::string_view id, std::string_view newParent) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!newParent.empty() && !FindFolder(newParent)) return Missing("folder", newParent);
-    if (Project* p = FindProject(id)) { p->parent = std::string(newParent); Touch(*p); return SaveLocked(); }
-    if (ProjectFolder* f = FindFolder(id)) {
-        if (IsInside(newParent, id)) return Invalid("a folder cannot be moved into itself");
-        f->parent = std::string(newParent);
-        return SaveLocked();
+    std::string json;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!newParent.empty() && !FindFolder(newParent)) return Missing("folder", newParent);
+        if (Project* p = FindProject(id)) { p->parent = std::string(newParent); Touch(*p); json = BuildStoreJsonLocked(); }
+        else if (ProjectFolder* f = FindFolder(id)) {
+            if (IsInside(newParent, id)) return Invalid("a folder cannot be moved into itself");
+            f->parent = std::string(newParent);
+            json = BuildStoreJsonLocked();
+        } else return Missing("project or folder", id);
     }
-    return Missing("project or folder", id);
+    return CommitStore(json);
 }
 
 Result<void> ProjectLibrary::Delete(std::string_view id) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto pit = std::find_if(projects_.begin(), projects_.end(), [&](const Project& p) { return p.id == id; });
-    if (pit != projects_.end()) { projects_.erase(pit); return SaveLocked(); }
-    auto fit = std::find_if(folders_.begin(), folders_.end(), [&](const ProjectFolder& f) { return f.id == id; });
-    if (fit == folders_.end()) return Missing("project or folder", id);
-    const std::string parent = fit->parent;
-    const std::string gone = fit->id;
-    folders_.erase(fit);
-    for (ProjectFolder& f : folders_) if (f.parent == gone) f.parent = parent;
-    for (Project& p : projects_) if (p.parent == gone) p.parent = parent;
-    return SaveLocked();
+    std::string json;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto pit = std::find_if(projects_.begin(), projects_.end(), [&](const Project& p) { return p.id == id; });
+        if (pit != projects_.end()) {
+            projects_.erase(pit);
+        } else {
+            auto fit = std::find_if(folders_.begin(), folders_.end(), [&](const ProjectFolder& f) { return f.id == id; });
+            if (fit == folders_.end()) return Missing("project or folder", id);
+            const std::string parent = fit->parent;
+            const std::string gone = fit->id;
+            folders_.erase(fit);
+            for (ProjectFolder& f : folders_) if (f.parent == gone) f.parent = parent;
+            for (Project& p : projects_) if (p.parent == gone) p.parent = parent;
+        }
+        json = BuildStoreJsonLocked();
+    }
+    return CommitStore(json);
 }
 
 #define WITH_PROJECT(id) \
@@ -391,18 +449,60 @@ Result<void> ProjectLibrary::Delete(std::string_view id) {
     Project* project = FindProject(id); \
     if (!project) return Missing("project", id);
 
-Result<void> ProjectLibrary::SetArchived(std::string_view id, bool v) { WITH_PROJECT(id) project->archived = v; Touch(*project); return SaveLocked(); }
-Result<void> ProjectLibrary::SetSectionsCollapsed(std::string_view id, bool v) { WITH_PROJECT(id) project->sectionsCollapsed = v; Touch(*project); return SaveLocked(); }
-Result<void> ProjectLibrary::SetSectionsLocked(std::string_view id, bool v) { WITH_PROJECT(id) project->sectionsLocked = v; Touch(*project); return SaveLocked(); }
-Result<void> ProjectLibrary::SetNotes(std::string_view id, std::string_view notes) { WITH_PROJECT(id) project->notes = std::string(notes); Touch(*project); return SaveLocked(); }
+Result<void> ProjectLibrary::SetArchived(std::string_view id, bool v) {
+    std::string json;
+    {
+        WITH_PROJECT(id)
+        project->archived = v;
+        Touch(*project);
+        json = BuildStoreJsonLocked();
+    }
+    return CommitStore(json);
+}
+Result<void> ProjectLibrary::SetSectionsCollapsed(std::string_view id, bool v) {
+    std::string json;
+    {
+        WITH_PROJECT(id)
+        project->sectionsCollapsed = v;
+        Touch(*project);
+        json = BuildStoreJsonLocked();
+    }
+    return CommitStore(json);
+}
+Result<void> ProjectLibrary::SetSectionsLocked(std::string_view id, bool v) {
+    std::string json;
+    {
+        WITH_PROJECT(id)
+        project->sectionsLocked = v;
+        Touch(*project);
+        json = BuildStoreJsonLocked();
+    }
+    return CommitStore(json);
+}
+Result<void> ProjectLibrary::SetNotes(std::string_view id, std::string_view notes) {
+    std::string json;
+    {
+        WITH_PROJECT(id)
+        project->notes = std::string(notes);
+        Touch(*project);
+        json = BuildStoreJsonLocked();
+    }
+    return CommitStore(json);
+}
 
 Result<Project> ProjectLibrary::Open(std::string_view id) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    Project* project = FindProject(id);
-    if (!project) return Missing("project", id);
-    project->used = Now();
-    if (auto saved = SaveLocked(); !saved.ok()) return saved.error();
-    return *project;
+    std::string json;
+    Project opened;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Project* project = FindProject(id);
+        if (!project) return Missing("project", id);
+        project->used = Now();
+        json = BuildStoreJsonLocked();
+        opened = *project;
+    }
+    if (auto saved = CommitStore(json); !saved.ok()) return saved.error();
+    return opened;
 }
 
 std::vector<Project> ProjectLibrary::RecentlyUsed() const {
@@ -421,73 +521,86 @@ std::vector<Project> ProjectLibrary::RecentlyUsed() const {
 // ---------------------------------------------------------------------------
 
 Result<std::vector<std::string>> ProjectLibrary::AddItems(std::string_view projectId, const std::vector<ProjectItem>& items, int index) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    Project* project = FindProject(projectId);
-    if (!project) return Missing("project", projectId);
-    if (items.empty()) return std::vector<std::string>{};
-    if (project->items.size() + items.size() > kMaxItems) return Invalid(std::format("a project holds at most {} items", kMaxItems));
-    for (const ProjectItem& i : items) {
-        if (!ItemTypes().contains(i.type)) return Invalid(std::format("'{}' is not something a project can hold", i.type));
-        if (i.ref.empty() && i.type != "section") return Invalid(std::format("a {} item needs to say what it is", i.type));
-    }
-
-    // Skip anything already in the project (same type + ref) — a repeat
-    // click/drop of the same overlay/show/media used to pile up duplicate
-    // rows (e.g. "Clock (Analog)" added four times over) instead of doing
-    // nothing the second time. Sections have no ref and no natural identity
-    // to dedupe on, so they stay exempt — a project can hold several.
-    std::vector<ProjectItem> deduped;
-    for (const ProjectItem& i : items) {
-        if (i.ref.empty()) { deduped.push_back(i); continue; }
-        const bool alreadyThere = std::any_of(project->items.begin(), project->items.end(),
-            [&i](const ProjectItem& existing) { return existing.type == i.type && existing.ref == i.ref; });
-        if (!alreadyThere) deduped.push_back(i);
-    }
-    if (deduped.empty()) return std::vector<std::string>{};
-
-    long long next = 0;
-    for (const ProjectItem& i : project->items)
-        if (i.id.rfind("pi-", 0) == 0) { try { next = std::max(next, std::stoll(i.id.substr(3))); } catch (...) {} }
-
-    std::vector<ProjectItem> added = deduped;
+    std::string json;
     std::vector<std::string> ids;
-    for (ProjectItem& i : added) {
-        i.id = std::format("pi-{}", ++next);
-        if (i.name.empty()) i.name = i.type == "section" ? std::string("Section") : FileNameOf(i.ref);
-        ids.push_back(i.id);
+    std::vector<ProjectItem> before;   // the undo, applied with the lock re-taken below
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Project* project = FindProject(projectId);
+        if (!project) return Missing("project", projectId);
+        if (items.empty()) return std::vector<std::string>{};
+        if (project->items.size() + items.size() > kMaxItems) return Invalid(std::format("a project holds at most {} items", kMaxItems));
+        for (const ProjectItem& i : items) {
+            if (!ItemTypes().contains(i.type)) return Invalid(std::format("'{}' is not something a project can hold", i.type));
+            if (i.ref.empty() && i.type != "section") return Invalid(std::format("a {} item needs to say what it is", i.type));
+        }
+
+        // Skip anything already in the project (same type + ref) — a repeat
+        // click/drop of the same overlay/show/media used to pile up duplicate
+        // rows (e.g. "Clock (Analog)" added four times over) instead of doing
+        // nothing the second time. Sections have no ref and no natural identity
+        // to dedupe on, so they stay exempt — a project can hold several.
+        std::vector<ProjectItem> deduped;
+        for (const ProjectItem& i : items) {
+            if (i.ref.empty()) { deduped.push_back(i); continue; }
+            const bool alreadyThere = std::any_of(project->items.begin(), project->items.end(),
+                [&i](const ProjectItem& existing) { return existing.type == i.type && existing.ref == i.ref; });
+            if (!alreadyThere) deduped.push_back(i);
+        }
+        if (deduped.empty()) return std::vector<std::string>{};
+
+        long long next = 0;
+        for (const ProjectItem& i : project->items)
+            if (i.id.rfind("pi-", 0) == 0) { try { next = std::max(next, std::stoll(i.id.substr(3))); } catch (...) {} }
+
+        std::vector<ProjectItem> added = deduped;
+        for (ProjectItem& i : added) {
+            i.id = std::format("pi-{}", ++next);
+            if (i.name.empty()) i.name = i.type == "section" ? std::string("Section") : FileNameOf(i.ref);
+            ids.push_back(i.id);
+        }
+        const size_t at = index < 0 || static_cast<size_t>(index) > project->items.size() ? project->items.size() : static_cast<size_t>(index);
+        before = project->items;
+        project->items.insert(project->items.begin() + static_cast<long>(at), added.begin(), added.end());
+        Touch(*project);
+        json = BuildStoreJsonLocked();
     }
-    const size_t at = index < 0 || static_cast<size_t>(index) > project->items.size() ? project->items.size() : static_cast<size_t>(index);
-    const std::vector<ProjectItem> before = project->items;
-    project->items.insert(project->items.begin() + static_cast<long>(at), added.begin(), added.end());
-    Touch(*project);
-    if (auto saved = SaveLocked(); !saved.ok()) { project->items = before; return saved.error(); }
+    if (auto saved = CommitStore(json); !saved.ok()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (Project* p = FindProject(projectId)) p->items = before;
+        return saved.error();
+    }
     return ids;
 }
 
 Result<void> ProjectLibrary::MoveItems(std::string_view projectId, const std::vector<int>& indexes, int position) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    Project* project = FindProject(projectId);
-    if (!project) return Missing("project", projectId);
-    const int count = static_cast<int>(project->items.size());
-    std::set<int> selected;
-    for (int i : indexes) {
-        if (i < 0 || i >= count) return Invalid(std::format("there is no item {}", i));
-        selected.insert(i);
-    }
-    if (selected.empty()) return {};
-    if (position < 0 || position > count) return Invalid("that is not a place in the list");
+    std::string json;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Project* project = FindProject(projectId);
+        if (!project) return Missing("project", projectId);
+        const int count = static_cast<int>(project->items.size());
+        std::set<int> selected;
+        for (int i : indexes) {
+            if (i < 0 || i >= count) return Invalid(std::format("there is no item {}", i));
+            selected.insert(i);
+        }
+        if (selected.empty()) return {};
+        if (position < 0 || position > count) return Invalid("that is not a place in the list");
 
-    // FreeShow's mover: lift the items out, then put them back together at the place, counting from what is left.
-    std::vector<ProjectItem> moved, rest;
-    int newPos = position;
-    for (int i = 0; i < count; ++i) {
-        if (selected.contains(i)) { if (i < position) --newPos; moved.push_back(project->items[static_cast<size_t>(i)]); }
-        else rest.push_back(project->items[static_cast<size_t>(i)]);
+        // FreeShow's mover: lift the items out, then put them back together at the place, counting from what is left.
+        std::vector<ProjectItem> moved, rest;
+        int newPos = position;
+        for (int i = 0; i < count; ++i) {
+            if (selected.contains(i)) { if (i < position) --newPos; moved.push_back(project->items[static_cast<size_t>(i)]); }
+            else rest.push_back(project->items[static_cast<size_t>(i)]);
+        }
+        rest.insert(rest.begin() + newPos, moved.begin(), moved.end());
+        project->items = std::move(rest);
+        Touch(*project);
+        json = BuildStoreJsonLocked();
     }
-    rest.insert(rest.begin() + newPos, moved.begin(), moved.end());
-    project->items = std::move(rest);
-    Touch(*project);
-    return SaveLocked();
+    return CommitStore(json);
 }
 
 #define WITH_ITEM(projectId, index) \
@@ -498,33 +611,49 @@ Result<void> ProjectLibrary::MoveItems(std::string_view projectId, const std::ve
     ProjectItem& item = project->items[static_cast<size_t>(index)];
 
 Result<void> ProjectLibrary::RemoveItem(std::string_view projectId, int index) {
-    WITH_ITEM(projectId, index)
-    if (project->sectionsLocked && item.type == "section") return Invalid("this project's sections are locked");
-    project->items.erase(project->items.begin() + index);
-    Touch(*project);
-    return SaveLocked();
+    std::string json;
+    {
+        WITH_ITEM(projectId, index)
+        if (project->sectionsLocked && item.type == "section") return Invalid("this project's sections are locked");
+        project->items.erase(project->items.begin() + index);
+        Touch(*project);
+        json = BuildStoreJsonLocked();
+    }
+    return CommitStore(json);
 }
 Result<void> ProjectLibrary::RenameItem(std::string_view projectId, int index, std::string_view name) {
-    WITH_ITEM(projectId, index)
-    if (Trim(name).empty()) return Invalid("a name cannot be empty");
-    if (project->sectionsLocked && item.type == "section") return Invalid("this project's sections are locked");
-    item.name = Trim(name).substr(0, 200);
-    Touch(*project);
-    return SaveLocked();
+    std::string json;
+    {
+        WITH_ITEM(projectId, index)
+        if (Trim(name).empty()) return Invalid("a name cannot be empty");
+        if (project->sectionsLocked && item.type == "section") return Invalid("this project's sections are locked");
+        item.name = Trim(name).substr(0, 200);
+        Touch(*project);
+        json = BuildStoreJsonLocked();
+    }
+    return CommitStore(json);
 }
 Result<void> ProjectLibrary::SetItemLayout(std::string_view projectId, int index, std::string_view layout) {
-    WITH_ITEM(projectId, index)
-    if (item.type != "show") return Invalid("only a show has a layout");
-    item.layout = std::string(layout);
-    Touch(*project);
-    return SaveLocked();
+    std::string json;
+    {
+        WITH_ITEM(projectId, index)
+        if (item.type != "show") return Invalid("only a show has a layout");
+        item.layout = std::string(layout);
+        Touch(*project);
+        json = BuildStoreJsonLocked();
+    }
+    return CommitStore(json);
 }
 Result<void> ProjectLibrary::SetItemColor(std::string_view projectId, int index, std::string_view color) {
-    WITH_ITEM(projectId, index)
-    if (item.type != "section") return Invalid("only a section has a colour");
-    item.color = std::string(color);
-    Touch(*project);
-    return SaveLocked();
+    std::string json;
+    {
+        WITH_ITEM(projectId, index)
+        if (item.type != "section") return Invalid("only a section has a colour");
+        item.color = std::string(color);
+        Touch(*project);
+        json = BuildStoreJsonLocked();
+    }
+    return CommitStore(json);
 }
 
 Result<std::vector<std::string>> ProjectLibrary::DropOnProject(std::string_view projectId, const DropPayload& payload, int index) {
