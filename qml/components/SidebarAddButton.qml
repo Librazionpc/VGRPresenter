@@ -14,9 +14,18 @@ Rectangle {
 
     height: 32
     radius: 6
-    color: hover.hovered ? "#1e1f28" : "#12131a"
+    color: "#12131a"
     border.color: Theme.border
     border.width: 1
+
+    // The same shared hover layer every other surface uses (HoverGlow): the
+    // pill sits on its resting colour and one layer fades in over it.
+    HoverGlow {
+        anchors.fill: parent
+        radius: parent.radius
+        hovered: hover.hovered
+        glowColor: Qt.rgba(1, 1, 1, 0.05)
+    }
 
     Row {
         anchors.centerIn: parent

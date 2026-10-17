@@ -4,6 +4,7 @@
 #include "services/ShowConverter.h"
 #include "services/StyleSpecBuilder.h"
 #include "services/DesignLibraryService.h"
+#include "services/MediaLibraryService.h"
 
 #include <QSet>
 #include "modules/presentation/CompositorState.hpp"
@@ -19,12 +20,15 @@
 #include "services/EngineWorker.h"
 #include "services/EventBus.h"
 #include "models/OutputListModel.h"
+#include "models/BusListModel.h"
+#include "models/VideoSourceListModel.h"
 
 #include "modules/display/DisplayEngine.hpp"
 #include "modules/display/Providers.hpp"
 #include "modules/broadcast/BroadcastEngine.hpp"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QPointer>
 #include <QThreadPool>
@@ -33,6 +37,7 @@
 #include <QAudioOutput>
 #include <QFile>
 #include <QFileInfo>
+#include <QImageReader>
 #include <QMediaPlayer>
 #include <QUrl>
 #include <QVideoFrame>
@@ -80,6 +85,43 @@ namespace {
 // CompositorState as plain RGBA8 bytes, so SceneBuilder's worker thread can
 // composite it too, not just the QML preview tile's image provider. A null
 // image clears the engine's copy instead of pushing empty bytes.
+// THE FILL OF THE FILE ON AIR ("" = none, so the output's own default decides).
+// The compositor frame carries it, because the frame is what is on air and the
+// engine reads a whole frame per tick — see CompositorState::MediaFrame::fit.
+// File scope like the `hadFrame` flag below: one service, one take.
+std::string g_mediaFitOnAir;
+
+// THE PICTURE ON AIR'S OWN TRANSPARENCY (see CompositorState::MediaFrame::hasAlpha).
+// Decided ONCE per take, where the pixels were already in hand — the still's
+// decode on the take's worker (preflightMediaTake) or the FIRST frame of a video
+// (applyMediaTake's sink handler; a per-frame scan of 1080p RGBA would cost more
+// than the render) — and re-pushed with every frame so the engine's composition
+// reads a fact about THIS take, never a leftover from the last one.
+bool g_mediaHasAlphaOnAir = false;
+
+// Does this picture carry a pixel you can see through? An alpha CHANNEL is not
+// the answer: a photo saved as PNG/ARGB is opaque everywhere, and treating its
+// channel as transparency put the monitor tile's checkers in the letterbox
+// margins of every such file. Walk the pixels — once per take, never per frame.
+bool imageHasTransparentPixel(const QImage &image)
+{
+    if (image.isNull() || !image.hasAlphaChannel())
+        return false;
+    const QImage probe = image.convertToFormat(QImage::Format_ARGB32);
+    for (int y = 0; y < probe.height(); ++y) {
+        const QRgb *row = reinterpret_cast<const QRgb *>(probe.constScanLine(y));
+        for (int x = 0; x < probe.width(); ++x) {
+            if (qAlpha(row[x]) < 255)
+                return true;
+        }
+    }
+    return false;
+}
+
+// The one label a taken file's meter lands under in EngineBridge::inputLevels
+// (see applyMediaTake). Reserved: it names the take that is UP, not a roster row.
+const QString kMediaMeterLabel = QStringLiteral("Media on air");
+
 void pushMediaFrameToCompositor(const QImage &frame)
 {
     // ONE-SHOT TRANSITION LOG, never per frame (a video hands a frame in at its
@@ -113,6 +155,16 @@ void pushMediaFrameToCompositor(const QImage &frame)
         std::memcpy(mf.rgba.data() + static_cast<size_t>(y) * mf.width * 4,
                     rgba.constScanLine(y), static_cast<size_t>(mf.width) * 4);
     }
+    // THE FILE'S OWN FILL RIDES THE FRAME (see CompositorState::MediaFrame::fit):
+    // SceneBuilder lays the picture out by it, and it WINS over the output's
+    // default there.
+    mf.fit = g_mediaFitOnAir;
+    // AND SO DOES ITS OWN TRANSPARENCY (see CompositorState::MediaFrame::hasAlpha):
+    // the engine's composition answers "is this frame transparent?" from the
+    // PICTURE, and every surface that draws the transparency convention reads
+    // that one answer (SlideComposition::frameTransparent) instead of asking a
+    // file's extension or a panel's own idea of what a take means.
+    mf.hasAlpha = g_mediaHasAlphaOnAir;
     pl::CompositorState::Instance().SetMediaFrame(std::move(mf));
     if (!hadFrame) {
         hadFrame = true;
@@ -227,9 +279,18 @@ QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec 
     // The frame has nothing of the style's OWN in it — either the style paints
     // nothing, or its only paint (the image) is stepped aside for this slide. A
     // surface bases its own transparency on this.
-    const bool stylePaintless = !stylePaints
+    // A TAKE CLEARS THE STYLE'S BACKGROUND (see SlideComposition::clearedByTake):
+    // the engine paints none of it, so a preview must not either — the tile's
+    // pane colour, its style image and the block render's own style image all
+    // read these facts. This is the half of the rule the QML side used to miss:
+    // the composited frame came up clean while the monitor tile and the output
+    // window kept painting the style's poster around the picture, which is
+    // exactly the report "the image shows perfectly now but the style bg still
+    // shows for some of them".
+    const bool stylePaintless = comp.clearedByTake || !stylePaints
         || (styleImageOnDisk && comp.styleImageSuppressed);
-    const bool styleImagePainted = styleImageOnDisk && !comp.styleImageSuppressed;
+    const bool styleImagePainted = !comp.clearedByTake && styleImageOnDisk
+        && !comp.styleImageSuppressed;
     // WOULD A BLOCK RENDER OF THIS FRAME BE A STAND-IN? The camera / media /
     // audio / image decision rides the composition too, so it is answered here
     // once instead of by each surface for itself: the monitor tile and the
@@ -243,9 +304,15 @@ QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec 
             ? slide->blocks : comp.blocks;
     const bool framePriority = pl::SlideRules::NeedsDistributedFrame(drawn);
     const QVariantMap styleFacts{
-        { QStringLiteral("styleColor"), QString::fromStdString(style.backgroundColor) },
+        // A take hands the frame to the picture: the style's colour is not the
+        // pane's base while one is showing (see clearedByTake above).
+        { QStringLiteral("styleColor"), comp.clearedByTake
+            ? QStringLiteral("transparent")
+            : QString::fromStdString(style.backgroundColor) },
         { QStringLiteral("styleImage"), styleImage },
-        { QStringLiteral("stylePaints"), stylePaints },
+        // stylePaints answers "would this style paint anything of its own" for
+        // the slide that is up — false while a take owns the frame.
+        { QStringLiteral("stylePaints"), stylePaints && !comp.clearedByTake },
         { QStringLiteral("stylePaintless"), stylePaintless },
         { QStringLiteral("styleImagePainted"), styleImagePainted },
         // The distributed frame must win over a block render for this slide —
@@ -257,6 +324,23 @@ QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec 
         // surface that shows transparency as transparency needs the difference,
         // and only the composition has it.
         { QStringLiteral("explicitTransparent"), comp.explicitTransparent },
+        // THE ONE ANSWER to "is this frame transparent where nothing paints?"
+        // (see SceneBuilder::SlideComposition::frameTransparent). Every surface
+        // that draws the transparency convention — the monitor tile's
+        // checkerboard, and anything added later — reads THIS, so a taken photo
+        // cannot be checkered on one surface and plain on the next, and a
+        // genuinely transparent picture cannot lose its checkers on one of them.
+        { QStringLiteral("frameTransparent"), comp.frameTransparent },
+        // A take owns the frame: surfaces use it to clear anything of the
+        // style's they would otherwise paint under the picture.
+        { QStringLiteral("clearedByTake"), comp.clearedByTake },
+        // THIS OUTPUT'S OWN FILL, which is only the FALLBACK now: a file that
+        // names its own (LiveOutputService::mediaFit) wins over it, exactly as
+        // SceneBuilder lays it out. A preview that laid the picture out by the
+        // output alone would letterbox what the output crops.
+        { QStringLiteral("mediaFit"), QString::fromStdString(style.mediaFit.empty()
+                                                             ? std::string("contain")
+                                                             : style.mediaFit) },
     };
 
     // The background, as a QML string: an EXPLICITLY transparent style is
@@ -279,6 +363,9 @@ QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec 
         cleared.insert(QStringLiteral("stylePaints"), false);
         cleared.insert(QStringLiteral("stylePaintless"), true);
         cleared.insert(QStringLiteral("styleImagePainted"), false);
+        // A CLEAR IS A TRANSPARENT FRAME by definition (nothing of the style's,
+        // nothing of the slide's) — the composition's own answer for it.
+        cleared.insert(QStringLiteral("frameTransparent"), true);
         cleared.insert(QStringLiteral("valid"), true);
         cleared.insert(QStringLiteral("title"), QString());
         cleared.insert(QStringLiteral("contentType"), QString::fromStdString(comp.contentType));
@@ -591,6 +678,13 @@ LiveOutputService::LiveOutputService(QObject *parent)
     });
     previewTimer_->start();
 
+    // The 10 Hz state poll runs from BOOT, not from GO LIVE. It is the only
+    // frameRev publisher (the monitor tiles' cache-buster), and the idle preview
+    // publishes a take's picture off air — a poll that only lived between GO
+    // LIVE and STOP meant none of those frames was ever fetched, which is
+    // exactly "it only shows on the monitor preview once I press go live".
+    ensurePollTimer();
+
     // A tap OPEN is split (§3.9/§6.3 of docs/gui_thread_audit.md): the bridge
     // accepts the claim here and now, opens the device on the engine worker, and
     // reports a refusal a beat later. That refusal is this service's to unwind —
@@ -671,47 +765,26 @@ void LiveOutputService::goLive()
     // the first frame is the heaviest (style load + scene build + full-
     // frame rasterize), so the click must feel acknowledged immediately —
     // and a fast STOP press right after is safe by design now.
+    // GO LIVE SENDS THE PREVIEW'S OWN PICTURE — nothing else. It used to fall back
+    // to MIRRORING THE OPEN SHOW (LiveOutputController::StartFromOpenShow), which is
+    // how a press of GO LIVE put a show that merely happened to be open in the editor
+    // onto the monitors, in place of the file being previewed. The operator's words:
+    // "clear the go-live path from being responsible for taking any show to monitor
+    // or live — it takes only what it finds in the monitor preview". So the gate has
+    // two sources and neither is the open document: a STAGED pick goes as itself
+    // (the branch above), and with nothing staged the COMPOSITOR's own layers go
+    // under the blank carrier — a taken camera/screen, media on air, the overlays,
+    // over the active style's background: exactly what the tile is showing.
+    //
+    // The carrier has no content of its own (no blocks, no title, transparent), so
+    // this is not committing or inventing a pick, and it does not touch the preview:
+    // a staged slide stays staged, the tile keeps its pixels, and the next GO LIVE
+    // re-sends the same thing. Putting an OPEN SHOW on air is now only ever the
+    // explicit act — the show's own Take / Go Live, which sends THAT show's slides
+    // (goLiveWithSlides).
     EventBus::instance().notify(QStringLiteral("Going live…"),
                                 QStringLiteral("info"), QStringLiteral("Go Live"));
-    auto r = bps::live::LiveOutputController::Instance().StartFromOpenShow();
-    if (!r.ok()) {
-        // No open show to mirror — but the preview is still showing something:
-        // the COMPOSITOR's own layers (a taken camera/screen, media on air, any
-        // overlays) over the active style's background. Those layers hang off
-        // the scene, so they only reach the outputs with a slide under them;
-        // sending the ONE blank carrier slide transmits exactly what the
-        // preview shows and nothing more.
-        //
-        // This is deliberately NOT the old "blank holding screen" decision: the
-        // carrier has no content of its own (no blocks, no title, transparent),
-        // so GO LIVE is not committing or inventing a pick, and it does not
-        // touch the preview — a staged slide stays staged, the tile keeps its
-        // pixels, and the next GO LIVE re-sends the same thing. The style's own
-        // background paints over it, because SceneBuilder composites the active
-        // style unconditionally.
-        goLiveBlank();
-        return;
-    }
-
-    // This live session's NDI sender opens under the FIRST enabled NDI
-    // output's own name (recreated when the name changed since last time —
-    // NDI can't rename a live sender; see armNdiSenderForSession).
-    armNdiSenderForSession();
-
-    if (!live_) {
-        live_ = true;
-        emit liveChanged();
-        refreshOnAirSlide();
-        emit onAirChanged();
-        if (!poll_) {
-            poll_ = new QTimer(this);
-            poll_->setInterval(100);   // 10Hz — slide titles AND a live-looking preview
-            connect(poll_, &QTimer::timeout, this, &LiveOutputService::pollTick);
-        }
-        poll_->start();
-        startNdiSendClock();   // the NDI feed's own clock, paced by the output's refresh rate
-        pollTick();
-    }
+    goLiveBlank();
 }
 
 // Any-content go-live: convert the QML slide maps to engine Slides and hand
@@ -771,16 +844,9 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         refreshOnAirSlide();
         emit onAirChanged();
     }
-    if (!poll_) {
-        poll_ = new QTimer(this);
-        poll_->setInterval(100);
-        connect(poll_, &QTimer::timeout, this, &LiveOutputService::pollTick);
-    }
-    if (!poll_->isActive()) {
-        poll_->start();
-        startNdiSendClock();   // the NDI feed's own clock, paced by the output's refresh rate
-        pollTick();
-    }
+    ensurePollTimer();          // already armed since boot — a no-op here
+    startNdiSendClock();        // the NDI feed's own clock, paced by the output's refresh rate
+    pollTick();
 }
 
 // Records a pick for the Main Output tile WITHOUT going live — see the
@@ -847,16 +913,26 @@ void LiveOutputService::clearAll()
     snap.inputLabel = inputLabel_;
     snap.inputKind = inputKind_;
     snap.inputMode = inputMode_;
+    // The media layer travels in the snapshot too, so the undo gives the file back
+    // the way it gives a camera back.
+    if (mediaOnAir_) {
+        snap.mediaPath = mediaPath_;
+        snap.mediaName = mediaName_;
+    }
     snap.overlays = activeOverlays_;
     snap.valid = !snap.contentSlidesRaw.isEmpty() || !snap.inputLabel.isEmpty()
-                 || !snap.overlays.isEmpty();
+                 || !snap.mediaPath.isEmpty() || !snap.overlays.isEmpty();
     cleared_ = snap;
     emit clearedChanged();
 
-    // The same four clears the button ran itself, in the same order and with
-    // the same gates. Note what is NOT here: live_.
+    // The same clears the button ran itself, in the same order and with the same
+    // gates — PLUS the media file, which is a compositor layer exactly like a taken
+    // camera/screen and used to survive Clear all (reported: "when press clear all or
+    // the media icon it doesn't clear the media"). Note what is NOT here: live_.
     if (!inputLabel_.isEmpty())
         clearInput();
+    if (mediaOnAir_)
+        clearMedia();
     if (!activeOverlays_.isEmpty())
         clearAllOverlays();
     // The on-air slide only means something while live (off air it already
@@ -880,6 +956,11 @@ void LiveOutputService::restoreCleared()
     // overlays, then the content.
     if (!snap.inputLabel.isEmpty())
         takeInput(snap.inputLabel, snap.inputKind, snap.inputMode);
+    // The media layer back where it was. Only one of the two can be non-empty — a
+    // take of either one releases the other (see takeInput/applyMediaTake) — so this
+    // cannot fight the input above for the single compositor layer.
+    else if (!snap.mediaPath.isEmpty())
+        takeMedia(snap.mediaPath, snap.mediaName);
     for (const QVariant &v : snap.overlays) {
         const QVariantMap o = v.toMap();
         takeOverlay(o.value(QStringLiteral("id")).toString(),
@@ -1095,6 +1176,9 @@ bool LiveOutputService::overlayIsOnAir(const QString &id) const
 // then bumps inputRev so every consuming Image re-fetches (the provider
 // answers warm-up requests with a 1×1 transparent that keeps placeholders
 // up without ever flipping inputLive). Stops itself when nothing is held.
+// Defined below (the bus windows' frame conversion — see rgbaFrameOf).
+static pl::CompositorState::MediaFrame rgbaFrameOf(const QImage &frame);
+
 void LiveOutputService::pumpTick()
 {
     // The taken input's frame is pulled ONCE per tick and shared by both
@@ -1133,8 +1217,19 @@ void LiveOutputService::pumpTick()
     // (the same one the media decoder fills) with the frame pulled above.
     if (!takenFrame.isNull())
         pushNdiInputFrame(takenFrame);
+    // BUS WINDOWS: every frame the on-air composition's buses are watching goes
+    // to the compositor, which paints each one at its block's rect (SceneBuilder's
+    // bus pass) — so NDI and HDMI show what the canvas shows. Pulled through the
+    // SAME kind switch the taken input uses: a camera/screen bus reads the PAL
+    // tap, an NDI bus the engine receiver, and neither path knows about the other.
+    for (auto it = busFeeds_.cbegin(); it != busFeeds_.cend(); ++it) {
+        const QImage frame = inputFrame(it->label, it->kind);
+        if (frame.isNull() || frame.width() <= 1)
+            continue;   // warming up or not delivering: keep the last honest picture
+        pl::CompositorState::Instance().SetBusFrame(it.key(), rgbaFrameOf(frame));
+    }
     emit inputChanged();
-    if (inputLabel_.isEmpty() && cardPreviews_.isEmpty())
+    if (inputLabel_.isEmpty() && cardPreviews_.isEmpty() && busFeeds_.isEmpty())
         inputPump_->stop();
 }
 
@@ -1228,6 +1323,172 @@ void LiveOutputService::endPreviewInput(const QString &label)
         EngineBridge::instance().stopVideoPreview(label, QStringLiteral("card"));
     producing_.remove(label);
     emit inputChanged();
+}
+
+// ---------------------------------------------------------------------------
+// Bus video windows — a "bus" block on the on-air slide (see the header)
+// ---------------------------------------------------------------------------
+// A QImage as CompositorState's tightly packed RGBA8. Row-by-row because
+// QImage's bytesPerLine() pads past width*4, and CompositorState's readers
+// assume no padding (the same copy pushMediaFrameToCompositor makes).
+static pl::CompositorState::MediaFrame rgbaFrameOf(const QImage &frame)
+{
+    const QImage rgba = frame.format() == QImage::Format_RGBA8888
+        ? frame : frame.convertToFormat(QImage::Format_RGBA8888);
+    pl::CompositorState::MediaFrame mf;
+    if (rgba.isNull())
+        return mf;
+    mf.width = static_cast<uint32_t>(rgba.width());
+    mf.height = static_cast<uint32_t>(rgba.height());
+    mf.rgba.resize(static_cast<size_t>(mf.width) * mf.height * 4);
+    for (int y = 0; y < rgba.height(); ++y)
+        std::memcpy(mf.rgba.data() + static_cast<size_t>(y) * mf.width * 4,
+                    rgba.constScanLine(y), static_cast<size_t>(mf.width) * 4);
+    return mf;
+}
+
+void LiveOutputService::refreshBusFeeds()
+{
+    // WHAT THE ON-AIR COMPOSITION ASKS FOR. onAirSlide_ is the STYLED
+    // composition every output renders (slideToVariantMap), so its blocks are
+    // the ones SceneBuilder's own bus pass walks: a bus window the outputs will
+    // paint is exactly a bus block listed here, and one the style's template
+    // replaced is not (and must not open a device either).
+    QHash<int, BusFeed> wanted;
+    const QVariantList blocks = onAirSlide_.value(QStringLiteral("blocks")).toList();
+    for (const QVariant &v : blocks) {
+        const QVariantMap block = v.toMap();
+        if (block.value(QStringLiteral("kind")).toString() != QLatin1String("bus"))
+            continue;
+        const QVariantMap meta = block.value(QStringLiteral("meta")).toMap();
+        const int busId = meta.value(QStringLiteral("busId")).toInt();
+        if (busId <= 0 || wanted.contains(busId))
+            continue;
+        // The bus's FIRST routed video source — the very choice BusMonitor and
+        // the Media pane's bus card make, so a window can never show a feed the
+        // operator's own bus card calls something else.
+        const int row = BusListModel::rowForBusNumber(busId);
+        if (row < 0)
+            continue;   // removed, or the roster has not reported yet — next tick retries
+        const QVariantMap bus = BusListModel::Instance()->getBus(row);
+        const QVariantList routes = bus.value(QStringLiteral("routedVideoSources")).toList();
+        if (routes.isEmpty())
+            continue;   // nothing routed in: the plane stays blank, no device is opened
+        const QVariantMap source =
+            VideoSourceListModel::Instance()->getSource(routes.first().toInt());
+        const QString label = source.value(QStringLiteral("sublabel")).toString().trimmed();
+        if (label.isEmpty())
+            continue;
+        BusFeed feed;
+        feed.label = label;
+        feed.kind = source.value(QStringLiteral("kind")).toString();
+        feed.mode = source.value(QStringLiteral("mode")).toString();
+        // The RESOLVED PAL id / NDI name — what the engine's log can name; the
+        // frames themselves travel through the tap below, not through this.
+        feed.deviceId = EngineBridge::instance().resolvedPreviewDeviceId(label);
+        wanted.insert(busId, feed);
+    }
+
+    // RELEASE FIRST: a bus whose feed changed (re-route, source swapped, bus
+    // renamed to another device) must let its old tap go before the new one is
+    // claimed, or the previous device stays open for the rest of the session.
+    const QList<int> held = busFeeds_.keys();
+    for (int busId : held) {
+        const BusFeed &current = busFeeds_[busId];
+        const auto want = wanted.constFind(busId);
+        if (want == wanted.constEnd() || want->label != current.label
+            || want->kind != current.kind)
+            releaseBusFeed(busId);
+    }
+
+    // ...then claim what is new. A refusal (an unavailable device, a closed
+    // window, an NDI runtime that is not there) unwinds cleanly — the same
+    // honest result the Media pane's cards follow: no half-held feed, and no
+    // placeholder that can never fill. The failed label is retried on a CLOCK
+    // (kBusTapRetryMs), not on every poll tick: this runs 10x/s, and a device
+    // that is gone must not write a line (or touch a roster probe) 10x/s.
+    constexpr qint64 kBusTapRetryMs = 3000;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    bool claimed = false;
+    for (auto it = wanted.cbegin(); it != wanted.cend(); ++it) {
+        if (busFeeds_.contains(it.key()))
+            continue;
+        const BusFeed &feed = it.value();
+        const QString retryKey = feed.kind + QLatin1Char('|') + feed.label;
+        if (busTapRetry_.value(retryKey, 0) > nowMs)
+            continue;
+        bool accepted = true;
+        if (feed.kind == QLatin1String("screen"))
+            accepted = EngineBridge::instance().startScreenPreview(feed.label, QStringLiteral("bus"));
+        else if (feed.kind == QLatin1String("ndi"))
+            accepted = EngineBridge::instance().startNdiPreview(feed.label, QStringLiteral("bus"));
+        else
+            accepted = EngineBridge::instance().startVideoPreview(feed.label, feed.mode,
+                                                                 QStringLiteral("bus"));
+        if (!accepted) {
+            busTapRetry_.insert(retryKey, nowMs + kBusTapRetryMs);
+            qInfo("LiveOutputService: bus %d feed '%s' could not be taken for the output "
+                  "(retrying in %lld s)",
+                  it.key(), qUtf8Printable(feed.label), static_cast<long long>(kBusTapRetryMs / 1000));
+            continue;
+        }
+        busTapRetry_.remove(retryKey);
+        busFeeds_.insert(it.key(), feed);
+        claimed = true;
+    }
+
+    publishBusFeeds();
+
+    if (busFeeds_.isEmpty())
+        return;   // the pump stops itself on its next tick (see pumpTick)
+    if (!inputPump_) {
+        inputPump_ = new QTimer(this);
+        inputPump_->setInterval(66);
+        connect(inputPump_, &QTimer::timeout, this, &LiveOutputService::pumpTick);
+    }
+    if (!inputPump_->isActive())
+        inputPump_->start();
+    if (claimed)
+        emit inputChanged();
+}
+
+void LiveOutputService::releaseBusFeed(int busId)
+{
+    const auto it = busFeeds_.constFind(busId);
+    if (it == busFeeds_.constEnd())
+        return;
+    const BusFeed feed = it.value();
+    busFeeds_.remove(busId);
+    if (feed.kind == QLatin1String("screen"))
+        EngineBridge::instance().stopScreenPreview(feed.label, QStringLiteral("bus"));
+    else if (feed.kind == QLatin1String("ndi"))
+        EngineBridge::instance().stopNdiPreview(feed.label, QStringLiteral("bus"));
+    else
+        EngineBridge::instance().stopVideoPreview(feed.label, QStringLiteral("bus"));
+    // Blank the plane, do not freeze it: the bus is no longer part of this
+    // composition, and a last picture left behind would paint into the next
+    // slide's hole.
+    pl::CompositorState::Instance().SetBusFrame(busId, pl::CompositorState::MediaFrame{});
+    publishBusFeeds();
+}
+
+void LiveOutputService::publishBusFeeds()
+{
+    std::vector<pl::CompositorState::BusFeed> feeds;
+    feeds.reserve(static_cast<size_t>(busFeeds_.size()));
+    for (auto it = busFeeds_.cbegin(); it != busFeeds_.cend(); ++it)
+        feeds.push_back(pl::CompositorState::BusFeed{
+            it.key(), it->deviceId.toStdString(), it->kind.toStdString() });
+    pl::CompositorState::Instance().SetBusFeeds(std::move(feeds));
+}
+
+void LiveOutputService::clearBusFeeds()
+{
+    const QList<int> held = busFeeds_.keys();
+    for (int busId : held)
+        releaseBusFeed(busId);   // releases the tap and blanks the plane
+    if (inputPump_ && busFeeds_.isEmpty() && cardPreviews_.isEmpty() && inputLabel_.isEmpty())
+        inputPump_->stop();
 }
 
 QString LiveOutputService::inputFailure(const QString &label, const QString &kind) const
@@ -1596,6 +1857,11 @@ void LiveOutputService::stop()
         live_ = false;
         emit liveChanged();
     }
+    // OFF AIR, NO OUTPUT NEEDS A BUS FEED: an output's bus window is the only
+    // reason these taps exist, and leaving them open held a camera (and its LED)
+    // for the rest of the session after a single GO LIVE/STOP. Unconditional —
+    // harmless when nothing was held.
+    clearBusFeeds();
     // OFF AIR KEEPS THE PICTURE. STOP is the OUTPUT gate, not a content
     // action — live report: "the GO LIVE button always clears the screen; its
     // only responsibility is the outgoing frames, it has nothing to do with
@@ -1635,8 +1901,13 @@ void LiveOutputService::stop()
     onAirIndex_ = -1;
     onAirTotal_ = 0;
     emit onAirChanged();
-    if (poll_)
-        poll_->stop();
+    // THE POLL KEEPS RUNNING OFF AIR. It used to stop here, which is why the
+    // monitor preview only ever updated while live: pollTick is the one place
+    // that bumps frameRev (the image provider's cache-buster), so with the
+    // timer stopped an off-air frame — the idle preview publishing a taken
+    // media file — was written into the buffer and never fetched. Off air the
+    // tick now does two atomic reads and returns (see its head), so the cost
+    // of leaving it armed is a 10 Hz timer, not a render.
     // The NDI feed has its own clock now — off air it stops with it.
     stopNdiSendClock();
     stopNdiFeed();
@@ -1714,7 +1985,16 @@ LiveOutputService::MediaPreflight LiveOutputService::preflightMediaTake(const QS
         return pre;   // found = false: the apply half logs the refusal
 
     static const char *videoExts[] = { "mp4", "mov", "mkv", "avi", "webm", "m4v", "wmv" };
-    static const char *imageExts[] = { "png", "jpg", "jpeg", "bmp", "gif", "webp" };
+    // THE SAME IMAGE LIST THE LIBRARY CLASSIFIES (MediaLibrary::MediaKindOf), so
+    // a file the grid shows as a picture can always be taken. It used to be a
+    // short png/jpg/bmp/gif/webp list, which REFUSED an SVG with "unrecognized
+    // extension" — a format this build's Qt does decode (qsvg plugin), and the
+    // one every logo arrives in ("please add more image types supported svg
+    // etc."). A format nothing here can decode still lands as a frameless take
+    // with a named reason (see the decode below), not as a refusal.
+    static const char *imageExts[] = { "png", "jpg", "jpeg", "jpe", "jfif", "bmp", "dib", "gif",
+                                       "webp", "tif", "tiff", "ico", "heic", "heif", "avif",
+                                       "svg", "svgz", "jp2", "tga" };
     // Same set MediaLibrary.cpp's own classifier recognizes as audio (see
     // its ExtToKind) — a file indexed there as "audio" must not turn out
     // to be refused here.
@@ -1737,8 +2017,57 @@ LiveOutputService::MediaPreflight LiveOutputService::preflightMediaTake(const QS
     // provider as a video frame. A failed decode leaves the take up but
     // frameless: image stays null and the apply half keeps the tile's
     // placeholder honest instead of faking a frame.
-    if (pre.isImage)
-        pre.image = QImage(pre.clean);
+    if (pre.isImage) {
+        // QImageReader, not QImage(path): the reader reports WHY a file failed
+        // and lets an SVG be rasterized at the size it will be shown at. An SVG
+        // carries no pixels of its own — read at its intrinsic size (often 512)
+        // it reaches a 1080 stage as a blown-up bitmap.
+        QImageReader reader(pre.clean);
+        reader.setAutoTransform(true);
+        const QByteArray format = reader.format();
+        if (format == "svg" || format == "svgz") {
+            const QSize intrinsic = reader.size();
+            if (intrinsic.isValid() && intrinsic.height() > 0 && intrinsic.height() < 1080) {
+                const qreal scale = 1080.0 / intrinsic.height();
+                reader.setScaledSize(QSize(qRound(intrinsic.width() * scale), 1080));
+            }
+        }
+        pre.image = reader.read();
+        // REAL TRANSPARENCY, scanned once, here, on the worker — the one place
+        // the decoded pixels are already in hand (see imageHasTransparentPixel
+        // and CompositorState::MediaFrame::hasAlpha).
+        pre.hasAlpha = imageHasTransparentPixel(pre.image);
+        // ONE-SHOT DECODE PROBE. "It does not render all images correctly" has
+        // exactly two halves — the file arrived wrong, or it arrived right and
+        // the composite lost it — and only the decoded pixels can tell them
+        // apart. Dimensions + four corner colours + the centre say whether this
+        // is the file the card was showing.
+        if (!pre.image.isNull()) {
+            const QImage probe = pre.image.convertToFormat(QImage::Format_RGB32);
+            const int cx = probe.width() / 2;
+            const int cy = probe.height() / 2;
+            qInfo("media take image: '%s' %dx%d corners tl=%08x br=%08x center=%08x alpha=%s",
+                  qUtf8Printable(pre.clean), probe.width(), probe.height(),
+                  probe.pixel(0, 0), probe.pixel(probe.width() - 1, probe.height() - 1),
+                  probe.pixel(cx, cy), pre.hasAlpha ? "yes" : "no");
+        } else {
+            // NAME THE FORMAT, not just the file: "failed to decode" for a .webp
+            // is this build's Qt having no WebP image plugin, and the operator
+            // can only act on that if the log says so. The supported list is the
+            // one that actually answers for THIS machine, plugins included.
+            static const QString supported = [] {
+                QStringList names;
+                for (const QByteArray &f : QImageReader::supportedImageFormats())
+                    names << QString::fromLatin1(f).toLower();
+                names.removeDuplicates();
+                names.sort();
+                return names.join(QStringLiteral(", "));
+            }();
+            qWarning("media take image: '%s' failed to decode (format '%s'; this build decodes: %s)",
+                     qUtf8Printable(pre.clean), format.isEmpty() ? "unknown" : format.constData(),
+                     qUtf8Printable(supported));
+        }
+    }
     return pre;
 }
 
@@ -1831,8 +2160,20 @@ void LiveOutputService::applyMediaTake(const MediaPreflight &pre)
             if (!f.isValid())
                 return;
             lastMediaFrame_ = f.toImage();
-            if (!lastMediaFrame_.isNull())
+            if (!lastMediaFrame_.isNull()) {
+                // THE FIRST FRAME DECIDES THIS TAKE'S OWN TRANSPARENCY — a video
+                // that really carries alpha (a keyed WebM/MOV, an alpha-capable
+                // capture) is a transparent picture on air, and the checkerboard
+                // convention must read it as one. Scanned ONCE: a per-frame walk
+                // of 1080p RGBA would cost more than the render it feeds.
+                if (!mediaAlphaDecided_) {
+                    mediaAlphaDecided_ = true;
+                    mediaHasAlpha_ = imageHasTransparentPixel(lastMediaFrame_);
+                    g_mediaHasAlphaOnAir = mediaHasAlpha_;
+                    emit mediaChanged();
+                }
                 mediaRev_++;
+            }
             pushMediaFrameToCompositor(lastMediaFrame_);
             emit mediaTick();
         });
@@ -1840,8 +2181,24 @@ void LiveOutputService::applyMediaTake(const MediaPreflight &pre)
 
     mediaPath_ = clean;
     mediaName_ = pre.name;
+    // THE FILE'S OWN FILL, from the library ("" = the output's default). It is
+    // handed to the compositor with the first frame and every frame after it, so
+    // every output lays THIS picture out the way the operator asked for the file
+    // — not the way each screen's Fill setting happens to say.
+    mediaFit_ = MediaLibraryService::instance().itemFit(clean);
+    g_mediaFitOnAir = mediaFit_.toStdString();
     mediaIsVideo_ = isVideo;
     mediaIsAudio_ = isAudio;
+    // A STILL's real transparency, decided by its pixels (see preflightMediaTake).
+    // A video or an audio file is never a transparent frame: a decoded video
+    // frame is opaque, and the letterbox margins a contain-fit leaves are the
+    // OUTPUT's empty pixels, not the picture's alpha — reading them as
+    // transparency is what put checkers around a taken 9:16 clip.
+    mediaHasAlpha_ = !isVideo && !isAudio && pre.hasAlpha;
+    g_mediaHasAlphaOnAir = mediaHasAlpha_;
+    // A video's own alpha is decided by its first decoded frame (see the sink
+    // handler above); a still's was just scanned on the worker.
+    mediaAlphaDecided_ = !isVideo;
     lastMediaFrame_ = QImage();   // warm-up: the tiles show their placeholder
     pushMediaFrameToCompositor(lastMediaFrame_);
     mediaOnAir_ = true;
@@ -1872,10 +2229,52 @@ void LiveOutputService::applyMediaTake(const MediaPreflight &pre)
         mediaPosition_ = 0;
         mediaDuration_ = 0;
     }
+    // THE MONITOR METERS FOLLOW A TAKE'S AUDIO. The file's sound is played by
+    // Qt's own QAudioOutput, which no PAL tap can see — so the take also holds a
+    // STREAM meter on the same file (EngineBridge::startStreamMeter, the tap a
+    // video/NDI row already uses for its own audio) under one reserved label the
+    // monitor tiles read. Without it, playing an audio file left every output
+    // tile's L/R strip flat: the bars only ever read capture-device taps, and a
+    // FILE is not a device. Released with the take (clearMedia), so no decoder
+    // outlives the picture.
+    // RELEASE FIRST: the meter is refcounted per label, and taking a second file
+    // must MOVE the decoder, not add a hold that outlives the take (one hold per
+    // take, released by the next one and by clearMedia).
+    EngineBridge::instance().stopStreamMeter(kMediaMeterLabel);
+    if (isVideo || isAudio)
+        EngineBridge::instance().startStreamMeter(kMediaMeterLabel, QStringLiteral("media"), clean);
     qInfo("LiveOutputService: media on air: '%s' (%s)", qUtf8Printable(mediaName_),
           isVideo ? "video" : (isAudio ? "audio" : "image"));
     emit mediaChanged();
     emit mediaTick();
+}
+
+void LiveOutputService::setMediaFit(const QString &fit)
+{
+    // NORMALISED at the edge: the three the renderer knows, anything else means
+    // "let the output decide" — the picker's fourth choice.
+    const QString wanted = (fit == QLatin1String("contain") || fit == QLatin1String("cover")
+                            || fit == QLatin1String("fill"))
+        ? fit : QString();
+    if (mediaPath_.isEmpty())
+        return;   // nothing on air to set it on (the card picker writes the file itself)
+    // THE FILE KEEPS IT: stored in the media library, so the choice is there for
+    // the next take and for every output — the take is only what is up now.
+    MediaLibraryService::instance().setItemFit(mediaPath_, wanted);
+    if (mediaFit_ == wanted)
+        return;
+    mediaFit_ = wanted;
+    g_mediaFitOnAir = wanted.toStdString();
+    // The picture is already decoded: only the LAYOUT changes, so hand the new
+    // fit to the compositor without re-pushing a frame (the pixels are identical)
+    // and let the next preview/live tick lay them out again.
+    pl::CompositorState::Instance().SetMediaFit(wanted.toStdString());
+    emit mediaChanged();
+}
+
+QString LiveOutputService::mediaMeterLabel() const
+{
+    return kMediaMeterLabel;
 }
 
 void LiveOutputService::clearMedia()
@@ -1892,11 +2291,18 @@ void LiveOutputService::clearMedia()
     mediaOnAir_ = false;
     mediaPath_.clear();
     mediaName_.clear();
+    mediaFit_.clear();
+    g_mediaFitOnAir.clear();
+    mediaHasAlpha_ = false;
+    mediaAlphaDecided_ = false;
+    g_mediaHasAlphaOnAir = false;
     mediaState_ = QStringLiteral("stopped");
     mediaPosition_ = 0;
     mediaDuration_ = 0;
     lastMediaFrame_ = QImage();
     pl::CompositorState::Instance().ClearMedia();
+    // The meter's decoder goes with the take (see applyMediaTake).
+    EngineBridge::instance().stopStreamMeter(kMediaMeterLabel);
     qInfo("LiveOutputService: media taken off air");
     emit mediaChanged();
     emit mediaTick();
@@ -2083,7 +2489,8 @@ QVariantList LiveOutputService::onAirSlidesRaw() const
 void LiveOutputService::refreshOnAirSlide()
 {
     const pl::Slide *slide = live_ ? pl::PresentationEngine::Instance().CurrentSlide() : nullptr;
-    onAirSlide_ = slide ? slideToVariantMap(slide) : QVariantMap{};
+    onAirSlide_ = slide ? slideToVariantMap(slide, pl::PresentationEngine::Instance().ActiveOutputStyle())
+                        : QVariantMap{};
     onAirSlideRaw_ = slide ? slideToVariantMap(slide, pl::OutputStyleSpec{}) : QVariantMap{};
 }
 
@@ -2144,12 +2551,43 @@ qulonglong LiveOutputService::framesSentNow() const
     return bps::live::LiveOutputController::Instance().FramesSent();
 }
 
+// See the header: armed once, at construction, and never stopped — pollTick is
+// what publishes the monitor preview OFF AIR, not only while live.
+void LiveOutputService::ensurePollTimer()
+{
+    if (poll_) {
+        if (!poll_->isActive())
+            poll_->start();
+        return;
+    }
+    poll_ = new QTimer(this);
+    poll_->setInterval(100);
+    connect(poll_, &QTimer::timeout, this, &LiveOutputService::pollTick);
+    poll_->start();
+}
+
 void LiveOutputService::pollTick()
 {
+    auto &ctrl = bps::live::LiveOutputController::Instance();
+
+    // THE CACHE-BUSTER RUNS OFF AIR TOO — GO LIVE IS NOT THE GATE TO THE
+    // MONITOR PREVIEW. The tiles read the engine's preview buffer through
+    // image://livepreview?v=<frameRev>, and ONLY a bump here makes them refetch
+    // it. This used to sit below `if (!live_) return`, so an off-air frame
+    // (LiveOutputController's idle preview publishes the compositor's picture
+    // — a taken media file, a camera over the style) landed in the buffer and
+    // nothing ever asked for it: the take appeared on the wall the moment GO
+    // LIVE started the live loop and not one tick earlier. The preview is what
+    // GO LIVE COPIES FROM, so it has to be current while nothing is on air.
+    if (ctrl.PreviewFrames() != previewFrames_) {
+        previewFrames_ = ctrl.PreviewFrames();
+        ++frameRev_;
+        emit frameRevChanged();
+    }
+
     if (!live_)
         return;
 
-    auto &ctrl = bps::live::LiveOutputController::Instance();
     if (ctrl.IsLiveContentReplacementPending())
         return;
 
@@ -2164,11 +2602,11 @@ void LiveOutputService::pollTick()
     // (heavier) per-output passes — the reported "I click a paragraph and it
     // delays before it updates on the monitor preview". Watching both costs
     // one refetch more per content change and shows the click immediately.
+    // (The preview counter is handled above, live or not; this is the LATE
+    // publish — once every per-output pass has also landed.)
     const qulonglong sent = ctrl.FramesSent();
-    const qulonglong previewed = ctrl.PreviewFrames();
-    if (sent != framesSent_ || previewed != previewFrames_) {
+    if (sent != framesSent_) {
         framesSent_ = sent;
-        previewFrames_ = previewed;
         // Bump the cache-buster too — without this frameRev stayed 0 forever,
         // hasFrame was never true, and every monitor tile showed the
         // checkerboard while LIVE (the emit alone changes nothing: QML
@@ -2219,14 +2657,24 @@ void LiveOutputService::pollTick()
         // (a document edit re-synced while live, a style rebuild) — the poll
         // re-reads them so the QML preview stays honest. Cheap when unchanged:
         // a property write with no matching QML binding change is free.
-        const QVariantMap next = slideToVariantMap(slide);
-        const QVariantMap nextRaw = slideToVariantMap(slide, pl::OutputStyleSpec{});
+        const QVariantMap next = slide
+            ? slideToVariantMap(slide, pl::PresentationEngine::Instance().ActiveOutputStyle())
+            : QVariantMap{};
+        const QVariantMap nextRaw = slide ? slideToVariantMap(slide, pl::OutputStyleSpec{})
+                                          : QVariantMap{};
         if (next != onAirSlide_ || nextRaw != onAirSlideRaw_) {
             onAirSlide_ = next;
             onAirSlideRaw_ = nextRaw;
             emit onAirChanged();
         }
     }
+
+    // THE OUTPUTS' BUS WINDOWS ride the same 10Hz mirror: onAirSlide_ is now
+    // this instant's on-air composition, so which buses need a feed (and which
+    // one each is watching) is a model read away. Idempotent — with nothing
+    // changed it touches no device — and a re-route or a bus rename settles
+    // within one tick, which is why no event for either has to be published.
+    refreshBusFeeds();
 }
 
 // ---------------------------------------------------------------------------

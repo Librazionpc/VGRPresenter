@@ -22,9 +22,15 @@
 
 #include "core/task_scheduler/TaskScheduler.hpp"
 #include "core/threading/ThreadPool.hpp"
+#include "modules/recording/RecordingEngine.hpp"
 
 #include <cstdio>
 #include <cstring>
+
+// The free space every suite starts with, as a SIMULATED number — pinned before
+// each suite below. It lives in TestHarness.hpp so the suites that simulate disk
+// pressure re-pin the SAME number instead of a second copy of it (see its
+// comment there, and TestRecordingLifecycle's emergency-disk case).
 
 struct Suite {
     const char* phase;
@@ -100,6 +106,7 @@ static const Suite kSuites[] = {
     {"styles", "style-bg-image", TestStyleBackgroundImage},
     {"styles", "style-bg-pixels", TestStyleBackgroundImagePixels},
     {"styles", "blank-carrier-pixels", TestBlankCarrierCompositorPixels},
+    {"styles", "media-fit-on-file", TestMediaFitOnTheFileWins},
     {"styles", "clear-carrier-paints-nothing", TestClearCarrierPaintsNothing},
     {"styles", "block-scenes", TestBlockScenes},
     {"styles", "block-text-box", TestBlockTextBox},
@@ -114,6 +121,7 @@ static const Suite kSuites[] = {
     {"styles", "show-slide-keeps-own-design", TestShowSlideKeepsItsOwnDesign},
     {"styles", "transparent-background", TestTransparentBackground},
     {"styles", "frame-rule", TestFrameRule},
+    {"styles", "bus-window-plane", TestBusWindowPlane},
     {"adaptive", "adaptive-hw", TestAdaptiveHardware},
     {"adaptive", "adaptive-prof", TestAdaptiveProfiler},
     {"adaptive", "adaptive-feat", TestAdaptiveFeatures},
@@ -157,6 +165,7 @@ static const Suite kSuites[] = {
     {"presentation", "present", TestPresentationDocument},
     {"presentation", "present", TestShowStructure},
     {"presentation", "present", TestTemplateFile},
+    {"presentation", "vgr-mkdir", TestVgrWriteCreatesItsFolder},
     {"presentation", "present", TestShowLibrary},
     {"presentation", "present", TestShowEditor},
     {"presentation", "present", TestNextTimer},
@@ -172,6 +181,9 @@ static const Suite kSuites[] = {
     {"media", "media-library", TestPngEncode},
     {"media", "media-library", TestMediaLibraryFolders},
     {"media", "media-library", TestMediaLibraryNestedFolders},
+    {"media", "media-library", TestMediaLibraryItemEdit},
+    {"media", "media-item-fit", TestMediaLibraryItemFit},
+    {"media", "media-library", TestMediaLibraryUndoDelete},
     {"media", "media-library", TestEmptyPathSafety},
     {"media", "media-library", TestThumbnailCache},
     {"media", "media-library", TestThumbnailCacheConcurrency},
@@ -285,6 +297,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "[mark] %s\n", s.name);
             last = s.name;
         }
+        bps::recording::RecordingEngine::Instance().SetSimulatedFreeBytes(kTestFreeBytes);
         s.fn();
         ++ran;
     }

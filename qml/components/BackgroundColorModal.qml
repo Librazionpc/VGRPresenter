@@ -416,7 +416,7 @@ Item {
                 height: 28
                 radius: 7
                 color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 Text {
                     anchors.centerIn: parent
@@ -600,7 +600,7 @@ Item {
                                    : (colorSwatchArea.containsMouse ? Theme.hoverBg : Theme.inset)
                             border.width: colorSwatch.selected ? 2 : 1
                             border.color: colorSwatch.selected ? Theme.accent : Theme.borderSubtle
-                            Behavior on color { ColorAnimation { duration: 100 } }
+                            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                             Behavior on border.width { NumberAnimation { duration: 100 } }
 
                             // Mini checkerboard so "Transparent" reads as a
@@ -912,7 +912,7 @@ Item {
                 height: 34
                 radius: 8
                 color: applyArea.containsMouse ? Qt.darker(Theme.accent, 1.15) : Theme.accent
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 Text {
                     anchors.centerIn: parent

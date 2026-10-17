@@ -612,6 +612,37 @@ target_include_directories(appVGRPresenterUI PRIVATE
     qml/models/include qml/models/include/models)
 
 # =============================================================================
+# Image formats Qt does not ship (WebP today) — a WIC-backed image-format plugin
+# =============================================================================
+# Qt's official MinGW build carries only qgif/qico/qjpeg/qsvg, so every Qt
+# image loader in this app refused a .webp: QML's Image logged "Unsupported
+# image format" over the Show Center preview, and QImageReader answered empty
+# for a still being taken on air — while the ENGINE drew the same file fine
+# (its decoder has always been WIC). One plugin closes the gap for every Qt
+# path at once instead of a fallback per call site.
+#
+# It lands in <build>/imageformats/, which is exactly where Qt looks for
+# plugins beside the executable (applicationDirPath is always a library path),
+# so a dev run and a portable deploy behave the same. windeployqt cannot know
+# about it — tools/make_portable.sh copies the directory.
+#
+# The plugin does nothing on a machine without the WebP codec installed (no
+# capability reported), so this adds no failure mode to a PC that never had
+# WebP support at all.
+if(WIN32)
+    qt_add_plugin(qwicimage CLASS_NAME WicImagePlugin
+        qml/services/imageformats/wicimage.cpp
+        qml/services/imageformats/wicimage.json)
+    target_link_libraries(qwicimage PRIVATE Qt6::Gui windowscodecs ole32)
+    set_target_properties(qwicimage PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/imageformats"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/imageformats"
+        # No ARCHIVE/import lib: nothing links against a plugin.
+        ENABLE_EXPORTS FALSE)
+    add_dependencies(appVGRPresenterUI qwicimage)
+endif()
+
+# =============================================================================
 # Lock-scope guard (tools/check_lock_scope.mjs) — part of the default build
 # =============================================================================
 # A lock held across a PAL/provider/cross-engine call — or across a

@@ -58,6 +58,9 @@ void TestSetActiveOutputStyle();
 void TestGoLivePaths();
 void TestStyleBackgroundImagePixels();
 void TestBlankCarrierCompositorPixels();
+// The file's own Contain/Cover/Fill beats the output's default, and a take
+// clears the style's background in the composition (ComposeSlide::clearedByTake).
+void TestMediaFitOnTheFileWins();
 void TestStyleBackgroundImage();
 // Clear all's carrier (Slide::clearStage): the engine paints NOTHING for it,
 // while the GO-LIVE-with-nothing carrier beside it keeps the style painting.
@@ -73,6 +76,9 @@ void TestLineHeightObeysTheTemplate();
 void TestTemplateStyleScenes();
 void TestBlankTemplateFallsBackToSlideBlocks();
 void TestShowSlideKeepsItsOwnDesign();
+// A "bus" block's live plane on the real output frame: the block's own rect,
+// a new frame through a cache hit, and a stopped feed going invisible.
+void TestBusWindowPlane();
 void TestTransparentBackground();
 void TestFrameRule();
 void TestImageScale();
@@ -132,6 +138,7 @@ void TestPresentationSerializer();
 void TestPresentationDocument();
 void TestShowStructure();
 void TestTemplateFile();
+void TestVgrWriteCreatesItsFolder();
 void TestShowLibrary();
 void TestShowEditor();
 void TestNextTimer();
@@ -148,6 +155,15 @@ void TestMediaEngine();
 void TestPngEncode();
 void TestMediaLibraryFolders();
 void TestMediaLibraryNestedFolders();
+// The Media pane's item menu: rename / move / delete a real file, and the index
+// that lists it afterwards (see tests_media.cpp).
+void TestMediaLibraryItemEdit();
+// A file's own fill (Contain/Cover/Stretch) lives on the file: it survives a
+// rescan, a rename and a restart, and "" means "follow the output's default".
+void TestMediaLibraryItemFit();
+// The operator's Delete is undoable: the file goes to the library's trash and a
+// restore puts it back in its own folder, in its own place (see tests_media.cpp).
+void TestMediaLibraryUndoDelete();
 void TestEmptyPathSafety();
 void TestThumbnailCache();
 void TestThumbnailCacheConcurrency();

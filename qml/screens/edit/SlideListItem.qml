@@ -156,7 +156,7 @@ Rectangle {
         visible: opacity > 0
         color: deleteArea.containsMouse ? "#3a2230" : "#1c2030"
         Behavior on opacity { NumberAnimation { duration: 100 } }
-        Behavior on color { ColorAnimation { duration: 100 } }
+        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
         Text {
             anchors.centerIn: parent

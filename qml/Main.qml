@@ -627,6 +627,17 @@ ApplicationWindow {
         transformOrigin: Item.Top
         scale: window.uiScale
         activeTab: window.currentView
+        // Edit opens a SHOW — one picked in the centre preview, or the one
+        // already open in the editor. With neither, the tab is greyed and does
+        // nothing: pressing it used to take the operator into an editor holding
+        // an untitled show nobody asked for (and the recovery store then tried
+        // to write it, which is where "cannot open for writing: …unsaved-show.vgr.tmp"
+        // came from). A new show is made with New show, deliberately.
+        // Truthy, not `!== null`: centerItem starts as undefined, and `undefined
+        // !== null` is true — which then read `.type` off it and put a TypeError
+        // in the log on the first evaluate.
+        editAvailable: ShowService.hasShow
+            || !!(showScreen.centerItem && showScreen.centerItem.type === "show")
         onTabSelected: (tab) => {
             // Edit means "edit what I'm looking at": a show clicked open in
             // the Show screen's centre preview (ShowCenter) is what Edit
@@ -636,7 +647,12 @@ ApplicationWindow {
             // DIFFERENT show than what's already open, so flipping back and
             // forth while actively editing doesn't reset undo history.
             if (tab === "edit") {
+                // Nothing to edit: stay put (the tab is greyed too — this is the
+                // guard for a click that got through anyway, a keyboard path, or
+                // the last show being closed while the editor held it).
                 const item = showScreen.centerItem
+                if (!ShowService.hasShow && !(item && item.type === "show"))
+                    return
                 if (item && item.type === "show" && item.ref !== "" && item.ref !== ShowService.showPath)
                     editScreen.openShowPath(item.ref)
             }
@@ -2107,6 +2123,385 @@ ApplicationWindow {
             window.pillReadCase()           // the fallback's reading
             window.pillStep = 0
             window.pillCase++
+        }
+    }
+
+    // ---- "New bus" needs its source (VGR_NEWBUS_TEST=1) ----------------------
+    // The rule the dialog exists for: a bus is created WITH the source the
+    // operator picked, so Create can never leave behind a bus that feeds nothing
+    // (a card that can never light, and a signal path nothing should open a
+    // device for). This drives the real button and the real cards: open
+    // Media · Inputs, click the New bus FAB, click Create with NOTHING picked (the
+    // roster must not grow), click the first source card, click Create (a bus must
+    // appear with its route already made and NO tap opened), grab the dialog for
+    // the design review, and remove the row again.
+    property int newBusStep: 0
+    property int newBusTries: 0
+    property int newBusBefore: 0
+    property int newBusRow: -1
+    property string newBusKind: ""
+    property int newBusPickRow: -1
+    property bool newBusBlocked: false
+    property bool newBusCreated: false
+    property bool newBusRouted: false
+    property bool newBusTapsClean: true
+    // The lights and the cancel path (the two things a passing Create flow does
+    // NOT prove — see the notes where each is read).
+    property int newBusLightChecked: 0
+    property int newBusLightWrong: 0
+    property bool newBusCancelClosed: false
+
+    function newBusFinish() {
+        selfTestNewBusTick.stop()
+        // Only the row THIS run added, and only while it still carries the marker
+        // name — a shifted roster can never cost the user a bus.
+        if (window.newBusRow >= 0
+                && BusListModel.getBus(window.newBusRow).name === "SelfTest NewBus Bus")
+            BusListModel.removeBus(window.newBusRow)
+        const ok = window.newBusBlocked && window.newBusCreated
+                   && window.newBusRouted && window.newBusTapsClean
+                   && window.newBusLightChecked > 0 && window.newBusLightWrong === 0
+                   && window.newBusCancelClosed
+                   && window.newBusEditPicker && window.newBusEditCancelClosed
+        console.log("[SELFTEST-NEWBUS] blockedEmpty=" + window.newBusBlocked
+                    + " created=" + window.newBusCreated
+                    + " routed=" + window.newBusRouted
+                    + " noTapOpened=" + window.newBusTapsClean
+                    + " lights=" + (window.newBusLightChecked - window.newBusLightWrong)
+                    + "/" + window.newBusLightChecked
+                    + " cancelClosed=" + window.newBusCancelClosed
+                    + " editRing=" + window.newBusEditPicker + "/" + window.newBusEditCancelClosed
+                    + " pick=" + window.newBusKind + "#" + window.newBusPickRow)
+        console.log("[SELFTEST-NEWBUS] result " + (ok ? "PASS" : "FAIL"))
+        SelfTest.quit()
+    }
+
+    // ---- what each SOURCE CARD's light claims ------------------------------
+    // Read off the card itself (`lightState`, the property its colour is drawn
+    // from) and checked against the very probe that answers it
+    // (LiveOutputService.inputAvailable/inputDelivery — the same call the bus
+    // cards in the pane use). A click-through flow passes with every card
+    // painted one flat colour; this is the half that says the colour MEANS
+    // something. "The probe light is not showing correct state" is exactly a
+    // card disagreeing with its own probe.
+    function newBusCheckLights() {
+        let state = ""
+        window.newBusLightChecked = 0
+        window.newBusLightWrong = 0
+        const read = (kind, row, label, sourceKind, name) => {
+            const card = SelfTest.findItem("newBusPicker_row_" + kind + "_" + row)
+            const light = card ? String(card.lightState) : "missing"
+            const alive = LiveOutputService.inputAvailable(label, sourceKind)
+            const starved = LiveOutputService.inputDelivery(label, sourceKind) === "starved"
+            const wanted = !alive ? "offline" : (starved ? "starved" : "connected")
+            window.newBusLightChecked++
+            if (light !== wanted)
+                window.newBusLightWrong++
+            state += (state === "" ? "" : " ") + name + "=" + light
+                     + (light === wanted ? "" : "(wanted " + wanted + ")")
+        }
+        for (let i = 0; i < VideoSourceListModel.rowCount(); ++i) {
+            const v = VideoSourceListModel.getSource(i)
+            const kind = v.kind !== undefined ? String(v.kind) : ""
+            if (["camera", "screen", "ndi"].indexOf(kind) < 0)
+                continue
+            read("video", i, v.sublabel !== undefined ? String(v.sublabel).trim() : "",
+                 kind, String(v.name !== undefined ? v.name : kind).replace(/ /g, "_"))
+        }
+        for (let i = 0; i < AudioInputListModel.rowCount(); ++i) {
+            const a = AudioInputListModel.getInput(i)
+            read("audio", i, a.sublabel !== undefined ? String(a.sublabel).trim() : "",
+                 "audio", String(a.name !== undefined ? a.name : "audio").replace(/ /g, "_"))
+        }
+        console.log("[SELFTEST-NEWBUS] lights " + state
+                    + " mismatched=" + window.newBusLightWrong
+                    + "/" + window.newBusLightChecked)
+    }
+
+    // The pane must be SHOWING its Inputs section before the FAB's centre means
+    // anything (the same reason the pill scenario opens it first).
+    function newBusOpenPane() {
+        SelfTest.activate()
+        const pane = SelfTest.findItem("selfTestMediaPane")
+        if (!pane)
+            return false
+        if (!pane.visible) {
+            window.newBusTries++
+            if (window.newBusTries <= 2) {
+                SelfTest.clickItem("selfTestTab_media")
+            } else {
+                const bar = SelfTest.findItem("selfTestLibraryTabBar")
+                const tabs = bar && bar.tabs ? bar.tabs : []
+                for (let i = 0; i < tabs.length; ++i)
+                    if (tabs[i].pane === "media") { bar.currentTab = i; break }
+            }
+            return false
+        }
+        window.newBusTries = 0
+        pane.selection = "inputs"
+        return true
+    }
+
+    // The first source card the dialog can offer, as { kind, row } — the rosters
+    // the dialog itself reads (a source with no device named is skipped: it has
+    // nothing for the tap to resolve).
+    function newBusFirstPick() {
+        for (let i = 0; i < VideoSourceListModel.rowCount(); ++i) {
+            const v = VideoSourceListModel.getSource(i)
+            const kind = v.kind !== undefined ? String(v.kind) : ""
+            if (["camera", "screen", "ndi"].indexOf(kind) >= 0
+                    && v.sublabel !== undefined && String(v.sublabel).trim() !== "")
+                return { kind: "video", row: i }
+        }
+        for (let i = 0; i < AudioInputListModel.rowCount(); ++i) {
+            const a = AudioInputListModel.getInput(i)
+            if (a.sublabel !== undefined && String(a.sublabel).trim() !== "")
+                return { kind: "audio", row: i }
+        }
+        return null
+    }
+
+    function newBusAdvance() {
+        if (window.newBusStep === 0) {
+            if (!SelfTest.findItem("selfTestMediaPane")) {
+                console.log("[SELFTEST-NEWBUS] pane=missing")
+                window.newBusStep = 99
+                window.newBusFinish()
+                return
+            }
+            if (!window.newBusOpenPane())
+                return
+            window.newBusBefore = BusListModel.rowCount()
+            window.newBusStep = 1
+            return
+        }
+        if (window.newBusStep === 1) {
+            if (!SelfTest.itemVisible("selfTestBusNew"))
+                return
+            SelfTest.clickItem("selfTestBusNew")     // the real button
+            window.newBusStep = 2
+            return
+        }
+        if (window.newBusStep === 2) {
+            // The dialog's card is what the click is measured on; the fade is
+            // 130 ms, so a tick is plenty.
+            if (!SelfTest.itemVisible("newBusPicker_card")) {
+                window.newBusTries++
+                if (window.newBusTries < 3)
+                    return
+                console.log("[SELFTEST-NEWBUS] dialog=missing")
+                window.newBusFinish()
+                return
+            }
+            window.newBusTries = 0
+            SelfTest.grab("newBusPicker_card", "newbus_dialog.png")
+            console.log("[SELFTEST-NEWBUS] dialog=open grabbed=newbus_dialog.png")
+            window.newBusCheckLights()
+            window.newBusStep = 3
+            return
+        }
+        if (window.newBusStep === 3) {
+            // NOTHING picked: Create must make nothing, and say why.
+            SelfTest.clickItem("newBusPicker_create")
+            window.newBusStep = 4
+            return
+        }
+        if (window.newBusStep === 4) {
+            window.newBusBlocked = BusListModel.rowCount() === window.newBusBefore
+            const problem = SelfTest.findItem("newBusPicker_problem")
+            console.log("[SELFTEST-NEWBUS] createWithNoPick rows=" + BusListModel.rowCount()
+                        + " (before " + window.newBusBefore + ")"
+                        + " saidWhy=" + (problem !== null && problem.visible))
+            const pick = window.newBusFirstPick()
+            if (!pick) {
+                console.log("[SELFTEST-NEWBUS] no source to pick")
+                window.newBusFinish()
+                return
+            }
+            window.newBusKind = pick.kind
+            window.newBusPickRow = pick.row
+            const name = "newBusPicker_row_" + pick.kind + "_" + pick.row
+            if (!SelfTest.itemVisible(name)) {
+                // Diagnose BEFORE failing: the name is carried by BOTH instances
+                // of this picker (the Media pane's and the Edit screen's), so a
+                // resolution that lands on the other instance's card reports the
+                // wrong thing — and "not laid out" would be the wrong sentence
+                // for it. No duplicate names, no ambiguity: see the objectName
+                // in BusSourceModal (the name follows the MODE, and only one
+                // caller ever opens the create mode at a time... except that the
+                // Edit instance is built at boot in create mode too).
+                const c = SelfTest.findItem(name)
+                console.log("[SELFTEST-NEWBUS] pick card probe " + name
+                            + " found=" + (c !== null)
+                            + " visible=" + (c !== null ? c.visible : "-")
+                            + " w=" + (c !== null ? c.width : "-")
+                            + " h=" + (c !== null ? c.height : "-")
+                            + " itemVisible=" + SelfTest.itemVisible(name))
+                window.newBusFinish()
+                return
+            }
+            SelfTest.clickItem(name)
+            window.newBusStep = 5
+            return
+        }
+        if (window.newBusStep === 5) {
+            const create = SelfTest.findItem("newBusPicker_create")
+            console.log("[SELFTEST-NEWBUS] createLive=" + (create !== null && create.opacity === 1)
+                        + " saidWhy=" + (SelfTest.findItem("newBusPicker_problem") !== null
+                                          && SelfTest.findItem("newBusPicker_problem").visible))
+            SelfTest.grab("newBusPicker_card", "newbus_dialog_picked.png")
+            SelfTest.clickItem("newBusPicker_create")
+            window.newBusStep = 6
+            return
+        }
+        // ---- the created bus, read back out of the model ----------------
+        if (BusListModel.rowCount() !== window.newBusBefore + 1) {
+            console.log("[SELFTEST-NEWBUS] create=" + (BusListModel.rowCount() - window.newBusBefore)
+                        + " row(s) (expected 1)")
+            window.newBusFinish()
+            return
+        }
+        window.newBusRow = BusListModel.rowCount() - 1
+        window.newBusCreated = true
+        const bus = BusListModel.getBus(window.newBusRow)
+        window.newBusRouted = window.newBusKind === "audio"
+            ? (bus.routedAudioInputs && bus.routedAudioInputs.length > 0)
+            : (bus.routedVideoSources && bus.routedVideoSources.length > 0)
+        // The drain this dialog exists to avoid: creating a bus must not open a
+        // device. No card preview, no output take, no meter — the route is a
+        // graph edge, nothing more.
+        const pane = SelfTest.findItem("selfTestMediaPane")
+        const meters = pane && pane.meteredLabels ? pane.meteredLabels.length : 0
+        window.newBusTapsClean = meters === 0 && LiveOutputService.inputLabel === ""
+        console.log("[SELFTEST-NEWBUS] bus=" + window.newBusRow + " type=" + bus.type
+                    + " name=\"" + bus.name + "\""
+                    + " routed=" + window.newBusRouted
+                    + " taps=" + meters + " outputTake=\"" + LiveOutputService.inputLabel + "\"")
+        BusListModel.renameBus(window.newBusRow, "SelfTest NewBus Bus")
+        window.newBusStep = 7
+        return
+    }
+
+    // ---- the picker, cancelled -------------------------------------------
+    // Steps 8-10: open it again and click Cancel. This is the half a successful
+    // Create does not cover: the modal reports `cancelled()` and does NOT close
+    // itself (its other caller binds `open` to its own flag), so a caller that
+    // forgot the handler left the picker on screen with Cancel, Esc and the scrim
+    // all doing nothing — "the buttons are not working". Esc goes through the
+    // same `cancelled()` (Hotkeys), so this covers both key and button.
+    function newBusCancelPhase() {
+        if (window.newBusStep === 8) {
+            if (window.newBusRow >= 0)
+                return                      // wait for the cleanup tick to finish
+            if (!SelfTest.itemVisible("selfTestBusNew"))
+                return
+            SelfTest.clickItem("selfTestBusNew")
+            window.newBusStep = 9
+            return
+        }
+        if (window.newBusStep === 9) {
+            if (!SelfTest.itemVisible("newBusPicker_card"))
+                return
+            SelfTest.clickItem("newBusPicker_cancel")
+            window.newBusStep = 10
+            return
+        }
+        // Open again must be CLOSED again, and the roster untouched.
+        window.newBusCancelClosed = !SelfTest.itemVisible("newBusPicker_card")
+                           && BusListModel.rowCount() === window.newBusBefore
+        console.log("[SELFTEST-NEWBUS] cancel closed=" + window.newBusCancelClosed
+                    + " buses=" + BusListModel.rowCount()
+                    + " (before " + window.newBusBefore + ")")
+        window.newBusStep = 11           // then the EDIT ring's own door
+    }
+
+    // ---- the Edit + ring's Bus chip uses the SAME picker -------------------
+    // The ring's Bus chip used to open a list of EXISTING buses, so a slide could
+    // carry a bus that feeds nothing (a window painting a hole). It opens the very
+    // picker Media › Inputs' "New bus" uses now, in its create mode: pick the
+    // SOURCE, the bus is made with that route already in it. This phase proves the
+    // WIRING (the chip reaches that picker, in that mode, and Cancel closes it)
+    // without creating anything, because creating here would add a canvas item to
+    // whatever show the operator has open.
+    property bool newBusEditPicker: false
+    property bool newBusEditCancelClosed: false
+
+    function newBusEditPhase() {
+        if (window.newBusStep === 11) {
+            window.currentView = "edit"
+            window.newBusStep = 12
+            return
+        }
+        if (window.newBusStep === 12) {
+            if (!SelfTest.itemVisible("selfTestAddChip"))
+                return                    // the Edit screen is still coming up
+            SelfTest.clickItem("selfTestAddChip")       // the + ring
+            window.newBusStep = 13
+            return
+        }
+        if (window.newBusStep === 13) {
+            if (!SelfTest.itemVisible("selfTestAddKindChip_bus"))
+                return                    // the menu opens on its own fade
+            SelfTest.clickItem("selfTestAddKindChip_bus")
+            window.newBusStep = 14
+            return
+        }
+        if (window.newBusStep === 14) {
+            // The picker that must appear is the CREATE one: its card, and at
+            // least one SOURCE card with a light. A bus-mode picker would show
+            // bus tiles instead (they carry no such name).
+            const pick = window.newBusFirstPick()
+            // The EDIT instance's own hooks (see the modal's hookPrefix note): the
+            // Media pane's picker is closed by now but still in the tree, and both
+            // are create-mode instances of the same component.
+            const sourceCard = pick
+                ? "editBusPicker_row_" + pick.kind + "_" + pick.row : ""
+            window.newBusEditPicker = SelfTest.itemVisible("editBusPicker_card")
+                                      && sourceCard !== ""
+                                      && SelfTest.itemVisible(sourceCard)
+            console.log("[SELFTEST-NEWBUS] editRing reachPicker=" + window.newBusEditPicker
+                        + " sourceCard=\"" + sourceCard + "\"")
+            SelfTest.clickItem("editBusPicker_cancel")
+            window.newBusStep = 15
+            return
+        }
+        window.newBusEditCancelClosed = !SelfTest.itemVisible("editBusPicker_card")
+                                        && BusListModel.rowCount() === window.newBusBefore
+        console.log("[SELFTEST-NEWBUS] editRing cancelClosed=" + window.newBusEditCancelClosed
+                    + " buses=" + BusListModel.rowCount())
+        window.newBusFinish()
+    }
+
+    Timer {
+        id: selfTestNewBus
+        running: typeof SelfTestNewBus !== "undefined" && SelfTestNewBus
+        interval: 8000          // boot, then the rosters' own restore
+        onTriggered: selfTestNewBusTick.start()
+    }
+    Timer {
+        id: selfTestNewBusTick
+        interval: 900           // one click, then read it back, per tick
+        repeat: true
+        onTriggered: {
+            if (window.newBusStep === 7) {
+                // The rename landed: take the row back out, then go and prove the
+                // picker CLOSES (see newBusCancelPhase).
+                if (window.newBusRow >= 0
+                        && BusListModel.getBus(window.newBusRow).name === "SelfTest NewBus Bus")
+                    BusListModel.removeBus(window.newBusRow)
+                window.newBusRow = -1
+                window.newBusStep = 8
+                return
+            }
+            if (window.newBusStep >= 11) {
+                window.newBusEditPhase()
+                return
+            }
+            if (window.newBusStep >= 8) {
+                window.newBusCancelPhase()
+                return
+            }
+            window.newBusAdvance()
         }
     }
 

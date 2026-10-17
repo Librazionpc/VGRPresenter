@@ -18,6 +18,7 @@
 #include "modules/bible/ReferenceResolver.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -169,12 +170,40 @@ private:
     // WriteAtomic is a PAL call: holding mutex_ across it parked every thread
     // that needs a chapter behind a disk write — the lock-the-guard-cannot-see
     // shape, because the wrap sat one call deep inside this helper.
-    // "" = nothing to write (no store path). Serializing cannot fail, so there
-    // is no Result here: the caller writes the text or does not.
-    std::string BuildStoreJsonLocked();
-    // Writes the text BuildStoreJsonLocked() produced. PAL: NEVER call with
-    // mutex_ held. Verified + atomic, so a failure leaves the previous file.
+    // A document BUILT under mutex_ and written after it is dropped. `seq` is
+    // stamped at build time, under that same lock, and is what keeps the two
+    // writes on disk in the order they were built (see WriteSlot).
+    struct Snapshot {
+        std::string json;
+        std::uint64_t seq = 0;
+        bool empty() const { return json.empty(); }
+    };
+    // ONE WRITER PER FILE, NEWEST WINS — and no lock across the PAL call.
+    // Two mutators can overlap (a highlight on the interface thread, an import
+    // on the engine worker). Each builds its snapshot under mutex_ and writes
+    // with that lock released, so without this the OLDER document could reach
+    // the file last and roll the newest mark off the disk. A writer PARKS its
+    // snapshot here (a newer build replaces an un-written older one) and
+    // leaves; whichever thread finds the slot idle becomes the drainer and
+    // writes until the slot is empty. So the file's last content is always the
+    // newest built snapshot, a burst of marks costs one write instead of one
+    // each, and no lock is ever held across the disk call.
+    // `written` only ever moves forward; `inFlight` is the drainer's claim.
+    struct WriteSlot {
+        Snapshot pending;
+        std::uint64_t written = 0;
+        bool inFlight = false;
+    };
+    // ""/seq 0 = nothing to write (no store path). Serializing cannot fail, so
+    // there is no Result here: the caller writes the text or does not.
+    Snapshot BuildStoreJsonLocked();
+    // The PAL write, with NO ordering of its own: this is what the drainer
+    // below calls, with every lock released. Verified + atomic, so a failure
+    // leaves the previous file.
     Result<void> WriteStoreFile(const std::string& json);
+    // Parks `snap` for the corpus and drains the slot (see WriteSlot). Never
+    // called with mutex_ held; logs its own failure.
+    void PersistStoreFile(Snapshot snap);
     // Consumes the ALREADY-PARSED store document. The file read, the parse and
     // the set-aside of a damaged store all happen BEFORE the engine lock is
     // taken (see Initialize), so no PAL call runs inside the locked scope.
@@ -198,7 +227,7 @@ private:
     // exposing operator[] on the object map and never on Value.
     void WriteUserDataLocked(json::Value::Object& root);
     void ReadUserDataLocked(const json::Value& root);
-    std::string BuildUserDataJsonLocked();
+    Snapshot BuildUserDataJsonLocked();
     // The sidecar write's own numbers (see UserDataWriteStats): written by the two
     // halves of a mark, read by LastUserDataWrite() and by the log line the app
     // prints for each one.
@@ -208,11 +237,15 @@ private:
     std::atomic<size_t> userDataWrites_{0};
     // PAL: NEVER call with mutex_ held (same rule as WriteStoreFile).
     Result<void> WriteUserDataFile(const std::string& json);
-    // Writes the sidecar a caller built under the lock and, only on success,
-    // records that the sidecar is now the user data's home. Called with the lock
-    // RELEASED (a PAL write is inside); failures are logged, never fatal — the
-    // corpus keeps carrying the data until this succeeds.
-    void PersistUserDataSidecar(const std::string& json);
+    // Parks the sidecar snapshot a caller built under the lock and drains it
+    // (see WriteSlot), recording — only once a write REALLY landed — that the
+    // sidecar is now the user data's home. Called with the lock RELEASED;
+    // failures are logged, never fatal: the corpus keeps carrying the data
+    // until this succeeds.
+    void PersistUserDataSidecar(Snapshot snap);
+    // Parks `snap` in `slot` and drains it; `sidecar` selects the file and the
+    // log line. No lock is held across the PAL write.
+    void PumpSlot(WriteSlot& slot, Snapshot snap, bool sidecar);
     // RESTORE of the flattened verse list from the stored chapters: the store
     // keeps only the canonical shape (GetChapter/Outline read `chapters`), so
     // rebuild `verses` in book order — Import()'s own shape — never a per-read
@@ -236,6 +269,15 @@ private:
     // Books for resolution: the target Bible's table, or the first installed
     // Bible's table when bibleId is empty.
     std::vector<BibleBook> BooksFor(std::string_view bibleId) const;
+
+    // The two write slots and their order stamps (see WriteSlot). snapshotSeq_
+    // is stamped under mutex_; writeMutex_ guards the slots ONLY — it is never
+    // held across a PAL call, and no PAL call takes mutex_ either, so the two
+    // can never deadlock.
+    WriteSlot storeWrite_;
+    WriteSlot userWrite_;
+    std::uint64_t snapshotSeq_ = 0;   // guarded by mutex_
+    mutable std::mutex writeMutex_;   // guards the two slots only
 
     mutable std::mutex mutex_;
     // Store-restore re-index runs off the boot path — but JOINED in Shutdown(),

@@ -3,6 +3,7 @@
 #include "AudioInputListModel.h"
 #include "ChannelTrim.h"
 #include "services/EngineBridge.h"
+#include "services/EventBus.h"
 #include "VideoSourceListModel.h"
 
 #include <QDebug>
@@ -797,6 +798,122 @@ void BusListModel::removeBus(int index)
     endRemoveRows();
 }
 
+bool BusListModel::deleteBus(int index)
+{
+    if (index < 0 || index >= m_buses.size())
+        return false;
+
+    // CAPTURE BEFORE THE ROWS GO: the item's own routing lists are ROSTER ROWS,
+    // and a row is a position in a list that can move. The node ids behind them
+    // are what an edge is really keyed on, so those are what a restore reconnects.
+    RemovedBus back;
+    back.row = index;
+    back.item = m_buses.at(index);
+    for (const int row : std::as_const(back.item.routedAudioInputs)) {
+        const QString node = audioSourceNodeId(row);
+        if (!node.isEmpty())
+            back.audioSources.append(node);
+    }
+    for (const int row : std::as_const(back.item.routedVideoSources)) {
+        const QString node = videoSourceNodeId(row);
+        if (!node.isEmpty())
+            back.videoSources.append(node);
+    }
+
+    const int before = m_buses.size();
+    removeBus(index);
+    if (m_buses.size() == before)
+        return false;   // the graph still held it — there is nothing to undo
+    m_removedBus = back;
+
+    // The notice is raised HERE, not at each call site: every door onto "delete
+    // this bus" (the pane's menu, the board's own Delete, the bus dialog's) then
+    // offers the same one click back, and a new door cannot forget to.
+    EventBus::instance().notify(tr("\u201c%1\u201d was removed \u2014 Undo puts it back.").arg(back.item.name),
+                                QStringLiteral("info"), tr("Buses"),
+                                QStringLiteral("ui.buses.removed"), QVariant(),
+                                QVariantMap{{ QStringLiteral("id"), QStringLiteral("buses.undoRemove") },
+                                            { QStringLiteral("label"), tr("Undo") }});
+    return true;
+}
+
+QString BusListModel::removedBusName() const
+{
+    return m_removedBus.has_value() ? m_removedBus->item.name : QString();
+}
+
+bool BusListModel::restoreRemovedBus()
+{
+    if (!m_removedBus.has_value())
+        return false;
+    const RemovedBus back = std::move(*m_removedBus);
+    m_removedBus.reset();
+
+    // THE IDENTITY IS THE POINT: a restore that minted a new bus number would put
+    // back a STRANGER — a slide, a scene or a saved route that names the deleted
+    // bus would not find what came back. So the same node ids are reused, and if
+    // something else already answers to them this refuses instead of duplicating.
+    const std::string audio = back.item.engineId.toStdString();
+    const std::string video = back.item.engineIdVideo.toStdString();
+    if (graph().HasNode(audio) || graph().HasNode(video)) {
+        qWarning() << "BusListModel: cannot put" << back.item.name
+                   << "back \u2014 another node holds its identity now";
+        return false;
+    }
+
+    GraphEdit edit;   // the nodes, their meta, their volume AND their routes: one save
+    logIfFailed("AddBus(audio)", graph().AddBus(audio, back.item.name.toStdString(),
+                                                 bps::production::BusRole::Custom,
+                                                 bps::production::SignalType::Audio));
+    logIfFailed("AddBus(video)", graph().AddBus(video, back.item.name.toStdString(),
+                                                 bps::production::BusRole::Custom,
+                                                 bps::production::SignalType::Video));
+    logIfFailed("SetMeta(audio)",
+                graph().SetMeta(audio, "uiBusType", back.item.type.toStdString()));
+    logIfFailed("SetMeta(video)",
+                graph().SetMeta(video, "uiBusType", back.item.type.toStdString()));
+    const bps::production::VolumeControl v{ dbFromLevel(back.item.level), back.item.muted,
+                                            false, 0.0, 0.0 };
+    logIfFailed("SetVolume(audio)", graph().SetVolume(audio, v));
+    logIfFailed("SetVolume(video)", graph().SetVolume(video, v));
+    // The edges the removal took with it, re-made from the stable source nodes.
+    for (const QString &src : std::as_const(back.audioSources)) {
+        const std::string node = src.toStdString();
+        if (graph().HasNode(node))
+            logIfFailed("Connect(audio)", graph().Connect(node, audio,
+                                                          bps::production::SignalType::Audio));
+    }
+    for (const QString &src : std::as_const(back.videoSources)) {
+        const std::string node = src.toStdString();
+        // A video plane takes one provider: a source that has since been routed to
+        // this bus's replacement, or a bus that has become audio-only, is skipped
+        // rather than forced — the bus still comes back, just not that route.
+        if (!graph().HasNode(node) || !graph().CanConnect(node, video,
+                                                          bps::production::SignalType::Video))
+            continue;
+        logIfFailed("Connect(video)", graph().Connect(node, video,
+                                                      bps::production::SignalType::Video));
+    }
+
+    const int row = std::clamp(back.row, 0, int(m_buses.size()));
+    beginInsertRows(QModelIndex(), row, row);
+    m_buses.insert(row, back.item);
+    endInsertRows();
+
+    // The per-side trims ride the plane node's meta, which went with the node.
+    for (int ch = 0; ch < back.item.channelGains.size(); ++ch)
+        setChannelGain(row, ch, back.item.channelGains[ch]);
+    for (int ch = 0; ch < back.item.channelTrims.size(); ++ch)
+        setChannelTrim(row, ch, back.item.channelTrims[ch]);
+
+    // The cached route rows come from the graph, so this is where the restored
+    // edges turn back into the card's line list.
+    pullRow(row);
+    const QModelIndex changed = index(row);
+    emit dataChanged(changed, changed);
+    return true;
+}
+
 int BusListModel::duplicateBus(int index)
 {
     if (index < 0 || index >= m_buses.size())
@@ -1225,12 +1342,22 @@ QVariantMap BusListModel::getBus(int index) const
         return {};
 
     const BusItem &item = m_buses.at(index);
+    // `id` is the bus's STABLE number, and callers pick/compare by it (a bus
+    // block on a slide carries it, the picker selects by it, a canvas item
+    // resolves its row from it). It was NOT in this map, so every reader got
+    // `undefined` — which is why every card in the Add Bus picker read as
+    // picked (all ids "equal" the default) and why a canvas bus item could
+    // never find its row. The engine node ids go with it for the same reason:
+    // they are the bus's identity in the graph, not its row here.
     return {
+        { "id", item.id },
         { "name", item.name },
         { "type", item.type },
         { "level", item.level },
         { "muted", item.muted },
         { "routedAudioInputs", toVariantList(item.routedAudioInputs) },
         { "routedVideoSources", toVariantList(item.routedVideoSources) },
+        { "engineId", item.engineId },
+        { "engineIdVideo", item.engineIdVideo },
     };
 }

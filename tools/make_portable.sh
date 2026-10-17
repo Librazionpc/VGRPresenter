@@ -170,9 +170,22 @@ if ! PATH="$MINGW_BIN:$QT_BIN:$PATH" "$WINDEPLOYQT" \
         --release --no-translations --qmldir "$ROOT/qml" \
         "$DIST/$APP" > /tmp/windeployqt.log 2>&1; then
     echo "windeployqt FAILED:"
-    tail -20 /tmp/windeployqt.log
-    echo "PORTABLE: FAIL deploy"
-    exit 1
+    tail -20 /tmp/windeployqt.log        echo "PORTABLE: FAIL deploy"
+        exit 1
+fi
+
+# The WIC image-format plugin (CMake target qwicimage). Qt's own MinGW build has
+# no WebP decoder, so a .webp was "Unsupported image format" to every Qt image
+# loader while the engine drew it fine; the plugin puts WebP (and any other codec
+# Windows has) behind Qt's normal image loading. windeployqt cannot know about a
+# plugin this project builds, so it is copied from the build tree beside the exe
+# — the directory Qt scans for plugins next to the application.
+QWT_SRC="$(dirname "$EXE_SRC")/imageformats/qwicimage.dll"
+if [ -f "$QWT_SRC" ]; then
+    mkdir -p "$DIST/imageformats"
+    cp "$QWT_SRC" "$DIST/imageformats/"
+else
+    echo "  warning: $QWT_SRC missing — .webp files will not preview (build the qwicimage target)"
 fi
 
 # MinGW runtime: the exe's own import-table needs (see the header). COPIED

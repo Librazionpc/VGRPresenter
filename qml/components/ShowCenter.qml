@@ -294,6 +294,14 @@ Item {
                                 showBindPlaceholders: false
                                 blocks: cell.styled.blocks ?? []
                                 background: cell.styled.background ?? "transparent"
+                                // THE COMPOSITION'S ANSWER, not a re-derived
+                                // "is this background clear": whether this frame
+                                // is transparent is composed once
+                                // (SlideComposition::frameTransparent) and read by
+                                // every surface that draws the convention — the
+                                // monitor wall, the output window and these
+                                // thumbnails alike.
+                                showCheckerboard: cell.styled.frameTransparent === true
                                 checkerSize: 32
                             }
                             Rectangle { anchors.fill: parent; color: "#0dffffff"; visible: cellHover.hovered }      // the hover veil
@@ -377,6 +385,8 @@ Item {
                             showBindPlaceholders: false
                             blocks: listRow.styled.blocks ?? []
                             background: listRow.styled.background ?? "transparent"
+                            // Same one answer as the grid cell above.
+                            showCheckerboard: listRow.styled.frameTransparent === true
                             checkerSize: 24
                         }
                     }
@@ -788,6 +798,65 @@ Item {
             : "image://mediathumb/500/-1/" + encodeURIComponent(filePath)
         readonly property bool playing: LiveOutputService.mediaState === "playing"
 
+        // THIS FILE'S OWN FILL ("" = the output's default). A choice about the
+        // PICTURE, stored on the file by the library, so it is the same on every
+        // output and comes back with the next take — see
+        // LiveOutputService::setMediaFit. `fitPulse` re-reads it when a write
+        // lands (the service writes it off the interface thread).
+        property int fitPulse: 0
+        Connections {
+            target: MediaLibraryService
+            function onFoldersChanged() { mediaView.fitPulse++ }
+        }
+        // WHILE IT IS ON AIR the take is the truth (the picker writes both); off
+        // air the file's stored value is.
+        readonly property string storedFit: {
+            void mediaView.fitPulse
+            return MediaLibraryService.itemFit(mediaView.filePath)
+        }
+        readonly property string shownFit: mediaView.onAir ? LiveOutputService.mediaFit : mediaView.storedFit
+        readonly property int previewFill: mediaView.shownFit === "cover" ? Image.PreserveAspectCrop
+                                            : mediaView.shownFit === "fill" ? Image.Stretch
+                                                                            : Image.PreserveAspectFit
+
+        // THE FILL PICKER — on the FILE, where the choice belongs. One of the
+        // four is always current ("Output default" included): a picture that is
+        // letterboxed over here and cropped over there is a decision nobody can
+        // find otherwise.
+        component FitChip: Rectangle {
+            id: chip
+            required property string value
+            required property string label
+            readonly property bool current: mediaView.shownFit === chip.value
+            width: chipLabel.implicitWidth + 20
+            height: 26
+            radius: 13
+            color: chip.current ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.18)
+                                : "#1b1d26"
+            border.width: chip.current ? 1 : 0
+            border.color: Theme.accent
+            Text {
+                id: chipLabel
+                anchors.centerIn: parent
+                text: chip.label
+                color: chip.current ? Theme.accentLight : "#8a90a5"
+                font.family: Theme.fontFamily
+                font.pixelSize: 11
+            }
+            PositionHoverArea {
+                anchors.fill: parent
+                showCursor: false
+                onClicked: {
+                    // On air, the take writes the file AND re-lays the picture
+                    // out right now; off air the file is written for next time.
+                    if (mediaView.onAir)
+                        LiveOutputService.setMediaFit(chip.value)
+                    else
+                        MediaLibraryService.setItemFit(mediaView.filePath, chip.value)
+                }
+            }
+        }
+
         Rectangle {
             id: videoBox
             anchors.horizontalCenter: parent.horizontalCenter
@@ -801,7 +870,9 @@ Item {
             Image {
                 anchors.fill: parent
                 source: mediaView.previewSource
-                fillMode: Image.PreserveAspectFit
+                // The picture laid out by ITS OWN fill, so the preview answers
+                // the same question the outputs do.
+                fillMode: mediaView.previewFill
                 cache: false
                 asynchronous: true
             }
@@ -834,11 +905,24 @@ Item {
             }
         }
 
+        // ---- the fill picker: Contain / Cover / Stretch / Output default ----
+        Row {
+            id: fitRow
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: videoBox.bottom
+            anchors.topMargin: 10
+            spacing: 8
+            FitChip { value: "contain"; label: qsTr("Contain") }
+            FitChip { value: "cover"; label: qsTr("Cover") }
+            FitChip { value: "fill"; label: qsTr("Stretch") }
+            FitChip { value: ""; label: qsTr("Output default") }
+        }
+
         // ---- the transport (videos only; an on-air still shows just OFF AIR)
         Column {
             anchors.horizontalCenter: parent.horizontalCenter
-            anchors.top: videoBox.bottom
-            anchors.topMargin: 12
+            anchors.top: fitRow.bottom
+            anchors.topMargin: 10
             width: Math.min(videoBox.width, 560)
             spacing: 8
             visible: mediaView.isVideoFile
@@ -902,7 +986,7 @@ Item {
                 Rectangle {
                     width: 34; height: 34; radius: 17
                     color: mediaView.onAir ? Theme.liveBg : "#232530"
-                    Behavior on color { ColorAnimation { duration: 120 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                     IconGlyph {
                         anchors.centerIn: parent
                         name: mediaView.onAir ? "stop" : "play"

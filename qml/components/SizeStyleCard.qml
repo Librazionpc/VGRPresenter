@@ -222,7 +222,7 @@ Column {
                     color: root.borderEnabled ? Theme.accent : Theme.inset
                     border.color: root.borderEnabled ? Theme.accent : Theme.border
                     border.width: 1
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent
@@ -269,7 +269,7 @@ Column {
                     border.width: 1
                     color: borderChangeArea.containsMouse ? Theme.hoverBg : Theme.inset
                     radius: 12
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                     Behavior on opacity { NumberAnimation { duration: 100 } }
 
                     Text {
@@ -348,7 +348,7 @@ Column {
                         color: styleBtn.active ? Theme.accent : (styleArea.containsMouse ? Theme.hoverBg : Theme.inset)
                         border.color: styleBtn.active ? Theme.accent : Theme.borderSubtle
                         border.width: 1
-                        Behavior on color { ColorAnimation { duration: 100 } }
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         Text {
                             anchors.centerIn: parent

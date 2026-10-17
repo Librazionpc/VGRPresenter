@@ -390,7 +390,10 @@ Item {
             objectName: "selfTestDesignGrid-" + root.noun
             anchors.fill: parent
             anchors.margins: 4
-            anchors.rightMargin: 10   // room for the scrollbar
+            // Room for the scrollbar, plus the clock's column when the pane is
+            // wide enough to show it — the grid then re-flows into fewer
+            // columns instead of running underneath the time.
+            anchors.rightMargin: 10
             // No bottom reserve: the "New <design>" pill FLOATS over the
             // grid (the old 64px lane cleared a solid-looking footer strip
             // behind it), so cards scroll beneath it like under any FAB.
@@ -764,7 +767,11 @@ Item {
         z: 30000
         title: root.deletingCategory ? qsTr("Delete category?") : qsTr("Delete %1?").arg(root.noun)
         message: root.deletingCategory
-                 ? qsTr("“%1” is removed. Its %2s are kept and become unlabeled.").arg(root.deleteName, root.noun)
+                 // One .arg() per name: Qt's arg(value, fieldWidth) two-argument form
+                 // takes a WIDTH second, so .arg(name, noun) is the "Invalid arguments"
+                 // warning (which surfaced as a QML notice instead of this sentence).
+                 ? qsTr("“%1” is removed. Its %2s are kept and become unlabeled.")
+                       .arg(String(root.deleteName)).arg(String(root.noun))
                  : (qsTr("“%1” is deleted. This can't be undone.").arg(root.deleteName)
                     + qsTr(" A default %1 can be brought back in Settings · General.").arg(root.noun))
         confirmLabel: qsTr("Delete")

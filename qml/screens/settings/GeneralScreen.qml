@@ -301,7 +301,7 @@ Item {
                     height: 36
                     radius: Theme.radiusMd
                     color: reviewArea.containsMouse ? Theme.accentLight : Theme.accent
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent
@@ -603,7 +603,7 @@ Item {
                                 color: checkArea.containsMouse ? Theme.chip : Theme.inset
                                 border.color: Theme.border
                                 border.width: 1
-                                Behavior on color { ColorAnimation { duration: 100 } }
+                                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                                 Text {
                                     anchors.centerIn: parent
@@ -720,7 +720,7 @@ Item {
                                         color: segRoot.active ? Theme.accentSoft : (segArea.containsMouse ? Theme.chip : Theme.inset)
                                         border.width: 1
                                         border.color: segRoot.active ? Theme.accent : Theme.border
-                                        Behavior on color { ColorAnimation { duration: 100 } }
+                                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                                         Text {
                                             id: segLabel
@@ -1108,7 +1108,7 @@ Item {
                         color: restoreArea.containsMouse ? Theme.chip : Theme.inset
                         border.color: Theme.border
                         border.width: 1
-                        Behavior on color { ColorAnimation { duration: 100 } }
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         Text {
                             id: restoreText
@@ -1244,7 +1244,7 @@ Item {
                     color: actionArea.containsMouse ? Theme.chip : Theme.inset
                     border.color: Theme.border
                     border.width: 1
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         id: actionText
@@ -1465,7 +1465,7 @@ Item {
                     height: 46
                     radius: Theme.radiusSm
                     color: rowHover.containsMouse ? Theme.inset : "transparent"
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     // Hover-only wash under the row (no button accepted), so it
                     // never eats the Restore/Delete clicks above it.
@@ -1512,7 +1512,7 @@ Item {
                             color: revealArea.containsMouse ? Theme.chip : Theme.inset
                             border.color: Theme.border
                             border.width: 1
-                            Behavior on color { ColorAnimation { duration: 100 } }
+                            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                             Text {
                                 id: revealLbl
@@ -1538,7 +1538,7 @@ Item {
                             color: restoreArea.containsMouse ? Theme.chip : Theme.inset
                             border.color: Theme.border
                             border.width: 1
-                            Behavior on color { ColorAnimation { duration: 100 } }
+                            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                             Text {
                                 id: restoreLbl
@@ -1564,7 +1564,7 @@ Item {
                             color: deleteArea.containsMouse ? Qt.alpha(Theme.danger, 0.16) : "transparent"
                             border.color: Theme.border
                             border.width: 1
-                            Behavior on color { ColorAnimation { duration: 100 } }
+                            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                             Text {
                                 id: deleteLbl

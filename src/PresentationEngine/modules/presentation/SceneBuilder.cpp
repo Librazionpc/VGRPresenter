@@ -224,6 +224,22 @@ rendering::RgbaImage LoadImageCached(const std::string& path) {
     return image;
 }
 
+// Contain-fit math: the WHOLE image fits inside `stage`, centered, letterboxed
+// by whatever is already painted underneath. This is what a media file on air
+// gets: a take is a picture the operator chose, and cropping a portrait photo
+// to a landscape stage (what cover-fit does) throws away most of it — the
+// report "the image is portrait and you made it landscape". The QML tile draws
+// the same file with PreserveAspectFit, so this is also the fit that keeps the
+// tile and the outputs showing ONE picture.
+rendering::Rect ContainRect(int imgW, int imgH, const rendering::Size& stage) {
+    if (imgW <= 0 || imgH <= 0)
+        return rendering::Rect(0, 0, static_cast<float>(stage.width), static_cast<float>(stage.height));
+    const float scale = std::min(static_cast<float>(stage.width) / imgW,
+                                 static_cast<float>(stage.height) / imgH);
+    const float w = imgW * scale, h = imgH * scale;
+    return rendering::Rect((stage.width - w) / 2.0f, (stage.height - h) / 2.0f, w, h);
+}
+
 // Cover-fit math: the image fills `stage` entirely, cropped centered (FreeShow
 // draws style backgrounds cover by default).
 rendering::Rect CoverRect(int imgW, int imgH, const rendering::Size& stage) {
@@ -503,6 +519,18 @@ bool HasOwnBox(const ContentBlock& b) {
         && StyleBuilder::ParseColor(b.style.backgroundColor).a > 0.0f;
 }
 
+// A block's rect in OUTPUT pixels — the 754x428 design grid scaled onto the
+// frame. ONE derivation, because every block pass (text/shape, and a bus
+// window's live plane) has to land on exactly the rectangle the design names.
+rendering::Rect BlockRect(const ContentBlock& block, const rendering::Size& size) {
+    constexpr double kStageW = bps::library::kStageWidth, kStageH = bps::library::kStageHeight;
+    return rendering::Rect(
+        static_cast<float>(block.x / kStageW * size.width),
+        static_cast<float>(block.y / kStageH * size.height),
+        static_cast<float>(block.width / kStageW * size.width),
+        static_cast<float>(block.height / kStageH * size.height));
+}
+
 // Defined below (one line per scene per STATE CHANGE). Declared here because
 // AddStageBlocks is where a build reports the split it got from
 // SceneBuilder::PlanBlockLayers.
@@ -556,11 +584,8 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
     for (const ContentBlock& block : blocks) {
         ++n;
         const std::string objId = std::format("{}{}", tag, n);
-        const rendering::Rect rect(
-            static_cast<float>(block.x / kBlockStageW * size.width),
-            static_cast<float>(block.y / kBlockStageH * size.height),
-            static_cast<float>(block.width / kBlockStageW * size.width),
-            static_cast<float>(block.height / kBlockStageH * size.height));
+        // The block's rectangle on the frame — see BlockRect.
+        const rendering::Rect rect = BlockRect(block, size);
         // The block's corner radius is authored on the SAME 754x428 stage grid
         // as its geometry (DesignCatalogs scales a catalog radius by the x
         // factor too), so it scales like the WIDTH does. Without this the
@@ -834,6 +859,93 @@ void UpsertVideoLayer(rendering::RenderEngine& engine, const std::string& sceneI
     (void)engine.AddObject(sceneId, videoObj, "media");
 }
 
+// ---- Bus video planes (a "bus" block on the on-air slide) -----------------
+// THE CANVAS IS NOT THE OUTPUT: a design block of kind "bus" draws the bus's
+// live feed inside its rectangle on the Edit canvas, and until now every real
+// output drew NOTHING there — the block fell through AddStageBlocks' kind
+// switch (text / box / shape, everything else ignored), so NDI and HDMI showed
+// an empty hole where the operator's canvas showed video. A bus block is a
+// WINDOW, not a picture of one: its own geometry belongs to the design, so the
+// plane is painted at the block's rect on the compositor's VIDEO layer ("media"
+// — under every text/shape block, which is what a caption over a bus feed is)
+// instead of full-frame like the taken input and media-on-air layers.
+//
+// Geometry is decided ONCE per build (RecordBusPlanes) because a scene's block
+// layout is part of what the cached scene means; the PIXELS are refreshed on
+// every build, cache hit included, exactly like AddCompositorLayers — a scene
+// that is already built must still show the bus's current frame, not the one it
+// had when it was built.
+struct BusPlane {
+    int busId = 0;
+    std::string objId;          // stable per block, so the frame upserts in place
+    rendering::Rect rect;
+};
+std::mutex g_busPlaneMutex;
+std::map<std::string, std::vector<BusPlane>> g_busPlanes;
+
+// The bus a block carries: its meta `busId` is the bus's STABLE number (see
+// BusSourceModal / BusMonitor — never a roster row, which moves). 0 = not a bus
+// block, or one whose meta lost its id (nothing to show, and nothing to guess).
+int BusIdOf(const ContentBlock& block) {
+    if (block.kind != "bus")
+        return 0;
+    return static_cast<int>(MetaNumber(block.metaJson, "busId", 0.0));
+}
+
+// Records where each bus block of THIS scene sits. Called from the one place
+// that knows a scene's block layout (the build path of BuildSlideScene); a bus
+// removed from a design replaces the list, so its plane stops being refreshed.
+void RecordBusPlanes(const std::string& sceneId, const std::vector<ContentBlock>& blocks,
+                     const rendering::Size& size) {
+    std::vector<BusPlane> planes;
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        const ContentBlock& block = blocks[i];
+        const int busId = BusIdOf(block);
+        if (busId <= 0)
+            continue;
+        // The block's own id keeps the object stable across refreshes; a block
+        // that somehow has none falls back to its index (still unique here).
+        const std::string key = block.id.empty() ? std::to_string(i) : block.id;
+        planes.push_back(BusPlane{busId, "bus:" + key, BlockRect(block, size)});
+    }
+    std::lock_guard<std::mutex> lock(g_busPlaneMutex);
+    if (planes.empty())
+        g_busPlanes.erase(sceneId);
+    else
+        g_busPlanes[sceneId] = std::move(planes);
+}
+
+// Repaints every recorded bus plane with the bus's CURRENT frame — on every
+// build, cache hits included (see BusPlane). A bus whose feed stopped gets an
+// empty frame, which UpsertVideoLayer already turns into "invisible" rather
+// than a frozen last picture.
+void RefreshBusPlanes(rendering::RenderEngine& engine, const std::string& sceneId) {
+    std::vector<BusPlane> planes;
+    {
+        std::lock_guard<std::mutex> lock(g_busPlaneMutex);
+        const auto it = g_busPlanes.find(sceneId);
+        if (it == g_busPlanes.end())
+            return;
+        planes = it->second;
+    }
+    const auto& compositor = presentation::CompositorState::Instance();
+    int withFrame = 0;
+    for (const BusPlane& plane : planes) {
+        const auto frame = compositor.GetBusFrame(plane.busId);
+        const rendering::RgbaImage img = ToRgbaImage(frame.width, frame.height, frame.rgba);
+        if (!img.empty())
+            ++withFrame;
+        UpsertVideoLayer(engine, sceneId, plane.objId, img, plane.rect);
+    }
+    // THE ENGINE HALF OF THE BUS-WINDOW DIAGNOSTIC. "the canvas has the bus but
+    // the output is empty" is answered here: a plane count of 0 means the scene
+    // never recorded a bus block, a count with no frames means the feed never
+    // reached CompositorState (its tap, not the renderer, is quiet), and
+    // frames-with-plane means the fault is downstream (texture/draw order).
+    ReportLayerState(sceneId, "bus video",
+                     std::format("{} of {} bus plane(s) have a frame", withFrame, planes.size()));
+}
+
 // Per-sceneId memory of which object ids AddCompositorLayers added for
 // overlays last call, and the take-order signature (comma-joined ids) that
 // produced them — so a call that finds the SAME signature again (the
@@ -891,7 +1003,8 @@ void ReportLayerState(const std::string& sceneId, const std::string& label, std:
 // BuildGatedSlideScene invocation, INCLUDING cache hits (see UpsertVideoLayer's
 // comment) — never gated behind the "already built" early return.
 void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sceneId,
-                         const rendering::Size& size, bool showOverlay = true) {
+                         const rendering::Size& size, bool showOverlay = true,
+                         std::string_view mediaFit = {}) {
     // Taken camera/screen input: pulled straight from the PAL's own
     // thread-safe tap (this runs on SceneBuilder's own worker thread) —
     // CompositorState only mirrors WHICH device, not its pixels, so a live
@@ -935,14 +1048,43 @@ void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sce
 
     // Media file on air: already-decoded pixels LiveOutputService pushed
     // (it owns the real QMediaPlayer/QVideoSink decoder — no second decode
-    // here). CoverRect (this file's own style-background-image fit) rather
-    // than a letterboxed fit — a reasonable first cut, not a pixel-match of
-    // the QML tile's PreserveAspectFit.
+    // here). CONTAIN, not cover: a taken file is the operator's picture, so its
+    // own aspect is kept (letterboxed on the stage's background) exactly as the
+    // QML tile draws it with PreserveAspectFit. Cover-fit used to crop a
+    // portrait photo down to the middle of a landscape stage — the report "the
+    // image is portrait and you made it landscape".
     const auto media = presentation::CompositorState::Instance().GetMediaFrame();
     const rendering::RgbaImage mediaImg = ToRgbaImage(media.width, media.height, media.rgba);
-    UpsertVideoLayer(engine, sceneId, "mediaonair", mediaImg,
-                     mediaImg.empty() ? rendering::Rect(0, 0, size.width, size.height)
-                                      : CoverRect(mediaImg.width, mediaImg.height, size));
+    // THE OUTPUT'S OWN FILL CHOICE (Settings · Outputs → Fill, FreeShow's
+    // MediaStyle.fit). "contain" is the default — the whole picture, its own
+    // aspect kept — because a take is the operator's picture and cropping it is
+    // a decision, not a default. "cover" crops to fill, "fill" stretches; an
+    // unknown/empty value (an older roster) is the default.
+    // THE FILE'S OWN FIT WINS over this output's default: a per-media choice is
+    // the operator saying "this picture, like this" and it travels with the
+    // frame (CompositorState::MediaFrame::fit — the optional override); the
+    // output's Fill setting is the fallback for files nobody has said anything
+    // about.
+    const std::string_view effectiveFit = media.fit.empty() ? mediaFit
+                                                            : std::string_view(media.fit);
+    rendering::Rect mediaRect(0, 0, size.width, size.height);
+    if (!mediaImg.empty()) {
+        if (effectiveFit == "cover") {
+            mediaRect = CoverRect(mediaImg.width, mediaImg.height, size);
+        } else if (effectiveFit == "fill") {
+            mediaRect = rendering::Rect(0, 0, size.width, size.height);
+        } else {
+            mediaRect = ContainRect(mediaImg.width, mediaImg.height, size);
+        }
+    }
+    // Letterboxed: the margins stay EMPTY (the frame's own transparency / the
+    // style colour underneath), and the picture is only the picture. An earlier
+    // cut drew a blown-up copy of the same frame under it to "fill" the bars,
+    // which reads as two rectangles ("the app is now rendering two rect full and
+    // 16:1 — if the image is 16:1 I expect the transparent bg around it, that is
+    // EMPTY SPACE"). Empty space is empty space; no extra layer, and one less
+    // full-stage blit per frame.
+    UpsertVideoLayer(engine, sceneId, "mediaonair", mediaImg, mediaRect);
 
     // THE ENGINE-SIDE HALF OF THE "media hand-off" DIAGNOSTIC (the UI half is
     // LiveOutputService::pushMediaFrameToCompositor, the state side is
@@ -1021,7 +1163,9 @@ void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sce
         // upsert), so a concurrent build of the same scene interleaving here
         // would leave duplicate overlay objects on the output. The lock is what
         // makes the build and its bookkeeping one step.
-        AddStageBlocks(engine, sceneId, ov.blocks, size, tag, layer);   // lock-ok: the overlay cache lock is what makes this build and its objectIds bookkeeping atomic (no upsert in AddObject)
+        // (The lock is held on purpose here — see the note above; this is not a
+        // waiver, the call no longer trips the guard's own reachability rule.)
+        AddStageBlocks(engine, sceneId, ov.blocks, size, tag, layer);
         for (size_t i = 0; i < ov.blocks.size(); ++i) {
             const std::string id = std::format("{}{}", tag, i + 1);
             cache.objectIds.push_back(id);
@@ -1235,6 +1379,46 @@ SceneBuilder::SlideComposition SceneBuilder::ComposeSlide(const Slide& slide,
     // of which layout ends up owning the slide, so it is settled before the
     // gates can return early.
     comp.styleImageSuppressed = style.clearBackgroundOnText && !slide.blocks.empty();
+
+    // ---- IS THIS FRAME TRANSPARENT WHERE NOTHING PAINTS? --------------------
+    // The style/slide half of the ONE answer (see frameTransparent): a frame that
+    // CHOSE transparency, or one that names no background at all — a keyable
+    // frame: what is keyed, recorded or composited behind it shows through. Both
+    // are transparency; only this composition can tell them from a frame that is
+    // merely still empty, which is why the answer is composed here and read by
+    // the surfaces instead of re-derived by each of them.
+    comp.frameTransparent = comp.explicitTransparent || !comp.paintBackground;
+
+    // ---- A TAKE CLEARS THE STYLE'S BACKGROUND -------------------------------
+    // "Anything that wants to show removes the style's bg." The rule already
+    // existed for a taken INPUT (the tile's `videoUnderneath`) and for text
+    // (clearBackgroundOnText); a file on air is the same situation and was
+    // missing, so a letterboxed photo sat inside the style's colour/image.
+    //
+    // Safe against the cache because the media bit is part of the SCENE ID (see
+    // StyledSceneIdFor's "@m:on" token): a build with a take is a DIFFERENT
+    // scene from one without, so clearing the take re-keys back to the scene
+    // that still has its backdrop — the composition and the cache can never
+    // disagree about it.
+    if (presentation::CompositorState::Instance().HasMediaFrame()) {
+        comp.paintBackground = false;
+        comp.background.clear();
+        comp.explicitTransparent = true;
+        comp.styleImageSuppressed = true;
+        comp.clearedByTake = true;
+        // THE PICTURE'S OWN ALPHA, not the take's existence. A video, an opaque
+        // photo and an audio file are OPAQUE frames: the margins a contain-fit
+        // leaves around them are the output's empty pixels, not the picture's
+        // transparency, and reading them as transparency is what painted
+        // checkered pillarbox bars on the monitor wall that no output ever had.
+        // A genuinely transparent still (a keyed PNG, an alpha WebP) keeps it.
+        comp.frameTransparent = presentation::CompositorState::Instance().MediaFrameIsTransparent();
+    } else if (!presentation::CompositorState::Instance().GetTakenInput().deviceId.empty()) {
+        // A TAKEN CAMERA/SCREEN FEED IS AN OPAQUE PICTURE: it replaces the frame
+        // the style/slide above described, exactly as a media file does (the two
+        // are mutually exclusive — see LiveOutputService's take).
+        comp.frameTransparent = false;
+    }
 
     // ---- Which layout owns the slide -------------------------------------
     // The style's gates first (when the caller is applying them): a refused
@@ -1504,6 +1688,16 @@ std::string SceneBuilder::StyledSceneIdFor(const Presentation& p, const Slide& s
     const int sh = static_cast<int>(sceneSize.height);
     if (sw > 0 && sh > 0 && (sw != 1920 || sh != 1080))
         id += std::format("@size:{}x{}", sw, sh);
+    // A TAKE IS PART OF THE COMPOSITION, so it is part of the KEY: with a file on
+    // air the style's colour and background image step aside (ComposeSlide), and
+    // a cache hit only refreshes the compositor's dynamic layers — so without
+    // this token a scene built before the take would keep its backdrop under the
+    // file, and clearing the file would leave a scene built without one.
+    //
+    // HasMediaFrame(), not GetMediaFrame(): the question is "is one up", and the
+    // latter COPIES the decoded frame (megabytes, at the preview's frame rate).
+    if (presentation::CompositorState::Instance().HasMediaFrame())
+        id += "@m:on";
     return id;
 }
 
@@ -1531,7 +1725,8 @@ Result<std::string> SceneBuilder::BuildGatedSlideScene(const Presentation& prese
         + "@gated" + StyledSceneIdFor(presentation, slide, style, size).substr(SceneIdFor(presentation, slide).size());
 
     if (engine.GetScene(sceneId).ok()) {
-        AddCompositorLayers(engine, sceneId, size, style.showOverlay);   // same cache-hit refresh as BuildSlideScene
+        AddCompositorLayers(engine, sceneId, size, style.showOverlay, style.mediaFit);   // same cache-hit refresh as BuildSlideScene
+        RefreshBusPlanes(engine, sceneId);   // ...and the bus windows' frames (none recorded for a refused scene)
         return sceneId;
     }
     auto scene = engine.CreateScene(sceneId, slide.title, size);
@@ -1583,7 +1778,7 @@ Result<std::string> SceneBuilder::BuildGatedSlideScene(const Presentation& prese
             (void)engine.AddObject(sceneId, imageObj, "bg");
         }
     }
-    AddCompositorLayers(engine, sceneId, size, style.showOverlay);
+    AddCompositorLayers(engine, sceneId, size, style.showOverlay, style.mediaFit);
     Logger::Instance().Debug(std::format("Gated scene built: {} (family refused by style '{}')",
                                         sceneId, style.name), "SceneBuilder");
     return sceneId;
@@ -1605,7 +1800,8 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
     // moment this scene was first built (see AddCompositorLayers/
     // UpsertVideoLayer's own comments).
     if (engine.GetScene(sceneId).ok()) {
-        AddCompositorLayers(engine, sceneId, size, style.showOverlay);
+        AddCompositorLayers(engine, sceneId, size, style.showOverlay, style.mediaFit);
+        RefreshBusPlanes(engine, sceneId);   // bus windows keep flowing on a cache hit (see BusPlane)
         return sceneId;
     }
 
@@ -1727,7 +1923,18 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
     // AddCompositorLayers' own comment. Runs ONCE here, before every content
     // branch below (each returns early after its own content), so every
     // path gets these layers regardless of which one executes.
-    AddCompositorLayers(engine, sceneId, size, style.showOverlay);
+    AddCompositorLayers(engine, sceneId, size, style.showOverlay, style.mediaFit);
+
+    // Bus windows: a "bus" block is a live feed in the design's own rectangle,
+    // so its plane is recorded from the composition that owns this scene's
+    // layout (the style's template when one owns the composition, the slide's
+    // own blocks otherwise — the SAME selection slideToVariantMap hands the QML
+    // preview surfaces) and painted straight away.
+    RecordBusPlanes(sceneId,
+                    comp.source == SlideComposition::Source::SlideBlocks ? slide.blocks
+                                                                        : comp.blocks,
+                    size);
+    RefreshBusPlanes(engine, sceneId);
 
     // ---- Content blocks ---------------------------------------------------
     // The on-air layout when the style wears an ENGINE TEMPLATE: the baked

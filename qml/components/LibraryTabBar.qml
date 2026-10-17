@@ -219,8 +219,21 @@ Rectangle {
                 // — the user call: selection must read at a glance, same
                 // treatment as the sidebar's selected row); the underline +
                 // accent icon stay. Hover keeps a fainter lift.
-                color: selected ? Theme.activeBg : (tabHover.hovered ? Theme.hoverBg : "transparent")
-                Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                color: selected ? Theme.activeBg : "transparent"
+                // Selection is state and still fades; hover is the app's shared
+                // glow layer, so a tab lights exactly like a card or a row.
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+                HoverGlow {
+                    anchors.fill: parent
+                    // The tab is squared at the bottom (it meets the bar's
+                    // rule), so the hover wash has to be too.
+                    radius: 0
+                    topLeftRadius: parent.topLeftRadius
+                    topRightRadius: parent.topRightRadius
+                    hovered: tabHover.hovered && !parent.selected
+                    glowColor: Theme.hoverBg
+                }
 
                 // Every tab icon is the SAME 15px box and the same optical
                 // weight (user call: the row read as mixed sizes). Two things

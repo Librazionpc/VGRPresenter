@@ -605,9 +605,16 @@ void TestBlankCarrierCompositorPixels() {
             p::CompositorState::Instance().ClearMedia();
             return;
         }
+        // STAGE-SHAPED (16:9), not square. A taken file is laid out with
+        // contain-fit — its own aspect preserved, letterboxed on the style's
+        // background (a portrait photo stays portrait; see ContainRect) — so a
+        // SQUARE frame would now leave the top/bottom bands of the design
+        // visible, and these assertions are about what sits OVER the feed, not
+        // about the feed's own margins. A 16:9 take fills the stage exactly, so
+        // their meaning is unchanged.
         p::CompositorState::MediaFrame frame;
-        frame.width = 8;
-        frame.height = 8;
+        frame.width = 192;
+        frame.height = 108;
         frame.rgba.assign(static_cast<size_t>(frame.width) * frame.height * 4, 0);
         for (size_t i = 0; i < frame.rgba.size(); i += 4) {
             frame.rgba[i + 0] = 0x00;   // R
@@ -832,8 +839,16 @@ void TestBlankCarrierCompositorPixels() {
             // Re-run the builder first: the compositor's media layer is refreshed
             // through the scene cache (AddCompositorLayers on a cache hit), so
             // clearing the state alone leaves the LAST frame in the object.
-            (void)builder.BuildSlideScene(pres, slide, caseStyle, render, r::Size(1920, 1080));
-            auto plain = render.Render(built.value(), opts);
+            //
+            // AND RENDER WHAT IT RETURNED. A take is part of the scene ID now
+            // (StyledSceneIdFor's "@m:on": a file on air steps the style's
+            // backdrop aside, so the two compositions cannot share one cached
+            // scene). Rendering the old id here would render the take's scene —
+            // the one deliberately built WITHOUT the backdrop — which is a
+            // stale question, not a failing rule.
+            auto plainScene = builder.BuildSlideScene(pres, slide, caseStyle, render, r::Size(1920, 1080));
+            auto plain = plainScene.ok() ? render.Render(plainScene.value(), opts)
+                                         : render.Render(built.value(), opts);
             CHECK(plain.ok());
             if (plain.ok() && !plain.value().empty()) {
                 long long red2 = 0;
@@ -2798,6 +2813,12 @@ void TestClearCarrierPaintsNothing() {
     CHECK(clearComp.explicitTransparent);      // ...as a CHOSEN empty frame
     CHECK(clearComp.styleImageSuppressed);     // ...not even the background image
     CHECK(clearComp.blocks.empty());           // ...and no layout of its own
+    // ...AND THAT IS THE ONE ANSWER TO "IS THIS FRAME TRANSPARENT?" (see
+    // SlideComposition::frameTransparent): a clear is transparency by
+    // definition, while the blank GO LIVE carrier beside it wears the style's
+    // own opaque poster.
+    CHECK(clearComp.frameTransparent);
+    CHECK(!blankComp.frameTransparent);
 
     // 2. THE PIXELS, at the stage size the outputs actually use.
     p::Presentation pres;
@@ -3066,4 +3087,360 @@ void TestShowSlideKeepsItsOwnDesign() {
         CHECK(!sawTemplate);
         (void)engine.DestroyScene(scene.value());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Bus windows — a "bus" block's live plane on the real output frame
+// ---------------------------------------------------------------------------
+// The Edit canvas draws a bus's feed inside its rectangle; before this the
+// outputs drew NOTHING there — a "bus" block fell through AddStageBlocks' kind
+// switch (text / box / shape, everything else ignored), so NDI and HDMI showed
+// an empty hole where the operator's canvas showed video. This pins the three
+// things that make it a WINDOW rather than a placeholder:
+//   * the plane is painted at the BLOCK's own rect, not full-frame (the taken
+//     input and media layers are full-frame; a bus block's geometry is the
+//     design's);
+//   * a new frame reaches it through a CACHE HIT — a scene that is already
+//     built must not freeze on the first frame it ever saw;
+//   * a bus whose feed stops goes INVISIBLE (not frozen), and a bus block that
+//     names no bus paints nothing at all.
+void TestBusWindowPlane() {
+    r::RenderEngine& engine = r::RenderEngine::Instance();
+    CHECK(engine.Initialize().ok());
+    CHECK(engine.SetBackend("software").ok());
+
+    auto& compositor = p::CompositorState::Instance();
+    auto solid = [](int w, int h) {
+        p::CompositorState::MediaFrame f;
+        f.width = static_cast<uint32_t>(w);
+        f.height = static_cast<uint32_t>(h);
+        f.rgba.assign(static_cast<size_t>(w) * h * 4, 0);
+        for (size_t i = 0; i < f.rgba.size(); i += 4) {
+            f.rgba[i + 0] = 0x00;   // R
+            f.rgba[i + 1] = 0xFF;   // G
+            f.rgba[i + 2] = 0x00;   // B
+            f.rgba[i + 3] = 0xFF;   // A
+        }
+        return f;
+    };
+
+    p::Presentation pres;
+    pres.id = "pres-bus-window";
+    p::Slide slide;
+    slide.id = "bus-window-slide";
+    slide.title = "Bus 1 live";
+    // The block the Bus chip inserts: a 16:9 window carrying the bus's STABLE
+    // number (see BusSourceModal / EditScreen's onApplied).
+    p::ContentBlock window;
+    window.id = "busA";
+    window.kind = "bus";
+    window.x = 100; window.y = 60; window.width = 400; window.height = 225;
+    window.metaJson = R"({"busId":3,"busName":"Camera 1","busType":"video"})";
+    // A caption: the plane lives on the compositor's video layer, UNDER the
+    // slide's text, which is exactly the layering a lower-third over a feed
+    // relies on.
+    p::ContentBlock caption;
+    caption.id = "cap";
+    caption.kind = "text";
+    caption.x = 100; caption.y = 300; caption.width = 400; caption.height = 60;
+    caption.text = "Bus 1";
+    caption.metaJson = R"({"color":"#ffffff","fontSize":30})";
+    slide.blocks = { window, caption };
+
+    p::OutputStyleSpec style;
+    style.templateKey = "fullscreen";
+    style.backgroundColor = "#ff000000";
+
+    // What LiveOutputService publishes for an on-air bus block: the identity of
+    // the bus's routed feed, then its decoded frames.
+    compositor.SetBusFeeds({ p::CompositorState::BusFeed{3, "cam-1", "camera"} });
+    CHECK(compositor.GetBusFeeds().size() == 1);
+    compositor.SetBusFrame(3, solid(8, 8));
+    CHECK(compositor.HasBusFrames());
+
+    p::SceneBuilder builder;
+    auto built = builder.BuildSlideScene(pres, slide, style, engine);
+    CHECK(built.ok());
+    if (!built.ok())
+        return;
+
+    const float expectX = 100.0f / 754.0f * 1920.0f;
+    const float expectY = 60.0f / 428.0f * 1080.0f;
+    const float expectW = 400.0f / 754.0f * 1920.0f;
+    const float expectH = 225.0f / 428.0f * 1080.0f;
+
+    auto probe = engine.GetObject(built.value(), "bus:busA");
+    CHECK(probe.ok());
+    if (probe.ok()) {
+        auto* video = dynamic_cast<r::VideoObject*>(probe.value());
+        CHECK(video != nullptr);
+        if (video) {
+            CHECK(video->HasFrame());
+            CHECK(video->Frame().width == 8 && video->Frame().height == 8);
+            // THE BLOCK'S RECTANGLE, scaled onto the frame — a full-frame plane
+            // would pass "has a frame" while covering the whole design.
+            CHECK(std::abs(video->Bounds().x - expectX) < 0.5f);
+            CHECK(std::abs(video->Bounds().y - expectY) < 0.5f);
+            CHECK(std::abs(video->Bounds().width - expectW) < 0.5f);
+            CHECK(std::abs(video->Bounds().height - expectH) < 0.5f);
+            // The compositor's video layer: under the slide's own text.
+            CHECK(video->LayerId() == "media");
+            const uint64_t firstRev = video->FrameRevision();
+
+            // A NEW FRAME THROUGH A CACHE HIT. The second build is the same
+            // sceneId (same slide + style), so nothing is rebuilt — and the bus
+            // must STILL pick up the newer frame, or a live feed freezes the
+            // moment its slide first goes on air.
+            compositor.SetBusFrame(3, solid(4, 4));
+            auto again = builder.BuildSlideScene(pres, slide, style, engine);
+            CHECK(again.ok() && again.value() == built.value());
+            auto updated = engine.GetObject(built.value(), "bus:busA");
+            CHECK(updated.ok());
+            if (updated.ok()) {
+                auto* v = dynamic_cast<r::VideoObject*>(updated.value());
+                CHECK(v != nullptr);
+                if (v) {
+                    CHECK(v->FrameRevision() > firstRev);
+                    CHECK(v->Frame().width == 4 && v->Frame().height == 4);
+                }
+            }
+
+            // A BUS WHOSE FEED STOPPED GOES INVISIBLE, not frozen on its last
+            // picture (the renderer skips a VideoObject with no frame).
+            compositor.ClearBusFrames();
+            CHECK(!compositor.HasBusFrames());
+            (void)builder.BuildSlideScene(pres, slide, style, engine);
+            auto blanked = engine.GetObject(built.value(), "bus:busA");
+            CHECK(blanked.ok());
+            if (blanked.ok()) {
+                auto* v = dynamic_cast<r::VideoObject*>(blanked.value());
+                CHECK(v != nullptr);
+                if (v)
+                    CHECK(!v->HasFrame());
+            }
+        }
+    }
+
+    // A bus block with no busId has nothing to show and nothing to guess: no
+    // plane, and no device opened for a bus nobody named.
+    p::Slide unnamed = slide;
+    unnamed.id = "bus-window-unnamed";
+    unnamed.blocks[0].metaJson = "{}";
+    auto noneBuilt = builder.BuildSlideScene(pres, unnamed, style, engine);
+    CHECK(noneBuilt.ok());
+    if (noneBuilt.ok()) {
+        CHECK(!engine.GetObject(noneBuilt.value(), "bus:busA").ok());
+        (void)engine.DestroyScene(noneBuilt.value());
+    }
+
+    compositor.SetBusFeeds({});
+    compositor.ClearBusFrames();
+    (void)engine.DestroyScene(built.value());
+}
+
+// ---------------------------------------------------------------------------
+// A FILE'S OWN FILL WINS OVER THE OUTPUT'S DEFAULT — and a take clears the
+// style's background.
+//
+// The operator's ask, in two halves:
+//   * "per-media fill override (Contain/Cover/Fill on the file itself) that wins
+//     over the output's default fit" — the choice belongs to the PICTURE, so a
+//     portrait photo marked "cover" must crop on every output, whatever each
+//     output's Fill setting says;
+//   * "the style already said shows should clear bg — anything that wants to
+//     show removes the style's bg" — a take is the frame, not a guest inside the
+//     style's poster, so the style's colour (and image) must not survive under
+//     it in the letterbox margins.
+//
+// Both are read off the real scene the outputs render: `mediaonair`'s bounds say
+// which fit was applied, `mediabars` says whether the contained picture needed
+// the blown-up bar fill, and the absence of `bg` says the style cleared.
+// ---------------------------------------------------------------------------
+void TestMediaFitOnTheFileWins() {
+    // Self-contained: the suite is reachable on its own (its name contains
+    // "media", so `./bps_unit_tests media` runs it), and a render engine that
+    // was never booted refuses SetBackend.
+    (void)bps::ConfigurationManager::Instance().Set(
+        "render.backend", bps::json::Value::String("software"));
+    r::RenderEngine& engine = r::RenderEngine::Instance();
+    CHECK(engine.Initialize().ok());
+    CHECK(engine.Start().ok());
+    CHECK(engine.SetBackend("software").ok());
+
+    p::Presentation pres;
+    pres.id = "pres-media-fit";
+    p::Slide slide;
+    slide.id = "media-fit-1";   // no blocks: the take is the whole picture
+    slide.background = "";
+
+    p::OutputStyleSpec style;
+    style.name = "Fit output";
+    style.templateKey = "fullscreen";
+    style.backgroundColor = "#ff00ff00";   // a style colour that MUST clear
+    style.mediaFit = "contain";            // the output's own default
+
+    p::SceneBuilder builder;
+    auto& compositor = p::CompositorState::Instance();
+
+    // A PORTRAIT take (100x200): contain letterboxes it, cover fills the stage,
+    // fill stretches over it. Solid, because only the geometry is under test.
+    auto takeWithFit = [&compositor](std::string fit) {
+        p::CompositorState::MediaFrame frame;
+        frame.width = 100;
+        frame.height = 200;
+        frame.fit = std::move(fit);
+        frame.rgba.assign(static_cast<size_t>(frame.width) * frame.height * 4, 0);
+        for (size_t i = 0; i < frame.rgba.size(); i += 4) {
+            frame.rgba[i + 0] = 0x40;   // R
+            frame.rgba[i + 1] = 0x80;   // G
+            frame.rgba[i + 2] = 0xC0;   // B
+            frame.rgba[i + 3] = 0xFF;   // A
+        }
+        // Opaque everywhere — the alpha flag the take carries (see
+        // MediaFrame::hasAlpha) says so, exactly as LiveOutputService's scan of a
+        // decoded JPEG does.
+        frame.hasAlpha = false;
+        compositor.SetMediaFrame(std::move(frame));
+    };
+    // The SAME frame, but with real transparency in its pixels and the flag to
+    // match (a keyed PNG or an alpha WebP on air).
+    auto takeWithAlpha = [&compositor] {
+        p::CompositorState::MediaFrame frame;
+        frame.width = 100;
+        frame.height = 200;
+        frame.rgba.assign(static_cast<size_t>(frame.width) * frame.height * 4, 0);
+        for (size_t i = 0; i < frame.rgba.size(); i += 4) {
+            frame.rgba[i + 0] = 0x40;   // R
+            frame.rgba[i + 1] = 0x80;   // G
+            frame.rgba[i + 2] = 0xC0;   // B
+            frame.rgba[i + 3] = 0x00;   // A — transparent
+        }
+        frame.hasAlpha = true;
+        compositor.SetMediaFrame(std::move(frame));
+    };
+
+    auto mediaBounds = [&engine](const std::string& sceneId, const char* name) {
+        auto obj = engine.GetObject(sceneId, name);
+        if (!obj.ok()) return r::Rect();
+        auto* video = dynamic_cast<r::VideoObject*>(obj.value());
+        return video ? video->Bounds() : r::Rect();
+    };
+
+    // 1. THE OUTPUT'S DEFAULT applies when the file names none: contain keeps the
+    //    100x200 picture's aspect (a narrow band down the middle), and the
+    //    picture itself continues behind the margins as the bar fill.
+    takeWithFit("");
+    auto built = builder.BuildSlideScene(pres, slide, style, engine);
+    CHECK(built.ok());
+    if (!built.ok())
+        return;
+    const std::string sceneId = built.value();
+    {
+        const r::Rect rect = mediaBounds(sceneId, "mediaonair");
+        CHECK(rect.height > 1079.0f);          // full height...
+        CHECK(rect.width < 700.0f);            // ...and the picture's own width
+        // THE MARGINS STAY EMPTY: no blown-up copy of the picture under it (the
+        // operator's "if the image is 16:1 I expect the transparent bg around
+        // it, that is EMPTY SPACE").
+        CHECK(!engine.GetObject(sceneId, "mediabars").ok());
+        // THE TAKE CLEARS THE STYLE: no background object of the style's, and the
+        // composition says so (the preview surfaces read this to clear too).
+        CHECK(!engine.GetObject(sceneId, "bg").ok());
+        const auto comp = p::SceneBuilder::ComposeSlide(slide, style);
+        CHECK(comp.clearedByTake);
+        CHECK(!comp.paintBackground);
+        CHECK(comp.background.empty());
+        CHECK(comp.styleImageSuppressed);
+        // AND IT IS NOT A TRANSPARENT FRAME: an opaque picture on air replaced
+        // the background, so the frame is opaque where the picture is — the
+        // margins a contain-fit leaves are the OUTPUT's empty pixels, never the
+        // picture's alpha. This is the one answer every surface draws its
+        // transparency convention from (the monitor wall used to read the take
+        // itself and painted checkered pillarbox bars no output had).
+        CHECK(!comp.frameTransparent);
+        CHECK(!compositor.MediaFrameIsTransparent());
+    }
+
+    // 1b. A PICTURE THAT REALLY CARRIES TRANSPARENCY is a transparent frame —
+    //     the convention exists for exactly this ("the checkerboard signifies
+    //     transparent"), and it must survive the rule above.
+    takeWithAlpha();
+    {
+        CHECK(compositor.MediaFrameIsTransparent());
+        const auto comp = p::SceneBuilder::ComposeSlide(slide, style);
+        CHECK(comp.clearedByTake);
+        CHECK(comp.frameTransparent);
+    }
+
+    // 2. THE FILE'S OWN FIT WINS: "cover" on the file crops it to the stage even
+    //    though this output says "contain". Same scene id (a fit change is a
+    //    LAYOUT change, not a new composition), refreshed through the cache hit —
+    //    which is exactly how a pick while the file is on air reaches the output.
+    takeWithFit("cover");
+    auto again = builder.BuildSlideScene(pres, slide, style, engine);
+    CHECK(again.ok());
+    if (again.ok()) {
+        CHECK(again.value() == sceneId);
+        const r::Rect rect = mediaBounds(sceneId, "mediaonair");
+        // COVER preserves the picture's aspect and CROPS: a 100x200 take on a
+        // 1920x1080 stage covers it at 1920x3840 (the stage is a window onto the
+        // middle of the picture), not stretched to the stage.
+        CHECK(std::abs(rect.width - 1920.0f) < 0.5f);
+        CHECK(std::abs(rect.height - 3840.0f) < 0.5f);
+    }
+
+    // 3. "fill" on the file stretches to the stage, and the OUTPUT's default is
+    //    overridden the other way too: a file saying "contain" on an output that
+    //    says "cover" keeps its own aspect.
+    takeWithFit("fill");
+    (void)builder.BuildSlideScene(pres, slide, style, engine);
+    {
+        const r::Rect rect = mediaBounds(sceneId, "mediaonair");
+        CHECK(std::abs(rect.width - 1920.0f) < 0.5f);
+        CHECK(std::abs(rect.height - 1080.0f) < 0.5f);
+    }
+    style.mediaFit = "cover";
+    takeWithFit("contain");
+    (void)builder.BuildSlideScene(pres, slide, style, engine);
+    {
+        const r::Rect rect = mediaBounds(sceneId, "mediaonair");
+        CHECK(rect.width < 700.0f);            // the FILE's answer, not the output's
+        CHECK(rect.height > 1079.0f);
+        CHECK(!engine.GetObject(sceneId, "mediabars").ok());
+    }
+
+    // 4. OFF AIR the style's own background is back: clearing the take re-keys to
+    //    the scene that still has its poster (the "@m:on" token in the scene id).
+    compositor.ClearMedia();
+    auto plain = builder.BuildSlideScene(pres, slide, style, engine);
+    CHECK(plain.ok());
+    if (plain.ok()) {
+        CHECK(plain.value() != sceneId);
+        CHECK(engine.GetObject(plain.value(), "bg").ok());
+        CHECK(!engine.GetObject(plain.value(), "mediaonair").ok());
+        const auto comp = p::SceneBuilder::ComposeSlide(slide, style);
+        CHECK(!comp.clearedByTake);
+        CHECK(comp.paintBackground);
+        CHECK(comp.background == style.backgroundColor);
+        // A STYLE THAT PAINTS ITS OWN COLOUR IS NOT A TRANSPARENT FRAME — the
+        // other half of the one answer: with the take gone, what the operator
+        // sees is the style's poster, not transparency.
+        CHECK(!comp.frameTransparent);
+    }
+
+    // 5. A TAKEN CAMERA/SCREEN FEED IS AN OPAQUE PICTURE TOO: the feed replaces
+    //    the frame the style described, so the composition says the frame is not
+    //    transparent even where the style named no colour at all.
+    {
+        style.backgroundColor = "";            // nothing named: keyable on its own
+        compositor.SetTakenInput("selftest-device", "camera");
+        const auto comp = p::SceneBuilder::ComposeSlide(slide, style);
+        CHECK(!comp.frameTransparent);
+        compositor.ClearTakenInput();
+        const auto withoutTake = p::SceneBuilder::ComposeSlide(slide, style);
+        CHECK(withoutTake.frameTransparent);    // ...and keyable once it is gone
+        style.backgroundColor = "#ff00ff00";
+        (void)engine.DestroyScene(plain.value());
+    }
+    (void)engine.DestroyScene(sceneId);
 }

@@ -20,21 +20,32 @@ Rectangle {
     // Qt's QML AOT compiler (see NavItem.qml for the same fix).
     readonly property color ghostHoverTint: Qt.rgba(Theme.textPrimary.r, Theme.textPrimary.g, Theme.textPrimary.b, 0.06)
 
+    // The RESTING fill only — hover is the shared layer below, so a button
+    // lights the same way a card or a row does instead of lightening its own
+    // fill by a hand-picked factor.
     color: {
         if (!root.enabled) return Theme.inset
         if (root.variant === "primary")
-            return mouseArea.pressed ? Qt.darker(Theme.accent, 1.15)
-                 : mouseArea.containsMouse ? Qt.lighter(Theme.accent, 1.1)
-                 : Theme.accent
+            return mouseArea.pressed ? Qt.darker(Theme.accent, 1.15) : Theme.accent
         if (root.variant === "danger")
-            return mouseArea.pressed ? Qt.darker(Theme.danger, 1.15)
-                 : mouseArea.containsMouse ? Qt.lighter(Theme.danger, 1.08)
-                 : Theme.danger
+            return mouseArea.pressed ? Qt.darker(Theme.danger, 1.15) : Theme.danger
         if (root.variant === "secondary")
-            return mouseArea.containsMouse ? Qt.lighter(Theme.inset, 1.3) : Theme.inset
-        return mouseArea.containsMouse ? root.ghostHoverTint : "transparent"
+            return Theme.inset
+        return "transparent"
     }
-    Behavior on color { ColorAnimation { duration: 120 } }
+    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+    // Over a filled button the wash is the app's own ink (white) — a white
+    // lift is what "lighter(accent, 1.1)" was approximating; a ghost button
+    // keeps its faint textPrimary tint.
+    HoverGlow {
+        anchors.fill: parent
+        radius: parent.radius
+        hovered: mouseArea.containsMouse && root.enabled
+        glowColor: root.variant === "ghost" ? root.ghostHoverTint
+                 : root.variant === "secondary" ? Qt.rgba(1, 1, 1, 0.05)
+                 : Qt.rgba(1, 1, 1, 0.10)
+    }
 
     border.width: (root.variant === "secondary" || root.variant === "ghost") ? 1 : 0
     border.color: Theme.borderSubtle

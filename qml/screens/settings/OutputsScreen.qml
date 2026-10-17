@@ -161,6 +161,11 @@ Item {
     // by row index (deleting a style would re-point every later output at
     // the wrong theme).
     property string editStyleId: ""
+    // How a media file taken on air sits on THIS output — "contain" (the
+    // whole picture, its own aspect kept), "cover" (cropped to fill) or
+    // "fill" (stretched). FreeShow's MediaStyle.fit; the engine applies it in
+    // SceneBuilder (OutputStyleSpec::mediaFit).
+    property string editMediaFit: "contain"
 
     function openEdit(index) {
         const data = OutputListModel.getOutput(index)
@@ -174,6 +179,7 @@ Item {
         root.editLocked = data.boundsLocked
         root.editStayOnTop = data.stayOnTop
         root.editStyleId = data.styleId
+        root.editMediaFit = data.mediaFit !== undefined && data.mediaFit !== "" ? data.mediaFit : "contain"
         root.editOriginalName = data.name
     }
 
@@ -229,6 +235,7 @@ Item {
         OutputListModel.setTestPattern(root.editIndex, root.editPattern)
         OutputListModel.setBoundsLocked(root.editIndex, root.editLocked)
         OutputListModel.setStayOnTop(root.editIndex, root.editStayOnTop)
+        OutputListModel.setMediaFit(row, root.editMediaFit)
         OutputListModel.setStyle(row, requestedStyleId)
         const savedOutput = OutputListModel.getOutput(row)
         if (!savedOutput || savedOutput.styleId !== requestedStyleId) {
@@ -584,7 +591,7 @@ Item {
         color: addOutputArea.pressed ? Qt.darker(Theme.accent, 1.15)
              : addOutputArea.containsMouse ? Qt.lighter(Theme.accent, 1.1)
              : Theme.accent
-        Behavior on color { ColorAnimation { duration: 120 } }
+        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
         Row {
             id: addOutputRow
@@ -747,6 +754,90 @@ Item {
             }
         }
 
+        // ---- Media fill (how a taken file sits on this output) ----
+        // The picture the operator takes is composed by the engine at THIS
+        // output's own size; "contain" keeps a portrait photo portrait
+        // (default), "cover" crops it to fill, "fill" stretches it. One
+        // choice per output, never per style: two outputs can wear the same
+        // style and need different fits (a 4:3 projector next to a 16:9 one).
+        Column {
+            width: parent.width
+            spacing: Theme.space2
+
+            Text {
+                text: "Media fill"
+                color: Theme.textSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
+            }            // A DROPDOWN, not a row of buttons: three words in a modal are not a
+            // segmented control (the row ran past the card and clipped), and the
+            // roster's other per-output choices are pickers too.
+            Rectangle {
+                id: fillRow
+                width: parent.width
+                height: 46
+                radius: Theme.radiusMd
+                color: Theme.inset
+
+                Text {
+                    x: 14
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: {
+                        if (root.editMediaFit === "cover")
+                            return qsTr("Cover — fills the output, cropped centered")
+                        if (root.editMediaFit === "fill")
+                            return qsTr("Fill — stretched to the output's shape")
+                        return qsTr("Contain — whole picture, own aspect kept")
+                    }
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.textSm
+                }
+
+                Text {
+                    anchors.right: parent.right
+                    anchors.rightMargin: 14
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "\u2304"
+                    color: Theme.textMuted
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.textSm
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    // openAt(), not a bare visible toggle: the panel lifts
+                    // itself into the window's overlay, measures the room
+                    // around this row and clamps/flips there (a bare toggle
+                    // left it at the dialog's top-left corner).
+                    onClicked: {
+                        if (fillMenu.visible)
+                            fillMenu.visible = false
+                        else
+                            fillMenu.openAt(fillRow, 0, fillRow.height + 4, editDialog)
+                    }
+                }
+            }
+
+            DropdownPanel {
+                id: fillMenu
+                visible: false
+                model: [
+                    { label: "Contain — whole picture, own aspect kept" },
+                    { label: "Cover — fills the output, cropped centered" },
+                    { label: "Fill — stretched to the output's shape" }
+                ]
+                onItemActivated: (label) => {
+                    root.editMediaFit = label.indexOf("Cover") === 0 ? "cover"
+                                      : label.indexOf("Fill") === 0 ? "fill"
+                                                                    : "contain"
+                    fillMenu.visible = false
+                }
+            }
+        }
+
         Column {
             width: parent.width
             spacing: Theme.space2
@@ -798,7 +889,7 @@ Item {
                     color: changeStyleArea.containsMouse ? "#20242f" : "#1a1c26"
                     border.color: "#2a3140"
                     border.width: 1
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         id: changeStyleLabel

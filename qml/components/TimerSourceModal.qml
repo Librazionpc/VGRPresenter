@@ -130,7 +130,7 @@ Item {
                         height: 28
                         radius: 7
                         color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
-                        Behavior on color { ColorAnimation { duration: 100 } }
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         Text {
                             anchors.centerIn: parent
@@ -193,7 +193,7 @@ Item {
                             color: modeBtn.active ? Theme.accent : (modeArea.containsMouse ? Theme.hoverBg : Theme.inset)
                             border.color: modeBtn.active ? Theme.accent : Theme.borderSubtle
                             border.width: 1
-                            Behavior on color { ColorAnimation { duration: 100 } }
+                            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                             Text {
                                 anchors.centerIn: parent
@@ -248,7 +248,7 @@ Item {
                             color: fieldBox.focused ? Qt.alpha(Theme.accent, 0.12) : Theme.inset
                             border.color: fieldBox.focused ? Theme.accent : Theme.borderSubtle
                             border.width: fieldBox.focused ? 1.5 : 1
-                            Behavior on color { ColorAnimation { duration: 100 } }
+                            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                             Column {
                                 anchors.centerIn: parent
@@ -317,7 +317,7 @@ Item {
                         height: 24
                         radius: 12
                         color: toggleTrack.on ? Theme.accent : Theme.borderSubtle
-                        Behavior on color { ColorAnimation { duration: 100 } }
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         Rectangle {
                             x: toggleTrack.on ? parent.width - width - 2 : 2
@@ -356,7 +356,7 @@ Item {
                     color: cancelArea.containsMouse ? Theme.hoverBg : Theme.inset
                     border.color: Theme.borderSubtle
                     border.width: 1
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent
@@ -381,7 +381,7 @@ Item {
                     height: 32
                     radius: 9
                     color: addArea.containsMouse ? Qt.darker(Theme.accent, 1.1) : Theme.accent
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent

@@ -1082,7 +1082,7 @@ Item {
         else if (root.deleteTargetType === "video")
             root.removeVideoFixingRoutes(root.deleteTargetIndex)
         else if (root.deleteTargetType === "bus")
-            BusListModel.removeBus(root.deleteTargetIndex)
+            BusListModel.deleteBus(root.deleteTargetIndex)   // the operator's delete: its notice offers the Undo
         root.deleteTargetIndex = -1
     }
 
@@ -3370,7 +3370,7 @@ Item {
                 text: qsTr("Delete Bus")
                 variant: "danger"
                 onClicked: {
-                    BusListModel.removeBus(root.editBusIndex)
+                    BusListModel.deleteBus(root.editBusIndex)   // the operator's delete: its notice offers the Undo
                     root.busDialogOpen = false
                 }
             }

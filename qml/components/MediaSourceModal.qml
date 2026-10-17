@@ -167,7 +167,7 @@ Item {
                         height: 28
                         radius: 7
                         color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
-                        Behavior on color { ColorAnimation { duration: 100 } }
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         Text {
                             anchors.centerIn: parent
@@ -229,7 +229,7 @@ Item {
                             color: tabBtn.active ? Qt.alpha(Theme.accent, 0.16) : (tabArea.containsMouse ? Theme.hoverBg : "transparent")
                             border.color: tabBtn.active ? Theme.accent : "transparent"
                             border.width: 1
-                            Behavior on color { ColorAnimation { duration: 100 } }
+                            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                             Text {
                                 id: tabLabel
@@ -333,7 +333,7 @@ Item {
                         border.width: mediaCard.selected ? 1.5 : 1
                         border.color: mediaCard.selected ? Theme.accent : Theme.borderSubtle
                         Behavior on border.color { ColorAnimation { duration: 100 } }
-                        Behavior on color { ColorAnimation { duration: 100 } }
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         // The still — the engine's real first frame for
                         // video, or the image itself (MediaThumbnailProvider,
@@ -443,7 +443,7 @@ Item {
                     color: browseArea.containsMouse ? Theme.accentLight : Theme.textSecondary
                     font.family: Theme.fontFamily
                     font.pixelSize: 14
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     MouseArea {
                         id: browseArea
@@ -466,7 +466,7 @@ Item {
                     color: cancelArea.containsMouse ? Theme.hoverBg : Theme.inset
                     border.color: Theme.borderSubtle
                     border.width: 1
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent
@@ -493,7 +493,7 @@ Item {
                     enabled: root.selectedItem !== null
                     opacity: root.selectedItem !== null ? 1 : 0.4
                     color: insertArea.containsMouse ? Qt.darker(Theme.accent, 1.1) : Theme.accent
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent

@@ -368,7 +368,7 @@ Item {
                 color: browseArea.containsMouse ? Theme.chip : Theme.inset
                 border.color: Theme.border
                 border.width: 1
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 Text {
                     anchors.centerIn: parent

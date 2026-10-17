@@ -128,7 +128,7 @@ Item {
                         height: 28
                         radius: 7
                         color: closeArea.containsMouse ? "#20222c" : "transparent"
-                        Behavior on color { ColorAnimation { duration: 100 } }
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         Text {
                             anchors.centerIn: parent
@@ -336,7 +336,7 @@ Item {
                     color: cancelArea.containsMouse ? "#20222c" : "#1a1c26"
                     border.color: "#2a2f3a"
                     border.width: 1
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent
@@ -361,7 +361,7 @@ Item {
                     height: 34
                     radius: 9
                     color: selectArea.containsMouse ? Qt.darker(Theme.accent, 1.1) : Theme.accent
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent

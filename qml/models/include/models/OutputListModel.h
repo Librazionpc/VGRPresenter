@@ -68,6 +68,11 @@ struct OutputItem
     // a style can't re-point every later output at the wrong theme the way an
     // index reference would (FreeShow keys outputs→styles by id the same way).
     QString styleId;
+    // How a taken media file sits on THIS output (Settings · Outputs → Fill):
+    // "contain" (default — the whole picture, its own aspect kept), "cover"
+    // (cropped to fill) or "fill" (stretched). FreeShow's MediaStyle.fit, which
+    // is what its media renderer reads per output.
+    QString mediaFit = QStringLiteral("contain");
     // NDI (and other network) outputs: carry ONLY their own transport — no
     // physical screen window, and no audience-facing window on this machine
     // (the receiver's monitor IS the audience screen). FreeShow's NDI output
@@ -143,6 +148,8 @@ public:
         // (SlideRules::LayoutScope), so the sentence cannot drift from what the
         // NDI/HDMI picture does — which is the whole point of printing it.
         StyleLayoutRole,
+        // This output's media fill choice ("contain" | "cover" | "fill").
+        MediaFitRole,
     };
     Q_ENUM(Role)
 
@@ -209,6 +216,9 @@ public:
     Q_INVOKABLE void setTestPattern(int index, const QString &pattern);
     // Assign a style by row (the picker's natural currency; "" = None).
     Q_INVOKABLE void setStyle(int index, const QString &styleId);
+    // Settings · Outputs → Fill: how a media file taken on air sits on THIS
+    // output. Pushes the engine spec again (the fit travels with it).
+    Q_INVOKABLE void setMediaFit(int index, const QString &fit);
     Q_INVOKABLE void toggleContent(int index, const QString &key);
 
     // Snapshot for edit dialogs — one QVariantMap per output with the same

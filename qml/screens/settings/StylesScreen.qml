@@ -630,7 +630,7 @@ Item {
                                 color: editStyleArea.containsMouse ? Theme.chip : "transparent"
                                 border.color: Theme.border
                                 border.width: 1
-                                Behavior on color { ColorAnimation { duration: 100 } }
+                                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                                 Text {
                                     id: editStyleLabel
@@ -664,7 +664,7 @@ Item {
                                 color: duplicateStyleArea.containsMouse ? Theme.chip : "transparent"
                                 border.color: Theme.border
                                 border.width: 1
-                                Behavior on color { ColorAnimation { duration: 100 } }
+                                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                                 Text {
                                     id: duplicateStyleLabel
@@ -701,7 +701,7 @@ Item {
                                 color: deleteStyleArea.containsMouse ? Theme.chip : "transparent"
                                 border.color: Theme.border
                                 border.width: 1
-                                Behavior on color { ColorAnimation { duration: 100 } }
+                                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                                 Text {
                                     id: deleteStyleLabel
@@ -939,7 +939,7 @@ Item {
                     color: resetFamilyTemplateArea.containsMouse ? Theme.chip : "transparent"
                     border.color: Theme.border
                     border.width: 1
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         id: resetFamilyTemplateLabel
@@ -975,7 +975,7 @@ Item {
                     color: changeTemplateArea.containsMouse ? Theme.chip : "transparent"
                     border.color: Theme.border
                     border.width: 1
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         id: changeTemplateLabel
@@ -1074,7 +1074,7 @@ Item {
                     color: changeBgArea.containsMouse ? Theme.chip : "transparent"
                     border.color: Theme.border
                     border.width: 1
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         id: changeBgLabel
@@ -1165,7 +1165,7 @@ Item {
                         color: pickImgArea.containsMouse ? Theme.chip : "transparent"
                         border.color: Theme.border
                         border.width: 1
-                        Behavior on color { ColorAnimation { duration: 100 } }
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         Text {
                             id: pickImgLabel

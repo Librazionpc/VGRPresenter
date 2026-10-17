@@ -197,7 +197,7 @@ Item {
                                 color: platChip.active ? Theme.accentSoft : (platArea.containsMouse ? Theme.chip : Theme.inset)
                                 border.width: 1
                                 border.color: platChip.active ? Theme.accent : Theme.border
-                                Behavior on color { ColorAnimation { duration: 100 } }
+                                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                                 Text {
                                     id: platLabel

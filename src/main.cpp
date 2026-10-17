@@ -638,7 +638,18 @@ int main(int argc, char *argv[])
     // layer). Same env the engine's own frame compositor reads — one switch
     // proves the alpha on every surface: in-app tile, real output window, NDI
     // and HDMI.
-    const bool alphaInspect = qEnvironmentVariableIsSet("VGR_ALPHA_INSPECT");
+    // TRUTHY, not merely PRESENT. The switch is documented as
+    // VGR_ALPHA_INSPECT=1, but qEnvironmentVariableIsSet() turned it ON for ANY
+    // value — an explicit `VGR_ALPHA_INSPECT=0`, or a stray empty one exported
+    // by a shell — and the diagnostic then repainted every transparent pixel of
+    // every output, NDI feed and captured frame as a checkerboard, which reads
+    // as a rendering fault rather than a switch someone meant to set. "off" now
+    // means off.
+    const QString alphaInspectValue =
+        qEnvironmentVariable("VGR_ALPHA_INSPECT").trimmed().toLower();
+    const bool alphaInspect = alphaInspectValue == QLatin1String("1")
+        || alphaInspectValue == QLatin1String("true") || alphaInspectValue == QLatin1String("yes")
+        || alphaInspectValue == QLatin1String("on");
     engine.rootContext()->setContextProperty(QStringLiteral("alphaInspectEnabled"), QVariant(alphaInspect));
 
     // Transparency inspection (VGR_ALPHA_INSPECT=1): composite every rendered
@@ -1077,6 +1088,15 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty(
         QStringLiteral("SelfTestPill"),
         QVariant(qEnvironmentVariableIsSet("VGR_PILL_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The "New bus" scenario: it opens Media · Inputs, opens the New bus dialog,
+    // proves Create makes nothing until a source is picked, picks the first
+    // source, creates the bus with its route already made, grabs the dialog for
+    // the design review and removes the row again — its own env var like the
+    // rest, so a plain VGR_SELFTEST=1 run never writes the bus roster.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestNewBus"),
+        QVariant(qEnvironmentVariableIsSet("VGR_NEWBUS_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     // The renderer-switch scenario: it opens Settings · General, scrolls to the
     // Hardware rendering row, clicks its toggle, reads back what the ENGINE says

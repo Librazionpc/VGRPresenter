@@ -190,8 +190,16 @@ Item {
         property string text: ""
         signal clicked()
         width: parent.width; height: 40; radius: 8
-        color: btnHover.hovered ? Theme.hoverBg : Theme.rowBg
+        color: Theme.rowBg
         border.color: Theme.borderSubtle
+        // The shared hover layer (declared before the label so the text stays
+        // crisp): the button rests on its own colour and one layer fades in.
+        HoverGlow {
+            anchors.fill: parent
+            radius: parent.radius
+            hovered: btnHover.hovered
+            glowColor: Theme.hoverBg
+        }
         Text { anchors.centerIn: parent; text: btn.text; color: Theme.textPrimary; font.family: Theme.fontFamily; font.pixelSize: 15 }
         HoverHandler { id: btnHover; cursorShape: Qt.PointingHandCursor }
         TapHandler { onTapped: btn.clicked() }
@@ -230,7 +238,16 @@ Item {
                 visible: root.page !== ""
                 anchors.verticalCenter: parent.verticalCenter
                 width: 28; height: 28; radius: 7
-                color: backHover.hovered ? Theme.hoverBg : "transparent"
+                color: "transparent"
+                // Paint before the glyph: the glow's wash is opaque, so declared
+                // after it, it would cover the icon.
+                HoverGlow {
+                    anchors.fill: parent
+                    radius: parent.radius
+                    hovered: backHover.hovered
+                    glowColor: Theme.hoverBg
+                    quick: true
+                }
                 IconGlyph { anchors.centerIn: parent; name: "chevronRight"; rotation: 180; color: Theme.textSecondary; width: 12; height: 12 }
                 HoverHandler { id: backHover; cursorShape: Qt.PointingHandCursor }
                 TapHandler { onTapped: root.page = "" }
@@ -245,7 +262,15 @@ Item {
             Rectangle {
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                 width: 28; height: 28; radius: 7
-                color: closeHover.hovered ? Theme.hoverBg : "transparent"
+                color: "transparent"
+                // Paint before the glyph (the wash is opaque).
+                HoverGlow {
+                    anchors.fill: parent
+                    radius: parent.radius
+                    hovered: closeHover.hovered
+                    glowColor: Theme.hoverBg
+                    quick: true
+                }
                 IconGlyph { anchors.centerIn: parent; name: "close"; color: Theme.textSecondary; width: 10; height: 10 }
                 HoverHandler { id: closeHover; cursorShape: Qt.PointingHandCursor }
                 TapHandler { onTapped: root.closed() }

@@ -889,7 +889,8 @@ Rectangle {
         // path data), not a Text glyph: the old "⏱"/"◷"/"◎" unicode
         // strings had no glyph coverage in Inter and rendered as missing-
         // glyph tofu boxes on Windows. Kind is the fallback for "text" —
-        // plain letters need no icon.        { kind: "text",   icon: "text",   label: "Text" },
+        // plain letters need no icon.
+        { kind: "text",   icon: "text",   label: "Text" },
         // The bus a slide carries. Camera / Media / Audio are gone from this
         // ring by request — a service puts a BUS on screen, not a device
         // (Settings · Audio & Video owns the buses and what is routed into
@@ -1035,7 +1036,7 @@ Rectangle {
             font.family: "Segoe UI"
             font.pixelSize: 10
             text: qsTr("Fit")
-            Behavior on color { ColorAnimation { duration: 100 } }
+            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
             MouseArea {
                 id: fitArea
@@ -1058,7 +1059,7 @@ Rectangle {
                 enabled: canvasHistory.canUndo
                 opacity: enabled ? 1 : 0.35
                 color: undoArea.containsMouse ? Theme.hoverBg : Theme.inset
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 Text { anchors.centerIn: parent; color: Theme.textSecondary; font.pixelSize: 14; text: "↺" }
 
@@ -1077,7 +1078,7 @@ Rectangle {
                 enabled: canvasHistory.canRedo
                 opacity: enabled ? 1 : 0.35
                 color: redoArea.containsMouse ? Theme.hoverBg : Theme.inset
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 Text { anchors.centerIn: parent; color: Theme.textSecondary; font.pixelSize: 14; text: "↻" }
 
@@ -1094,7 +1095,7 @@ Rectangle {
                 width: 34
                 radius: 7
                 color: zoomResetArea.containsMouse ? Theme.hoverBg : Theme.inset
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 Text {
                     anchors.centerIn: parent
@@ -1338,6 +1339,18 @@ Rectangle {
                 // enter edit mode directly, without a fixed/named id to
                 // reference the way the old title/verse/ref/date objects had.
                 property alias textLabel: itemTextLabel
+                // The bus this item carries — resolved from the STABLE id in its
+                // meta (ids survive renames and row moves), then read exactly
+                // as the picker and the Media › Inputs card read it, so the
+                // picture and the light on the canvas are the same two answers
+                // the operator chose from.
+                BusMonitor {
+                    id: busMonitor
+                    busRow: canvasItemObject.modelData.kind === "bus"
+                        ? busMonitor.rowForBusId(canvasItemObject.modelData.meta
+                                                 ? (canvasItemObject.modelData.meta.busId ?? 0) : 0)
+                        : -1
+                }
                 x: modelData.x
                 y: modelData.y
                 width: modelData.width
@@ -1345,7 +1358,7 @@ Rectangle {
                 style: modelData.style
                 // A circle / line / glyph shape, a vignette and screen corners draw their own body (see below); the box behind
                 // every other kind is the item's fill and border.
-                drawsOwnBody: modelData.kind === "vignette" || modelData.kind === "corners"
+                drawsOwnBody: modelData.kind === "vignette" || modelData.kind === "corners" || modelData.kind === "bus"
                     || (modelData.kind === "shape" && ["circle", "line", "triangle", "arrow", "star", "hexagon"].includes(modelData.meta.shapeType ?? "rectangle"))
                 selected: root.isCanvasObjectSelected(modelData.key)
                 // Sourced from whichever content MouseArea is actually
@@ -1356,6 +1369,7 @@ Rectangle {
                     : modelData.kind === "clock" ? clockDragArea.containsMouse
                     : modelData.kind === "timer" ? timerDragArea.containsMouse
                     : modelData.kind === "shape" ? shapeDragArea.containsMouse
+                    : modelData.kind === "bus" ? busDragArea.containsMouse
                     : placeholderDragArea.containsMouse
                 onSelectedRequested: (mods) => root.handleCanvasSelect(modelData.key, mods)
                 onContextMenuRequested: (mx, my) => root.openCanvasContextMenu(canvasItemObject, mx, my, modelData.key)
@@ -2008,6 +2022,96 @@ Rectangle {
                     }
                 }
 
+                // ---- BUS: the same live tile the picker showed ------------
+                // A bus item IS its feed: the window is the bus's picture while
+                // its routed video source is delivering frames, "No signal"
+                // when it is not, the three-state light in the corner and the
+                // bus's name along the bottom. Same answers as the picker and
+                // the Media › Inputs card (all three read BusMonitor), so the
+                // tile you chose is the tile you get.
+                Rectangle {
+                    id: busBody
+                    visible: canvasItemObject.modelData.kind === "bus"
+                    anchors.fill: parent
+                    radius: 6
+                    color: "#000000"
+                    clip: true
+
+                    Image {
+                        anchors.fill: parent
+                        source: busMonitor.previewSource
+                        fillMode: Image.PreserveAspectCrop
+                        cache: false
+                        asynchronous: false
+                        visible: busMonitor.previewing
+                    }
+
+                    Column {
+                        anchors.centerIn: parent
+                        spacing: 4
+                        visible: !busMonitor.previewing
+
+                        IconGlyph {
+                            name: "activity"
+                            color: Theme.textMuted
+                            width: 20; height: 20
+                            fit: true
+                        }
+                        Text {
+                            text: busMonitor.busType === "audio" ? qsTr("audio only") : qsTr("No signal")
+                            color: Theme.textMuted
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 10
+                        }
+                    }
+
+                    // The light: green connected · amber offline/starved · red
+                    // nothing routed. Same three colours as the pane's card.
+                    Rectangle {
+                        anchors.top: parent.top
+                        anchors.right: parent.right
+                        anchors.margins: 6
+                        width: 9; height: 9; radius: 4.5
+                        color: busMonitor.statusColor
+                        border.width: 1
+                        border.color: Qt.alpha("#000000", 0.45)
+                    }
+
+                    // The name rides the picture's bottom edge.
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.bottom: parent.bottom
+                        anchors.margins: 6
+                        width: Math.min(parent.width - 12, busNameText.implicitWidth + 12)
+                        height: busNameText.implicitHeight + 6
+                        radius: 4
+                        color: Qt.alpha("#000000", 0.55)
+
+                        Text {
+                            id: busNameText
+                            anchors.centerIn: parent
+                            text: canvasItemObject.modelData.text
+                            color: "#ffffff"
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 10
+                            elide: Text.ElideRight
+                            width: Math.min(implicitWidth, busBody.width - 24)
+                        }
+                    }
+
+                    CanvasDragArea {
+                        id: busDragArea
+                        anchors.fill: parent
+                        onMoved: (dx, dy, snapDisabled) => {
+                            if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
+                                root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
+                            root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
+                        }
+                        onDragFinished: root.endCanvasDrag()
+                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers)
+                    }
+                }
+
                 // Generic placeholder for every other kind — its own
                 // icon/label from root.contentTypes, not just the bare kind
                 // name, so Media/Audio/Shape at least read as visually
@@ -2022,7 +2126,7 @@ Rectangle {
                         }
                         return { icon: "?", label: canvasItemObject.modelData.kind }
                     }
-                    visible: !["text", "camera", "clock", "timer", "shape", "vignette", "corners"].includes(canvasItemObject.modelData.kind)
+                    visible: !["text", "camera", "clock", "timer", "shape", "vignette", "corners", "bus"].includes(canvasItemObject.modelData.kind)
                     anchors.fill: parent
                     color: Theme.inset
                     border.color: Theme.borderSubtle
@@ -2153,7 +2257,7 @@ Rectangle {
                 width: 140
                 radius: 18
                 color: emptyAddArea.containsMouse ? Qt.lighter(Theme.accent, 1.08) : Theme.accent
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 Text {
                     anchors.centerIn: parent
@@ -2193,7 +2297,7 @@ Rectangle {
                 color: zoomOutArea.containsMouse ? Theme.textSecondary : Theme.textSecondary
                 font.pixelSize: 14
                 text: "−"
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                 MouseArea {
                     id: zoomOutArea
                     anchors.fill: parent
@@ -2209,7 +2313,7 @@ Rectangle {
                 font.family: "Segoe UI"
                 font.pixelSize: 12
                 text: Math.round(root.canvasZoom * 100) + "%"
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                 MouseArea {
                     id: zoomLabelArea
                     anchors.fill: parent
@@ -2224,7 +2328,7 @@ Rectangle {
                 color: zoomInArea.containsMouse ? Theme.textSecondary : Theme.textSecondary
                 font.pixelSize: 14
                 text: "+"
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                 MouseArea {
                     id: zoomInArea
                     anchors.fill: parent
@@ -2663,7 +2767,7 @@ Rectangle {
                                 border.width: 1
                                 border.color: metaHover.hovered ? Qt.alpha(Theme.accent, 0.55)
                                                                 : Qt.alpha(Theme.borderSubtle, 0.85)
-                                Behavior on color { ColorAnimation { duration: 110 } }
+                                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                                 Behavior on border.color { ColorAnimation { duration: 110 } }
 
                                 // A tick down the left edge while the pointer is on
@@ -2890,7 +2994,7 @@ Rectangle {
                 border.width: 1
                 color: addSlideArea.containsMouse ? Theme.hoverBg : Theme.inset
                 radius: 8
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 Row {
                     anchors.centerIn: parent
@@ -2975,7 +3079,7 @@ Rectangle {
                 // state; the underline indicator does the rest.
                 font.weight: Font.Medium
                 text: qsTr("ITEMS")
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 MouseArea {
                     anchors.fill: parent
@@ -2993,7 +3097,7 @@ Rectangle {
                 font.pixelSize: 13
                 font.weight: Font.Medium // constant — see tabItemsLabel above
                 text: qsTr("TEXT")
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 MouseArea {
                     anchors.fill: parent
@@ -3011,7 +3115,7 @@ Rectangle {
                 font.pixelSize: 13
                 font.weight: Font.Medium // constant — see tabItemsLabel above
                 text: qsTr("SLIDE")
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 MouseArea {
                     anchors.fill: parent
@@ -3178,7 +3282,7 @@ Rectangle {
                 border.width: 1
                 color: changeArea.containsMouse ? Theme.hoverBg : Theme.inset
                 radius: 12
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 Text {
                     anchors.centerIn: parent
@@ -3522,21 +3626,54 @@ Rectangle {
         onCancelled: root.bgModalOpen = false
     }
 
-    // The Bus chip's picker. What lands on the slide carries the bus's STABLE
-    // id in its meta (and its name as the item's text), so renaming or
-    // reordering the bus later leaves the item pointing at the same bus.
+    // The Bus chip's picker — the SAME picker Media › Inputs' "New bus" uses
+    // (BusSourceModal in its create mode), so the two doors are one flow: the
+    // operator picks the SOURCE the bus is built from, the bus is created with
+    // that route already made, and the item lands carrying it. A bus that feeds
+    // nothing can no longer be made from the ring either — which matters more
+    // here than anywhere, because a slide's bus block is a window that would
+    // simply paint a hole if the bus it named carried no source.
+    //
+    // What lands on the slide carries the bus's STABLE id in its meta (and its
+    // name as the item's text), so renaming or reordering the bus later leaves
+    // the item pointing at the same bus.
     BusSourceModal {
         id: busSourceModal
+        // Its own name for the test hooks: this instance is in create mode at the
+        // same time as the Media pane's, so the two cannot share them.
+        objectName: "editBusPicker"
+        mode: "newBus"
         open: root.busModalOpen
-        onApplied: (bus) => {
-            const item = root.addCanvasItem("bus")
-            if (item) {
-                item.text = bus.name
-                item.width = 200
-                item.height = 120
-                item.meta = { busId: bus.id, busName: bus.name, busType: bus.type }
-            }
+        onCreated: (busRow) => {
+            // The picker reports and leaves `open` alone — `open` is bound to
+            // busModalOpen here, so writing it from inside the modal would break
+            // that binding and the picker would never open again.
             root.busModalOpen = false
+            // Its name and type are read from the model HERE, so the item is
+            // named what the bus is called now and not what a stale list said.
+            const info = BusListModel.getBus(busRow)
+            const item = root.addCanvasItem("bus")
+            if (!item) {
+                // The engine refused the item (no show, or no slide open) —
+                // addCanvasItem returns null then and nothing is added. The bus
+                // this picker just made would otherwise be left in the roster
+                // with nothing on the canvas carrying it, which is the "a bus
+                // nobody asked for" half of what this picker exists to prevent:
+                // take it back out. (The Media pane's own door keeps its bus —
+                // there the bus IS the thing the operator asked for.)
+                BusListModel.removeBus(busRow)
+                return
+            }
+            item.text = info.name !== undefined ? info.name : ""
+            // A 16:9 tile — the window is the bus's feed, so it is sized
+            // like a picture rather than like a line of text.
+            item.width = 240
+            item.height = 135
+            item.meta = {
+                busId: info.id,
+                busName: item.text,
+                busType: info.type !== undefined ? info.type : ""
+            }
         }
         onCancelled: root.busModalOpen = false
     }

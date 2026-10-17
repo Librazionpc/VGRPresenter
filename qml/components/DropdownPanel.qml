@@ -597,15 +597,23 @@ Rectangle {
                                 // with no hover wash and swallow activation.
                                 // Autocomplete mode draws the keyboard highlight (the row
                                 // Up/Down will accept) under the mouse hover, same wash.
-                                color: alive && !modelData.disabled && (itemArea.hovered || root.highlightedIndex === index)
+                                color: alive && !modelData.disabled && root.highlightedIndex === index
                                        ? (modelData.danger ? Qt.alpha(Theme.danger, 0.14)
                                                            : Theme.border)
                                        : "transparent"
-                                // Slightly quicker fade than the header pills
-                                // (180 ms there): the cursor sweeps rows fast,
-                                // and a longer wash here smears the trail.
                                 Behavior on color {
-                                    ColorAnimation { duration: 150; easing.type: Easing.OutQuad }
+                                    ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing }
+                                }
+
+                                // The MOUSE wash is the app's shared hover layer;
+                                // the keyboard highlight above is state and stays
+                                // on the row itself.
+                                HoverGlow {
+                                    anchors.fill: parent
+                                    radius: parent.radius
+                                    hovered: alive && !modelData.disabled && itemArea.hovered
+                                    glowColor: modelData.danger ? Qt.alpha(Theme.danger, 0.14) : Theme.border
+                                    quick: true
                                 }
 
                                 Text {

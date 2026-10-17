@@ -86,7 +86,9 @@ Item {
         radius: 6
         clip: true
         color: "#16171e"
-        border.width: hover.hovered ? 1 : 0
+        // The pointer's edge is the shared hover layer at the foot of this
+        // card (see below), so the card itself keeps no hover border.
+        border.width: 0
         border.color: "#4a4d5e"
 
         // ---- preview ----
@@ -256,6 +258,19 @@ Item {
                 acceptedButtons: Qt.LeftButton
                 onDoubleClicked: root.beginRename()
             }
+        }
+
+        // THE POINTER'S EDGE — the app's shared hover layer, declared LAST so
+        // it draws over the preview; a border on the card itself would sit
+        // under every child. Transparent wash: a design's preview must not be
+        // tinted, only edged.
+        HoverGlow {
+            anchors.fill: parent
+            radius: parent.radius
+            hovered: hover.hovered
+            glowColor: "transparent"
+            edge: true
+            edgeColor: "#4a4d5e"
         }
     }
 

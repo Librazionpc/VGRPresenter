@@ -226,6 +226,29 @@ QtObject {
     readonly property int space6: 24
     readonly property int space8: 32
 
+    // ---- Hover motion ----------------------------------------------------------
+    // ONE motion language for every surface the pointer can light up.
+    //
+    // The app used to animate hover on a per-component guess — 90 ms here, 100
+    // there, 250 on the tab pills — and cards animated their FILL and their
+    // BORDER at once, which strobed while the pointer swept across a row of
+    // them (each card popped off and on). Two rules replace that:
+    //
+    //   1. a hovered surface is lit by ONE overlay layer whose OPACITY fades
+    //      (HoverGlow.qml) — opacity interpolates smoothly where alpha-blended
+    //      colours band, and one layer rising reads as light coming up under the
+    //      surface instead of two properties racing;
+    //   2. everything times to the constants below, so changing the feel of the
+    //      app's hover is a one-line change and no surface can drift.
+    readonly property int hoverFade: 220        // cards, rows, tiles, buttons
+    readonly property int hoverFadeFast: 130    // micro-controls: scrollbar, chevrons, close X
+    readonly property var hoverEasing: Easing.InOutQuad
+    // The accent wash a lit surface takes, and the strength of its edge. Kept
+    // as ALPHAS so every surface derives its look from the user's own accent
+    // choice instead of hard-coding a purple.
+    readonly property real hoverGlowAlpha: 0.10
+    readonly property real hoverEdgeAlpha: 0.45
+
     // ---- Radius scale ----
     readonly property int radiusSm: 6
     readonly property int radiusMd: 8

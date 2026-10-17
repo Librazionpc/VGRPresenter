@@ -11,11 +11,14 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
+#include <QStringList>
 #include <QImageReader>
 #include <QJSEngine>
 #include <QQmlEngine>
 #include <QThreadPool>
 #include <QUrl>
+
+#include <vector>
 
 namespace bm = bps::media;
 
@@ -32,9 +35,26 @@ QString cleanPath(const QString &raw)
     return p;
 }
 
-void report(const QString &title, const QString &message, const QString &level = QStringLiteral("error"))
+void report(const QString &title, const QString &message, const QString &level = QStringLiteral("error"),
+            const QVariant &crux = QVariant(), const QVariant &action = QVariant())
 {
-    EventBus::instance().notify(message, level, title, QStringLiteral("media.library"));
+    EventBus::instance().notify(message, level, title, QStringLiteral("media.library"), crux, action);
+}
+
+// The name a path ENDS in, without its extension — a pure string parse, never a
+// filesystem question (a file that is already gone still has to be named in the
+// notice about it).
+QString leafName(const QString &path)
+{
+    QString name = path;
+    while (name.endsWith(QLatin1Char('/')) || name.endsWith(QLatin1Char('\\')))
+        name.chop(1);
+    name = name.mid(name.lastIndexOf(QLatin1Char('/')) + 1);
+    name = name.mid(name.lastIndexOf(QLatin1Char('\\')) + 1);
+    const int dot = name.lastIndexOf(QLatin1Char('.'));
+    if (dot > 0)
+        name = name.left(dot);
+    return name.isEmpty() ? path : name;
 }
 
 } // namespace
@@ -168,6 +188,10 @@ QVariantList MediaLibraryService::items(const QString &folderPath, const QString
                                         : it.kind == bm::MediaKind::Audio ? QStringLiteral("audio")
                                                                           : QStringLiteral("image") },
             { QStringLiteral("folder"), qstr(it.folder) },
+            // THIS FILE'S OWN FILL ("" = the output's default): the badge and
+            // the picker on the card read it, and the take pushes it into the
+            // compositor so the engine lays the picture out by it.
+            { QStringLiteral("fit"), qstr(it.fit) },
         });
     return out;
 }
@@ -270,6 +294,197 @@ void MediaLibraryService::rescan(const QString &path)
         return;
     }
     startScan(path);
+}
+
+void MediaLibraryService::renameItem(const QString &path, const QString &newName)
+{
+    editItem(path, ItemOp::Rename, newName.trimmed());
+}
+
+void MediaLibraryService::removeItem(const QString &path)
+{
+    editItem(path, ItemOp::Remove, QString());
+}
+
+// The same delete for a whole selection. ONE notice, ONE Undo: the tokens are joined
+// with a newline (a path cannot contain one) and undoRemove() splits them back, so
+// "delete these five" costs one toast instead of five the operator has to read and
+// answer separately.
+void MediaLibraryService::removeItems(const QStringList &paths)
+{
+    VGR_CALL_TRACE("MediaLibraryService.removeItems");
+    if (!library_)
+        return;
+    QStringList clean;
+    for (const QString &p : paths)
+        if (!p.trimmed().isEmpty() && !clean.contains(p))
+            clean.append(p);
+    if (clean.isEmpty())
+        return;
+    if (clean.size() == 1) {
+        removeItem(clean.first());
+        return;
+    }
+    QStringList names;
+    for (const QString &p : clean)
+        names.append(leafName(p));
+    QThreadPool::globalInstance()->start([this, clean, names] {
+        QStringList tokens;
+        QString firstFailure;
+        int failed = 0;
+        for (const QString &p : clean) {
+            if (auto trashed = library_->TrashItem(p.toStdString()); trashed.ok()) {
+                tokens.append(qstr(trashed.value()));
+            } else {
+                ++failed;
+                if (firstFailure.isEmpty())
+                    firstFailure = qstr(trashed.error().message);
+            }
+        }
+        QMetaObject::invokeMethod(this, [this, tokens, failed, firstFailure, names] {
+            if (!tokens.isEmpty())
+                emit foldersChanged();
+            if (!tokens.isEmpty()) {
+                const QString joined = tokens.join(QLatin1Char('\n'));
+                QString message = tr("%1 files were deleted \u2014 Undo puts them back.")
+                                      .arg(tokens.size());
+                if (failed > 0)
+                    message = tr("%1 of %2 files were deleted \u2014 Undo puts those back. %3")
+                                  .arg(tokens.size()).arg(tokens.size() + failed)
+                                  .arg(firstFailure);
+                report(tr("Media"), message, failed > 0 ? QStringLiteral("warning") : QStringLiteral("info"),
+                       QVariant(),
+                       QVariantMap{{ QStringLiteral("id"), QStringLiteral("media.undoRemove.") + joined },
+                                   { QStringLiteral("label"), tr("Undo") },
+                                   { QStringLiteral("token"), joined }});
+            } else if (!firstFailure.isEmpty()) {
+                report(tr("Media"), firstFailure);
+            }
+        }, Qt::QueuedConnection);
+    });
+}
+
+// The Undo on a delete's notice. Same shape as the edit it takes back: the engine
+// call on the pool, the verdict back here, foldersChanged() once the file is on
+// the disk again — so the tile reappears in its own folder, in its own order,
+// with the id (and the thumbnails) it had. A batch's token is several tokens joined
+// with a newline (see removeItems), and each one is put back in turn.
+void MediaLibraryService::undoRemove(const QString &token)
+{
+    VGR_CALL_TRACE("MediaLibraryService.undoRemove");
+    if (!library_ || token.isEmpty())
+        return;
+    const QStringList tokens = token.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    std::vector<std::string> keys;
+    keys.reserve(size_t(tokens.size()));
+    for (const QString &t : tokens)
+        keys.push_back(t.toStdString());
+    QThreadPool::globalInstance()->start([this, keys] {
+        int restoredCount = 0;
+        QString firstFailure;
+        QString lastName;
+        for (const std::string &key : keys) {
+            auto restored = library_->RestoreTrashedItem(key);
+            if (restored.ok()) {
+                ++restoredCount;
+                lastName = qstr(restored.value());
+            } else if (firstFailure.isEmpty()) {
+                firstFailure = qstr(restored.error().message);
+            }
+        }
+        QMetaObject::invokeMethod(this, [this, restoredCount, firstFailure, lastName] {
+            if (restoredCount > 0)
+                emit foldersChanged();
+            if (!firstFailure.isEmpty()) {
+                report(tr("Media"), firstFailure);
+                return;
+            }
+            report(tr("Media"), restoredCount == 1
+                                      ? tr("Restored \u201c%1\u201d.").arg(leafName(lastName))
+                                      : tr("%1 files were restored.").arg(restoredCount),
+                   QStringLiteral("info"));
+        }, Qt::QueuedConnection);
+    });
+}
+
+void MediaLibraryService::moveItem(const QString &path, const QString &targetFolder)
+{
+    editItem(path, ItemOp::Move, targetFolder);
+}
+
+void MediaLibraryService::setItemFit(const QString &path, const QString &fit)
+{
+    editItem(path, ItemOp::Fit, fit);
+}
+
+QString MediaLibraryService::itemFit(const QString &path) const
+{
+    // In-memory map lookup behind one path canonicalisation, so a caller on the
+    // interface thread can ask this on every take (and the tile can ask it for
+    // the file on air) without touching the disk.
+    if (!library_ || path.isEmpty())
+        return {};
+    return qstr(library_->ItemFit(path.toStdString()));
+}
+
+// The three file operations are one shape: a PAL call on the pool (the same thread
+// the scans use), the verdict queued back here, and foldersChanged() — the signal the
+// pane already re-reads on — once the disk agrees. Every figure the pane shows comes
+// from the library, so one emit is the whole refresh: the grid, the folder counts and
+// the tree.
+void MediaLibraryService::editItem(const QString &path, ItemOp op, const QString &argument)
+{
+    VGR_CALL_TRACE("MediaLibraryService.editItem");
+    if (!library_ || path.isEmpty())
+        return;
+    const std::string target = path.toStdString();
+    const std::string arg = argument.toStdString();
+    const QString name = leafName(path);   // for the delete's notice (see below)
+    QThreadPool::globalInstance()->start([this, target, arg, op, name] {
+        QString failure;
+        QString token;   // the trash token of a delete — empty for a rename/move
+        switch (op) {
+        case ItemOp::Rename:
+            if (auto r = library_->RenameItem(target, arg); !r.ok())
+                failure = qstr(r.error().message);
+            break;
+        case ItemOp::Move:
+            if (auto r = library_->MoveItem(target, arg); !r.ok())
+                failure = qstr(r.error().message);
+            break;
+        case ItemOp::Fit:
+            // A PREFERENCE, not a file operation — but it writes its own small
+            // document, so it takes the same off-thread hop as the rest (a
+            // share that has gone away must never park the window).
+            if (auto r = library_->SetItemFit(target, arg); !r.ok())
+                failure = qstr(r.error().message);
+            break;
+        case ItemOp::Remove:
+            // TRASHED, not destroyed: the notice below offers the Undo that puts
+            // it back, so the token is what makes a delete takeable back.
+            if (auto trashed = library_->TrashItem(target); !trashed.ok())
+                failure = qstr(trashed.error().message);
+            else
+                token = qstr(trashed.value());
+            break;
+        }
+        QMetaObject::invokeMethod(this, [this, failure, token, name] {
+            if (!failure.isEmpty()) {
+                report(tr("Media"), failure);
+                return;
+            }
+            emit foldersChanged();
+            if (token.isEmpty())
+                return;
+            // The Undo is this notice's own: the id carries the token, so a second
+            // deletion on screen cannot steal the first one's button.
+            report(tr("Media"), tr("\u201c%1\u201d was deleted \u2014 Undo puts it back.").arg(name),
+                   QStringLiteral("info"), QVariant(),
+                   QVariantMap{{ QStringLiteral("id"), QStringLiteral("media.undoRemove.") + token },
+                               { QStringLiteral("label"), tr("Undo") },
+                               { QStringLiteral("token"), token }});
+        }, Qt::QueuedConnection);
+    });
 }
 
 void MediaLibraryService::startScan(const QString &path)

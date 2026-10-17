@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <format>
 
@@ -78,6 +80,16 @@ bool NaturalLess(const std::string& a, const std::string& b) {
     return (a.size() - i) < (b.size() - j);
 }
 
+// The item list's order (the one Scan() stores and Items() hands out): natural name
+// order, then the path as the tie-breaker. Shared so an item that arrives by a MOVE
+// takes its place in the destination folder's order instead of landing at the end of
+// the grid.
+bool ItemLess(const LibraryItem& a, const LibraryItem& b) {
+    if (NaturalLess(a.name, b.name)) return true;
+    if (NaturalLess(b.name, a.name)) return false;
+    return a.path < b.path;
+}
+
 std::string ParentDir(const std::string& path) {
     const size_t cut = path.find_last_of("/\\");
     return cut == std::string::npos ? std::string() : path.substr(0, cut);
@@ -132,7 +144,12 @@ std::optional<MediaKind> MediaKindOf(std::string_view path) {
 
 MediaLibrary::MediaLibrary(std::string storageFile) : storageFile_(std::move(storageFile)) {
     const size_t cut = storageFile_.find_last_of("/\\");
-    indexFile_ = (cut == std::string::npos ? std::string() : storageFile_.substr(0, cut + 1)) + "media-index.json";
+    const std::string dir = cut == std::string::npos ? std::string() : storageFile_.substr(0, cut + 1);
+    indexFile_ = dir + "media-index.json";
+    // The per-file fills live in their OWN document: the index is rebuilt from
+    // the disk by every scan (and is the big one), while a fit is a choice the
+    // operator made and must survive a rescan untouched.
+    fitsFile_ = dir + "media-fits.json";
 }
 
 // The PAL half: resolve the path (a filesystem call, so callers run this with
@@ -156,7 +173,33 @@ std::string MediaLibrary::MatchKey(const std::string& key) const {
 
 Result<void> MediaLibrary::Load() {
     auto& fs = platform::PlatformAccessor::Get().Filesystem();
-    if (!fs.Exists(storageFile_)) return {};
+
+    // THE PER-FILE FILLS, read first and OUTSIDE every lock (a PAL read): this
+    // document is independent of the folder list and of the index, and a damaged
+    // one is simply ignored — the files keep their output's default, which is
+    // exactly "nobody chose one".
+    std::map<std::string, std::string, std::less<>> storedFits;
+    if (fs.Exists(fitsFile_)) {
+        if (auto fitsText = fs.ReadText(fitsFile_); fitsText.ok()) {
+            if (auto parsedFits = json::Parse(fitsText.value()); parsedFits.ok()) {
+                if (const auto* object = parsedFits.value().Find("fits")
+                                            ? parsedFits.value().Find("fits")->asObject()
+                                            : nullptr) {
+                    for (const auto& [path, value] : *object) {
+                        const std::string fit(value.asString());
+                        if (fit == "contain" || fit == "cover" || fit == "fill")
+                            storedFits[Norm(path)] = fit;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!fs.Exists(storageFile_)) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        fits_ = std::move(storedFits);
+        return {};
+    }
     auto text = fs.ReadText(storageFile_);
     if (!text.ok()) return text.error();
     auto parsed = json::Parse(text.value());
@@ -175,6 +218,7 @@ Result<void> MediaLibrary::Load() {
         order_.clear();
         items_.clear();
         scanned_.clear();
+        fits_ = std::move(storedFits);   // a lost folder list loses no FILL
         return {};
     }
 
@@ -182,6 +226,7 @@ Result<void> MediaLibrary::Load() {
     order_.clear();
     items_.clear();
     scanned_.clear();
+    fits_ = std::move(storedFits);
     if (const auto* list = parsed.value().Find("folders"))
         if (const auto* arr = list->asArray())
             for (const auto& v : *arr) {
@@ -254,6 +299,21 @@ std::string MediaLibrary::BuildIndexLocked() const {
     json::Value::Object root;
     root["folders"] = json::Value(std::move(byFolder));
     return json::Value(std::move(root)).ToString();
+}
+
+std::string MediaLibrary::BuildFitsJsonLocked() const {
+    json::Value::Object byPath;
+    for (const auto& [key, fit] : fits_) byPath[key] = json::Value::String(fit);
+    json::Value::Object root;
+    root["fits"] = json::Value(std::move(byPath));
+    return json::Value(std::move(root)).ToString();
+}
+
+void MediaLibrary::SaveFits(const std::string& text) const {
+    if (fitsFile_.empty()) return;
+    // ATOMIC, like the index: a truncated document would silently lose every
+    // choice it held. Best-effort by signature — the fit is a preference.
+    (void)platform::PlatformAccessor::Get().Filesystem().WriteAtomic(fitsFile_, text);
 }
 
 void MediaLibrary::SaveIndex(const std::string& text) const {
@@ -376,11 +436,7 @@ Result<size_t> MediaLibrary::Scan(std::string_view path) {
             }
             found.push_back(std::move(item));
         }
-        std::sort(found.begin(), found.end(), [](const LibraryItem& a, const LibraryItem& b) {
-            if (NaturalLess(a.name, b.name)) return true;
-            if (NaturalLess(b.name, a.name)) return false;
-            return a.path < b.path;
-        });
+        std::sort(found.begin(), found.end(), ItemLess);
     }   // a folder that has gone missing is scanned as empty
 
     const size_t count = found.size();
@@ -395,6 +451,384 @@ Result<size_t> MediaLibrary::Scan(std::string_view path) {
     }
     SaveIndex(index);   // written outside the lock: it can be a few MB for a big library
     return count;
+}
+
+// ---------------------------------------------------------------------------
+// The FILES themselves: rename, delete, move
+// ---------------------------------------------------------------------------
+// One shape for all three, and each half is where it is on purpose: the PAL
+// (resolve the path, rename/delete/move the file, read the new file's metadata)
+// runs with NO lock held, and only the index re-key does — the same split this
+// module's folder writes already use (BuildFoldersJsonLocked/CommitFolders).
+bool MediaLibrary::FindItemLocked(const std::string& key, std::string& folderOut,
+                                  size_t& indexOut) const {
+    if (key.empty()) return false;
+    for (const std::string& folder : order_) {
+        auto it = items_.find(folder);
+        if (it == items_.end()) continue;
+        for (size_t i = 0; i < it->second.size(); ++i) {
+            if (Norm(it->second[i].path) == key) {
+                folderOut = folder;
+                indexOut = i;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+std::string MediaLibrary::ApplyItemChangeLocked(const std::string& oldKey,
+                                                const LibraryItem* replacement) {
+    // THE FILL FOLLOWS THE FILE. Rename and move re-key the item, and the fit
+    // is about the FILE, not about where it sat: leaving it on the old key would
+    // hand it to whatever is written at that path next. A permanent Remove drops
+    // it (replacement == nullptr) — the file it described is gone.
+    if (const auto held = fits_.find(oldKey); held != fits_.end()) {
+        const std::string fit = held->second;
+        fits_.erase(held);
+        if (replacement)
+            fits_[Norm(replacement->path)] = fit;
+    }
+    std::string folder;
+    size_t index = 0;
+    if (FindItemLocked(oldKey, folder, index)) {
+        auto it = items_.find(folder);
+        if (it != items_.end()) {
+            if (!replacement) {
+                it->second.erase(it->second.begin() + static_cast<std::ptrdiff_t>(index));
+            } else if (Norm(replacement->folder) == Norm(folder)) {
+                it->second[index] = *replacement;
+            } else {
+                // A MOVE into another library folder re-FILES the item: the list it
+                // lives in is keyed by that folder, so leaving it in the old one
+                // would keep the file showing where it no longer is (and hide it
+                // where it now is).
+                it->second.erase(it->second.begin() + static_cast<std::ptrdiff_t>(index));
+                auto& target = items_[replacement->folder];
+                target.push_back(*replacement);
+                std::sort(target.begin(), target.end(), ItemLess);
+            }
+        }
+    }
+    return BuildIndexLocked();
+}
+
+std::string MediaLibrary::ContainingFolderLocked(const std::string& targetKey) const {
+    if (targetKey.empty()) return {};
+    if (const std::string exact = MatchKey(targetKey); !exact.empty())
+        return exact;
+    // A folder INSIDE one of them (the tree's own nested rows): its key extends a
+    // library folder's by a separator.
+    for (const std::string& f : order_) {
+        const std::string fk = Norm(f);
+        if (targetKey.size() > fk.size() && targetKey.compare(0, fk.size(), fk) == 0
+                && targetKey[fk.size()] == '/')
+            return f;
+    }
+    return {};
+}
+
+Result<void> MediaLibrary::RenameItem(std::string_view path, std::string_view newName) {
+    std::string name(newName);
+    while (!name.empty() && name.front() == ' ') name.erase(name.begin());
+    while (!name.empty() && name.back() == ' ') name.pop_back();
+    if (name.empty())
+        return Error::Make(Err::InvalidArgument, kModule, "a file needs a name");
+    if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos)
+        return Error::Make(Err::InvalidArgument, kModule,
+                           "a file name cannot contain a path separator");
+    if (name == "." || name == "..")
+        return Error::Make(Err::InvalidArgument, kModule, "'" + name + "' is not a file name");
+
+    auto& fs = platform::PlatformAccessor::Get().Filesystem();
+    const std::string key = CanonicalKey(path);   // PAL, resolved before any lock
+    LibraryItem current;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::string folder;
+        size_t index = 0;
+        if (!FindItemLocked(key, folder, index))
+            return Error::Make(Err::NotFound, kModule, "that file is not in the library");
+        current = items_.at(folder)[index];
+    }
+    // A name with no extension of its own KEEPS the file's: renaming a video must
+    // not leave behind a file the library can no longer classify.
+    if (fs.Extension(name).empty())
+        name += fs.Extension(current.path);
+    const std::string parent = ParentDir(current.path);
+    const std::string newPath = parent.empty() ? name : fs.Join(parent, name);
+    if (Norm(newPath) == key) return {};   // the same name — nothing to do, nothing to write
+    if (fs.Exists(newPath))
+        return Error::Make(Err::AlreadyExists, kModule,
+                           std::format("'{}' is already in that folder", name));
+    if (auto renamed = fs.Rename(current.path, newPath); !renamed.ok())
+        return renamed.error();
+
+    LibraryItem replacement;
+    replacement.path = newPath;
+    replacement.id = MediaPathHash(newPath);   // the item id IS the path hash
+    replacement.name = StripExtension(name);
+    replacement.kind = MediaKindOf(newPath).value_or(current.kind);
+    replacement.folder = current.folder;       // a rename stays in its library folder
+    if (auto meta = fs.Metadata(newPath); meta.ok()) {
+        replacement.sizeBytes = meta.value().sizeBytes;
+        replacement.modifiedMs = meta.value().modifiedEpochNs / 1000000;
+    }
+    std::string index;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        index = ApplyItemChangeLocked(key, &replacement);
+    }
+    SaveIndex(index);   // PAL, outside the lock (a big library's index is a few MB)
+    return {};
+}
+
+Result<void> MediaLibrary::RemoveItem(std::string_view path) {
+    auto& fs = platform::PlatformAccessor::Get().Filesystem();
+    const std::string key = CanonicalKey(path);
+    LibraryItem current;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::string folder;
+        size_t index = 0;
+        if (!FindItemLocked(key, folder, index))
+            return Error::Make(Err::NotFound, kModule, "that file is not in the library");
+        current = items_.at(folder)[index];
+    }
+    // The FILE goes; its cached pictures stay in the cache. They are keyed by the
+    // file's path hash, so they are reused if the same file is put back, and the
+    // cache is not the library's to clean.
+    if (auto removed = fs.Remove(current.path); !removed.ok())
+        return removed.error();
+    std::string index;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        index = ApplyItemChangeLocked(key, nullptr);
+    }
+    SaveIndex(index);
+    return {};
+}
+
+// ---------------------------------------------------------------------------
+// Undoable delete: the file goes into the library's own trash
+// ---------------------------------------------------------------------------
+namespace {
+
+// A DELETE MUST SURVIVE LEAVING THE DRIVE. TrashItem puts the file in the
+// library's trash, which lives in the app's data folder — and a rename cannot
+// cross volumes (EXDEV), which is exactly the case of media kept on a second
+// drive or a USB stick. So: rename, and when that fails, copy then delete. The
+// copy path costs the file's size once on the way out and once on the way back,
+// on a worker thread, and only ever for a delete the operator asked for.
+Result<void> MoveFileAcross(platform::IFilesystem& fs, const std::string& from,
+                            const std::string& to) {
+    if (auto moved = fs.Move(from, to); moved.ok())
+        return moved;
+    if (auto copied = fs.Copy(from, to); !copied.ok())
+        return copied.error();
+    if (auto removed = fs.Remove(from); !removed.ok()) {
+        (void)fs.Remove(to);   // do not leave a second copy behind
+        return removed.error();
+    }
+    return {};
+}
+
+// How long a deleted file waits in the trash before the sweep removes it. The
+// undo that makes the trash worth having lives for seconds; a week covers "I
+// deleted this last night" without letting a dead library hold gigabytes.
+constexpr int64_t kTrashRetentionMs = 7LL * 24 * 60 * 60 * 1000;
+
+int64_t NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+} // namespace
+
+std::string MediaLibrary::TrashDir() const {
+    // Beside the library's own documents (media-folders.json, the index), and
+    // deliberately NOT under any library folder: a scan walks folders
+    // recursively, so trash inside one would list the file the operator just
+    // deleted right back into the grid.
+    const std::string parent = ParentDir(storageFile_);
+    return parent.empty() ? std::string("media-trash")
+                          : platform::PlatformAccessor::Get().Filesystem().Join(parent, "media-trash");
+}
+
+void MediaLibrary::SweepTrash() const {
+    auto& fs = platform::PlatformAccessor::Get().Filesystem();
+    const std::string dir = TrashDir();
+    auto entries = fs.Enumerate(dir);
+    if (!entries.ok())
+        return;   // no trash yet is the normal case
+    const int64_t cutoff = NowMs() - kTrashRetentionMs;
+    for (const std::string& entry : entries.value()) {
+        // Only OUR names are ever touched: <epoch-ms>-<leaf>. Anything else in
+        // there (a file the user dropped in) is not the sweep's to delete.
+        const std::string leaf = LeafName(entry);
+        const size_t dash = leaf.find('-');
+        if (dash == std::string::npos || dash < 10) continue;
+        int64_t stamp = 0;
+        bool digits = true;
+        for (size_t i = 0; i < dash; ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(leaf[i]))) { digits = false; break; }
+            stamp = stamp * 10 + (leaf[i] - '0');
+        }
+        if (!digits || stamp > cutoff) continue;
+        (void)fs.Remove(entry);
+    }
+}
+
+std::string MediaLibrary::InsertItemLocked(const LibraryItem& item) {
+    auto it = items_.find(item.folder);
+    if (it == items_.end())
+        return {};   // its folder left the library: the file comes back, the row does not
+    it->second.push_back(item);
+    std::sort(it->second.begin(), it->second.end(), ItemLess);
+    return BuildIndexLocked();
+}
+
+Result<std::string> MediaLibrary::TrashItem(std::string_view path) {
+    auto& fs = platform::PlatformAccessor::Get().Filesystem();
+    const std::string key = CanonicalKey(path);
+    LibraryItem current;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::string folder;
+        size_t index = 0;
+        if (!FindItemLocked(key, folder, index))
+            return Error::Make(Err::NotFound, kModule, "that file is not in the library");
+        current = items_.at(folder)[index];
+    }
+
+    SweepTrash();   // PAL, before this delete adds to what the sweep looks at
+    const std::string dir = TrashDir();
+    if (auto made = fs.CreateDirectories(dir); !made.ok())
+        return made.error();
+    // The name keeps the leaf (extension and all) so the trashed file is still
+    // recognisably itself, and starts with the time so the sweep can date it.
+    const std::string leaf = LeafName(current.path);
+    const std::string base = fs.Join(dir, std::format("{}-{}", NowMs(), leaf));
+    std::string token = base;
+    for (int n = 2; fs.Exists(token) && n < 1000; ++n)
+        token = std::format("{}-{}", base, n);
+
+    if (auto moved = MoveFileAcross(fs, current.path, token); !moved.ok())
+        return moved.error();
+
+    std::string index;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        trash_[token] = TrashEntry{ token, current };
+        index = ApplyItemChangeLocked(key, nullptr);
+    }
+    SaveIndex(index);   // PAL, outside the lock
+    return token;
+}
+
+Result<std::string> MediaLibrary::RestoreTrashedItem(std::string_view token) {
+    auto& fs = platform::PlatformAccessor::Get().Filesystem();
+    TrashEntry entry;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = trash_.find(std::string(token));
+        if (it == trash_.end())
+            return Error::Make(Err::NotFound, kModule,
+                               "that deletion can no longer be undone");
+        entry = it->second;
+    }
+    // THE WAY HAS TO BE CLEAR: a photo that came back while this one was deleted
+    // must not be overwritten by the restore — the trashed copy stays where it is
+    // and the same Undo works again once the name is free.
+    if (fs.Exists(entry.item.path))
+        return Error::Make(Err::AlreadyExists, kModule,
+                           std::format("'{}' is back in that folder — the deleted copy stays in the trash",
+                                       LeafName(entry.item.path)));
+    if (!fs.Exists(entry.token))
+        return Error::Make(Err::NotFound, kModule, "the deleted file is no longer in the trash");
+
+    const std::string parent = ParentDir(entry.item.path);
+    if (!parent.empty())
+        if (auto made = fs.CreateDirectories(parent); !made.ok())
+            return made.error();
+    if (auto moved = MoveFileAcross(fs, entry.token, entry.item.path); !moved.ok())
+        return moved.error();
+
+    // The item comes back as it WAS (id, name, kind — the id is the path's hash, so
+    // it is the same id it had), with the size and timestamp of the restored file.
+    LibraryItem restored = entry.item;
+    if (auto meta = fs.Metadata(restored.path); meta.ok()) {
+        restored.sizeBytes = meta.value().sizeBytes;
+        restored.modifiedMs = meta.value().modifiedEpochNs / 1000000;
+    }
+    std::string index;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        trash_.erase(std::string(token));
+        index = InsertItemLocked(restored);
+    }
+    if (!index.empty())
+        SaveIndex(index);
+    return restored.path;
+}
+
+Result<void> MediaLibrary::MoveItem(std::string_view path, std::string_view targetFolder) {
+    auto& fs = platform::PlatformAccessor::Get().Filesystem();
+    const std::string key = CanonicalKey(path);
+    const std::string targetKey = CanonicalKey(targetFolder);
+    // The destination as the UI spelled it (the key above is folded for the
+    // COMPARISON only): a move must never rewrite the folder's own name.
+    std::string target(targetFolder);
+    while (target.size() > 3 && (target.back() == '/' || target.back() == '\\')) target.pop_back();
+    if (target.empty())
+        return Error::Make(Err::InvalidArgument, kModule, "no folder to move it into");
+
+    LibraryItem current;
+    std::string root;
+    bool knownFolder = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        root = ContainingFolderLocked(targetKey);
+        if (root.empty())
+            return Error::Make(Err::InvalidArgument, kModule, "that folder is not in the library");
+        // A target that IS one of the library's own folders takes the library's own
+        // spelling: a move must never mint a second spelling of a folder the
+        // library already knows ("C:\\media" and "c:/media" would otherwise both
+        // name a real folder and only one of them would match later lookups).
+        knownFolder = !MatchKey(targetKey).empty();
+        std::string folder;
+        size_t index = 0;
+        if (!FindItemLocked(key, folder, index))
+            return Error::Make(Err::NotFound, kModule, "that file is not in the library");
+        current = items_.at(folder)[index];
+    }
+    const std::string leaf = LeafName(current.path);
+    const std::string newPath = fs.Join(knownFolder ? root : target, leaf);
+    if (Norm(newPath) == key) return {};   // it is already in that folder
+    if (fs.Exists(newPath))
+        return Error::Make(Err::AlreadyExists, kModule,
+                           std::format("'{}' is already in that folder", leaf));
+    if (auto moved = fs.Move(current.path, newPath); !moved.ok())
+        return moved.error();
+
+    LibraryItem replacement;
+    replacement.path = newPath;
+    replacement.id = MediaPathHash(newPath);
+    replacement.name = StripExtension(leaf);
+    replacement.kind = MediaKindOf(newPath).value_or(current.kind);
+    replacement.folder = root;   // the library folder it now lives under (may differ)
+    if (auto meta = fs.Metadata(newPath); meta.ok()) {
+        replacement.sizeBytes = meta.value().sizeBytes;
+        replacement.modifiedMs = meta.value().modifiedEpochNs / 1000000;
+    }
+    std::string index;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        index = ApplyItemChangeLocked(key, &replacement);
+    }
+    SaveIndex(index);
+    return {};
 }
 
 std::vector<LibrarySubfolder> MediaLibrary::Subfolders(std::string_view libraryFolder) const {
@@ -442,6 +876,44 @@ std::vector<LibrarySubfolder> MediaLibrary::Subfolders(std::string_view libraryF
     return out;
 }
 
+Result<void> MediaLibrary::SetItemFit(std::string_view path, std::string_view fit) {
+    const std::string value(fit);
+    // "" is a legitimate answer (follow the output's own Fill); every other
+    // spelling has to be one of the three the renderer knows.
+    if (!value.empty() && value != "contain" && value != "cover" && value != "fill")
+        return Error::Make(Err::InvalidArgument, kModule,
+                           std::format("'{}' is not a fill (contain, cover, fill)", value));
+    const std::string key = CanonicalKey(path);   // PAL, outside the lock
+    std::string json;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::string folder;
+        size_t index = 0;
+        if (!FindItemLocked(key, folder, index))
+            return Error::Make(Err::NotFound, kModule, "that file is not in the library");
+        const std::string held = fits_.count(key) != 0 ? fits_[key] : std::string();
+        if (held == value) return {};   // unchanged — nothing to write
+        if (value.empty())
+            fits_.erase(key);
+        else
+            fits_[key] = value;
+        // The item's own copy too, so a caller holding an item it just changed
+        // (and every Items() result) says the same thing as the store.
+        if (auto it = items_.find(folder); it != items_.end())
+            it->second[index].fit = value;
+        json = BuildFitsJsonLocked();
+    }
+    SaveFits(json);   // PAL, outside the lock
+    return {};
+}
+
+std::string MediaLibrary::ItemFit(std::string_view path) const {
+    const std::string key = CanonicalKey(path);   // PAL, outside the lock
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = fits_.find(key);
+    return it == fits_.end() ? std::string() : it->second;
+}
+
 std::vector<LibraryItem> MediaLibrary::Items(std::string_view folder) const {
     // The PAL path resolution runs BEFORE the library lock: a filesystem call
     // must never sit under mutex_ (the lock-scope guard flags it, and a slow
@@ -455,10 +927,20 @@ std::vector<LibraryItem> MediaLibrary::Items(std::string_view folder) const {
 
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<LibraryItem> out;
+    // THE FILE'S OWN FILL rides every item handed out (see LibraryItem::fit):
+    // the store keeps it keyed by path because a scan rebuilds the items from
+    // the disk, so it is merged here, once, for every caller.
+    auto withFits = [this](std::vector<LibraryItem>& list) -> std::vector<LibraryItem> {
+        for (LibraryItem& item : list) {
+            const auto it = fits_.find(Norm(item.path));
+            item.fit = it == fits_.end() ? std::string() : it->second;
+        }
+        return std::move(list);
+    };
     if (!folder.empty()) {
         if (const std::string root = MatchKey(folderKey); !root.empty()) {
             if (auto it = items_.find(root); it != items_.end()) out = it->second;
-            return out;
+            return withFits(out);
         }
         // A folder inside a library folder: everything under it (its own files and its subfolders').
         std::string prefix = Norm(absoluteFolder);
@@ -467,12 +949,12 @@ std::vector<LibraryItem> MediaLibrary::Items(std::string_view folder) const {
             if (auto it = items_.find(f); it != items_.end())
                 for (const LibraryItem& item : it->second)
                     if (Norm(item.path).compare(0, prefix.size(), prefix) == 0) out.push_back(item);
-        return out;
+        return withFits(out);
     }
     for (const std::string& f : order_)
         if (auto it = items_.find(f); it != items_.end())
             out.insert(out.end(), it->second.begin(), it->second.end());
-    return out;
+    return withFits(out);
 }
 
 std::vector<LibraryItem> MediaLibrary::Search(std::string_view text, std::string_view folder) const {
@@ -512,8 +994,21 @@ std::vector<LibraryItem> MediaLibrary::Search(std::string_view text, std::string
             if (!any) { all = false; break; }
         }
         if (!all) continue;
-        const size_t at = name.find(lookFor.front().front());
-        const int rank = at == 0 ? 0 : (name[at - 1] == ' ' || name[at - 1] == '_' || name[at - 1] == '-' ? 1 : 2);
+        // WHERE the first word was found, among the alternatives that matched. The
+        // raw word is not necessarily one of them: a query that only landed through
+        // a typo CORRECTION ("img10" -> "img2") is in no name at all, and asking
+        // for its position gave npos — which then read the name at npos - 1 and
+        // aborted the app. A corrected-only match is rank 2 by definition (a fuzzy
+        // hit, not the word the operator typed).
+        size_t at = std::string::npos;
+        for (const std::string& w : lookFor.front()) {
+            const size_t found = name.find(w);
+            if (found != std::string::npos && (at == std::string::npos || found < at)) at = found;
+        }
+        int rank = 2;
+        if (at == 0) rank = 0;
+        else if (at != std::string::npos
+                 && (name[at - 1] == ' ' || name[at - 1] == '_' || name[at - 1] == '-')) rank = 1;
         hits.push_back({rank, i, std::move(pool[i])});
     }
     std::stable_sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) { return a.rank < b.rank; });

@@ -47,6 +47,8 @@ Rectangle {
     color: Theme.panelBg
 
     property string activeTab: "show"
+    // Whether the Edit tab has anything to open (ViewTabs greys it when not).
+    property bool editAvailable: true
     signal tabSelected(string tab)
     // The gear — the entry point to the Settings dialog (Main.qml owns the
     // dialog itself and shows it on this signal).
@@ -122,7 +124,7 @@ Rectangle {
             radius: 8
             color: goLiveArea.hovered ? Qt.lighter(goLiveButton.baseColor(), 1.15)
                                             : goLiveButton.baseColor()
-            Behavior on color { ColorAnimation { duration: 120 } }
+            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
             Rectangle {
                 anchors.centerIn: parent
@@ -163,6 +165,9 @@ Rectangle {
         anchors.horizontalCenter: parent.horizontalCenter
         y: root.titleRowHeight + (root.tabRowHeight - height) / 2
         activeTab: root.activeTab
+        // Passed straight through from Main: whether Edit has a show to open
+        // (see ViewTabs.editAvailable).
+        editAvailable: root.editAvailable
         onTabSelected: (tab) => root.tabSelected(tab)
     }
 
@@ -186,7 +191,7 @@ Rectangle {
             height: 30
             radius: 8
             color: searchHover.hovered ? Theme.hoverBg : "transparent"
-            Behavior on color { ColorAnimation { duration: 100 } }
+            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
             // (IconGlyph's search icon is a fixed 10.5 px, so the large one is drawn here.)
             Shape {
@@ -280,7 +285,7 @@ Rectangle {
             // Position truth - containsMouse latches forever in this build
             // (KNOWN_ISSUES.md).
             color: gearHover.hovered ? Theme.hoverBg : "transparent"
-            Behavior on color { ColorAnimation { duration: 100 } }
+            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
             // A 24 px box holding the gear. IconGlyph is a plain Item that needs an explicit
             // size and is drawn at ~10 px, so it is enlarged with scale (its stroke is

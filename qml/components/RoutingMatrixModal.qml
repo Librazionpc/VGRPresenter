@@ -84,7 +84,7 @@ ModalCard {
                 color: root.autoRoute ? Theme.accent : Theme.inset
                 border.width: 1
                 border.color: root.autoRoute ? Theme.accent : Theme.border
-                Behavior on color { ColorAnimation { duration: 110 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 Text {
                     anchors.centerIn: parent
@@ -222,7 +222,7 @@ ModalCard {
                                     border.width: 1
                                     border.color: root.autoRoute ? Theme.borderSubtle : Theme.border
                                     opacity: root.autoRoute ? 0.65 : 1
-                                    Behavior on color { ColorAnimation { duration: 100 } }
+                                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                                     MouseArea {
                                         anchors.fill: parent

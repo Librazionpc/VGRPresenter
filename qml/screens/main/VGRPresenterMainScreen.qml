@@ -374,7 +374,7 @@ Rectangle {
                              : (actionQuickSearchHover.hovered ? Theme.hoverBg : Theme.rowBg)
                         radius: 8
                         Behavior on border.color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
-                        Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         PositionHoverArea {
                             id: actionQuickSearchHover
@@ -468,7 +468,7 @@ Rectangle {
                              : (actionNewProjectHover.hovered ? Theme.hoverBg : Theme.rowBg)
                         radius: 8
                         Behavior on border.color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
-                        Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         PositionHoverArea {
                             id: actionNewProjectHover
@@ -557,7 +557,7 @@ Rectangle {
                              : (actionNewShowHover.hovered ? Theme.hoverBg : Theme.rowBg)
                         radius: 8
                         Behavior on border.color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
-                        Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         PositionHoverArea {
                             id: actionNewShowHover
@@ -842,10 +842,13 @@ Rectangle {
                         // "double click does nothing" from the Media grid).
                         onItemOpened: (item) => {
                             ProjectService.dropOnProject("media", [{ ref: item.ref, name: item.name }])
-                            if (LiveOutputService.mediaOnAir && LiveOutputService.mediaPath === item.ref)
-                                LiveOutputService.clearMedia()
-                            else
-                                LiveOutputService.takeMedia(item.ref, item.name)
+                            // ...and TO THE OUTPUT, always as a TAKE. The single click
+                            // already put this file on air (MediaLibraryPane's
+                            // tileClicked), so the old "already on air -> clear" half
+                            // read as the double-click undoing the take it had just
+                            // made it: the image went off the output as the project row
+                            // appeared. Taking it back down is the tile's TAKE pill.
+                            LiveOutputService.takeMedia(item.ref, item.name)
                         }
                         visible: media_tab_bar.currentPane === "media"
                         filter: media_tab_bar.searches.media !== undefined ? media_tab_bar.searches.media : ""
@@ -1185,7 +1188,7 @@ Rectangle {
                                         // up, selected one more + edge.
                                         color: selected ? Theme.activeBg
                                              : (catHover.hovered ? Theme.hoverBg : Theme.rowBg)
-                                        Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                                         Rectangle {
                                             visible: parent.selected
@@ -1615,7 +1618,7 @@ Rectangle {
                                 // so it cannot see the pill on top of it — without the gate
                                 // the row beneath lit up while the pointer was on the pill.
                                 color: (rowHover.hovered && !newShowDockHover.hovered) ? Theme.activeBg : "transparent"
-                                Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                                 PositionHoverArea {
                                     id: rowHover
                                     anchors.fill: parent
@@ -1632,7 +1635,7 @@ Rectangle {
                                     name: "shows"
                                     color: rowHover.hovered ? Theme.textSecondary : Theme.textMuted
                                     width: 15; height: 15
-                                    Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                                 }
 
                                 Text {
@@ -1712,7 +1715,7 @@ Rectangle {
                         width: new_show_1.width + 32
                         radius: 18
                         color: newShowDockHover.hovered ? Qt.darker(Theme.accent, 1.1) : Theme.accent
-                        Behavior on color { ColorAnimation { duration: 100 } }
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         // the soft shadow (drawn first, so it sits under the pill)
                         Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 3; width: parent.width + 6; height: parent.height + 4; radius: 20; color: "#26000000" }
@@ -1771,6 +1774,37 @@ Rectangle {
                         }
                     }   // new_show_dock_btn
                 }   // media_table
+                // ---- The clock, in the preview column ----------------------
+                // This is the dock's right column: Shows fills it with its
+                // category's template preview, Scripture and The Table fill it
+                // with their own preview column. The libraries (Media,
+                // Overlays, Templates) have nothing to preview in it, so it sat
+                // EMPTY — a wide dead band beside the grid that read as a pane
+                // that had failed to load ("the right side pane that is empty").
+                // The shared ClockPanel stands in it, in the SAME slot and at
+                // the SAME width as the template column, so a tab switch moves
+                // nothing: every library pane already reserves this row with
+                // `width: parent.width - shows_template_sidebar.width`.
+                //
+                // This dock carried a clock panel here in the earlier build;
+                // this is that panel back, now the one shared component every
+                // clock in the app uses.
+                ClockPanel {
+                    id: dock_clock
+                    visible: media_tab_bar.currentPane === "media"
+                          || media_tab_bar.currentPane === "overlays"
+                          || media_tab_bar.currentPane === "templates"
+                          || media_tab_bar.currentPane === "soon"
+                          || media_tab_bar.currentPane === "functions"
+                    x: parent.width - width
+                    y: 39
+                    width: vGRPresenter_Main_Screen.templateColumnWidth
+                    height: parent.height - 39
+                    // The column is ~400 wide; the type follows it.
+                    mainSize: Math.min(60, Math.round(width * 0.15))
+                    running: visible
+                }
+
                 // ---- Shows template sidebar (Shows tab) ---- the right column
                 // Scripture/The Table have, per CATEGORY: each category keeps its
                 // own template pick (one declared JSON key, session.showsCategoryTemplates),

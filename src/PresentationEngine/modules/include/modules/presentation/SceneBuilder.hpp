@@ -153,6 +153,38 @@ public:
         // own idea of "has content" — which is how a blank carrier came to lose
         // the image on the tile while the engine was still painting it.
         bool styleImageSuppressed = false;
+
+        // A TAKE CLEARS THE STYLE'S BACKGROUND ENTIRELY: a file (or a pushed
+        // feed) is on air, so the frame is THAT picture — the style's colour and
+        // image are not part of it, and neither is the slide's own colour. This
+        // is the operator's rule ("anything that wants to show removes the
+        // style's bg") applied to the one layer that was still dressed in it. It
+        // is a field of its own rather than a combination of the two above
+        // because a preview cannot deduce it: `paintBackground == false &&
+        // explicitTransparent` also describes a style whose colour is
+        // "transparent", which must keep its checkerboard convention.
+        bool clearedByTake = false;
+
+        // IS THIS FRAME TRANSPARENT WHERE NOTHING PAINTS? — THE ONE ANSWER.
+        // Every surface that shows transparency as transparency draws from this
+        // (the monitor tile's checkerboard, and whatever else asks the same
+        // question later), because four independent copies of the rule is how
+        // the wall showed checkered pillarbox bars around a taken photo while the
+        // output beside it — drawing the engine's own frame — showed plain dark
+        // margins, and how the same tile later refused the checkers under a
+        // genuinely transparent PNG.
+        //
+        // It is composed HERE because only the composition knows both halves:
+        //   * what the style/slide painted (`paintBackground`, `explicitTransparent`
+        //     — a frame that names nothing is keyable, one that CHOSE transparent
+        //     looks identical in pixels and is not the same statement), and
+        //   * what is composited on top of it — a taken input (an opaque feed) or
+        //     a media file (transparent only when the PICTURE is; a contain-fit
+        //     leaves the OUTPUT's empty pixels around it, which are not the
+        //     picture's alpha). That fact travels with the frame
+        //     (CompositorState::MediaFrame::hasAlpha), scanned once where the file
+        //     was decoded, never guessed from an extension here.
+        bool frameTransparent = true;
     };
     // `applyGates`: does this caller apply the style's content gates? The gated
     // build does, and so does the live preview (it shows what the gates leave on

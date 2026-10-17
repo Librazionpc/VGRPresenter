@@ -3,8 +3,10 @@
 #include <QAbstractListModel>
 #include <QList>
 #include <QString>
+#include <QStringList>
 #include <QVariantMap>
 #include <QVariantList>
+#include <optional>
 #include <qqml.h>
 
 #include "modules/production/ProductionTypes.hpp"
@@ -129,7 +131,23 @@ public:
     QHash<int, QByteArray> roleNames() const override;
 
     Q_INVOKABLE void addBus(const QString &name, const QString &type);
+    // Takes the row out and nothing else. The ROLLBACK form, on purpose: a bus a
+    // half-finished dialog created and then walked away from is taken back out
+    // with it, and offering to undo a bus the operator never saw himself create
+    // would be an offer to resurrect a mistake.
     Q_INVOKABLE void removeBus(int index);
+    // The DELETE the operator asked for (the Media pane's bus menu, the Audio &
+    // Video board's own Delete): removeBus() plus the record that makes the
+    // notice's Undo able to put the bus back. false when it could not be taken
+    // out (the graph still held it).
+    Q_INVOKABLE bool deleteBus(int index);
+    // Puts the last deleted bus back — the same row, in the same place, with the
+    // same node identity (a slide or scene that names the bus finds it again),
+    // its routes and its per-side trims. false when there is nothing to put back,
+    // or something has taken its identity in the meantime.
+    Q_INVOKABLE bool restoreRemovedBus();
+    // The name the last delete removed ("" when there is none).
+    Q_INVOKABLE QString removedBusName() const;
     // Insert a copy of row `index` (name suffixed " · copy", mute NOT
     // copied, routing NOT copied — a new bus starts unrouted); returns the
     // new row's index, -1 on a bad index. Same convention as
@@ -215,6 +233,19 @@ private:
     // rows from whatever the engine's graph holds (restored from the
     // kernel's persisted production document) — the graph is the only
     // truth, across restarts too.
+    // One deleted bus, whole: the row it came from, the row itself, and the
+    // STABLE source nodes its routes hung off — the roster ROWS in the item mean
+    // nothing once the rosters move, the nodes do.
+    struct RemovedBus {
+        int row = -1;
+        BusItem item;
+        QStringList audioSources;
+        QStringList videoSources;
+    };
+    // One deep, like every undo an operator takes immediately: a second delete
+    // replaces the offer, because the notice on screen is about that second bus.
+    std::optional<RemovedBus> m_removedBus;
+
     int createBusRow(const QString &name, const QString &type,
                      qreal level, bool muted);
     void pullRow(int row);

@@ -612,7 +612,7 @@ Column {
                     color: chRow.chOn ? Theme.accent : "transparent"
                     border.width: 1
                     border.color: chRow.chOn ? Theme.accent : Theme.controlBorder
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent

@@ -96,7 +96,254 @@ void MakeFile(const std::string& path, const std::string& content = "x") {
     CHECK(fs.Write(path, content).ok());
 }
 
+// Separator-agnostic suffix test: the paths the library stores come back in the PAL's
+// own spelling ("C:\\dir/sub/sunrise.png" on Windows), so an assertion about WHICH
+// file an item names compares the folded tail rather than the whole string.
+bool PathEndsWith(const std::string& path, const std::string& tail) {
+    std::string folded = path;
+    std::replace(folded.begin(), folded.end(), '\\', '/');
+    return folded.size() >= tail.size()
+           && folded.compare(folded.size() - tail.size(), tail.size(), tail) == 0;
+}
+
 } // namespace
+
+// The file-level CRUD the Media pane's item menu drives: rename, move, delete.
+// Every branch is a REAL file operation, so each one is checked on disk AND in
+// the remembered index (which is what the next start lists).
+void TestMediaLibraryItemEdit() {
+    namespace mm = bps::media;
+    auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    const std::string root = "/tmp/bps_media_item_edit";
+    (void)fs.RemoveAll(root);
+    CHECK(fs.CreateDirectories(root + "/photos/sub").ok());
+    CHECK(fs.CreateDirectories(root + "/clips").ok());
+    MakeFile(root + "/photos/img2.png");
+    MakeFile(root + "/photos/img10.png");
+    MakeFile(root + "/clips/intro.mp4");
+    const std::string storage = root + "/state/media-folders.json";
+
+    {
+        mm::MediaLibrary lib(storage);
+        CHECK(lib.Load().ok());
+        CHECK(lib.AddFolder(root + "/photos").ok());
+        CHECK(lib.AddFolder(root + "/clips").ok());
+        CHECK(lib.Scan(root + "/photos").ok());
+        CHECK(lib.Scan(root + "/clips").ok());
+        CHECK(lib.Count() == 3);
+        // The paths the UI passes are the library's OWN (folderTree/items), never a
+        // string the caller made up: that is what the pane hands to rename/move.
+        const std::string photosDir = lib.Folders()[0].path;
+        const std::string clipsDir = lib.Folders()[1].path;
+
+        // ---- RENAME: a name without an extension KEEPS the file's ----------------
+        CHECK(!lib.RenameItem(root + "/photos/img2.png", "").ok());
+        CHECK(!lib.RenameItem(root + "/photos/img2.png", "   ").ok());
+        CHECK(!lib.RenameItem(root + "/photos/img2.png", "a/b").ok());       // a name, not a path
+        CHECK(!lib.RenameItem(root + "/photos/img2.png", "..").ok());
+        CHECK(!lib.RenameItem(root + "/photos/nope.png", "x").ok());         // not in the library
+        CHECK(lib.RenameItem(root + "/photos/img2.png", "  sunrise  ").ok());   // trimmed
+        CHECK(fs.Exists(root + "/photos/sunrise.png"));                      // extension kept
+        CHECK(!fs.Exists(root + "/photos/img2.png"));                         // ...and it MOVED
+        CHECK(lib.Count() == 3);                                              // nothing gained or lost
+        {
+            auto items = lib.Items(root + "/photos");
+            CHECK(items.size() == 2);
+            bool found = false;
+            for (const auto& it : items)
+                if (it.name == "sunrise") {
+                    found = true;
+                    // The stored path is the PAL's own spelling (separator style and
+                    // all), so this asks the disk rather than comparing strings.
+                    CHECK(fs.Exists(it.path));
+                    CHECK(PathEndsWith(it.path, "photos/sunrise.png"));
+                    CHECK(it.kind == mm::MediaKind::Image);
+                    CHECK(it.id == mm::MediaPathHash(it.path));               // the id follows the path
+                }
+            CHECK(found);
+            CHECK(lib.Search("sunrise").size() == 1);                         // findable under the new name
+            CHECK(lib.Search("img2").empty());
+        }
+        // A name already taken in that folder is refused, not overwritten, and the
+        // file that was there is untouched.
+        CHECK(!lib.RenameItem(root + "/photos/img10.png", "sunrise").ok());
+        // A rename that only changes the extension is still a rename.
+        CHECK(lib.RenameItem(root + "/photos/img10.png", "portrait.jpg").ok());
+        CHECK(fs.Exists(root + "/photos/portrait.jpg"));
+        {
+            auto items = lib.Items(root + "/photos");
+            bool jpgIsImage = false;
+            for (const auto& it : items)
+                if (it.name == "portrait") jpgIsImage = it.kind == mm::MediaKind::Image;
+            CHECK(jpgIsImage);
+        }
+        CHECK(lib.RenameItem(root + "/photos/sunrise.png", "sunrise").ok());   // same name = no-op
+        CHECK(fs.Exists(root + "/photos/sunrise.png"));
+
+        // ---- MOVE: into another library folder, and into a folder inside one ----
+        CHECK(!lib.MoveItem(root + "/photos/portrait.jpg", root + "/elsewhere").ok());
+        CHECK(!lib.MoveItem(root + "/photos/portrait.jpg", "").ok());
+        CHECK(lib.MoveItem(root + "/photos/portrait.jpg", clipsDir).ok());
+        CHECK(fs.Exists(root + "/clips/portrait.jpg"));
+        CHECK(!fs.Exists(root + "/photos/portrait.jpg"));
+        CHECK(lib.Items(photosDir).size() == 1);        // sunrise only
+        CHECK(lib.Items(clipsDir).size() == 2);         // intro + portrait
+        CHECK(lib.Count() == 3);                        // a move never changes the count
+        // Moving onto a name that is already there is refused.
+        MakeFile(root + "/clips/sunrise.png");
+        CHECK(!lib.MoveItem(root + "/photos/sunrise.png", clipsDir).ok());
+        (void)fs.Remove(root + "/clips/sunrise.png");
+        // A folder INSIDE a library folder is allowed, and the file stays on the shelf.
+        // (An EMPTY nested folder is not a row yet — Subfolders lists folders that hold
+        // media — so the target is addressed the way the tree will spell it once it is
+        // there: the PAL's own join onto the library folder.)
+        const std::string subDir = fs.Join(photosDir, "sub");
+        CHECK(lib.Subfolders(photosDir).empty());
+        CHECK(lib.MoveItem(root + "/photos/sunrise.png", subDir).ok());
+        CHECK(fs.Exists(root + "/photos/sub/sunrise.png"));
+        CHECK(lib.Items(photosDir).size() == 1);        // it lists what is beneath, subfolders included
+        {
+            auto subs = lib.Subfolders(photosDir);
+            CHECK(subs.size() == 1 && subs[0].name == "sub" && subs[0].count == 1);
+        }
+
+        // ---- DELETE: the file goes, the index follows ---------------------------
+        CHECK(!lib.RemoveItem(root + "/clips/nothing.mp4").ok());
+        CHECK(lib.RemoveItem(root + "/clips/intro.mp4").ok());
+        CHECK(!fs.Exists(root + "/clips/intro.mp4"));
+        CHECK(lib.Count() == 2);
+        CHECK(lib.Items(clipsDir).size() == 1);
+        CHECK(lib.Search("intro").empty());
+    }
+    // The re-keyed index survives a restart: the renamed file is listed under its
+    // new name, the moved one under its new folder, and the deleted one is gone.
+    {
+        mm::MediaLibrary again(storage);
+        CHECK(again.Load().ok());
+        CHECK(again.Count() == 2);
+        bool sawMoved = false;
+        for (const auto& it : again.Items(root + "/clips"))
+            sawMoved = sawMoved || it.name == "portrait";
+        CHECK(sawMoved);
+        bool sawRenamed = false;
+        for (const auto& it : again.Items(root + "/photos"))
+            sawRenamed = sawRenamed || (it.name == "sunrise" && it.kind == mm::MediaKind::Image);
+        CHECK(sawRenamed);   // the rename is in the INDEX, not only on disk
+        CHECK(again.Search("intro").empty());
+    }
+    (void)fs.RemoveAll(root);
+}
+
+// The operator's Delete: the file leaves the grid but is NOT destroyed, so the
+// notice that follows can put it back. What has to hold is the whole round trip —
+// off the disk, into the trash, back to the SAME path, re-filed in its folder's
+// own order — and every refusal that must not lose the file on the way.
+void TestMediaLibraryUndoDelete() {
+    namespace mm = bps::media;
+    auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    const std::string root = "/tmp/bps_media_undo_delete";
+    (void)fs.RemoveAll(root);
+    CHECK(fs.CreateDirectories(root + "/photos").ok());
+    CHECK(fs.CreateDirectories(root + "/extra").ok());
+    MakeFile(root + "/photos/img2.png");
+    MakeFile(root + "/photos/img10.png");
+    MakeFile(root + "/photos/img3.png");
+    MakeFile(root + "/extra/note.mp3");
+    const std::string storage = root + "/state/media-folders.json";
+
+    {
+        mm::MediaLibrary lib(storage);
+        CHECK(lib.Load().ok());
+        CHECK(lib.AddFolder(root + "/photos").ok());
+        CHECK(lib.AddFolder(root + "/extra").ok());
+        CHECK(lib.Scan(root + "/photos").ok());
+        CHECK(lib.Scan(root + "/extra").ok());
+        CHECK(lib.Count() == 4);
+
+        // ---- a delete that can be taken back ------------------------------------
+        CHECK(!lib.TrashItem(root + "/photos/nope.png").ok());          // not in the library
+        auto trashed = lib.TrashItem(root + "/photos/img10.png");
+        CHECK(trashed.ok());
+        const std::string token = trashed.ok() ? trashed.value() : std::string();
+        CHECK(!fs.Exists(root + "/photos/img10.png"));                  // out of the folder...
+        CHECK(fs.Exists(token));                                          // ...but not destroyed
+        CHECK(lib.Count() == 3);
+        // Gone from the grid (the search itself is fuzzy — a near name may still come
+        // back as a correction — so this asks about the file, not the hit count).
+        for (const auto& it : lib.Items(root + "/photos"))
+            CHECK(it.name != "img10");
+
+        // A second delete has its OWN token: two notices on screen must never undo
+        // each other's file.
+        auto trashed2 = lib.TrashItem(root + "/photos/img3.png");
+        CHECK(trashed2.ok() && trashed2.value() != token);
+        CHECK(lib.Count() == 2);
+
+        // ---- undo -----------------------------------------------------------------
+        auto back = lib.RestoreTrashedItem(token);
+        CHECK(back.ok());
+        CHECK(fs.Exists(root + "/photos/img10.png"));                    // the same path it had
+        CHECK(!fs.Exists(token));                                         // the trash copy is gone
+        CHECK(lib.Count() == 3);
+        {
+            // Findable again, and FIRST: the literal name outranks a fuzzy neighbour.
+            const auto hits = lib.Search("img10");
+            CHECK(!hits.empty() && hits.front().name == "img10");
+        }
+        // ...and it came back IN ITS PLACE, not at the end of the grid.
+        {
+            auto items = lib.Items(root + "/photos");
+            CHECK(items.size() == 2);                                     // img10 + img2 (img3 is still out)
+            if (items.size() == 2) {
+                CHECK(items[0].name == "img2");
+                CHECK(items[1].name == "img10");
+                CHECK(items[1].id == mm::MediaPathHash(items[1].path));    // same identity as before
+            }
+        }
+        // A token is good ONCE.
+        auto again = lib.RestoreTrashedItem(token);
+        CHECK(!again.ok() && again.error().code == Err::NotFound);
+
+        // ---- something has taken the name: the file stays safe in the trash -----
+        auto third = lib.TrashItem(root + "/photos/img2.png");
+        CHECK(third.ok());
+        MakeFile(root + "/photos/img2.png", "a new file under the old name");
+        auto blocked = lib.RestoreTrashedItem(third.value());
+        CHECK(!blocked.ok() && blocked.error().code == Err::AlreadyExists);
+        CHECK(fs.Exists(third.value()));                                  // the copy is still there
+        CHECK(lib.Count() == 2);                                          // the library lists neither copy yet
+        // The way clears, and the same token works: nothing was lost by the refusal.
+        CHECK(fs.Remove(root + "/photos/img2.png").ok());
+        CHECK(lib.RestoreTrashedItem(third.value()).ok());
+        CHECK(fs.Exists(root + "/photos/img2.png"));
+
+        // ---- a folder that has left the library: the file still comes back -------
+        auto orphan = lib.TrashItem(root + "/extra/note.mp3");
+        CHECK(orphan.ok());
+        CHECK(lib.RemoveFolder(root + "/extra").ok());
+        CHECK(lib.RestoreTrashedItem(orphan.value()).ok());
+        CHECK(fs.Exists(root + "/extra/note.mp3"));                      // on the disk again...
+        CHECK(lib.Count() == 2);                                          // ...but not re-indexed
+
+        // The permanent delete is still permanent, and is not what the operator's
+        // Delete calls (see removeItem in the service).
+        CHECK(lib.RemoveItem(root + "/photos/img2.png").ok());
+        CHECK(!fs.Exists(root + "/photos/img2.png"));
+    }
+    // A restart cannot undo: the tokens lived in the run that made them, and the
+    // index remembers only what is in the library.
+    {
+        mm::MediaLibrary restarted(storage);
+        CHECK(restarted.Load().ok());
+        CHECK(restarted.Count() == 1);                                     // img10 (img2 was deleted for good, img3 is in the trash)
+        CHECK(!restarted.RestoreTrashedItem("whatever").ok());
+        bool saw = false;
+        for (const auto& it : restarted.Items(root + "/photos"))
+            saw = saw || it.name == "img10";
+        CHECK(saw);
+    }
+    (void)fs.RemoveAll(root);
+}
 
 void TestPngEncode() {
     namespace r = bps::rendering;
@@ -543,4 +790,96 @@ void TestEmptyPathSafety() {
         CHECK(lib.Subfolders("").empty());
         (void)fs.RemoveAll(root);
     }
+}
+
+// ---------------------------------------------------------------------------
+// A FILE'S OWN FILL (Contain / Cover / Stretch) lives on the FILE.
+//
+// The operator's ask: "per-media fill override on the file itself that wins over
+// the output's default fit". So the choice has to survive everything the library
+// does to its items — a rescan rebuilds every item from the disk, a rename moves
+// the path, a restart reloads from storage — and it has to be readable on the
+// item the grid lists, because that is what the take pushes into the compositor.
+// ---------------------------------------------------------------------------
+void TestMediaLibraryItemFit() {
+    namespace mm = bps::media;
+    auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    const std::string root = "/tmp/bps_media_item_fit";
+    (void)fs.RemoveAll(root);
+    CHECK(fs.CreateDirectories(root + "/photos").ok());
+    MakeFile(root + "/photos/logo.png");
+    MakeFile(root + "/photos/portrait.png");
+    const std::string storage = root + "/state/media-folders.json";
+
+    auto fitOf = [](const std::vector<mm::LibraryItem>& items, const std::string& name) {
+        for (const auto& it : items)
+            if (it.name == name) return it.fit;
+        return std::string("<missing>");
+    };
+
+    {
+        mm::MediaLibrary lib(storage);
+        CHECK(lib.Load().ok());
+        CHECK(lib.AddFolder(root + "/photos").ok());
+        CHECK(lib.Scan(root + "/photos").ok());
+
+        // Nothing chosen yet: no file names a fill, so every one of them follows
+        // its output's own default.
+        CHECK(fitOf(lib.Items(root + "/photos"), "portrait") == "");
+        CHECK(lib.ItemFit(root + "/photos/portrait.png") == "");
+
+        CHECK(lib.SetItemFit(root + "/photos/portrait.png", "cover").ok());
+        CHECK(lib.ItemFit(root + "/photos/portrait.png") == "cover");
+        CHECK(fitOf(lib.Items(root + "/photos"), "portrait") == "cover");
+        CHECK(fitOf(lib.Items(root + "/photos"), "logo") == "");   // only that file
+
+        // The three the renderer knows are the three it takes; anything else is
+        // refused rather than silently becoming the default.
+        CHECK(!lib.SetItemFit(root + "/photos/portrait.png", "blur").ok());
+        CHECK(!lib.SetItemFit(root + "/photos/portrait.png", "Contain").ok());   // case matters
+        CHECK(lib.ItemFit(root + "/photos/portrait.png") == "cover");
+        // A file the library does not list has no fill to set.
+        CHECK(!lib.SetItemFit(root + "/photos/nope.png", "cover").ok());
+        // Setting the same value again is a no-op that still answers ok().
+        CHECK(lib.SetItemFit(root + "/photos/portrait.png", "cover").ok());
+
+        // A RESCAN REBUILDS THE ITEMS from the disk — the fill must not go with
+        // them (it is not a fact about the file on disk, it is a choice).
+        CHECK(lib.Scan(root + "/photos").ok());
+        CHECK(fitOf(lib.Items(root + "/photos"), "portrait") == "cover");
+
+        // A RENAME carries it to the new path (the fill is about the picture, not
+        // about the path it happened to sit at).
+        CHECK(lib.RenameItem(root + "/photos/portrait.png", "portrait 2").ok());
+        CHECK(lib.ItemFit(root + "/photos/portrait 2.png") == "cover");
+        CHECK(lib.ItemFit(root + "/photos/portrait.png") == "");
+        CHECK(fitOf(lib.Items(root + "/photos"), "portrait 2") == "cover");
+
+        CHECK(lib.SetItemFit(root + "/photos/logo.png", "fill").ok());
+        CHECK(lib.ItemFit(root + "/photos/logo.png") == "fill");
+    }
+
+    // A RESTART: the fills are their own small document beside the index, so they
+    // are back with the folder list and the remembered items.
+    {
+        mm::MediaLibrary lib(storage);
+        CHECK(lib.Load().ok());
+        CHECK(lib.ItemFit(root + "/photos/portrait 2.png") == "cover");
+        CHECK(lib.ItemFit(root + "/photos/logo.png") == "fill");
+        CHECK(fitOf(lib.Items(root + "/photos"), "logo") == "fill");
+
+        // "": back to whatever the output says — a real answer, not a miss.
+        CHECK(lib.SetItemFit(root + "/photos/logo.png", "").ok());
+        CHECK(lib.ItemFit(root + "/photos/logo.png") == "");
+        CHECK(fitOf(lib.Items(root + "/photos"), "logo") == "");
+    }
+    {
+        // ...and the clear is what a third run reads too (the empty map is
+        // written, not just kept in memory).
+        mm::MediaLibrary lib(storage);
+        CHECK(lib.Load().ok());
+        CHECK(lib.ItemFit(root + "/photos/logo.png") == "");
+        CHECK(lib.ItemFit(root + "/photos/portrait 2.png") == "cover");
+    }
+    (void)fs.RemoveAll(root);
 }

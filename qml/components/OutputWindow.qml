@@ -295,6 +295,16 @@ Window {
     readonly property bool videoUnderneath: root.inputTaken
         || (root.mediaOnAir && !LiveOutputService.mediaIsAudio)
 
+    // THE PICTURE'S OWN FILL: the file's if it names one, else THIS output's
+    // default — the same precedence the engine composes with (SceneBuilder),
+    // and the very one the monitor tile uses.
+    readonly property string effectiveFit:
+        LiveOutputService.mediaFit !== "" ? LiveOutputService.mediaFit
+                                          : (root.onAirSlide.mediaFit || "contain")
+    readonly property int effectiveFillMode: effectiveFit === "cover" ? Image.PreserveAspectCrop
+                                            : effectiveFit === "fill" ? Image.Stretch
+                                                                      : Image.PreserveAspectFit
+
     // Media-kind on-air blocks (camera/media/audio/image) draw as a
     // placeholder-only tile through DesignPreview — the distributed frame
     // is the honest picture for those specifically; everything else (text/
@@ -319,9 +329,15 @@ Window {
         tileSize: 64
     }
 
+    // THE STYLE'S COLOUR — unless a take owns the frame (videoUnderneath), in
+    // which case the picture is the base layer and a style colour behind it only
+    // shows in the margins of what the output letterboxes. The composition says
+    // so itself (clearedByTake zeroes styleColor), but the explicit gate here
+    // keeps an off-air stage from painting it either.
     Rectangle {
         anchors.fill: parent
         visible: root.onAirSlide.styleColor !== "" && root.onAirSlide.styleColor !== "transparent"
+                 && !root.videoUnderneath
         color: root.onAirSlide.styleColor
     }
     Image {
@@ -349,7 +365,7 @@ Window {
         anchors.fill: parent
         visible: root.mediaOnAir && !LiveOutputService.mediaIsAudio
         source: root.mediaSource
-        fillMode: Image.PreserveAspectFit
+        fillMode: root.effectiveFillMode   // the file's own fill, else this output's
         cache: false
         asynchronous: false
     }
@@ -380,7 +396,13 @@ Window {
         backgroundImage: (root.onAirSlide.styleImagePainted === true && !root.videoUnderneath)
             ? root.onAirSlide.styleImage : ""
         blocks: root.onAirSlide.blocks ?? []
-        background: root.videoUnderneath ? "transparent" : (root.onAirSlide.background ?? "transparent")
+        // THE COMPOSITION'S ANSWER, not this window's own idea of what a take
+        // means: "is this frame transparent where nothing paints?" is composed
+        // once (SceneBuilder::SlideComposition::frameTransparent) and every
+        // surface reads it, so the audience screen, the monitor tile and the
+        // Show Center preview cannot paint different backgrounds for one frame.
+        background: root.onAirSlide.frameTransparent === true
+                    ? "transparent" : (root.onAirSlide.background ?? "transparent")
     }
 
     // The distributed frame — wins only for media-kind on-air content (a

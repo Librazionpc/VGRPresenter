@@ -271,7 +271,7 @@ Item {
                         height: 28
                         radius: 7
                         color: closeArea.containsMouse ? "#20222c" : "transparent"
-                        Behavior on color { ColorAnimation { duration: 100 } }
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         Text {
                             anchors.centerIn: parent
@@ -543,7 +543,7 @@ Item {
                                     color: tplRow.selected ? "#1a2240" : (rowArea.containsMouse ? "#191b24" : "#161823")
                                     border.width: tplRow.selected ? 1.5 : 1
                                     border.color: tplRow.selected ? Theme.accent : "#262a38"
-                                    Behavior on color { ColorAnimation { duration: 100 } }
+                                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                                     // A plain generic mark, not a redundant tiny render of the design - the actual preview is the
                                     // big pane on the left; a 36px render of it here read as an unexplained blob of colour, not a
@@ -639,7 +639,7 @@ Item {
                     color: cancelArea.containsMouse ? "#20222c" : "#1a1c26"
                     border.color: "#2a2f3a"
                     border.width: 1
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent
@@ -664,7 +664,7 @@ Item {
                     height: 34
                     radius: 9
                     color: useArea.containsMouse ? Theme.accentLight : Theme.accent
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent

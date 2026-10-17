@@ -19,6 +19,11 @@ Item {
     property string name: ""
     property string path: ""
     property string kind: "image"   // "image" | "video" | "audio"
+    // THIS FILE'S OWN FILL ("" = the output's default): a choice made on the
+    // picture itself (the tile menu's Fill row), which wins over every output's
+    // Fill setting when it is on air — so the grid has to show it holds one, or
+    // a picture that crops everywhere else reads as a bug on the other tiles.
+    property string fit: ""
 
     readonly property bool isVideo: kind === "video"
     readonly property bool isAudio: kind === "audio"
@@ -31,14 +36,25 @@ Item {
     // meters are the only visible confirmation — it has no frame).
     readonly property bool onAir: LiveOutputService.mediaOnAir
                                   && LiveOutputService.mediaPath === root.path
-    readonly property bool takeable: true
+    // PICKED (the grid's multi-selection). The tile draws its own ring for it, so a
+    // selection reads on the picture itself rather than only in a count at the foot
+    // of the pane.
+    property bool selected: false
+    // What THIS tile's drag carries: one file normally, the whole selection when the
+    // tile is part of one (the pane builds it — see dragItemsFor). A list of
+    // { ref, name }, the same shape every drop target in the app already takes.
+    property var dragItems: []
 
-    // Click: the file on the centre page. Double-click: into the open project. Drag: into a project.
-    signal activated()
+    // Click: the file on the centre page AND on the output (a take). Double-click: into the
+    // open project (and still on the output — a take never toggles). Drag: into a project.
+    // The click carries its KEYBOARD MODIFIERS — Ctrl toggles this tile's pick, Shift
+    // extends it from the last plain click (the pane decides; the tile only reports).
+    signal activated(int modifiers)
     signal opened()
-    // The TAKE pill was clicked (or a taken tile's was again — the pane
-    // toggles off air); the pane routes it to LiveOutputService.
-    signal takeToggled()
+    // Right-click: the host builds and shows the item menu (rename / move / delete).
+    // The same signature the design cards and sidebar rows report, so one host-side
+    // menu pattern serves every library — the tile itself touches no file.
+    signal contextMenuRequested(var source, real mx, real my)
 
     // The size to ask the engine for (it rounds up to a cache size).
     readonly property int pictureSize: width > 300 ? 500 : 250
@@ -63,10 +79,24 @@ Item {
     // Underneath the card: the preview's scrub area above it takes no buttons, so a press falls through to here.
     DragSource {
         anchors.fill: parent
-        payload: ({ kind: "media", items: [{ ref: root.path, name: root.name }] })
-        label: root.name
-        onActivated: root.activated()
+        payload: ({ kind: "media",
+                    items: (root.dragItems && root.dragItems.length > 0)
+                           ? root.dragItems
+                           : [{ ref: root.path, name: root.name }] })
+        label: (root.dragItems && root.dragItems.length > 1)
+               ? qsTr("%1 files").arg(root.dragItems.length)
+               : root.name
+        onActivated: (modifiers) => root.activated(modifiers)
         onOpened: root.opened()
+    }
+
+    // The RIGHT button only, declared over the DragSource: the left one (click,
+    // double-click, drag onto a project) stays the DragSource's, and a button this
+    // area does not accept is passed straight down to it.
+    MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.RightButton
+        onClicked: (mouse) => root.contextMenuRequested(root, mouse.x, mouse.y)
     }
 
     Rectangle {
@@ -76,7 +106,9 @@ Item {
         radius: 6
         clip: true
         color: "#16171e"
-        border.width: root.onAir ? 2 : (hover.hovered ? 1 : 0)
+        // ON AIR is state (a 2px accent ring that must stay put); the pointer's
+        // edge is the shared hover layer at the foot of this card.
+        border.width: root.onAir ? 2 : 0
         border.color: root.onAir ? Theme.accent : "#4a4d5e"
 
         // ---- preview ----
@@ -152,6 +184,20 @@ Item {
                 color: Theme.accent
             }
 
+            // THIS FILE'S OWN FILL. Top-left, away from the play/music badge, so
+            // the two never collide on a video tile.
+            Pill {
+                visible: root.fit !== ""
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.margins: 6
+                text: root.fit === "cover" ? qsTr("Cover")
+                      : root.fit === "fill" ? qsTr("Stretch")
+                                             : qsTr("Contain")
+                tint: false
+                fontSize: Theme.textXs - 1
+            }
+
             // Marks a video or an audio file (the picture alone looks like a photo).
             Rectangle {
                 visible: (root.isVideo && !root.scrubbing && !hover.hovered) || root.isAudio
@@ -171,48 +217,6 @@ Item {
                 }
             }
 
-            // The TAKE pill — hover action on video/image tiles (audio has no
-            // compositor layer). On a taken tile it stays up permanently and
-            // turns into the OFF-AIR control, so the file can always be
-            // taken back down from the grid itself.
-            Rectangle {
-                id: takePill
-                visible: root.takeable
-                         && (root.onAir || hover.hovered)
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                anchors.margins: 6
-                width: takeLabel.implicitWidth + 20
-                height: 26
-                radius: 13
-                color: root.onAir ? Theme.liveBg : "#b0000000"
-                Behavior on color { ColorAnimation { duration: 120 } }
-                Row {
-                    anchors.centerIn: parent
-                    spacing: 5
-                    IconGlyph {
-                        anchors.verticalCenter: parent.verticalCenter
-                        name: root.onAir ? "stop" : "play"
-                        color: "#ffffff"
-                        fit: true
-                        width: 11; height: 11
-                    }
-                    Text {
-                        id: takeLabel
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: root.onAir ? "ON AIR — take off" : "TAKE"
-                        color: "#ffffff"
-                        font.family: Theme.fontFamily
-                        font.pixelSize: 11
-                        font.weight: Font.DemiBold
-                    }
-                }
-                PositionHoverArea {
-                    anchors.fill: parent
-                    showCursor: false
-                    onClicked: if (root.takeable) root.takeToggled()
-                }
-            }
         }
 
         // ---- name ----
@@ -244,6 +248,29 @@ Item {
                 textFormat: Text.PlainText
             }
         }
+        // THE POINTER'S EDGE — the app's shared hover layer, declared LAST so
+        // it is drawn over the preview (a border on the card itself would sit
+        // under every child and show only along the name strip). Its wash is
+        // transparent: a tile's picture must not be tinted, only edged.
+        HoverGlow {
+            anchors.fill: parent
+            radius: parent.radius
+            hovered: hover.hovered && !root.onAir
+            glowColor: "transparent"
+            edge: true
+            edgeColor: "#4a4d5e"
+        }
+        // PICKED — OVER the hover edge, and a step thicker, so "this one is part of
+        // what Delete would act on" cannot be read as "the pointer is here".
+        Rectangle {
+            visible: root.selected
+            anchors.fill: parent
+            anchors.margins: -2
+            radius: card.radius + 2
+            color: "transparent"
+            border.width: 2
+            border.color: Theme.accent
+        }
     }
 
     // Hover feedback only (the pointing hand comes from the DragSource underneath).
@@ -251,5 +278,21 @@ Item {
         id: hover
         anchors.fill: parent
         showCursor: false
+        // Geometry alone decides "is this tile on screen" — the same posture
+        // DesignCard and the library rows take. Walking every ancestor's
+        // visible/enabled made `shownChain` depend on a chain that itself reads
+        // a hover-driven property inside the grid, which the binding loop
+        // detector caught (MediaTile.qml: QML PositionHoverArea: Binding loop
+        // detected for property "shownChain"). The open-popup case is still
+        // covered by AppCursor.blocked() below.
+        checkAncestors: false
+        // HOVER ONLY — NO CLICKS. This area is the tile's LAST child, so it is drawn
+        // over everything: with its click-sinking MouseArea enabled it swallowed
+        // every press before the DragSource beneath it ever saw one. That is why a
+        // click on a tile did
+        // nothing to the output and a double-click never opened it — the gestures
+        // were being delivered to a hover tracker. DesignCard's own hover layer sits
+        // UNDER its DragSource for the same reason.
+        clickEnabled: false
     }
 }

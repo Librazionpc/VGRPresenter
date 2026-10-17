@@ -720,7 +720,11 @@ Result<void> LiveOutputController::RenderOnce() {
     // heartbeat throttle below) the same way a style/content change does.
     const auto& compositor = presentation::CompositorState::Instance();
     const bool hasLiveCompositorContent = !compositor.GetTakenInput().deviceId.empty()
-        || compositor.HasMediaFrame() || compositor.HasActiveOverlays();
+        || compositor.HasMediaFrame() || compositor.HasActiveOverlays()
+        // A bus window on the slide is live video too: skipping the frame while
+        // one is on air froze the feed at whatever it rasterised last, which is
+        // exactly the "bus shows on the canvas but the output is stuck" report.
+        || compositor.HasBusFrames();
     const uint64_t styleRev = pres_->Runtime().StyleRevision();
     if (!hasLiveCompositorContent && sceneId == lastRenderedScene_ && styleRev == lastStyleRevision_) {
         // ...but a LIGHT HEARTBEAT: a fully static scene would otherwise stop
@@ -1028,26 +1032,70 @@ void LiveOutputController::StopIdlePreviewLocked() {
 // no longer reads as idle just because a show is not on air.
 void LiveOutputController::PreviewLoop() {
     int emptyTicks = 0;
+    // THE PREVIEW'S OWN SCENE — the ACTIVE STYLE plus the compositor's layers, which
+    // is exactly the picture GO LIVE sends (a blank carrier under whatever is taken:
+    // see LiveOutputService::goLiveBlank). This used to render only a slide of the
+    // OPEN SHOW, so with nothing open — or with a file on air that the operator was
+    // actually looking at — the monitor tile kept its last frame, or none: "it showed
+    // the label in the monitor preview but not the image". A take is preview content
+    // in its own right, so it must be able to hold the preview up on its own.
+    presentation::Slide carrier;
+    // The preview showed a taken layer last tick — so the tick that finds it GONE
+    // still has to render (once), or the tile keeps the cleared picture on screen:
+    // that is the other half of "clear all doesn't clear the media" (the layer left
+    // the compositor and the last captured frame stayed).
+    bool hadLayer = false;
     while (previewRunning_.load()) {
         bool rendered = false;
         if (presPreview_) {
+            presentation::Presentation show;
+            bool haveSlide = false;
             auto doc = presPreview_->Document();
             if (doc && doc->HasDocument()) {
-                const presentation::Presentation show = doc->Snapshot();
-                if (!show.slides.empty()) {
-                    rendering::RenderEngine &engine = rendering::RenderEngine::Instance();
-                    // The builder caches by scene id, so this rebuilds only
-                    // when the slide itself changed.
-                    auto sceneId = presPreview_->Builder().BuildSlideScene(
-                        show, show.slides.front(), engine,
-                        rendering::Size(kFrameBufferWidth, kFrameBufferHeight));
-                    if (sceneId.ok()) {
-                        rendering::RenderOptions opts;
-                        opts.distribute = false;   // nothing goes on air
-                        opts.capture = false;      // no readback: the frame is the point
-                        (void)engine.Render(sceneId.value(), opts);
-                        rendered = true;
-                    }
+                show = doc->Snapshot();
+                haveSlide = !show.slides.empty();
+            }
+            const auto &compositor = presentation::CompositorState::Instance();
+            const bool takenLayer = !compositor.GetTakenInput().deviceId.empty()
+                                    || compositor.HasMediaFrame()
+                                    || compositor.HasActiveOverlays()
+                                    || compositor.HasBusFrames();
+            const bool paintTheClear = !haveSlide && !takenLayer && hadLayer;
+            if (haveSlide || takenLayer || paintTheClear) {
+                // Nothing open to stand on: the carrier (no blocks, no title,
+                // transparent) carries the compositor layers and nothing else.
+                if (!haveSlide)
+                    show.slides.push_back(carrier);
+                rendering::RenderEngine &engine = rendering::RenderEngine::Instance();
+                // The builder caches by scene id, so this rebuilds only when the
+                // slide itself changed — the compositor layers ride the same scene.
+                // The ACTIVE OUTPUT's style, exactly as the live main pass
+                // builds it: the preview must be the picture GO LIVE would send,
+                // so the operator's decision is "does this go out?" and not "I
+                // hope it looks the same once it does".
+                auto sceneId = presPreview_->Builder().BuildSlideScene(
+                    show, show.slides.front(), presPreview_->ActiveOutputStyle(), engine,
+                    rendering::Size(kFrameBufferWidth, kFrameBufferHeight));
+                if (sceneId.ok()) {
+                    rendering::RenderOptions opts;
+                    opts.distribute = false;   // nothing goes on air
+                    opts.capture = false;      // no readback: nobody reads this frame
+                    auto frame = engine.Render(sceneId.value(), opts);
+                    rendered = frame.ok();
+                    hadLayer = takenLayer;
+                    // NOT PUBLISHED FROM HERE. Writing the shared preview buffer
+                    // (and each styled output's own buffer) from this worker put
+                    // a second thread on buffers and scene graphs the live pass
+                    // and the output providers read, and the app died with
+                    // 0xc0000005 seconds after a take — twice. The monitor wall
+                    // does not need it: off air a taken file is drawn by the tile
+                    // from the SAME layer the centre Preview pane uses
+                    // (image://mediaplay — one decode, one provider, one picture;
+                    // see OutputMonitorTile's selfTestTileMediaFrame), and while
+                    // live the live loop publishes the buffers it always did.
+                    // What stays here is what this loop was always for: keep the
+                    // engine producing frames off air so the render-path
+                    // telemetry the Settings meters read does not sit at zero.
                 }
             }
         }
@@ -1057,7 +1105,10 @@ void LiveOutputController::PreviewLoop() {
             previewRunning_.store(false);   // no open show: give the thread back
             break;
         }
-        // Sleep in short steps so a stop is felt promptly.
+        // Sleep in short steps so a stop is felt promptly. One frame a second,
+        // as this loop has always run: it is a telemetry beat now (see the note
+        // above about what it deliberately no longer publishes), so a faster
+        // cadence would be rasterizing on a worker for nobody.
         for (int slept = 0; slept < kPreviewIntervalMs && previewRunning_.load(); slept += 50)
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }

@@ -116,7 +116,7 @@ Rectangle {
                 : active ? glowColor : Theme.borderSubtle
     opacity: capable ? 1 : 0.55
     Behavior on border.color { ColorAnimation { duration: 120 } }
-    Behavior on color { ColorAnimation { duration: 120 } }
+    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
     // Soft glow halo — the "premium" touch: a wider, dim corona in the SAME
     // sampled colour, brightening with level.
@@ -142,7 +142,7 @@ Rectangle {
         font.family: Theme.fontFamily
         font.pixelSize: root.labelSize
         font.bold: true
-        Behavior on color { ColorAnimation { duration: 120 } }
+        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
     }
 
     // Mute slash — only while actually closed, so an idle-but-open channel

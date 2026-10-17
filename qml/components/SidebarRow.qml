@@ -39,8 +39,18 @@ Rectangle {
     radius: 6
     // Same subtle pill ramp as the shows categories sidebar (the first
     // brighter ramp read too hot against the ground — user call).
-    color: selected ? "#1e2130" : (rowHover.hovered ? "#181a23" : "#14161e")
-    Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
+    color: selected ? "#1e2130" : "#14161e"
+    // Selection is state and still fades; HOVER is the shared layer below
+    // (HoverGlow), so every row in the app lights the same way and at the same
+    // pace instead of each one guessing a colour and a duration.
+    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+    HoverGlow {
+        anchors.fill: parent
+        radius: parent.radius
+        hovered: rowHover.hovered && !root.selected
+        glowColor: Qt.rgba(1, 1, 1, 0.05)
+    }
 
     Rectangle {
         visible: root.selected

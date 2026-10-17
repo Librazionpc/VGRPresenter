@@ -61,7 +61,37 @@ Item {
     // notification layer stays data-driven — see NotificationCenter.registerAction).
     Component.onCompleted: {
         NotificationCenter.registerAction("recovery.open", function() { root.openOfferedRecovery() })
+        // The bus delete's Undo. ONE id, because BusListModel keeps one deleted bus deep: the id
+        // can only ever mean the bus the notice on screen is about. (A media FILE's Undo is
+        // registered per notice instead — its id carries the file's trash token, so two deletions
+        // on screen each give their own file back; see the Connections below.)
+        NotificationCenter.registerAction("buses.undoRemove", function() { BusListModel.restoreRemovedBus() })
         SettingsService.whenReady(function() { startTimer.start() })
+    }
+
+    // ---- the media file Undo's one click ---------------------------------------------------------
+    // A delete's notice carries the TRASH TOKEN of the file it removed, and the id is built from
+    // that token ("media.undoRemove.<token>") precisely so the click knows WHICH file it is
+    // putting back: "Undo" under one notice must never bring back a different deletion that
+    // happened after it. A payload is data and cannot carry a function, so the id is turned into
+    // one here — registrations live as long as the app, which outlives every notice.
+    Connections {
+        target: EventBus
+        function onEventPosted(topic, payload) {
+            void topic
+            const action = payload ? payload.action : null
+            if (!action || typeof action !== "object" || !action.id || action.token === undefined)
+                return
+            const token = String(action.token)
+            const id = String(action.id)
+            NotificationCenter.registerAction(id, function() {
+                MediaLibraryService.undoRemove(token)
+                // The click is the notice's last act (its card dismisses itself after
+                // running this), so the entry goes with it instead of piling up one
+                // closure per deletion for the rest of the session.
+                NotificationCenter.unregisterAction(id)
+            })
+        }
     }
 
     Timer {

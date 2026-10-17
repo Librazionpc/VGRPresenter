@@ -141,6 +141,29 @@ class LiveOutputService : public QObject {
     Q_PROPERTY(qulonglong mediaRev READ mediaRev NOTIFY mediaTick)
     // Muted playback (monitoring the file's own audio off the program mix).
     Q_PROPERTY(bool mediaMuted READ mediaMuted NOTIFY mediaChanged)
+    // THE FILE'S OWN FILL ("contain" | "cover" | "fill", "" = none), which
+    // WINS over the output's default when this file is on air. A per-file choice
+    // is a fact about the picture, so it is stored on the file in the media
+    // library and travels into the compositor with every frame; this property is
+    // the copy the surfaces read for the take that is up right now, so the tile
+    // and the engine lay the picture out the same way.
+    Q_PROPERTY(QString mediaFit READ mediaFit NOTIFY mediaChanged)
+    // DOES THE PICTURE ON AIR ACTUALLY CARRY TRANSPARENCY? True only when the
+    // take is a STILL whose decoded pixels include at least one with alpha < 255
+    // (see preflightMediaTake). A video never does, and neither does an opaque
+    // photo saved with an alpha channel — so a surface can tell "this frame is
+    // transparent" (show the checkerboard convention) from "this frame is
+    // opaque" (show nothing of the sort) without guessing from the file's
+    // extension. The monitor tile used to treat EVERY take as a transparent
+    // frame, which painted the tile's checkerboard under a taken VIDEO: a 9:16
+    // clip in a 16:9 pane showed checkered pillarbox bars that the real output
+    // never had ("this shouldn't even be happening").
+    Q_PROPERTY(bool mediaHasAlpha READ mediaHasAlpha NOTIFY mediaChanged)
+    // The label a taken file's audio meter lands under in
+    // EngineBridge::inputLevels (see applyMediaTake). Exposed so the monitor
+    // tile matches the take's snapshot by the ONE spelling the service publishes
+    // rather than by a copy that can drift from it.
+    Q_PROPERTY(QString mediaMeterLabel READ mediaMeterLabel CONSTANT)
     // ---- NDI PROGRAM SENDER ---------------------------------------------
     // True while the FIRST enabled NDI-kind output (the active one, or any
     // other enabled NDI row when a projector is on air) is being fed by the
@@ -218,6 +241,9 @@ public:
     qlonglong mediaDuration() const { return mediaDuration_; }
     qulonglong mediaRev() const { return mediaRev_; }
     bool mediaMuted() const { return mediaMuted_; }
+    QString mediaFit() const { return mediaFit_; }
+    bool mediaHasAlpha() const { return mediaHasAlpha_; }
+    QString mediaMeterLabel() const;
     // No lock inside any of these: the pill's four fields are the GUI thread's
     // own state and the frame counter is an atomic the feed thread publishes
     // (see the members). They are read from QML bindings, so they must not wait
@@ -306,6 +332,21 @@ public:
     // monitor, the output take, a meter tap — so asking never opens a device.
     Q_INVOKABLE QString inputDelivery(const QString &label, const QString &kind);
 
+    // ---- BUS VIDEO WINDOWS (a "bus" block on the on-air slide) -----------
+    // A design block of kind "bus" is a WINDOW onto one of the mix buses: the
+    // canvas draws that bus's live feed inside it, so every real output has to
+    // draw the same feed — otherwise NDI and HDMI show an empty hole where the
+    // operator sees video. QML owns the answers (which bus the block names,
+    // which source is routed into it), so this service resolves them off the
+    // ON-AIR composition, holds one owner-"bus" tap per feed and hands each
+    // bus's decoded frames to the engine (CompositorState, which SceneBuilder
+    // paints at the block's own rect). One path for camera, screen AND NDI —
+    // the PAL tap route the taken input uses only knows the first two.
+    // Frames and taps follow the composition: a bus block that leaves the
+    // slide releases its tap on the next poll. Releasing everything at once
+    // (off air, app teardown) is clearBusFeeds().
+    Q_INVOKABLE void clearBusFeeds();
+
     // ---- MEDIA ON AIR ----------------------------------------------------
     // takeMedia(path, name): a video/image file plays into the compositor
     // layer on every monitor tile (under the on-air content, over the style
@@ -315,6 +356,11 @@ public:
     // the program mix the loopback tap meters).
     Q_INVOKABLE void takeMedia(const QString &path, const QString &name);
     Q_INVOKABLE void clearMedia();
+    // THIS FILE'S OWN FILL, set from the take (the Media pane's picker): stored
+    // on the file in the library — so it is remembered for the next take and for
+    // any other output, and wins over that output's default — and applied to the
+    // frame on air right away. "" means "whatever the output says".
+    Q_INVOKABLE void setMediaFit(const QString &fit);
     // Transport: play/pause toggle, seek to a fraction of the duration (0..1;
     // images ignore), mute toggle. stop() (going off air) pauses the player.
     Q_INVOKABLE void mediaTogglePlay();
@@ -473,6 +519,10 @@ private:
     static LiveOutputService *s_instance;
 
     void pollTick();   // refresh onAir* + framesSent from the engine
+    // Create (once) and arm the 10 Hz poll. Called from the CONSTRUCTOR: it
+    // publishes frameRev for the IDLE preview too, so it must not be something
+    // a live session switches on (see pollTick's head).
+    void ensurePollTimer();
     // The shared input pump tick (~15 Hz while ANY tap is held): flips
     // inputLive on the taken input's first frame (decode-cache poll) and
     // bumps inputRev so every consuming Image re-fetches. Stops itself when
@@ -514,6 +564,12 @@ private:
         bool isImage = false;
         bool isAudio = false;
         QImage image;              // the decoded still (image takes only)
+        // The still carries REAL transparency (a pixel with alpha < 255), which
+        // is what the monitor tile's checkerboard convention stands for. An
+        // alpha CHANNEL is not enough: a photo saved as PNG/ARGB is opaque
+        // everywhere, and reading hasAlphaChannel() alone would have put the
+        // checkers in the letterbox margins of every such file.
+        bool hasAlpha = false;
     };
     void applyMediaTake(const MediaPreflight &pre);
     // The disk half itself (a static: it reads no member, so the worker half of
@@ -580,6 +636,12 @@ private:
         QString inputLabel;
         QString inputKind;
         QString inputMode;
+        // The media file that was on air (its path is also the id of the take).
+        // MEDIA IS A COMPOSITOR LAYER LIKE THE INPUT, and Clear all did not touch
+        // it: the file stayed on the monitors while every other layer went — the
+        // report "when I press clear all it doesn't clear the media".
+        QString mediaPath;
+        QString mediaName;
         QVariantList overlays;          // [{id,name}], insertion order = z-order
     };
     ClearedSnapshot cleared_;
@@ -631,6 +693,34 @@ private:
     void armNdiSenderForSession();
     QString ndiArmedName_;
 
+    // ---- bus video windows (see clearBusFeeds above) ----
+    struct BusFeed {
+        QString label;      // the roster caption the tap is keyed by
+        QString kind;       // "camera" | "screen" | "ndi"
+        QString mode;       // a camera's capture-mode pick ("" for the others)
+        QString deviceId;   // the resolved PAL id / NDI source name, for the log
+    };
+    // Bus number (a block's meta busId) → the feed held for it. GUI thread only,
+    // like every other tap table here: written by refreshBusFeeds() (the 10Hz
+    // poll) and read by pumpTick on the same thread.
+    QHash<int, BusFeed> busFeeds_;
+    // "kind|label" → earliest ms to retry a feed whose tap was refused. The
+    // poll runs at 10Hz; a device that is gone must not be re-probed (or
+    // re-logged) at that rate.
+    QHash<QString, qint64> busTapRetry_;
+    // Diffs the ON-AIR composition's bus blocks against the held feeds and
+    // starts/releases taps accordingly. Cheap and idempotent — it is called from
+    // the live poll, so a re-route, a roster rename or a new slide all settle
+    // within one tick instead of needing an event nobody publishes.
+    void refreshBusFeeds();
+    // Releases one bus's tap (owner "bus") and drops its frames from the
+    // compositor, so the plane goes blank rather than freezing on its last
+    // picture.
+    void releaseBusFeed(int busId);
+    // Mirrors the held feeds' identity (device id + kind) into CompositorState —
+    // the engine half of the "bus window is empty on air" diagnostic.
+    void publishBusFeeds();
+
     // ---- taken-input state ----
     QString inputLabel_;
     QString inputKind_;
@@ -657,6 +747,13 @@ private:
     bool mediaOnAir_ = false;
     QString mediaPath_;
     QString mediaName_;
+    QString mediaFit_;   // the on-air file's own fill ("" = the output's default)
+    // Real transparency in the picture on air (see the mediaHasAlpha property).
+    bool mediaHasAlpha_ = false;
+    // Whether THIS take's alpha is already known: a still decides it at take
+    // time (the decode scanned its pixels), a video at its first frame — the
+    // scan runs once, never per frame.
+    bool mediaAlphaDecided_ = false;
     bool mediaIsVideo_ = false;
     bool mediaIsAudio_ = false;
     QString mediaState_ = QStringLiteral("stopped");

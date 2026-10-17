@@ -1637,7 +1637,17 @@ Item {
                         required property var modelData
                         readonly property bool active: modelData.id === root.sourceId
                         width: sourceList.width; height: 29; radius: 6
-                        color: active ? "#1a1414" : (sourceHoverPA.hovered ? "#16171e" : "transparent")
+                        color: active ? "#1a1414" : "transparent"
+
+                        // The pointer's wash is the app's shared hover layer
+                        // (HoverGlow) — a row here lights exactly like a row in
+                        // the Shows list, instead of with its own private grey.
+                        HoverGlow {
+                            anchors.fill: parent
+                            radius: parent.radius
+                            hovered: sourceHoverPA.hovered
+                            glowColor: "#0dffffff"
+                        }
 
                         Rectangle { visible: sourceRow.active; x: 0; y: 4; width: 3; height: 21; color: Theme.accent; radius: 1.5 }
                         IconGlyph {
@@ -1782,7 +1792,13 @@ Item {
                         width: booksList.width; height: 28
                         Rectangle {
                             anchors.fill: parent; anchors.margins: 2; radius: 4
-                            color: bookRow.active ? "#1e1f28" : (bookHoverPA.hovered ? "#1a1b23" : "transparent")
+                            color: bookRow.active ? "#1e1f28" : "transparent"
+                            HoverGlow {
+                                anchors.fill: parent
+                                radius: parent.radius
+                                hovered: bookHoverPA.hovered
+                                glowColor: "#0dffffff"
+                            }
                             Rectangle { visible: bookRow.active; x: 0; y: 4; width: 2; height: parent.height - 8; color: Theme.accent }
                         }
                         Text {
@@ -1857,7 +1873,13 @@ Item {
                         width: chapterList.width; height: 28
                         Rectangle {
                             anchors.fill: parent; anchors.margins: 2; radius: 4
-                            color: chapterRow.active ? "#1e1f28" : (chapterHoverPA.hovered ? "#1a1b23" : "transparent")
+                            color: chapterRow.active ? "#1e1f28" : "transparent"
+                            HoverGlow {
+                                anchors.fill: parent
+                                radius: parent.radius
+                                hovered: chapterHoverPA.hovered
+                                glowColor: "#0dffffff"
+                            }
                             Rectangle { visible: chapterRow.active; x: 0; y: 4; width: 2; height: parent.height - 8; color: Theme.accent }
                         }
                         Text {
@@ -1989,8 +2011,13 @@ Item {
                     // delivers, hover-exit never does; see PositionHoverArea's
                     // header), which is exactly the "verse row stays highlighted
                     // after I click it" report.
-                    color: verseRow.active ? "#2a2b35"
-                                           : (verseHover.hovered ? "#1a1b23" : "transparent")
+                    color: verseRow.active ? "#2a2b35" : "transparent"
+                    HoverGlow {
+                        anchors.fill: parent
+                        radius: parent.radius
+                        hovered: verseHover.hovered
+                        glowColor: "#0dffffff"
+                    }
                 }
                 PositionHoverArea {
                     id: verseHover
@@ -2108,7 +2135,17 @@ Item {
                     visible: root.hasUserData && (verseHover.hovered || verseRow.hasNote || editing)
                     x: parent.width - 34; y: 7
                     width: 24; height: 24
-                    Rectangle { anchors.fill: parent; radius: 5; color: noteBtn.editing || noteHover.hovered ? "#22242e" : "transparent" }
+                    Rectangle {
+                        anchors.fill: parent; radius: 5
+                        color: noteBtn.editing ? "#22242e" : "transparent"
+                        HoverGlow {
+                            anchors.fill: parent
+                            radius: parent.radius
+                            hovered: noteHover.hovered
+                            glowColor: "#0dffffff"
+                            quick: true
+                        }
+                    }
                     IconGlyph {
                         anchors.centerIn: parent
                         name: "pencil"
@@ -2225,7 +2262,16 @@ Item {
                     Component.onCompleted: root.hitRowBuilds++
                     Component.onDestruction: root.hitRowDrops++
                     width: hitsList.width; height: 32
-                    Rectangle { anchors.fill: parent; anchors.margins: 1; radius: 4; color: hitHover.hovered ? "#16171e" : "transparent" }
+                    Rectangle {
+                        anchors.fill: parent; anchors.margins: 1; radius: 4
+                        color: "transparent"
+                        HoverGlow {
+                            anchors.fill: parent
+                            radius: parent.radius
+                            hovered: hitHover.hovered
+                            glowColor: "#0dffffff"
+                        }
+                    }
                     Text {
                         x: 10; anchors.verticalCenter: parent.verticalCenter; width: 170
                         text: hitRow.modelData.reference
@@ -2328,7 +2374,13 @@ Item {
                     width: matchesList.width; height: 30
                     Rectangle {
                         anchors.fill: parent; anchors.margins: 1; radius: 4
-                        color: matchRow.active ? "#2a2b35" : (matchHover.hovered ? "#16171e" : "transparent")
+                        color: matchRow.active ? "#2a2b35" : "transparent"
+                        HoverGlow {
+                            anchors.fill: parent
+                            radius: parent.radius
+                            hovered: matchHover.hovered
+                            glowColor: "#0dffffff"
+                        }
                         Rectangle { visible: matchRow.active; x: 0; y: 4; width: 2; height: parent.height - 8; color: Theme.accent }
                     }
                     Text {
@@ -2595,7 +2647,14 @@ Item {
                         width: 20; height: 20
                         Rectangle {
                             anchors.fill: parent; radius: 10
-                            color: scopeHover.hovered ? "#22242e" : (root.scopeLock ? "#1d2a2f" : "transparent")
+                            color: root.scopeLock ? "#1d2a2f" : "transparent"
+                            HoverGlow {
+                                anchors.fill: parent
+                                radius: parent.radius
+                                hovered: scopeHover.hovered
+                                glowColor: "#0dffffff"
+                                quick: true
+                            }
                         }
                         IconGlyph {
                             anchors.centerIn: parent
@@ -2816,7 +2875,16 @@ Item {
                             width: drawerList.width; height: noteText.implicitHeight + 26
                             Rectangle {
                                 anchors.fill: parent; radius: 6
-                                color: noteRowHover.hovered ? "#1a1b23" : "transparent"
+                                color: "transparent"
+                                // Same shared hover layer as every other
+                                // row: this is the notes list, and a row here
+                                // must light like a row in The Table or Shows.
+                                HoverGlow {
+                                    anchors.fill: parent
+                                    radius: parent.radius
+                                    hovered: noteRowHover.hovered
+                                    glowColor: "#0dffffff"
+                                }
                             }
                             Text {
                                 id: noteText

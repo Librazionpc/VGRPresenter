@@ -49,6 +49,10 @@ struct StoredOutput {
     bool active = false;
     bool enabled = true;
     std::string styleId;                       // "" = no style
+    // How a taken media file sits on THIS output — "contain" (default, whole
+    // picture, own aspect kept), "cover" (cropped to fill) or "fill"
+    // (stretched). Settings · Outputs' Fill picker; empty = default.
+    std::string mediaFit;
     // On-air-only transport: this output carries ONLY its own feed (NDI etc.)
     // — no physical-screen window, no slot in the screen pipeline. The QML
     // model's transport mutual-exclusion switch (OutputListModel's

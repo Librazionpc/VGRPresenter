@@ -210,8 +210,14 @@ Rectangle {
                         width: resultsFlick.width
                         height: 34
                         radius: Theme.radiusMd
-                        color: resultRow.selected ? Theme.accentSoft
-                            : rowArea.containsMouse ? Theme.chip : "transparent"
+                        color: resultRow.selected ? Theme.accentSoft : "transparent"
+                        // Selection is state; hover is the app's shared layer.
+                        HoverGlow {
+                            anchors.fill: parent
+                            radius: parent.radius
+                            hovered: rowArea.containsMouse && !resultRow.selected
+                            glowColor: Theme.chip
+                        }
 
                         Row {
                             x: 10
@@ -305,7 +311,17 @@ Rectangle {
         width: 34
         height: 34
         radius: Theme.radiusMd
-        color: closeArea.containsMouse ? Theme.chip : Theme.inset
+        color: Theme.inset
+
+        // Hover is the shared layer (painted before the glyph so the wash
+        // cannot hide it).
+        HoverGlow {
+            anchors.fill: parent
+            radius: parent.radius
+            hovered: closeArea.containsMouse
+            glowColor: Theme.chip
+            quick: true
+        }
 
         Text {
             anchors.centerIn: parent

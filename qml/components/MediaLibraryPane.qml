@@ -99,6 +99,114 @@ Item {
 
     // ---- the media grid's items ----------------------------------------------
     property var gridItems: []
+
+    // ---- the grid's multi-selection ------------------------------------------
+    // A set of PATHS (path -> true), not rows: this grid is rebuilt whenever the
+    // folder, the query or a scan changes, so a row number would be a different file
+    // by the time the menu acted on it — the same reason the bus menu holds a bus id.
+    // Ctrl-click picks one more (or drops it), Shift-click takes the run from the
+    // last plain click, and a plain click is still just "show this file".
+    property var picks: ({})
+    readonly property int pickCount: Object.keys(root.picks).length
+    readonly property bool multiPicked: root.pickCount > 1
+    // The last plain-clicked (or Ctrl-clicked) path: where a Shift-click starts.
+    property string pickAnchor: ""
+
+    function isPicked(path) { return root.picks[String(path)] === true }
+    function prunePicks() {
+        const keys = Object.keys(root.picks)
+        if (keys.length === 0)
+            return
+        const live = {}
+        let changed = false
+        for (let i = 0; i < root.gridItems.length; ++i) {
+            const p = root.gridItems[i].path
+            if (root.picks[p] === true)
+                live[p] = true
+        }
+        for (let i = 0; i < keys.length; ++i)
+            if (live[keys[i]] !== true) changed = true
+        if (changed)
+            root.picks = live
+    }
+    function clearPicks() {
+        if (root.pickCount > 0)
+            root.picks = ({})
+        root.pickAnchor = ""
+    }
+    function togglePick(path) {
+        const next = Object.assign({}, root.picks)
+        if (next[path] === true)
+            delete next[path]
+        else
+            next[path] = true
+        root.picks = next
+        root.pickAnchor = path
+    }
+    function extendPickTo(path) {
+        const rows = root.gridItems
+        let from = -1, to = -1
+        for (let i = 0; i < rows.length; ++i) {
+            if (rows[i].path === root.pickAnchor) from = i
+            if (rows[i].path === path) to = i
+        }
+        if (from < 0 || to < 0) {
+            root.togglePick(path)
+            return
+        }
+        const next = Object.assign({}, root.picks)
+        for (let i = Math.min(from, to); i <= Math.max(from, to); ++i)
+            next[rows[i].path] = true
+        root.picks = next
+    }
+    // The picked rows, in grid order ({ ref, name }) — what a drag carries and what
+    // Delete acts on.
+    function pickedItems() {
+        const out = []
+        for (let i = 0; i < root.gridItems.length; ++i) {
+            const row = root.gridItems[i]
+            if (root.picks[row.path] === true)
+                out.push({ ref: row.path, name: row.name })
+        }
+        return out
+    }
+    // What THIS tile's drag carries: the whole selection when it is part of one,
+    // otherwise just itself — so dragging a picked tile moves the group (the gesture
+    // the selection exists for) while dragging an unpicked one is unchanged.
+    function dragItemsFor(path) {
+        if (root.pickCount > 1 && root.isPicked(path)) {
+            const picked = root.pickedItems()
+            if (picked.length > 0)
+                return picked
+        }
+        return [{ ref: path, name: root.nameOfItem(path) }]
+    }
+    function nameOfItem(path) {
+        for (let i = 0; i < root.gridItems.length; ++i)
+            if (root.gridItems[i].path === path)
+                return root.gridItems[i].name
+        return ""
+    }
+    // A tile's click, with the modifiers the DragSource handed over: Ctrl and Shift
+    // pick, anything else is the tile's own gesture (with the older picks dropped, so
+    // a stray selection cannot outlive the click that ignores it).
+    function tileClicked(path, modifiers, item) {
+        if (modifiers & Qt.ControlModifier) {
+            root.togglePick(path)
+            return
+        }
+        if (modifiers & Qt.ShiftModifier) {
+            root.extendPickTo(path)
+            return
+        }
+        root.clearPicks()
+        root.pickAnchor = path
+        // SINGLE CLICK = THE CENTRE PREVIEW, and nothing else. Sending it to the
+        // monitors is the DOUBLE click (the pane's onItemOpened): the operator's own
+        // split — "double click monitor right away, single click centre preview" —
+        // so one click still reads the file without putting it in front of anybody.
+        root.itemActivated(item)
+    }
     // Is what is on screen still being read? (A folder's files arrive when its scan finishes, and until
     // then the grid is empty - which must not look the same as a folder with nothing in it.)
     readonly property bool loading: {
@@ -419,6 +527,10 @@ Item {
     }
     function reload() {
         gridItems = inputsMode ? [] : MediaLibraryService.items(selection === "all" ? "" : selection, query)
+        // A grid that was re-read may no longer hold what was picked (a deleted file,
+        // another folder): drop the picks that are gone instead of acting on paths
+        // that are no longer on screen.
+        root.prunePicks()
     }
     onSelectionChanged: reload()
     onQueryChanged: reload()
@@ -494,10 +606,15 @@ Item {
                 selected: root.selection === "all"
                 onClicked: root.selection = "all"
             }
+            // THE BUSES. The row used to say "Inputs", which named the thing
+            // that feeds a bus rather than the bus itself — the section lists
+            // BUSES (one card per bus, with what is routed into it), so the row
+            // says so. The internal id stays "inputs": self-tests and the pane's
+            // own wiring select on it.
             SidebarRow {
                 width: parent.width
                 icon: "volume2"
-                label: qsTr("Inputs")
+                label: qsTr("Buses")
                 count: String(root.inputTotal)
                 selected: root.inputsMode
                 onClicked: root.selection = "inputs"
@@ -575,7 +692,9 @@ Item {
             id: grid
             anchors.fill: parent
             anchors.margins: 4
-            anchors.rightMargin: 10   // room for the scrollbar
+            // Scrollbar room, plus the clock's column when it is showing: the
+            // grid's own column maths then re-flows into fewer, wider cards.
+            anchors.rightMargin: 10
             clip: true
             boundsBehavior: Flickable.StopAtBounds
             // The engine hands this grid a new array per filter change, which is a
@@ -600,18 +719,69 @@ Item {
                 name: modelData.name
                 path: modelData.path
                 kind: modelData.kind
-                onActivated: root.itemActivated({ type: modelData.kind, ref: modelData.path, name: modelData.name })
+                // The file's own fill, so a tile can say it holds one (see MediaTile).
+                fit: modelData.fit ?? ""
+                // The click carries its modifiers: Ctrl picks, Shift extends, anything
+                // else is the tile's own "show this file" gesture (see tileClicked).
+                selected: root.isPicked(modelData.path)
+                dragItems: root.dragItemsFor(modelData.path)
+                onActivated: (modifiers) => root.tileClicked(modelData.path, modifiers,
+                                                             { type: modelData.kind, ref: modelData.path, name: modelData.name })
                 onOpened: root.itemOpened({ type: modelData.kind, ref: modelData.path, name: modelData.name })
-                // The TAKE pill: this file on/off the monitor wall's media
-                // layer (videos + images; audio refuses honestly).
-                onTakeToggled: {
-                    if (LiveOutputService.mediaOnAir && LiveOutputService.mediaPath === modelData.path)
-                        LiveOutputService.clearMedia()
-                    else
-                        LiveOutputService.takeMedia(modelData.path, modelData.name)
+                onContextMenuRequested: (source, mx, my) =>
+                    root.openTileMenu(modelData.path, modelData.name, modelData.kind, source, mx, my)
+            }
+        }
+        // THE SELECTION'S OWN BAR — what is picked and the two things a pick is for.
+        // Only when something IS picked, so a plain click leaves this pane exactly the
+        // size and shape it had before the selection existed. It sits above the grid's
+        // own scrollbar and is centred, where a delete confirm lands anyway.
+        Rectangle {
+            id: pickBar
+            visible: root.pickCount > 0
+            z: 4
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 16
+            width: pickRow.implicitWidth + 28
+            height: 42
+            radius: 21
+            color: Theme.surface
+            border.width: 1
+            border.color: "#4a4d5e"
+
+            Row {
+                id: pickRow
+                anchors.centerIn: parent
+                spacing: 10
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("%1 selected").arg(root.pickCount)
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: 12
+                    font.weight: Font.DemiBold
+                }
+                AppButton {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("Delete…")
+                    variant: "danger"
+                    onClicked: {
+                        batchDeleteConfirm.title = qsTr("Delete these files?")
+                        batchDeleteConfirm.message = qsTr("%1 files are deleted. One Undo puts them all back.")
+                                                              .arg(root.pickCount)
+                        batchDeleteConfirm.open()
+                    }
+                }
+                AppButton {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("Clear")
+                    variant: "secondary"
+                    onClicked: root.clearPicks()
                 }
             }
         }
+
         AppScrollBar {
             anchors.right: parent.right
             anchors.rightMargin: 3
@@ -668,6 +838,8 @@ Item {
         Flickable {
             id: cardsFlick
             y: 0
+            // The clock's column is reserved here too, so the third card of a
+            // row never slides under the time.
             width: parent.width
             height: parent.height - y
             clip: true
@@ -1040,9 +1212,38 @@ Item {
                             width: (inputCards.width - 16) / 3
                             height: 8 + (width - 16) * 9 / 16 + 6 + 32 + 8
                             radius: 6
-                            color: cardHover.hovered ? Theme.activeBg : Theme.rowBg
+                            color: Theme.rowBg
                             border.width: taken ? 2 : 1
+                            // The pointer's light is the app's shared hover layer
+                            // (HoverGlow), declared FIRST so it washes the card behind
+                            // its window, name and pills instead of over them; TAKEN is
+                            // state and keeps its own ring on the card itself.
+                            HoverGlow {
+                                anchors.fill: parent
+                                radius: parent.radius
+                                hovered: cardHover.hovered
+                                glowColor: Theme.activeBg
+                                edge: true
+                                edgeColor: Qt.alpha(Theme.accent, 0.45)
+                            }
                             border.color: taken ? Theme.accent : "transparent"
+                            // TAKEN keeps its own ring (it is state, not the
+                            // pointer); everything else about hover is the shared
+                            // layer above.
+
+                            Behavior on border.color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+                            // THE BUS CARD'S OWN MENU (right-click): rename, duplicate, delete.
+                            // The gestures above are the LEFT button's (monitor a bus, meter a
+                            // source), so this adds the other one without borrowing any of them,
+                            // and only on a bus card — the video/audio rows are the device
+                            // rosters' to manage, on the Settings board that owns them.
+                            MouseArea {
+                                anchors.fill: parent
+                                visible: busCard
+                                acceptedButtons: Qt.RightButton
+                                onClicked: (mouse) => root.openBusMenu(card, index, mouse.x, mouse.y)
+                            }
 
                             PositionHoverArea {
                                 id: cardHover
@@ -1723,8 +1924,7 @@ Item {
                     horizontalAlignment: Text.AlignHCenter
                     text: root.query !== ""
                           ? qsTr("Nothing named \u201c%1\u201d.").arg(root.query)
-                          : qsTr("Nothing here yet - add %1 in Settings - Audio & Video.")
-                                .arg(root.inputRoster.label.toLowerCase())
+                          : qsTr("No buses yet — make one with the button below.")
                     color: Theme.textMuted
                     font.family: Theme.fontFamily; font.pixelSize: 14
                     wrapMode: Text.WordWrap
@@ -1737,6 +1937,85 @@ Item {
                 anchors.top: parent.top; anchors.bottom: parent.bottom
                 anchors.right: parent.right; anchors.rightMargin: 2
             }
+        }
+
+        // THE FLOATING "NEW BUS" BUTTON — a true FAB, the SAME pill + soft
+        // stacked-rect shadow the template and project libraries use (see
+        // DesignLibraryPane's "New <design>"): it hovers OVER the scrolling
+        // card grid, so adding a bus never means leaving the pane for
+        // Settings. The dialog behind it asks for the SOURCE as well as the
+        // name (the app's bus picker, BusSourceModal, opened in its create
+        // mode) and creates the bus with that route already made, so no bus
+        // exists that feeds nothing — a bus with no source is a card that can
+        // never light and a device nothing should open.
+        Rectangle {
+            id: newBus
+            objectName: "selfTestBusNew"
+            anchors.right: parent.right
+            anchors.rightMargin: 22
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 16
+            width: newBusRow.width + 32
+            height: 36
+            radius: 18
+            color: newBusHover.hovered ? Qt.lighter(Theme.accent, 1.08) : Theme.accent
+
+            // the soft shadow (drawn first, so it sits under the pill)
+            Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 3; width: parent.width + 6; height: parent.height + 4; radius: 20; color: "#26000000" }
+            Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 2; width: parent.width + 2; height: parent.height + 2; radius: 19; color: "#33000000" }
+
+            Row {
+                id: newBusRow
+                anchors.centerIn: parent
+                spacing: 8
+                PlusGlyph {
+                    anchors.verticalCenter: parent.verticalCenter
+                    size: 12; thickness: 1.6; color: "#ffffff"
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("New Bus")
+                    color: "#ffffff"
+                    font.family: Theme.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold
+                }
+            }
+            PositionHoverArea {
+                id: newBusHover
+                anchors.fill: parent
+                onClicked: newBusDialog.open = true
+            }
+        }
+    }
+
+    // The prompt behind the "New bus" button: the SOURCE the bus is built from,
+    // picked on the SAME card grid the app's bus picker uses (`BusSourceModal`,
+    // opened in its create mode) — a name and a source, created together, so a
+    // bus with no source is no longer a thing this button makes. The tiles' feed
+    // and light come from `BusMonitor` (its source mode), i.e. the same answers
+    // the bus cards give, and the model write is the same addBus +
+    // connectVideoRoute/connectAudioRoute the bus dialog in Settings · Audio &
+    // Video uses, so both doors make the same graph edge.
+    BusSourceModal {
+        id: newBusDialog
+        // Names this INSTANCE's test hooks (see the modal's hookPrefix note):
+        // the Edit screen holds a create-mode instance of the same picker at the
+        // same time, so the names have to say which one a scenario means.
+        objectName: "newBusPicker"
+        mode: "newBus"
+        // The CALLER owns closing it: the modal reports the cancel and leaves
+        // `open` alone (EditScreen's instance binds that property to its own
+        // flag, so the modal must not write to it). Without this handler Cancel,
+        // Esc and a click on the scrim all reported a cancel nothing listened
+        // to, and the picker stayed on screen with every button looking dead.
+        onCancelled: newBusDialog.open = false
+        onCreated: (busRow) => {
+            // The picker reports and leaves `open` alone (see its header), so the
+            // caller that opened it closes it.
+            newBusDialog.open = false
+            // The pane that owns the row is the roster the whole app reads, so
+            // land on the list the new bus appeared in.
+            root.selection = "inputs"
+            void busRow
         }
     }
 
@@ -1775,6 +2054,370 @@ Item {
             return
         }
         LiveOutputService.takeInput(label, v.kind, v.mode !== undefined ? v.mode : "")
+    }
+
+    // ---- a media item's own menu: rename, move, delete --------------------------------
+    // The library lists the files WHERE THEY LIE (nothing was ever copied in), so
+    // these three act on the user's real file: the tile menu is the only place in
+    // the app that renames or deletes one, and each operation runs off the
+    // interface thread (MediaLibraryService). Delete is confirmed; nothing here is
+    // undoable.
+    property string tileMenuPath: ""
+    property string tileMenuName: ""
+    property string tileMenuKind: ""
+    property var tileMenuRow: null       // the menu's "Move to" row (the flyout's anchor)
+    readonly property string moveToLabel: qsTr("Move to")
+    // The row label this menu gave the flyout ("Move to" or "Move 4 files to…"), so the
+    // hover that opens the flyout can recognise it whatever the count is.
+    property string moveRowLabel: root.moveToLabel
+    // THE FILE'S OWN FILL (see MediaLibraryService::setItemFit): "" when it follows
+    // whatever the output says, and the row label names what it holds.
+    property string tileMenuFit: ""
+    property string fitRowLabel: qsTr("Fill")
+    // How a fill reads in the UI. "fill" is STRETCH there because "Fill" is
+    // already the row's own word (FreeShow's MediaStyle.fit uses the same three
+    // engine values, and "fill" there means distort to the frame).
+    function fitLabel(fit) {
+        if (fit === "contain") return qsTr("Contain (whole picture)")
+        if (fit === "cover") return qsTr("Cover (crop to fill)")
+        if (fit === "fill") return qsTr("Stretch")
+        return qsTr("Output default")
+    }
+    // Is the tile menu open FOR THE SELECTION? Then Move and Delete act on every picked
+    // file, and the single-file rows (Rename) are not offered — a name for one of four
+    // picked files is not a sentence.
+    property bool tileMenuMany: false
+
+    function openFitMenu(rowItem) {
+        if (!rowItem || root.tileMenuPath === "")
+            return
+        root.tileMenuRow = rowItem
+        // The four choices, with the one the file holds ticked. The LAST one is
+        // "stop naming one", which is a real answer: every output then lays the
+        // picture out by its own Fill setting.
+        fitMenu.model = [
+            { label: root.fitLabel("contain"), payload: "contain", trailing: root.tileMenuFit === "contain" ? "\u2713" : "" },
+            { label: root.fitLabel("cover"), payload: "cover", trailing: root.tileMenuFit === "cover" ? "\u2713" : "" },
+            { label: root.fitLabel("fill"), payload: "fill", trailing: root.tileMenuFit === "fill" ? "\u2713" : "" },
+            { divider: true },
+            { label: root.fitLabel(""), payload: "", trailing: root.tileMenuFit === "" ? "\u2713" : "" }
+        ]
+        fitMenu.openBeside(rowItem, root.Window.contentItem)
+    }
+
+    function openTileMenu(path, name, kind, source, mx, my) {
+        moveToMenu.closeFlyout()
+        fitMenu.closeFlyout()
+        root.tileMenuPath = path
+        root.tileMenuName = name
+        root.tileMenuKind = kind
+        root.tileMenuMany = root.multiPicked && root.isPicked(path)
+        root.moveRowLabel = root.tileMenuMany
+                           ? qsTr("Move %1 files to…").arg(root.pickCount)
+                           : root.moveToLabel
+        // The fill the file holds ("" = the output's default), and the row's own
+        // label, which states it — the menu has to say what a click would CHANGE.
+        root.tileMenuFit = MediaLibraryService.itemFit(path)
+        root.fitRowLabel = qsTr("Fill: %1").arg(root.fitLabel(root.tileMenuFit))
+        tileMenu.model = root.tileMenuMany
+            ? [
+                { label: root.moveRowLabel, trailing: "\u203a", payload: "move" },
+                { divider: true },
+                { label: qsTr("Delete %1 files…").arg(root.pickCount), danger: true, payload: "delete-many" }
+              ]
+            : [
+                { label: qsTr("Rename…"), payload: "rename" },
+                { label: root.fitRowLabel, trailing: "\u203a", payload: "fit" },
+                { label: root.moveRowLabel, trailing: "\u203a", payload: "move" },
+                { divider: true },
+                { label: qsTr("Delete…"), danger: true, payload: "delete" }
+              ]
+        // The WINDOW, not the pane: a DropdownPanel lifts itself to window level,
+        // so a pane-sized bounds rect let the menu hang over the other screens.
+        tileMenu.openAt(source, mx, my, root.Window.contentItem)
+    }
+
+    // "Move to" opens beside the menu with one row per folder the library holds
+    // (a nested folder included, indented), the file's own folder ticked. A
+    // submenu of the tile menu — same open/close life — so it can never be left
+    // floating on its own.
+    function openMoveToMenu(rowItem) {
+        if (!rowItem || root.tileMenuPath === "")
+            return
+        root.tileMenuRow = rowItem
+        const current = root.folderOfItem(root.tileMenuPath)
+        moveToMenu.model = MediaLibraryService.folderTree.map((row) => ({
+            label: (row.depth === 0 ? "" : "    ".repeat(row.depth)) + row.name,
+            payload: row.path,
+            trailing: row.path === current ? "\u2713" : ""
+        }))
+        moveToMenu.openBeside(rowItem, root.Window.contentItem)
+    }
+    // The item's folder, for the tick above (the row's own `folder`, not a
+    // re-derivation of the path — the library is the one that knows).
+    function folderOfItem(path) {
+        const rows = root.gridItems
+        for (let i = 0; i < rows.length; ++i)
+            if (rows[i].path === path)
+                return rows[i].folder !== undefined ? rows[i].folder : ""
+        return ""
+    }
+    // Leaving the row into the flyout must not close it: the two are separate items
+    // with a gap between them, so the exit arms a short grace that only closes when
+    // the pointer has settled on NEITHER (the pattern the design library uses).
+    Timer {
+        id: moveToGrace
+        interval: 260
+        onTriggered: if (!AppCursor.hovered(moveToMenu) && !AppCursor.hovered(root.tileMenuRow))
+                         moveToMenu.closeFlyout()
+    }
+    Timer {
+        id: fitGrace
+        interval: 260
+        onTriggered: if (!AppCursor.hovered(fitMenu) && !AppCursor.hovered(root.tileMenuRow))
+                         fitMenu.closeFlyout()
+    }
+    MenuCatcher { menu: tileMenu }
+    DropdownPanel {
+        id: tileMenu
+        objectName: "selfTestMediaItemMenu"
+        visible: false
+        z: 25
+        fitContentWidth: true
+        maxHeight: 320
+        onItemHovered: (label, hovering, rowItem) => {
+            if (label === root.moveRowLabel) {
+                if (hovering) {
+                    moveToGrace.stop()
+                    root.openMoveToMenu(rowItem)
+                } else {
+                    moveToGrace.restart()
+                }
+            } else {
+                moveToGrace.stop()
+                moveToMenu.closeFlyout()
+            }
+            // The FILL row opens its own flyout the same way Move to does: four
+            // choices on the file itself, with the one it holds ticked.
+            if (label === root.fitRowLabel) {
+                if (hovering) {
+                    fitGrace.stop()
+                    root.openFitMenu(rowItem)
+                } else {
+                    fitGrace.restart()
+                }
+            } else {
+                fitGrace.stop()
+                fitMenu.closeFlyout()
+            }
+        }
+        // A row that carries a payload reports through itemPicked (see
+        // DropdownPanel), so every row of this menu comes here.
+        onItemPicked: (index, payload) => {
+            void index
+            moveToMenu.closeFlyout()
+            fitMenu.closeFlyout()
+            tileMenu.visible = false
+            if (payload === "rename") {
+                itemNameDialog.title = qsTr("Rename file")
+                itemNameDialog.placeholder = qsTr("File name")
+                itemNameDialog.confirmLabel = qsTr("Rename")
+                itemNameDialog.open(root.tileMenuName)
+            } else if (payload === "delete") {
+                itemDeleteConfirm.title = qsTr("Delete this file?")
+                itemDeleteConfirm.message = qsTr("\u201c%1\u201d is deleted. An Undo appears for a few seconds afterwards.")
+                                                .arg(root.tileMenuName)
+                itemDeleteConfirm.open()
+            } else if (payload === "delete-many") {
+                batchDeleteConfirm.title = qsTr("Delete these files?")
+                batchDeleteConfirm.message = qsTr("%1 files are deleted. One Undo puts them all back.")
+                                                      .arg(root.pickCount)
+                batchDeleteConfirm.open()
+            }
+        }
+    }
+    DropdownPanel {
+        id: moveToMenu
+        objectName: "selfTestMediaItemMoveMenu"
+        visible: false
+        z: 26
+        fitContentWidth: true
+        maxHeight: 320
+        onItemPicked: (index, payload) => {
+            void index
+            moveToMenu.closeFlyout()
+            tileMenu.visible = false
+            if (payload === undefined || payload === "")
+                return
+            if (root.tileMenuMany) {
+                // Every picked file, into the folder that was chosen once. Each move is
+                // its own off-thread operation (a file system rename), and the grid
+                // re-reads on each one's foldersChanged.
+                const picked = root.pickedItems()
+                root.clearPicks()
+                for (let i = 0; i < picked.length; ++i)
+                    MediaLibraryService.moveItem(picked[i].ref, payload)
+                return
+            }
+            MediaLibraryService.moveItem(root.tileMenuPath, payload)
+        }
+    }
+    // THIS FILE'S OWN FILL (Contain / Cover / Stretch / the output's default).
+    // A choice about the PICTURE, so it lives on the file and wins over every
+    // output's own Fill; the take on air lays itself out again immediately when
+    // this IS the file showing.
+    DropdownPanel {
+        id: fitMenu
+        objectName: "selfTestMediaFitMenu"
+        visible: false
+        z: 26
+        fitContentWidth: true
+        maxHeight: 320
+        onItemPicked: (index, payload) => {
+            void index
+            fitMenu.closeFlyout()
+            tileMenu.visible = false
+            if (payload === undefined)
+                return
+            const chosen = String(payload)
+            if (LiveOutputService.mediaOnAir && LiveOutputService.mediaPath === root.tileMenuPath)
+                LiveOutputService.setMediaFit(chosen)
+            else
+                MediaLibraryService.setItemFit(root.tileMenuPath, chosen)
+        }
+    }
+    // The flyouts go when their menu does, and when this tab does.
+    Connections {
+        target: tileMenu
+        function onVisibleChanged() {
+            if (tileMenu.visible)
+                return
+            moveToMenu.closeFlyout()
+            fitMenu.closeFlyout()
+        }
+    }
+    onVisibleChanged: if (!visible) tileMenu.visible = false
+    NameDialog {
+        id: itemNameDialog
+        z: 30000
+        onAccepted: (text) => {
+            itemNameDialog.close()
+            if (text !== "" && text !== root.tileMenuName)
+                MediaLibraryService.renameItem(root.tileMenuPath, text)
+        }
+        onDismissed: itemNameDialog.close()
+    }
+    ConfirmDialog {
+        id: itemDeleteConfirm
+        z: 30000
+        confirmLabel: qsTr("Delete")
+        onConfirmed: {
+            itemDeleteConfirm.close()
+            MediaLibraryService.removeItem(root.tileMenuPath)
+        }
+        onDismissed: itemDeleteConfirm.close()
+    }
+    // The selection's delete: ONE confirm, ONE service call, ONE notice (and one Undo
+    // that puts the whole batch back — see MediaLibraryService::removeItems).
+    ConfirmDialog {
+        id: batchDeleteConfirm
+        z: 30000
+        confirmLabel: qsTr("Delete all")
+        onConfirmed: {
+            batchDeleteConfirm.close()
+            const picked = root.pickedItems().map((p) => p.ref)
+            root.clearPicks()
+            MediaLibraryService.removeItems(picked)
+        }
+        onDismissed: batchDeleteConfirm.close()
+    }
+
+    // ---- a bus's own menu: rename, duplicate, remove ----------------------------------
+    // The Buses section is where a bus is CREATED (the New bus FAB), so it is where
+    // one should be renamed or dropped too: a row that can only be made here and
+    // deleted two screens away is a row the operator cannot manage. Every action goes
+    // through BusListModel — the one roster the whole app reads — so a rename or a
+    // removal lands on the cards, the pickers and the canvas at once.
+    property int busMenuId: -1
+    property string busMenuName: ""
+    function openBusMenu(source, index, mx, my) {
+        if (!source || index < 0)
+            return
+        const b = BusListModel.getBus(index)
+        root.busMenuId = b.id !== undefined ? Number(b.id) : -1
+        root.busMenuName = b.name !== undefined ? String(b.name) : ""
+        busMenu.model = [
+            { label: qsTr("Rename…"), payload: "rename" },
+            { label: qsTr("Duplicate"), payload: "duplicate" },
+            { divider: true },
+            { label: qsTr("Delete…"), danger: true, payload: "delete" }
+        ]
+        busMenu.openAt(source, mx, my, root.Window.contentItem)
+    }
+    // The row a STABLE bus id still names, or -1 when the bus is gone: a menu opened
+    // on a row that has since moved (or been removed) must act on the BUS, never on a
+    // row number that now belongs to something else.
+    function rowOfBusId(id) {
+        void root.modelsRev
+        const n = BusListModel.rowCount()
+        for (let i = 0; i < n; ++i) {
+            const b = BusListModel.getBus(i)
+            if (b.id !== undefined && Number(b.id) === Number(id))
+                return i
+        }
+        return -1
+    }
+    MenuCatcher { menu: busMenu }
+    DropdownPanel {
+        id: busMenu
+        objectName: "selfTestBusCardMenu"
+        visible: false
+        z: 25
+        fitContentWidth: true
+        maxHeight: 320
+        onItemPicked: (index, payload) => {
+            void index
+            busMenu.visible = false
+            const row = root.rowOfBusId(root.busMenuId)
+            if (row < 0)
+                return
+            if (payload === "rename") {
+                busNameDialog.open(root.busMenuName)
+            } else if (payload === "duplicate") {
+                BusListModel.duplicateBus(row)
+            } else if (payload === "delete") {
+                busDeleteConfirm.message = qsTr("\u201c%1\u201d is removed, and any slide using it loses its feed. An Undo appears for a few seconds afterwards.")
+                                                .arg(root.busMenuName)
+                busDeleteConfirm.open()
+            }
+        }
+    }
+    NameDialog {
+        id: busNameDialog
+        z: 30000
+        title: qsTr("Rename bus")
+        placeholder: qsTr("Bus name")
+        confirmLabel: qsTr("Rename")
+        onAccepted: (text) => {
+            busNameDialog.close()
+            const row = root.rowOfBusId(root.busMenuId)
+            if (row >= 0 && text !== "")
+                BusListModel.renameBus(row, text)
+        }
+        onDismissed: busNameDialog.close()
+    }
+    ConfirmDialog {
+        id: busDeleteConfirm
+        z: 30000
+        title: qsTr("Delete this bus?")
+        confirmLabel: qsTr("Delete")
+        onConfirmed: {
+            busDeleteConfirm.close()
+            const row = root.rowOfBusId(root.busMenuId)
+            if (row >= 0)
+                BusListModel.deleteBus(row)   // the operator's delete: its notice offers the Undo
+        }
+        onDismissed: busDeleteConfirm.close()
     }
 
     // Card label helpers - one lookup per roster so the delegates stay dumb.

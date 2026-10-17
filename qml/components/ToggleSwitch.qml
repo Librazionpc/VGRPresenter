@@ -20,7 +20,7 @@ Item {
         radius: height / 2
         color: root.checked ? root.onColor : Theme.toggleOffTrack
         opacity: root.enabled ? 1.0 : 0.5
-        Behavior on color { ColorAnimation { duration: 140 } }
+        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
     }
 
     Rectangle {

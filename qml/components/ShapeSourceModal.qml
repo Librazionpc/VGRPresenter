@@ -130,7 +130,7 @@ Item {
                         height: 28
                         radius: 7
                         color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
-                        Behavior on color { ColorAnimation { duration: 100 } }
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         Text {
                             anchors.centerIn: parent
@@ -181,7 +181,7 @@ Item {
                         color: shapeCell.selected ? Qt.alpha(Theme.accent, 0.125) : (cellArea.containsMouse ? Theme.hoverBg : Theme.inset)
                         border.color: shapeCell.selected ? Theme.accent : Theme.borderSubtle
                         border.width: 1
-                        Behavior on color { ColorAnimation { duration: 100 } }
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         Text {
                             anchors.centerIn: parent
@@ -228,7 +228,7 @@ Item {
                     color: cancelArea.containsMouse ? Theme.hoverBg : Theme.inset
                     border.color: Theme.borderSubtle
                     border.width: 1
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent
@@ -254,7 +254,7 @@ Item {
                     height: 32
                     radius: 9
                     color: addArea.containsMouse ? Qt.darker(Theme.accent, 1.1) : Theme.accent
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent

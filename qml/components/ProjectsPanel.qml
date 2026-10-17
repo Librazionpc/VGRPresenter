@@ -302,8 +302,19 @@ Item {
                                 readonly property real indent: 8 * modelData.depth
                                 x: indent; width: card.width - indent
                                 height: isFolder ? 34 : 28
-                                color: root.dropFolder === modelData.id ? Qt.alpha(Theme.accent, 0.19) : (active ? root.cDarkest : (treeHover.hovered ? "#0dffffff" : Qt.rgba(1, 1, 1, 0.01 * modelData.depth)))
+                                color: root.dropFolder === modelData.id ? Qt.alpha(Theme.accent, 0.19)
+                                     : (active ? root.cDarkest : Qt.rgba(1, 1, 1, 0.01 * modelData.depth))
                                 opacity: modelData.archived ? 0.55 : 1
+
+                                // The pointer's light is the app's shared hover
+                                // layer, so a project row fades like every other
+                                // surface instead of snapping on and off.
+                                HoverGlow {
+                                    anchors.fill: parent
+                                    radius: parent.radius
+                                    hovered: treeHover.hovered
+                                    glowColor: "#0dffffff"
+                                }
 
                                 // an indented row keeps a line down its left, like FreeShow's
                                 Rectangle { visible: treeRow.modelData.depth > 0; width: 1; height: parent.height; color: root.cLighter }
@@ -444,7 +455,17 @@ Item {
                                     width: itemCardBody.width
                                     height: isSection ? root.sectionHeight : root.itemHeight
                                     color: isSection ? (sectionColor !== "" ? Qt.rgba(Qt.color(sectionColor).r, Qt.color(sectionColor).g, Qt.color(sectionColor).b, 0.2) : root.cDarkest)
-                                                     : (selected ? root.cDarkest : (itemHover.hovered ? "#0dffffff" : "transparent"))
+                                                     : (selected ? root.cDarkest : "transparent")
+
+                                    // Hover = the shared layer (selection and a
+                                    // section's tint are state, so they stay on
+                                    // the row itself).
+                                    HoverGlow {
+                                        anchors.fill: parent
+                                        radius: parent.radius
+                                        hovered: itemHover.hovered && !itemRow.selected && !itemRow.isSection
+                                        glowColor: "#0dffffff"
+                                    }
 
                                     // a section has a line above it, the item list has the tab edge
                                     Rectangle { visible: itemRow.isSection && itemRow.modelData.index > 0; width: parent.width; height: 1; color: root.cLighter }

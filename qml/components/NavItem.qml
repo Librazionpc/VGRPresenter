@@ -26,10 +26,17 @@ Item {
         id: pill
         anchors.fill: parent
         radius: Theme.radiusMd
-        color: root.selected ? root.accentTint10
-             : mouseArea.containsMouse ? root.textPrimaryTint04
-             : "transparent"
-        Behavior on color { ColorAnimation { duration: 120 } }
+        color: root.selected ? root.accentTint10 : "transparent"
+        // Selection is state and still fades; hover is the app's shared glow
+        // layer (HoverGlow), timed by Theme.hoverFade like every other surface.
+        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+        HoverGlow {
+            anchors.fill: parent
+            radius: parent.radius
+            hovered: mouseArea.containsMouse && !root.selected
+            glowColor: root.textPrimaryTint04
+        }
     }
 
     Rectangle {

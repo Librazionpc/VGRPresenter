@@ -343,9 +343,7 @@ Item {
                 // Soft hover fade — 100 ms read as a snap; 180 ms ease-out
                 // reads as a breathe. Same treatment on the File/Edit/View/
                 // Help pills below.
-                Behavior on color {
-                    ColorAnimation { duration: 180; easing.type: Easing.OutQuad }
-                }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
             }
 
             Row {
@@ -435,9 +433,7 @@ Item {
                            ? Qt.alpha(Theme.textPrimary, 0.05)
                            : "transparent"
                     // Same soft fade as the logo pill above.
-                    Behavior on color {
-                        ColorAnimation { duration: 180; easing.type: Easing.OutQuad }
-                    }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                 }
 
                 Text {

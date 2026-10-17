@@ -1,0 +1,5 @@
+{
+    "Keys": ["webp"],
+    "MimeTypes": ["image/webp"],
+    "Capabilities": ["CanRead"]
+}

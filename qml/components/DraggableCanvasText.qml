@@ -158,34 +158,17 @@ Item {
         }
     }
 
-    // Very faint always-on outline so an unselected item's bounds stay
-    // legible without hunting for them — kept dim enough to not read as
-    // "selected" (selectionOutline below is a completely different color/
-    // weight) and to not tire the eye with several items on screen at once.
-    // radius follows the item's own cornerRadius — a hardcoded 2 here was
-    // exactly the mystery radius on fresh boxes (border off, yet rounded).
-    Rectangle {
-        anchors.fill: parent
-        radius: root.styleCornerRadius
-        color: "transparent"
-        border.color: "#ffffff"
-        border.width: 2
-        opacity: root.selected ? 0 : 0.22
-        Behavior on opacity { NumberAnimation { duration: 120 } }
-    }
-
-    // Hover wash.
-    Rectangle {
-        anchors.fill: parent
-        radius: root.styleCornerRadius
-        color: "#0dffffff"
-        opacity: (!root.selected && root.contentHovered) ? 1 : 0
-        Behavior on opacity { NumberAnimation { duration: 120 } }
-    }
+    // NO ALWAYS-ON OUTLINE, NO HOVER WASH (user request: "the fake border
+    // around both text and shape items — remove it completely … let me set it
+    // myself"). An item's edge is now exactly what its own style says: fill,
+    // border, or nothing. The two decorations that used to live here drew a
+    // 2px white frame at 22% around EVERY item and a white 5% wash on hover,
+    // so a design with no border still showed one on the canvas — and it was
+    // drawn by the canvas, not by the design, so it never appeared on any
+    // output either. Selection (below) is the only state the canvas marks.
 
     // True bounds, no edgeMargin offset — has to match where contentHolder
-    // actually clips. Purple accent so it reads as a distinct state from
-    // the neutral outline above, not just a brighter version of it.
+    // actually clips. Purple accent, and the ONE outline the canvas draws.
     Rectangle {
         id: selectionOutline
         anchors.fill: parent

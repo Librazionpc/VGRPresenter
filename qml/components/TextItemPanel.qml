@@ -197,7 +197,7 @@ Column {
             color: toggle.active ? Theme.accent : (toggleArea.containsMouse ? Theme.hoverBg : Theme.inset)
             border.color: toggle.active ? Theme.accent : Theme.border
             border.width: 1
-            Behavior on color { ColorAnimation { duration: 100 } }
+            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
             Text {
                 anchors.centerIn: parent
@@ -298,7 +298,7 @@ Column {
                 color: alignToggle.active ? Theme.accent : (alignArea.containsMouse ? Theme.hoverBg : Theme.inset)
                 border.color: alignToggle.active ? Theme.accent : Theme.border
                 border.width: 1
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 IconGlyph {
                     anchors.centerIn: parent
@@ -451,7 +451,7 @@ Column {
                 color: colorChangeArea.containsMouse ? Theme.hoverBg : Theme.inset
                 border.color: Theme.borderSubtle
                 border.width: 1
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 Text {
                     anchors.centerIn: parent
@@ -508,7 +508,7 @@ Column {
                     color: caseBtn.active ? Theme.accent : (caseArea.containsMouse ? Theme.hoverBg : Theme.inset)
                     border.color: caseBtn.active ? Theme.accent : Theme.border
                     border.width: 1
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent
@@ -568,7 +568,7 @@ Column {
                     color: sizeBtn.active ? Theme.accent : (sizeArea.containsMouse ? Theme.hoverBg : Theme.inset)
                     border.color: sizeBtn.active ? Theme.accent : Theme.border
                     border.width: 1
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent
@@ -699,7 +699,7 @@ Column {
                     color: listBtn.active ? Theme.accent : (listArea.containsMouse ? Theme.hoverBg : Theme.inset)
                     border.color: listBtn.active ? Theme.accent : Theme.border
                     border.width: 1
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent

@@ -62,7 +62,7 @@ Column {
                        : Theme.inset
                 border.width: root.selectedKey === chip.modelData.key ? 1.5 : 1
                 border.color: root.selectedKey === chip.modelData.key ? Theme.accent : Theme.border
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 Column {
                     x: 10
@@ -119,7 +119,7 @@ Column {
                     color: chip.modelData.enabled ? Theme.success : "transparent"
                     border.width: 1.4
                     border.color: chip.modelData.enabled ? Theme.success : Theme.borderSubtle
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     MouseArea {
                         anchors.fill: parent

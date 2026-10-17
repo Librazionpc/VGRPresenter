@@ -17,6 +17,18 @@ Item {
 
     property string activeTab: "show" // "show" | "edit" | "stage"
     signal tabSelected(string tab)
+    // Whether Edit has anything to open. The header owns what that means (a
+    // show picked in the centre preview, or one already open in the editor);
+    // with neither, Edit is greyed and inert — reaching the editor with
+    // nothing picked used to create an untitled show on the spot, which is a
+    // document the operator never asked for (and one the recovery store then
+    // tried to write). A new show is made with New show, not by pressing Edit.
+    property bool editAvailable: true
+    // Stage has no screen behind it yet (Main's tab handler accepts the click
+    // and does not switch the view), so it is greyed and inert by default —
+    // the same rule Edit follows when there is nothing to open. Flip this to
+    // true the moment a Stage screen exists.
+    property bool stageAvailable: false
 
     // The buttons are ICONS: each is a rounded pill with the icon centred in it, and the
     // pill is the only hover/click target. The label is just a caption under it. Same
@@ -42,12 +54,18 @@ Item {
         property real iconShapeHeight: 10.50
 
         readonly property bool isActive: root.activeTab === tabKey
+        // A tab that has nothing to open: greyed, and it takes no hover or
+        // click (see PositionHoverArea below).
+        readonly property bool available: (tabRoot.tabKey !== "edit" || root.editAvailable)
+                                            && (tabRoot.tabKey !== "stage" || root.stageAvailable)
         // Position truth, not containsMouse - hover-exit never delivers to
         // MouseAreas in this build (see KNOWN_ISSUES.md); a containsMouse
         // wash sticks forever after a click. PositionHoverArea derives hover
         // from the AppCursorCatcher's pointer-position stream, which clears
         // the instant the pointer moves off.
-        readonly property bool isHover: tabHover.hovered
+        // ... and none at all on a tab with nothing to open: a wash would say
+        // "press me" about a tab whose click is ignored.
+        readonly property bool isHover: tabHover.hovered && tabRoot.available
 
         // How much the icon path is enlarged (the Stage icon is a 10.5 px design-size path;
         // the 24 px-grid Show/Edit icons use about 1). Every header icon is sized to
@@ -72,7 +90,10 @@ Item {
             border.width: 1
             border.color: tabRoot.isActive ? Theme.border : "transparent"
             color: tabRoot.isActive ? Theme.activeBg : (tabRoot.isHover ? Theme.hoverBg : "transparent")
-            Behavior on color { ColorAnimation { duration: 100 } }
+            // Greyed when there is nothing to open, so "don't press this yet"
+            // is visible before the pointer is on it.
+            opacity: tabRoot.available ? 1 : 0.4
+            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
             // 24 px icon box, centred in the pill.
             Item {
@@ -89,10 +110,11 @@ Item {
                     visible: tabRoot.glyph !== ""
                     anchors.centerIn: parent
                     name: tabRoot.glyph
-                    color: (tabRoot.isActive || tabRoot.isHover) ? Theme.accent : Theme.textSecondary
+                    color: tabRoot.available && (tabRoot.isActive || tabRoot.isHover)
+                           ? Theme.accent : Theme.textSecondary
                     width: 18; height: 18
                     fit: true
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                 }
 
                 Shape {
@@ -131,6 +153,8 @@ Item {
                 id: tabHover
                 anchors.fill: parent
                 onClicked: {
+                    if (!tabRoot.available)
+                        return
                     // No self-assignment here: activeTab is owned by the parent
                     // (AppHeader <- Main.currentView). Assigning it imperatively
                     // would break the binding chain and let a dead "stage" click
@@ -147,14 +171,16 @@ Item {
             // and below the caption. Was y: 33, which pushed the caption's
             // descenders onto the row's bottom border.
             y: 30
-            color: tabRoot.isActive ? Theme.textPrimary : (tabRoot.isHover ? Theme.navLabelMuted : Theme.textSecondary)
+            color: !tabRoot.available ? Theme.textMuted
+                 : tabRoot.isActive ? Theme.textPrimary
+                 : (tabRoot.isHover ? Theme.navLabelMuted : Theme.textSecondary)
             font.family: "Segoe UI"
             font.pixelSize: 15
             // One weight for every tab: mixing Bold and DemiBold shifts the glyphs by a pixel.
             font.weight: Font.Bold
             text: tabRoot.label
             textFormat: Text.PlainText
-            Behavior on color { ColorAnimation { duration: 100 } }
+            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
         }
     }
 

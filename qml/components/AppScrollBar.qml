@@ -180,7 +180,18 @@ Item {
     Rectangle {
         anchors.fill: parent
         radius: root.trackWidth / 2
-        color: trackHover.hovered || thumbArea.drag.active ? Qt.lighter(root.trackColor, 1.6) : root.trackColor
+        // The DRAG state is the bar's own (a grab in progress must stay lit
+        // whatever the pointer does); the HOVER light is the app's shared
+        // layer, so the bar fades like every other control.
+        color: thumbArea.drag.active ? Qt.lighter(root.trackColor, 1.6) : root.trackColor
+
+        HoverGlow {
+            anchors.fill: parent
+            radius: parent.radius
+            hovered: trackHover.hovered
+            glowColor: Qt.rgba(1, 1, 1, 0.12)
+            quick: true
+        }
 
         // `margin` extends the hover zone over the thumb's grip, which the
         // old `thumbArea.containsMouse` term used to cover.
@@ -248,9 +259,17 @@ Item {
         radius: root.trackWidth / 2
         // Hover feedback: brighten before you commit to the grab, the same
         // hover language every chip/button in this app uses.
-        color: thumbArea.pressed ? Qt.lighter(root.thumbColor, 1.5)
-             : thumbArea.containsMouse ? Qt.lighter(root.thumbColor, 1.25)
-             : root.thumbColor
+        color: thumbArea.pressed ? Qt.lighter(root.thumbColor, 1.5) : root.thumbColor
+
+        // Hover is the shared layer (the press state above stays the bar's
+        // own, because a held thumb must not dim under the pointer).
+        HoverGlow {
+            anchors.fill: parent
+            radius: parent.radius
+            hovered: thumbArea.containsMouse
+            glowColor: Qt.rgba(1, 1, 1, 0.12)
+            quick: true
+        }
         // The thumb runs across the track; its length/position come from the
         // bar axis. Vertical: fixed trackWidth-wide, y driven. Horizontal:
         // fixed trackWidth-tall, x driven.

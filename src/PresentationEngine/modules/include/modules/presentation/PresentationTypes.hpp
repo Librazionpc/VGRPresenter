@@ -301,6 +301,16 @@ struct OutputStyleSpec {
     // painted cover-fit over the colour, under all content (FreeShow's
     // styles[...].backgroundImage). Empty = no image.
     std::string backgroundImage;
+    // HOW A TAKEN MEDIA FILE SITS ON THIS OUTPUT — the per-output "Fill" choice
+    // in Settings · Outputs (FreeShow's MediaStyle.fit, which is what its media
+    // renderer reads):
+    //   "contain" (default) — the whole picture, its own aspect kept, letterboxed;
+    //   "cover"             — fills the stage, cropped centered;
+    //   "fill"              — stretched to the stage, aspect ignored (a 4:3
+    //                         camera feed matched to a 16:9 output).
+    // Empty = whatever the app's default is ("contain"); unknown values fall
+    // back to it too, so an older roster never renders nothing.
+    std::string mediaFit;
     // FreeShow's clearStyleBackgroundOnText: when the slide itself carries a
     // background colour, the style's background steps aside for it.
     bool clearBackgroundOnText = false;

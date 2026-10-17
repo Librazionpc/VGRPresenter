@@ -32,7 +32,10 @@
 #                                         # (run the cycle itself, or
 #                                         # build/bps_unit_tests.exe directly, when
 #                                         # the suite is what you are after)
-#   tools/dev_cycle.sh --build-only       # stop, build, unit-test (no launch)
+#   tools/dev_cycle.sh --build-only       # stop, build (no launch, NO unit tests —
+#                                         # a build-only run is the fast inner loop;
+#                                         # run build/bps_unit_tests.exe directly
+#                                         # when the suite is what you are after)
 #   tools/dev_cycle.sh --health-secs 20   # wait longer before the health check
 #   tools/dev_cycle.sh --no-tests         # skip the engine unit-test step (it runs
 #                                         # by default, as step 3)
@@ -154,10 +157,21 @@ fi
 # this step a regression in the engine is caught by a human noticing, so it runs
 # by default here (skip with --no-tests).
 #
+# NOT in --build-only: that mode exists to answer "does it compile" fast (often
+# for one QML file), and a suite that takes a minute turned it into a full cycle
+# whose failures were indistinguishable from build failures. The PASS line says
+# the tests did not run, so a green build-only can never be mistaken for a green
+# suite.
+#
 # It needs the SAME PATH the launch does: it links the MinGW/Qt runtime, and
 # without those dirs Windows cannot resolve its DLLs — the binary then exits 127
 # with NO output at all, which reads exactly like "the tests passed quietly" if
 # the status is not checked (it is, below).
+if [ "$TESTS" = 1 ] && [ "$MODE" = "build" ]; then
+    echo "== unit tests: skipped (--build-only; run build/bps_unit_tests.exe directly) =="
+    TESTS=0
+fi
+
 if [ "$TESTS" = 1 ]; then
     TESTS_BIN="$BUILD_DIR/bps_unit_tests.exe"
     if [ ! -f "$TESTS_BIN" ]; then
@@ -181,7 +195,7 @@ if [ "$TESTS" = 1 ]; then
 fi
 
 if [ "$MODE" = "build" ]; then
-    echo "DEV_CYCLE: PASS (build-only)"
+    echo "DEV_CYCLE: PASS (build-only, tests not run)"
     exit 0
 fi
 

@@ -17,10 +17,18 @@ Rectangle {
     implicitHeight: 30
     radius: Theme.radiusMd
     color: root.selected ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.15)
-                         : (area.containsMouse ? Theme.chip : Theme.inset)
+                         : Theme.inset
     border.width: 1
     border.color: root.selected ? Theme.accent : Theme.border
-    Behavior on color { ColorAnimation { duration: 100 } }
+    // Selection is state and still fades; hover is the shared layer.
+    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+    HoverGlow {
+        anchors.fill: parent
+        radius: parent.radius
+        hovered: area.containsMouse && !root.selected
+        glowColor: Theme.chip
+    }
 
     Item {
         id: swatch

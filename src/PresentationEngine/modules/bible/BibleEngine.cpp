@@ -166,16 +166,15 @@ Result<void> BibleEngine::Initialize() {
     // userDataFileWritten_ false, the corpus keeps carrying the data, and the
     // next boot (or the next mark) tries again.
     if (userDataFromCorpus_.load() && !haveUserStore && !userDataPath_.empty()) {
-        std::string sidecar;
+        Snapshot sidecar;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             sidecar = BuildUserDataJsonLocked();
         }
-        if (auto saved = WriteUserDataFile(sidecar); saved.ok())
-            userDataFileWritten_.store(true);
-        else
-            Logger::Instance().Warning("BibleEngine: user-data sidecar write failed: " +
-                                           saved.error().message, "BibleEngine");
+        // Records the new home and logs it once the write really landed; a
+        // failure leaves userDataFileWritten_ false, so the corpus keeps
+        // carrying the data.
+        PersistUserDataSidecar(std::move(sidecar));
     }
     if (!reindex.empty()) {
         // Join/start with mutex_ RELEASED: IndexBible takes that lock itself,
@@ -255,8 +254,8 @@ Result<void> BibleEngine::Reload() {
 }
 
 Result<void> BibleEngine::Reset() {
-    std::string storeJson;
-    std::string userJson;
+    Snapshot storeJson;
+    Snapshot userJson;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         notes_.clear();
@@ -269,12 +268,10 @@ Result<void> BibleEngine::Reset() {
         if (!storePath_.empty()) storeJson = BuildStoreJsonLocked();
         if (userDataFileWritten_.load()) userJson = BuildUserDataJsonLocked();
     }
-    if (auto saved = WriteUserDataFile(userJson); !saved.ok())
-        Logger::Instance().Warning("BibleEngine: user-data store save failed: " +
-                                       saved.error().message, "BibleEngine");
-    if (auto saved = WriteStoreFile(storeJson); !saved.ok())
-        Logger::Instance().Warning("BibleEngine: bible store save failed: " +
-                                       saved.error().message, "BibleEngine");
+    // Through the write slots, so an older snapshot can never undo this clear
+    // (see WriteSlot): the newest document is the one that ends up on disk.
+    PersistUserDataSidecar(std::move(userJson));
+    PersistStoreFile(std::move(storeJson));
     return Ok();
 }
 
@@ -390,8 +387,8 @@ Result<std::string> BibleEngine::Import(std::string_view source, std::string_vie
 
     BibleVersion oldBible;
     bool hadOld = false;
-    std::string storeJson;
-    std::string userJson;
+    Snapshot storeJson;
+    Snapshot userJson;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = bibles_.find(bible.metadata.id);
@@ -424,14 +421,10 @@ Result<std::string> BibleEngine::Import(std::string_view source, std::string_vie
         // notes drawer keeps offering notes for a text that is gone.
         if (hadOld && userDataFileWritten_.load()) userJson = BuildUserDataJsonLocked();
     }
-    if (auto saved = WriteUserDataFile(userJson); !saved.ok())
-        Logger::Instance().Warning("BibleEngine: user-data store save failed: " +
-                                       saved.error().message, "BibleEngine");
-    if (!storeJson.empty()) {
-        if (auto saved = WriteStoreFile(storeJson); !saved.ok())
-            Logger::Instance().Warning("BibleEngine: bible store save failed: " +
-                                           saved.error().message, "BibleEngine");
-    }
+    // The write slots (see WriteSlot in the header) put these on disk in the
+    // order they were BUILT, and log their own failures.
+    PersistUserDataSidecar(std::move(userJson));
+    PersistStoreFile(std::move(storeJson));
 
     // Replacing a translation: drop its stale index documents first so the
     // global index never serves outdated verse text — whether or not this
@@ -530,8 +523,8 @@ Result<size_t> BibleEngine::IndexBible(const BibleVersion& bible,
 
 Result<void> BibleEngine::RemoveBible(std::string_view bibleId) {
     BibleVersion removed;
-    std::string storeJson;
-    std::string userJson;
+    Snapshot storeJson;
+    Snapshot userJson;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = bibles_.find(std::string(bibleId));
@@ -556,12 +549,8 @@ Result<void> BibleEngine::RemoveBible(std::string_view bibleId) {
         // The removal dropped this translation's user data: its sidecar follows.
         if (userDataFileWritten_.load()) userJson = BuildUserDataJsonLocked();
     }
-    if (auto saved = WriteUserDataFile(userJson); !saved.ok())
-        Logger::Instance().Warning("BibleEngine: user-data store save failed: " +
-                                       saved.error().message, "BibleEngine");
-    if (auto saved = WriteStoreFile(storeJson); !saved.ok())
-        Logger::Instance().Warning("BibleEngine: bible store save failed: " +
-                                       saved.error().message, "BibleEngine");
+    PersistUserDataSidecar(std::move(userJson));
+    PersistStoreFile(std::move(storeJson));
     // Drop this translation's documents from the global search index.
     auto& search = search::SearchEngine::Instance();
     for (const auto& v : removed.verses) (void)search.RemoveDocument(DocId(bibleId, v));
@@ -586,13 +575,32 @@ void BibleEngine::SetStorePath(std::string_view path) {
         if (base.ends_with(kJson)) base.erase(base.size() - kJson.size());
         sidecar = base + ".userdata.json";
     }
-    std::lock_guard<std::mutex> lock(mutex_);
-    storePath_ = std::move(store);
-    userDataPath_ = std::move(sidecar);
-    // A new location is a new layout to establish: until a sidecar is written
-    // THERE, the corpus at that path carries the user data (see BuildStoreJsonLocked).
-    userDataFileWritten_.store(false);
-    userDataFromCorpus_.store(false);
+    bool liveChange = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        liveChange = initialized_.load();
+        storePath_ = std::move(store);
+        userDataPath_ = std::move(sidecar);
+        // A new location is a new layout to establish: until a sidecar is
+        // written THERE, the corpus at that path carries the user data (see
+        // BuildStoreJsonLocked). Only a path set BEFORE Initialize() can be
+        // established this way — see the `liveChange` warning below.
+        if (!liveChange) {
+            userDataFileWritten_.store(false);
+            userDataFromCorpus_.store(false);
+        }
+    }
+    if (liveChange) {
+        // A path set on a RUNNING engine does not re-read the corpus or the
+        // sidecar (Initialize() is idempotent), so the flags have to keep
+        // describing what is actually loaded in memory. Clearing them here was
+        // the quiet data-divergence: the next mark would write the notes into
+        // the new corpus while the sidecar at the old path stayed stale.
+        Logger::Instance().Warning(
+            "BibleEngine: SetStorePath called after Initialize — the new location takes "
+            "effect on the next boot; the user-data layout is left as loaded",
+            "BibleEngine");
+    }
 }
 
 // One bible -> JSON. Only the canonical shape persists: metadata + books +
@@ -748,8 +756,9 @@ Result<size_t> BibleEngine::LoadStoreLocked(const json::Value& root, const json:
     return count;
 }
 
-std::string BibleEngine::BuildStoreJsonLocked() {
-    if (storePath_.empty()) return std::string();
+BibleEngine::Snapshot BibleEngine::BuildStoreJsonLocked() {
+    Snapshot out;
+    if (storePath_.empty()) return out;
     using J = json::Value;
     J::Array arr;
     for (const auto& [id, bible] : bibles_)
@@ -764,7 +773,12 @@ std::string BibleEngine::BuildStoreJsonLocked() {
     root["bibles"] = J(std::move(arr));
     if (corpusCarriesUserData)
         WriteUserDataLocked(root);   // still ONE file: never orphan user data
-    return J(std::move(root)).ToString();
+    out.json = J(std::move(root)).ToString();
+    // Stamped under the SAME lock that produced the document — that is what
+    // orders the write against an older snapshot built by another thread (see
+    // WriteSlot in the header).
+    out.seq = ++snapshotSeq_;
+    return out;
 }
 
 Result<void> BibleEngine::WriteStoreFile(const std::string& json) {
@@ -798,17 +812,19 @@ Result<void> BibleEngine::WriteStoreFile(const std::string& json) {
 // on a verse writes, and kilobytes rather than the corpus's megabytes.
 // Mutex-HELD by contract: it walks the user-data maps. The write is
 // WriteUserDataFile below, called with the lock released.
-std::string BibleEngine::BuildUserDataJsonLocked() {
+BibleEngine::Snapshot BibleEngine::BuildUserDataJsonLocked() {
     const auto t0 = std::chrono::steady_clock::now();
     using J = json::Value;
     J::Object root;
     root["schema"] = J::Number(1);   // the sidecar's own schema, not the corpus's
     WriteUserDataLocked(root);
-    std::string out = J(std::move(root)).ToString();
+    Snapshot out;
+    out.json = J(std::move(root)).ToString();
+    out.seq = ++snapshotSeq_;
     lastUserDataBuildMs_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::steady_clock::now() - t0)
                                    .count());
-    lastUserDataBytes_.store(out.size());
+    lastUserDataBytes_.store(out.json.size());
     return out;
 }
 
@@ -834,27 +850,79 @@ BibleEngine::UserDataWriteStats BibleEngine::LastUserDataWrite() const {
     return s;
 }
 
-void BibleEngine::PersistUserDataSidecar(const std::string& json) {
-    if (auto saved = WriteUserDataFile(json); saved.ok()) {
-        // The layout only turns over once the data is REALLY on disk.
-        userDataFileWritten_.store(true);
-        // One line per mark, with the numbers the guarantee is about. The corpus
-        // is not read, not parsed and not rewritten by this path at all (the
-        // sidecar is the user data's home from the first successful write on),
-        // so the two figures below ARE the whole cost of the click — and the
-        // click is a QML call on the interface thread.
-        const auto stats = LastUserDataWrite();
-        Logger::Instance().Info(
-            "BibleEngine: user-data sidecar written in " +
-                std::to_string(stats.lastWriteMs) + " ms (" +
-                std::to_string(stats.lastWriteBytes) + " bytes, JSON built in " +
-                std::to_string(stats.lastBuildMs) + " ms; corpus untouched, write " +
-                std::to_string(stats.writes + 1) + ")",
-            "BibleEngine");
-        userDataWrites_.fetch_add(1);
-    } else {
-        Logger::Instance().Warning("BibleEngine: user-data save failed: " +
-                                       saved.error().message, "BibleEngine");
+void BibleEngine::PersistUserDataSidecar(Snapshot snap) {
+    if (userDataPath_.empty() || snap.empty()) return;
+    PumpSlot(userWrite_, std::move(snap), true);
+}
+
+void BibleEngine::PersistStoreFile(Snapshot snap) {
+    if (storePath_.empty() || snap.empty()) return;
+    PumpSlot(storeWrite_, std::move(snap), false);
+}
+
+// The single writer: parks the newest snapshot in the slot, claims the drain,
+// and writes until nothing newer is left. Every OTHER caller leaves its
+// snapshot parked and returns, so the order the files see is the order the
+// snapshots were BUILT — never the order two threads happened to reach the
+// disk — and the newest state is always the last thing written.
+void BibleEngine::PumpSlot(WriteSlot& slot, Snapshot snap, bool sidecar)
+{
+    {
+        std::lock_guard<std::mutex> lock(writeMutex_);
+        if (snap.seq > slot.pending.seq)
+            slot.pending = std::move(snap);
+        if (slot.inFlight)
+            return;              // the drainer already running will pick it up
+        slot.inFlight = true;
+    }
+    for (;;) {
+        Snapshot take;
+        {
+            std::lock_guard<std::mutex> lock(writeMutex_);
+            if (slot.pending.empty() || slot.pending.seq <= slot.written) {
+                slot.pending = Snapshot{};
+                slot.inFlight = false;
+                return;
+            }
+            take = std::move(slot.pending);
+            slot.pending = Snapshot{};
+        }
+        // The PAL write runs with NO lock held: writeMutex_ guards the slot
+        // only (see the header), so nothing here can park the interface thread
+        // behind a disk write, and an older snapshot can no longer land last.
+        const Result<void> written = sidecar ? WriteUserDataFile(take.json)
+                                             : WriteStoreFile(take.json);
+        if (!written.ok()) {
+            Logger::Instance().Warning(
+                sidecar ? ("BibleEngine: user-data store save failed: " + written.error().message)
+                        : ("BibleEngine: bible store save failed: " + written.error().message),
+                "BibleEngine");
+            std::lock_guard<std::mutex> lock(writeMutex_);
+            slot.inFlight = false;   // a later mark pumps whatever is parked
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(writeMutex_);
+            slot.written = take.seq;
+        }
+        if (sidecar) {
+            // The layout only turns over once the data is REALLY on disk.
+            userDataFileWritten_.store(true);
+            // One line per WRITE (a burst of marks coalesces into one, which is
+            // the point), with the numbers the guarantee is about. The corpus is
+            // not read, not parsed and not rewritten by this path at all, so the
+            // two figures below ARE the whole cost of the click — and the click
+            // is a QML call on the interface thread.
+            const auto stats = LastUserDataWrite();
+            Logger::Instance().Info(
+                "BibleEngine: user-data sidecar written in " +
+                    std::to_string(stats.lastWriteMs) + " ms (" +
+                    std::to_string(take.json.size()) + " bytes, JSON built in " +
+                    std::to_string(stats.lastBuildMs) + " ms; corpus untouched, write " +
+                    std::to_string(stats.writes + 1) + ")",
+                "BibleEngine");
+            userDataWrites_.fetch_add(1);
+        }
     }
 }
 
@@ -1327,7 +1395,7 @@ Result<void> BibleEngine::AddNote(std::string_view bibleId, const PassageRef& re
     note.createdMs = note.modifiedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                           std::chrono::system_clock::now().time_since_epoch())
                                           .count();
-    std::string userJson;
+    Snapshot userJson;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         notes_[std::string(bibleId) + "|" + RefKey(ref)].push_back(std::move(note));
@@ -1335,20 +1403,20 @@ Result<void> BibleEngine::AddNote(std::string_view bibleId, const PassageRef& re
     }
     // The write leaves the lock AND the corpus: a note is kilobytes, and the
     // click that made it is a QML call on the interface thread.
-    PersistUserDataSidecar(userJson);
+    PersistUserDataSidecar(std::move(userJson));
     return Ok();
 }
 
 Result<void> BibleEngine::RemoveNote(std::string_view bibleId, const PassageRef& ref) {
     if (!ref.Valid())
         return Error::Make(Err::Bible_InvalidReference, "BibleEngine", "invalid reference");
-    std::string userJson;
+    Snapshot userJson;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         notes_.erase(std::string(bibleId) + "|" + RefKey(ref));
         userJson = BuildUserDataJsonLocked();
     }
-    PersistUserDataSidecar(userJson);
+    PersistUserDataSidecar(std::move(userJson));
     return Ok();
 }
 
@@ -1377,7 +1445,7 @@ Result<void> BibleEngine::SetHighlight(std::string_view bibleId, const PassageRe
                                        bool on) {
     if (!ref.Valid())
         return Error::Make(Err::Bible_InvalidReference, "BibleEngine", "invalid reference");
-    std::string userJson;
+    Snapshot userJson;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto& list = highlights_[std::string(bibleId)];
@@ -1392,7 +1460,7 @@ Result<void> BibleEngine::SetHighlight(std::string_view bibleId, const PassageRe
     }
     // One small sidecar write, off the lock: a highlight click is a QML call on
     // the interface thread and used to re-read, re-parse and rewrite the corpus.
-    PersistUserDataSidecar(userJson);
+    PersistUserDataSidecar(std::move(userJson));
     return Ok();
 }
 
@@ -1413,7 +1481,7 @@ Result<void> BibleEngine::AddCollection(std::string_view name) {
 Result<void> BibleEngine::AddToCollection(std::string_view collection, const PassageRef& ref) {
     if (!ref.Valid())
         return Error::Make(Err::Bible_InvalidReference, "BibleEngine", "invalid reference");
-    std::string userJson;
+    Snapshot userJson;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = collections_.find(std::string(collection));
@@ -1423,7 +1491,7 @@ Result<void> BibleEngine::AddToCollection(std::string_view collection, const Pas
         it->second.push_back(ref);
         userJson = BuildUserDataJsonLocked();
     }
-    PersistUserDataSidecar(userJson);
+    PersistUserDataSidecar(std::move(userJson));
     return Ok();
 }
 

@@ -74,7 +74,7 @@ Item {
                         color: quickArea.containsMouse ? "#232530" : Theme.inset
                         border.width: 1
                         border.color: Theme.border
-                        Behavior on color { ColorAnimation { duration: 100 } }
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         Row {
                             id: quickRow

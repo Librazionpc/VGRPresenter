@@ -192,6 +192,10 @@ void TestRecordingLifecycle() {
     CHECK(prod.Initialize().ok());
     CHECK(prod.Start().ok());
 
+    // The free space is simulated for every suite by the runner (see
+    // kTestFreeBytes in main.cpp): StartRecording refuses below 5% free, and a
+    // full developer drive must not read as an engine failure.
+    //
     // A production node to record (docs/specs/28: recording taps the graph).
     auto pvb = prod.CreateBus("pvb2", "Program Video", pr::BusRole::Program,
                               pr::SignalType::Video);
@@ -291,7 +295,12 @@ void TestRecordingLifecycle() {
     auto st4 = rec.GetStatus(id);
     CHECK(st4.ok() && st4.value().state == rk::RecordingState::Completed);
     CHECK(ev.stopped >= 2);
-    rec.SetSimulatedFreeBytes(-1);  // back to real filesystem
+    // BACK TO THE RUNNER'S PIN, not to the real filesystem: the rest of this
+    // suite (recovery, replay, scheduling) starts recordings on the SAME engine
+    // instance, and a developer drive under 5% free would turn every one of them
+    // into Recording_DiskFull. kTestFreeBytes is the number the runner pins
+    // before each suite — see TestHarness.hpp.
+    rec.SetSimulatedFreeBytes(kTestFreeBytes);
 
     CHECK(rec.StopRecording(id, "again").error().code == Err::Recording_NotActive);
 
@@ -415,7 +424,10 @@ void TestRecordingStorageAndScheduling() {
     // Policy thresholds.
     CHECK(rec.SetStoragePolicy(15, rk::StorageAction::Warn).ok());
     CHECK(rec.SetStoragePolicy(15, rk::StorageAction::None).ok());  // remove
-    rec.SetSimulatedFreeBytes(-1);
+    // Back to the runner's pin, not the real filesystem — the scheduling half
+    // below STARTS a recording, and a nearly-full developer drive must not make
+    // it a DiskFull no-op (see kTestFreeBytes in TestHarness.hpp).
+    rec.SetSimulatedFreeBytes(kTestFreeBytes);
 
     // Default directory round-trip.
     const std::string oldDir = rec.DefaultDirectory();

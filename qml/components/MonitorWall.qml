@@ -200,7 +200,7 @@ Item {
 
                 width: 6; height: 6; radius: 3
                 color: index === wall.currentPage ? Theme.accent : Theme.border
-                Behavior on color { ColorAnimation { duration: 120 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 MouseArea {
                     anchors.fill: parent
@@ -303,7 +303,7 @@ Item {
                     return toolArea.hovered ? Theme.borderSubtle : Theme.chip
                 }
                 border.width: 1
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
             }
             IconGlyph {
                 anchors.centerIn: parent
@@ -311,7 +311,7 @@ Item {
                 color: !toolBtn.enabled2 ? Theme.textMuted
                      : (toolBtn.danger ? (toolBtn.active ? Theme.dangerLight : Theme.textMuted) : Theme.textPrimary)
                 width: 15; height: 15; fit: true
-                Behavior on color { ColorAnimation { duration: 100 } }
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
             }
             HoverHandler { id: toolArea; cursorShape: toolBtn.enabled2 ? Qt.PointingHandCursor : Qt.ArrowCursor }
             TapHandler { onTapped: if (toolBtn.enabled2) toolBtn.picked() }
@@ -332,14 +332,20 @@ Item {
             height: 28
             Rectangle {
                 anchors.fill: parent; radius: 8
-                color: !rowBtn.enabled2 ? Theme.inset
-                     : rowArea.hovered ? Qt.alpha(Theme.accent, 0.18)
-                                                     : Qt.alpha(Theme.accent, 0.11)
-                border.color: !rowBtn.enabled2 ? Theme.chip
-                            : rowArea.hovered ? Qt.alpha(Theme.accent, 0.40)
-                                                           : Qt.alpha(Theme.accent, 0.20)
+                color: !rowBtn.enabled2 ? Theme.inset : Qt.alpha(Theme.accent, 0.11)
+                border.color: !rowBtn.enabled2 ? Theme.chip : Qt.alpha(Theme.accent, 0.20)
                 border.width: 1
-                Behavior on color { ColorAnimation { duration: 100 } }
+
+                // The pointer's light is the app's shared hover layer (the
+                // disabled state above stays the button's own).
+                HoverGlow {
+                    anchors.fill: parent
+                    radius: parent.radius
+                    hovered: rowArea.hovered && rowBtn.enabled2
+                    glowColor: Qt.alpha(Theme.accent, 0.07)
+                    edge: true
+                    edgeColor: Qt.alpha(Theme.accent, 0.20)
+                }
             }
             Row {
                 anchors.centerIn: parent

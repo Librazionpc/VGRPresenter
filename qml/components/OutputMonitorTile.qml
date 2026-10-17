@@ -36,11 +36,29 @@ Rectangle {
     // one rev serves both.
     readonly property string ownBuffer: (root.model !== null && root.model !== undefined)
                                         ? String(root.model.frameBuffer ?? "") : ""
-    readonly property bool hasFrame: LiveOutputService.live && LiveOutputService.frameRev > 0
+    // A FRAME EXISTS OFF AIR TOO. This used to read `LiveOutputService.live &&
+    // frameRev > 0`, which made GO LIVE the switch that revealed the picture:
+    // double-click a media file and the tile kept drawing the style's own
+    // background until the live loop started publishing. GO LIVE's job is to
+    // copy the preview to the CONFIGURED OUTPUTS (NDI/HDMI/windows) — it
+    // decides nothing about this tile. The engine's idle preview publishes the
+    // compositor's picture while nothing is on air (a taken media file is the
+    // one layer this tile no longer paints itself, see the note further down),
+    // so the take is the frame as soon as it is taken. A taken camera/screen
+    // keeps its own tap layer (the Image below outranks the frame), and with
+    // no take at all the tile stays on its QML design composition — those
+    // states are unchanged.
+    readonly property bool hasFrame: LiveOutputService.frameRev > 0
+                                     && (LiveOutputService.live || root.mediaOnAir)
     readonly property url frameSource: {
         if (!hasFrame)
             return ""
-        return ownBuffer !== ""
+        // OFF AIR there is no per-output pass (those run on the live loop), so a
+        // styled output's own buffer holds nothing — read the SHARED preview feed,
+        // which the idle preview publishes for exactly this: seeing the take
+        // before it goes live. While LIVE, the per-output buffer is the gated
+        // picture this output really sends.
+        return (LiveOutputService.live && ownBuffer !== "")
             ? "image://livepreview/" + ownBuffer + "?v=" + LiveOutputService.frameRev
             : "image://livepreview?v=" + LiveOutputService.frameRev
     }
@@ -228,6 +246,25 @@ Rectangle {
     // longer part of this: it arrives with the engine frame, above this
     readonly property bool videoUnderneath: root.inputTaken
 
+
+    // A TAKE OWNS THE PANE. While an input or a file is showing, nothing of the
+    // style's paints its own colour underneath: the picture is the frame, and a
+    // branded poster showing through the margins of a portrait photo (or behind
+    // a warmed-up taking) is exactly the "the style bg is still showing" report.
+    // The engine's answer travels in the composition (clearedByTake) — this is
+    // the pane's base reading the same answer.
+    readonly property bool videoLayerUp: root.inputTaken || root.mediaOnAir
+
+    // THE PICTURE'S OWN FILL: the file's if it names one, else THIS OUTPUT's
+    // default (Settings · Outputs → Fill) — the same precedence SceneBuilder
+    // applies, so the tile letterboxes what the output letterboxes.
+    readonly property string effectiveFit:
+        LiveOutputService.mediaFit !== "" ? LiveOutputService.mediaFit
+                                          : (root.onAirSlide.mediaFit || "contain")
+    readonly property int effectiveFillMode: effectiveFit === "cover" ? Image.PreserveAspectCrop
+                                            : effectiveFit === "fill" ? Image.Stretch
+                                                                      : Image.PreserveAspectFit
+
     // Pixel-kind decision: when the on-air slide carries media-like blocks
     // (camera/media/audio/image), DesignPreview could only draw the source's
     // NAME as a placeholder tile — the distributed FRAME is the honest picture
@@ -297,8 +334,14 @@ Rectangle {
         clip: true
         radius: 7
         // The style's colour (the engine's OutputStyleSpec), from the
-        // composition: the pane's base.
-        color: root.onAirSlide.styleColor !== "" ? root.onAirSlide.styleColor : "transparent"
+        // composition: the pane's base. A TAKE CLEARS IT: whatever is showing
+        // on the feeds is the picture, and the style's branded colour is not
+        // part of it ("the style already said shows should clear bg — change it
+        // so anything that wants to show removes the style's bg"). The empty
+        // margins around a letterboxed file stay EMPTY, not styled.
+        color: root.videoLayerUp || root.onAirSlide.styleColor === ""
+               ? "transparent"
+               : root.onAirSlide.styleColor
 
         // TRANSPARENCY CONVENTION: the checkerboard lives at the BOTTOM of this
         // pane's stack — under the style image, the taken input/media layer, the
@@ -334,7 +377,9 @@ Rectangle {
         Image {
             anchors.fill: parent
             visible: root.onAirSlide.styleImagePainted === true && !root.videoUnderneath
-            source: (root.onAirSlide.styleImagePainted === true && !root.videoUnderneath)
+                     && !root.mediaOnAir
+            source: (root.onAirSlide.styleImagePainted === true && !root.videoUnderneath
+                     && !root.mediaOnAir)
                     ? "file:///" + root.onAirSlide.styleImage : ""
             fillMode: Image.PreserveAspectCrop
         }
@@ -373,6 +418,28 @@ Rectangle {
             fillMode: Image.PreserveAspectCrop
             cache: false   // every rev IS a new frame
             asynchronous: false
+        }
+
+        // THE TAKEN MEDIA FILE — painted from the SAME layer the centre Preview
+        // pane paints: the service's own decoded frame (image://mediaplay,
+        // rev-paced), PreserveAspectFit, so a portrait photo stays portrait and
+        // the margins stay empty. That is the picture the operator already trusts
+        // in the middle of the window, and "use whatever renders the centre
+        // preview for the rest" is exactly right: one decode, one provider, one
+        // look here and there. The ENGINE's composed frame still takes over while
+        // LIVE (it is what NDI/HDMI actually send), so the tile never claims a
+        // picture the outputs do not have.
+        Image {
+            objectName: "selfTestTileMediaFrame"
+            anchors.fill: parent
+            visible: root.mediaOnAir && !LiveOutputService.live && !root.inputTaken
+            source: root.mediaOnAir ? "image://mediaplay?v=" + LiveOutputService.mediaRev : ""
+            // THE FILE'S OWN FILL — see effectiveFillMode: a portrait photo the
+            // operator marked "cover" is cropped here, not in a bar of style
+            // colour the way the output crops it.
+            fillMode: root.effectiveFillMode
+            cache: false          // every mediaRev IS a new frame
+            asynchronous: false   // a sync load cannot blank the tile between revs
         }
 
         // Warm-up placeholder while an input is taken but no frame has
@@ -455,7 +522,8 @@ Rectangle {
             // under its blocks) so a video layer underneath is never hidden
             // by it. The clear-on-text step-aside rides `styleImagePainted`:
             // the composition's answer, not a second test here.
-            backgroundImage: (root.onAirSlide.styleImagePainted === true && !root.videoUnderneath)
+            backgroundImage: (root.onAirSlide.styleImagePainted === true && !root.videoUnderneath
+                              && !root.mediaOnAir)
                 ? root.onAirSlide.styleImage : ""
             // Marked blocks (the engine's own backdrop answer, above) draw here
             // WITHOUT their own paint: the backdrop pass below the feed already
@@ -495,6 +563,11 @@ Rectangle {
             visible: root.hasFrame
                      && (root.framePriority || !root.hasSlidePreview)
                      && !root.inputTaken
+                     // OFF AIR a taken file is drawn by the mediaplay layer above
+                     // (the same one the centre preview uses); this engine frame is
+                     // the LIVE picture, and drawing both would put the engine's
+                     // copy over the trusted one.
+                     && !(root.mediaOnAir && !LiveOutputService.live)
             source: root.frameSource
             fillMode: Image.Stretch
             // SYNCHRONOUS on purpose: every frameRev bump is a NEW url, and an
@@ -576,7 +649,37 @@ Rectangle {
         // chrome now; it only animates once a real tap feeds rawLevel.
         visible: root.isEnabled
 
+        // THE FILE ON AIR IS A SOURCE TOO. Its audio is played by Qt's own
+        // QAudioOutput, which no capture-device tap can see — the take holds a
+        // STREAM meter on the file instead (LiveOutputService::applyMediaTake),
+        // published into the same inputLevels list under this one reserved
+        // label. Read FIRST: while a video or audio file is up, it IS the
+        // program's audio, and the strip must move with it (the report "when I
+        // played the audio from the media section the monitor out audio levels
+        // did not animate").
+        readonly property string mediaMeterLabel: LiveOutputService.mediaMeterLabel
+        readonly property real mediaLevel: {
+            if (!LiveOutputService.mediaOnAir)
+                return 0
+            const list = EngineBridge.inputLevels
+            for (let i = 0; i < list.length; ++i) {
+                const snap = list[i]
+                if (!snap || String(snap.label || "") !== bar.mediaMeterLabel)
+                    continue
+                if (!snap.peaks || snap.peaks.length < 1)
+                    continue
+                const channels = Math.min(Number(snap.channelCount) || snap.peaks.length,
+                                          snap.peaks.length)
+                const ch = channels <= 1 ? 0 : Math.min(bar.channelIndex, channels - 1)
+                return Math.max(0, Math.min(1, Number(snap.peaks[ch]) || 0))
+            }
+            return 0
+        }
+
         readonly property real rawLevel: {
+            // A file on air owns the strip (see mediaLevel).
+            if (bar.mediaLevel > 0)
+                return bar.mediaLevel
             // ONE source decides this bar: the loudest currently TAPPED input,
             // honoring the source mute, fader, and matching channel gain so a
             // closed L/R side stays dark. A program-mix reading
@@ -596,7 +699,7 @@ Rectangle {
             // wall-side state that Clear all could release. Off air there is no
             // input audio in the program, so the bars rest at silence.
             if (!LiveOutputService.live)
-                return 0
+                return bar.mediaLevel
             const list = EngineBridge.inputLevels
             let loudest = 0
             for (let i = 0; i < list.length; ++i) {

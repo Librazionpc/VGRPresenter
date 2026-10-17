@@ -153,7 +153,7 @@ Item {
                                 color: modeCell.active ? Theme.accentSoft : (modeArea.containsMouse ? Theme.chip : Theme.inset)
                                 border.width: 1
                                 border.color: modeCell.active ? Theme.accent : Theme.border
-                                Behavior on color { ColorAnimation { duration: 100 } }
+                                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                                 Column {
                                     x: 14
@@ -341,7 +341,7 @@ Item {
                     radius: Theme.radiusMd
                     opacity: parent.inForce ? 0.5 : 1
                     color: applyArea.containsMouse && !parent.inForce ? Theme.accentLight : Theme.accent
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent

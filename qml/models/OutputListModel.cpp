@@ -174,6 +174,8 @@ void OutputListModel::reloadFromStore()
         item.fullscreenOutput = so.fullscreenOutput;
         item.isEnabled = so.enabled;
         item.styleId = QString::fromStdString(so.styleId);
+        item.mediaFit = so.mediaFit.empty() ? QStringLiteral("contain")
+                                            : QString::fromStdString(so.mediaFit);
         // Legacy rows (before onAirOnly was a thing): an NDI row never wears
         // a screen window — enforce the transport rule on hydrate so pre-
         // existing rosters get the fix without a settings round-trip.
@@ -275,6 +277,7 @@ void OutputListModel::saveRoster()
         so.active = item.active;
         so.enabled = item.isEnabled;
         so.styleId = item.styleId.toStdString();
+        so.mediaFit = item.mediaFit.toStdString();
         so.onAirOnly = item.onAirOnly;
         for (int i = 0; i < item.content.size() && i < 6; ++i)
             so.contentToggles[i] = item.content.at(i).enabled;
@@ -414,6 +417,7 @@ QVariant OutputListModel::data(const QModelIndex &index, int role) const
     case ActiveRole: return item.active;
     case EnabledRole: return item.isEnabled;
     case StyleIdRole: return item.styleId;
+    case MediaFitRole: return item.mediaFit;
     case StyleNameRole: {
         // Resolved through StyleListModel by id; "" / unknown ids render as
         // "None" (a style removed under us reads as None, never a stale name).
@@ -459,6 +463,7 @@ QHash<int, QByteArray> OutputListModel::roleNames() const
         { ActiveRole, "active" },
         { EnabledRole, "isEnabled" },
         { StyleIdRole, "styleId" },
+        { MediaFitRole, "mediaFit" },
         { StyleNameRole, "styleName" },
         { OnAirOnlyRole, "onAirOnly" },
         { ContentRole, "content" },
@@ -610,6 +615,28 @@ void OutputListModel::renameOutput(int index, const QString &name)
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { NameRole });
     saveRoster();
+}
+
+// Settings · Outputs → Fill. Guarded to the three fits the engine's
+// AddCompositorLayers understands; an unknown string would silently fall back
+// to "contain" there, which is honest but would make a corrupt roster look
+// like a broken picker.
+void OutputListModel::setMediaFit(int index, const QString &fit)
+{
+    if (index < 0 || index >= m_outputs.size())
+        return;
+    const QString normalized = (fit == QLatin1String("cover") || fit == QLatin1String("fill"))
+        ? fit : QStringLiteral("contain");
+    if (m_outputs[index].mediaFit == normalized)
+        return;
+    m_outputs[index].mediaFit = normalized;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { MediaFitRole });
+    saveRoster();
+    // The fit rides the style spec into the engine (OutputStyleSpec::mediaFit);
+    // push again so a take already on air re-fits without waiting for the next
+    // style edit.
+    pushEngineStyle(activeStyleId());
 }
 
 void OutputListModel::setResolution(int index, const QString &res)
@@ -1158,6 +1185,15 @@ void OutputListModel::pushEngineStyle(const QString &styleId)
     // one way on an output and another way on a monitor tile.
     bps::presentation::OutputStyleSpec spec =
         StyleSpecBuilder::specForStyleRow(styleRowForId(styleId), styleRoster());
+    // ...and the ACTIVE output's own media fill (Settings · Outputs → Fill):
+    // the main deck's shared preview/main pass composes with THIS spec, so a
+    // file taken on air must land in it with the fit its output was given.
+    for (const OutputItem &activeItem : std::as_const(m_outputs)) {
+        if (activeItem.active) {
+            spec.mediaFit = activeItem.mediaFit.toStdString();
+            break;
+        }
+    }
     if (SettingsService *settings = SettingsService::instancePtr())
         settings->setActiveOutputStyle(spec);
     // THE OTHER LIVE OUTPUTS: push the per-output style set so the engine's
@@ -1180,6 +1216,10 @@ void OutputListModel::pushEngineStyle(const QString &styleId)
             if (styleRow >= 0) {
                 bps::presentation::OutputStyleSpec outSpec =
                     StyleSpecBuilder::specForStyleRow(styleRow, styleRoster());
+                // THIS output's fill choice (Settings · Outputs → Fill). It
+                // lives on the OUTPUT, not the style: two outputs can wear one
+                // style and fit a taken file differently.
+                outSpec.mediaFit = item.mediaFit.toStdString();
                 // Buffer name keyed by output identity (qHash(name) — the same
                 // keying saveRoster uses for StoredOutput ids).
                 specs.push_back(std::move(outSpec));
@@ -1276,6 +1316,7 @@ QVariantMap OutputListModel::getOutput(int index) const
         { "active", item.active },
         { "isEnabled", item.isEnabled },
         { "styleId", item.styleId },
+        { "mediaFit", item.mediaFit },
         { "onAirOnly", item.onAirOnly },
         { "styleName", styleName },
         { "content", content },

@@ -48,6 +48,13 @@ Item {
         if (root.hasAction(id))
             root.actions[id]()
     }
+    // Drop one, for an action registered FOR ONE NOTICE (an Undo whose id carries the
+    // thing it gives back): once that notice is gone the entry can only ever fire
+    // twice. A long-lived id (the recovery offer) is simply never unregistered.
+    function unregisterAction(id) {
+        if (id && root.actions[id] !== undefined)
+            delete root.actions[id]
+    }
 
     // The identity of a notice is what the operator can SEE: two notices with
     // the same level, title and message are the same notice even when different

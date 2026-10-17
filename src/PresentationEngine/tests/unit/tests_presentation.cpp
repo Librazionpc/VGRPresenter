@@ -635,6 +635,37 @@ void TestTemplateFile() {
     (void)fs.Remove(showPath);
 }
 
+// A save creates its folder. The crash-recovery copy lives in a directory
+// nothing else in the app creates (%LOCALAPPDATA%\bps\recovery), and
+// VgrFile::Write writes <path>.tmp with the PLAIN write — no parent creation,
+// unlike WriteAtomic. So the first periodic copy of an unsaved show failed with
+// "cannot open for writing: …\unsaved-show.vgr.tmp" and toasted the operator
+// about a background copy they never asked for. This pins the fix: a write into
+// a folder that does not exist yet must land.
+void TestVgrWriteCreatesItsFolder() {
+    auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    const std::string root = "/tmp/bps_mkdir_test";
+    (void)fs.RemoveAll(root);
+    CHECK(!fs.Exists(root));
+
+    bps::vgr::VgrDocument doc;
+    doc.header.engineVersion = "test";
+    doc.header.type = v::DocumentType::Show;
+    doc.header.uuid = "mkdir-show";
+    doc.header.name = "Mkdir";
+    doc.documentJson = "{}";
+
+    // Three levels that do not exist — exactly the recovery store's shape.
+    const std::string path = root + "/recovery/unsaved-show.vgr";
+    CHECK(bps::vgr::VgrFile::Write(path, doc).ok());
+    CHECK(fs.IsRegularFile(path));
+    CHECK(bps::vgr::VgrFile::Read(path).ok());
+    // And no half-written sibling is left behind.
+    CHECK(!fs.Exists(path + ".tmp"));
+
+    (void)fs.RemoveAll(root);
+}
+
 void TestShowLibrary() {
     auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
     const std::string root = "/tmp/bps_library_test";

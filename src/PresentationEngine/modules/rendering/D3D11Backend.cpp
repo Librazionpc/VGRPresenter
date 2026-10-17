@@ -289,6 +289,29 @@ public:
             return Error::Make(Err::Render_TextureNotFound, "D3D11", "no texture");
         if (image.empty() || !context_ || !it->second.tex)
             return Ok();
+        // A DIFFERENT SIZE IS A DIFFERENT TEXTURE, not an update of this one.
+        // UpdateSubresource copies into the texture's OWN subresource, while the
+        // source row pitch is the NEW image's — so a frame that changed size makes
+        // the driver read `newWidth*4 * oldHeight` bytes out of a buffer holding
+        // only `newWidth*4 * newHeight`. That is a read PAST the buffer whenever
+        // the picture got wider and shorter (a 1920x1080 media frame replaced by a
+        // 282x179 one, i.e. any second take). The D3D11 runtime cannot catch it
+        // (the pitch validates, the height does not), so the fault lands inside
+        // the GPU driver: the live "recovered from an unexpected shutdown —
+        // code=0xc0000005" crashes were all in igd10um64xe.dll, read at exactly
+        // this call. Recreate the texture and its view at the new size instead,
+        // which is what the frame needs anyway.
+        if (it->second.cpu.width != image.width || it->second.cpu.height != image.height) {
+            Texture fresh;
+            if (!UploadTexture(image, fresh))
+                return Error::Make(Err::Render_BackendUnavailable, "D3D11",
+                                   "texture re-upload failed after a size change");
+            textureBytes_ -= it->second.cpu.ByteSize();
+            it->second = std::move(fresh);
+            it->second.cpu = image;
+            textureBytes_ += it->second.cpu.ByteSize();
+            return Ok();
+        }
         context_->UpdateSubresource(it->second.tex.Get(), 0, nullptr, image.pixels.data(),
                                     static_cast<UINT>(image.width) * 4u, 0);
         textureBytes_ -= it->second.cpu.ByteSize();

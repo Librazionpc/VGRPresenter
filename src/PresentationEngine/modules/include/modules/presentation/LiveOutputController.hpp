@@ -121,6 +121,7 @@ public:
     void StopIdlePreview();
     bool IsPreviewing() const noexcept { return previewRunning_.load(); }
 
+
     // Test seam: render one frame now (the loop body's single iteration).
     Result<void> RenderOnce();
 

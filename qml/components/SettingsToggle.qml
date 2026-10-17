@@ -25,7 +25,7 @@ Rectangle {
     color: checked ? Theme.accent : Theme.toggleOffTrack
     border.width: 1
     border.color: checked ? Theme.accent : Theme.borderSubtle
-    Behavior on color { ColorAnimation { duration: 120 } }
+    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
     Rectangle {
         id: knob
