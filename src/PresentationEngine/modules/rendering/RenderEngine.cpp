@@ -25,6 +25,61 @@ RenderEngine& RenderEngine::Instance() {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// THE DEFAULT RENDER BACKEND: the CPU rasterizer, with the GPU as the user's own
+// choice (Settings · General's "Hardware rendering (GPU)", off out of the box).
+//
+// WHY SOFTWARE IS THE DEFAULT: it draws the same frames on every machine,
+// including the laptops with no usable card, so the app's picture never depends
+// on what a machine happens to have. The GPU path is no longer the reason it used
+// to be, though — see the history below, which is kept because it is what the
+// regression test guards.
+//
+// THE FAULT THAT MADE THIS A STOPGAP (2026-10-16, FIXED): in the sessions that
+// ran on the GPU, EVERY output frame came back holding nothing but its clear. The
+// evidence is in engine.log for 2026-10-16: the command list of a live styled
+// scene is non-empty
+//     render dispatch: [..._tpl-3_996ca59675a5f6be] objects=4 cmds=98 glyph=95 shape=2
+// while the very same frame reads
+//     output frame sanity: '__out_17803898930370586661__' meanLuma=0.0 maxLuma=0 maxAlpha=0 allBlack=yes
+// (alpha 255 black for the opaque-#000000 style, alpha 0 for the transparent
+// one: the clear landed, the objects did not). The app's own surfaces hide it —
+// the monitor tiles and the output window draw their own QML copy of the slide —
+// and the NDI feed, which reads ENGINE pixels, was the one surface that showed
+// the loss: a black receiver while the operator read "sending - 3134 frames -
+// 2 monitor(s)". The same buffer painted before the GPU backend existed
+// (02:16 that day: meanLuma=41.2 allBlack=no), and no session since the first
+// "render backend: requested 'auto' -> active 'directx11'" at 03:44 has.
+//
+// ...and the CAUSE was in the backend, not in the readback: Submit unbound the
+// render target at the end of every frame (it must not stay attached while it is
+// read back) and never bound one itself — EnsureFrame's binding is only redone
+// when the frame SIZE changes, which a steady live session never does. So the
+// second and every later frame at one size drew nothing at all, while the clear
+// (which takes the render target directly) still landed; the first frames after a
+// GO LIVE or a screen change were the ones that looked right. Submit now binds
+// its own target, and the case is pinned by `rendering · d3d11-stage-frame`, which
+// renders the app's own scene shape at 1920x1080 and compares the GPU frame to the
+// CPU one TWICE per size (the first frame is the one that always worked). The CPU
+// rasterizer stays the default because it works everywhere and the GPU is a
+// deliberate opt-in, not because of this.
+constexpr const char *kDefaultRenderBackend = "software";
+
+// The GPU path, named the way the setting, the log and the docs all name it.
+constexpr const char *kHardwareRenderBackend = "directx11";
+
+// The key the APP writes when a user turns Settings · General's "Hardware
+// rendering (GPU)" on or off (SettingsService owns the other end). It is a
+// PREFERENCE, not a selection: render.backend below outranks it, which is what
+// keeps an explicit profile/developer choice working.
+constexpr const char *kHardwarePreferenceKey = "render.hardwareAcceleration";
+
+// The explicit choice, as the configuration spells it.
+constexpr const char *kBackendKey = "render.backend";
+
+} // namespace
+
 Result<void> RenderEngine::Initialize() {
     if (initialized_.load()) return Ok();
 
@@ -35,15 +90,10 @@ Result<void> RenderEngine::Initialize() {
     softwareBackend_ = std::make_unique<SoftwareGraphicsBackend>();
     nullBackend_ = std::make_unique<NullGraphicsBackend>();
 
-    auto& config = ConfigurationManager::Instance();
-    // "auto" is the default: a machine with a D3D11 device draws its frames on
-    // the GPU (the live loop's whole point — one composed frame rasterised once,
-    // then scaled/copied to every output, the preview and the NDI feed), and a
-    // machine without one runs the software rasterizer, which is what this
-    // engine did before the GPU backend existed. The name is logged either way,
-    // so which one a given run used is never a guess.
-    const std::string backendName = config.GetString("render.backend", "auto");
-    SelectBackend(backendName);
+    // Where the request comes from is ResolveBackendName's business (one rule
+    // for the boot and for every switch after it). Whichever one a run uses is
+    // logged, so it is never a guess.
+    SelectBackend(ConfiguredBackendName());
 
     gpu_.BindBackend(backend_);
     uploader_.BindGpu(&gpu_);
@@ -87,17 +137,24 @@ Result<void> RenderEngine::Shutdown() {
     nullBackend_.reset();
     loggedBackendOnce_ = false;
     loggedBackend_.clear();
+    // The pair the app reads back goes with the backends: a shutdown that left
+    // them behind would have the next Initialize report a name it is not
+    // drawing with.
+    {
+        std::lock_guard<std::mutex> lock(backendNameMutex_);
+        requestedBackendName_.clear();
+        activeBackendName_.clear();
+    }
     initialized_.store(false);
     return Ok();
 }
 
 Result<void> RenderEngine::Reload() {
-    // Reload re-reads the setting (a profile that switches backends applies with
-    // a reload) and re-installs whatever it names — the same selection the boot
-    // ran, so a switch to the GPU and a switch back are one code path.
-    auto& config = ConfigurationManager::Instance();
-    const std::string backendName = config.GetString("render.backend", "auto");
-    (void)SelectBackend(backendName);
+    // Reload re-reads the request (a profile that switches backends applies with
+    // a reload, and so does the General screen's hardware switch — SettingsService
+    // calls exactly this) and re-installs whatever it names — the same selection
+    // the boot ran, so a switch to the GPU and a switch back are one code path.
+    (void)SelectBackend(ConfiguredBackendName());
     gpu_.SetTextureBudget(adaptive::AdaptiveRuntime::Instance().GetTextureBudget());
     return Ok();
 }
@@ -138,6 +195,42 @@ Metrics RenderEngine::MetricsSnapshot() const {
 // Backend
 // ---------------------------------------------------------------------------
 
+// WHAT THE BACKEND IS ASKED FOR — the rule, in one place, for the boot and for
+// every later switch (a boot and a switch that answered differently is the class
+// of bug this whole file's comments keep naming):
+//
+//   1. `render.backend`              an EXPLICIT choice — a config file, a
+//                                    profile, a developer, a test. It WINS, and
+//                                    that is deliberate: it is the escape hatch
+//                                    this engine has always had (and it is how
+//                                    every rendering test pins software).
+//   2. else `render.hardwareAcceleration`
+//                                    the app's own preference — Settings ·
+//                                    General's "Hardware rendering (GPU)",
+//                                    which SettingsService writes here when the
+//                                    user turns it on or off.
+//   3. else                         the software rasterizer.
+//
+// 3 is the default on purpose, and it is NOT the same "auto" that precedes it in
+// SelectBackend below: "auto" means "the GPU when a device can really be made",
+// and that is what a fresh install of this build must not do — the software
+// rasterizer draws the same frames on every machine, including the ones with no
+// GPU at all (see kDefaultRenderBackend for the readback fault that decided it).
+// Asking for the GPU — by the switch or by render.backend — still FALLS BACK to
+// software when no device can be made, and the active name the log prints is what
+// says which one came up.
+std::string RenderEngine::ResolveBackendName(std::string_view explicitBackend, bool hardwareAcceleration) {
+    if (!explicitBackend.empty())
+        return std::string(explicitBackend);
+    return hardwareAcceleration ? kHardwareRenderBackend : kDefaultRenderBackend;
+}
+
+std::string RenderEngine::ConfiguredBackendName() {
+    auto& config = ConfigurationManager::Instance();
+    return ResolveBackendName(config.GetString(kBackendKey, ""),
+                              config.GetBool(kHardwarePreferenceKey, false));
+}
+
 // The engine's backend contract, in one place (the live loop, the unit tests
 // and the app all go through it):
 //
@@ -146,7 +239,7 @@ Metrics RenderEngine::MetricsSnapshot() const {
 //   "directx11"       the GPU rasterizer; if no device can be made the engine
 //                     runs the software one and SAYS SO (a machine that cannot
 //                     do D3D11 is a fallback case, not an error the app dies on)
-//   "auto" (default)  the GPU when a device can be made, software otherwise
+//   "auto"            the GPU when a device can be made, software otherwise
 //   anything else     Render_BackendUnavailable, as before
 Result<void> RenderEngine::SelectBackend(std::string_view requested) {
     const std::string name(requested.empty() ? "auto" : requested);
@@ -188,6 +281,15 @@ Result<void> RenderEngine::SelectBackend(std::string_view requested) {
         // are no-ops on the boot path (there is nothing cached yet).
         cache_.Clear();
     }
+    // What the app reads back afterwards (ActiveBackendName / RequestedBackendName),
+    // recorded BEFORE the log line so a caller that saw the line in the log and
+    // then asked reports the same pair. The lock guards two string assignments
+    // and nothing else — no device, no wait (see the header).
+    {
+        std::lock_guard<std::mutex> lock(backendNameMutex_);
+        requestedBackendName_ = name;
+        activeBackendName_ = backend_->Capabilities().name;
+    }
     // ONE line, on the real switch only: which backend this process is drawing
     // with, so "the live frames are on the GPU" is a fact in the log rather
     // than an assumption about the setting.
@@ -200,6 +302,16 @@ Result<void> RenderEngine::SelectBackend(std::string_view requested) {
             "RenderEngine");
     }
     return Ok();
+}
+
+std::string RenderEngine::ActiveBackendName() const {
+    std::lock_guard<std::mutex> lock(backendNameMutex_);
+    return activeBackendName_;
+}
+
+std::string RenderEngine::RequestedBackendName() const {
+    std::lock_guard<std::mutex> lock(backendNameMutex_);
+    return requestedBackendName_;
 }
 
 Result<void> RenderEngine::SetBackend(std::string_view name) {
@@ -609,7 +721,21 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
     TextureId tid = tex.ok() ? tex.value() : TextureId{};
     if (!tid.valid()) {
         auto up = gpu_.AcquireTexture(atlasName, entry.atlas);
-        if (!up.ok()) return;
+        if (!up.ok()) {
+            // NOT A SILENT RETURN. An atlas that cannot be uploaded takes the
+            // WHOLE TEXT OBJECT down with it — every glyph of it — so the frame
+            // goes out with its background and nothing else, which is the
+            // report "the output became black at 1920x1080 with the GPU on"
+            // arriving with no reason in the log at all (the image and video
+            // paths above have always said theirs). Logged once per atlas, with
+            // the numbers that name the cause.
+            LogDrawFailureOnce(atlasName, std::format(
+                "glyph atlas upload failed: {} (atlas {}x{} {} bytes, budget {} bytes, {} uploaded) "
+                "- every glyph of this style draws nothing, so the frame carries only its background",
+                up.error().message, entry.atlas.width, entry.atlas.height,
+                entry.atlas.ByteSize(), gpu_.TextureBudget(), gpu_.TextureMemoryBytes()));
+            return;
+        }
         tid = up.value();
     }
 
@@ -905,10 +1031,16 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
                                          static_cast<int>(c.type), c.rect.x, c.rect.y,
                                          c.rect.width, c.rect.height);
         }
+        // WHICH BACKEND DREW THIS, named by the backend itself. This read
+        // `backend_ == nullBackend_.get() ? "null" : "software"` — so every
+        // D3D11 frame in the log was labelled SOFTWARE, which is how a session
+        // whose frames came back holding nothing but their clear could be read
+        // as a software-rasterizer fault (and how two diagnosis rounds went
+        // looking in the wrong backend entirely).
         const std::string state = std::format(
             "objects={} layers={} cmds={} size={}x{} backend={} clear={} fill={} blit={} glyph={} shape={} |{}",
             objects.size(), layers.size(), cmds.size(), w, h,
-            backend_ == nullBackend_.get() ? "null" : "software",
+            backend_ ? backend_->Capabilities().name : "none",
             nClear, nFill, nBlit, nGlyph, nShape, firstCmds);
         bool changed = false;
         {

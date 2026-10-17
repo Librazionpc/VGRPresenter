@@ -25,6 +25,24 @@ Item {
 
     property bool open: false
 
+    // ---- Esc = cancel, Enter = the Add button (qml/settings/Hotkeys.qml) --
+    // The picker's own pair, pushed as a Hotkeys scope while it is up.
+    property int hotkeyScope: 0
+    function accept() { root.applied(root.selectedSource) }
+    onOpenChanged: {
+        if (root.open && root.hotkeyScope === 0) {
+            root.hotkeyScope = Hotkeys.open({
+                name: qsTr("Camera source"),
+                cancel: function () { root.cancelled() },
+                accept: function () { root.accept() }
+            })
+        } else if (!root.open && root.hotkeyScope !== 0) {
+            Hotkeys.close(root.hotkeyScope)
+            root.hotkeyScope = 0
+        }
+    }
+    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
+
     property var sources: [
         { id: "cam1", name: qsTr("CAM 1"), description: qsTr("Main platform camera"), status: "live" },
         { id: "cam2", name: qsTr("CAM 2"), description: qsTr("Side angle / choir view"), status: "live" },
@@ -343,7 +361,7 @@ Item {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.applied(root.selectedSource)
+                        onClicked: root.accept()
                     }
                 }
             }

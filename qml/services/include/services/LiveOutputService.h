@@ -529,13 +529,18 @@ private:
     // set rather than the current slide, so a restored passage comes back with
     // its own navigation instead of collapsing to the verse that was showing.
     QVariantList onAirSlidesRaw() const;
-    // The ONE blank slide clearOnAirSlide() needs (empty blocks, transparent
-    // background) — the style's own background paints regardless, since
-    // SceneBuilder composites it unconditionally, before/regardless of blocks.
-    // Deliberately NOT goLive()'s fallback any more: GO LIVE is an output gate
-    // and never invents content, so a blank holding screen goes out only when
-    // the operator asks for one (clear the on-air slide, or stage a blank).
+    // The blank slide GO LIVE's fallback sends when there is no open show: EMPTY
+    // blocks on a transparent background, which the active style still paints —
+    // deliberately, because going live with nothing staged is meant to show the
+    // output's own look rather than a black screen. Not a clear: see
+    // goLiveCleared below for the one that is.
     void goLiveBlank();
+    // The CLEAR carrier clearOnAirSlide() sends: an empty slide that says so
+    // (Slide::clearStage), so the engine paints NOTHING for it — not the style's
+    // colour, not its background image. Clear all is the operator asking for an
+    // empty screen; sending goLiveBlank() instead put the style's poster back on
+    // the outputs, which is the report this exists to answer.
+    void goLiveCleared();
 
     bool live_ = false;
     // Tab id -> "this tab owns the tile's content and can step it" (see

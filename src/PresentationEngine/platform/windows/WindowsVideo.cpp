@@ -276,14 +276,19 @@ std::vector<WindowInfo> WindowsVideo::EnumerateWindows() const
 
 namespace {
 
-// The capture-device interface classes: cameras (KSCATEGORY_VIDEO_CAMERA) and
-// capture hardware that is not a camera (KSCATEGORY_CAPTURE). The values are
-// fixed by the Windows SDK (ks.h/ksmedia.h); spelled out here so this file does
-// not have to pull in the DirectShow headers for two GUIDs.
+// The camera interface class (KSCATEGORY_VIDEO_CAMERA). The value is fixed by
+// the Windows SDK (ks.h/ksmedia.h); spelled out here so this file does not have
+// to pull in the DirectShow headers for one GUID.
+//
+// THIS CLASS AND NOT KSCATEGORY_CAPTURE: on the machine this was written on, the
+// camera-class interface list is EXACTLY the roster MF reports
+// (MFEnumDeviceSources: 10 video device sources, 10 interfaces, same paths — see
+// build/probe_cams.exe), while the capture class adds ~36 more entries that are
+// WAVE/AUDIO endpoints. Fingerprinting those would report "video device
+// configuration changed" when a headset is plugged in, and the audio fingerprint
+// next to it already covers that change.
 constexpr GUID kCameraInterfaceClass = {
     0xE5323777, 0xF976, 0x4f5b, {0x9b, 0x55, 0xb9, 0x46, 0x99, 0xc4, 0x6e, 0x44}};
-constexpr GUID kCaptureInterfaceClass = {
-    0x65E8773D, 0x8F56, 0x11D0, {0xa3, 0xb9, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96}};
 
 // The capture roster's IDs from the Plug-and-Play DEVICE-INTERFACE LIST, which
 // answers "which capture devices exist right now" without opening one.
@@ -305,23 +310,25 @@ constexpr GUID kCaptureInterfaceClass = {
 std::optional<std::string> CheapCaptureFingerprint()
 {
     std::vector<std::string> paths;
-    for (const GUID &cls : {kCameraInterfaceClass, kCaptureInterfaceClass}) {
+    {
         ULONG len = 0;
-        if (CM_Get_Device_Interface_List_SizeW(&len, const_cast<GUID *>(&cls), nullptr,
+        if (CM_Get_Device_Interface_List_SizeW(&len, const_cast<GUID *>(&kCameraInterfaceClass),
+                                               nullptr,
                                                CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS)
             return std::nullopt;
-        if (len == 0)
-            continue;
-        std::wstring list(len, L'\0');
-        if (CM_Get_Device_Interface_ListW(const_cast<GUID *>(&cls), nullptr, list.data(), len,
-                                          CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS)
-            return std::nullopt;
-        for (const wchar_t *p = list.c_str(); *p; p += std::wcslen(p) + 1)
-            paths.push_back(win::Utf8(p));
+        if (len > 0) {
+            std::wstring list(len, L'\0');
+            if (CM_Get_Device_Interface_ListW(const_cast<GUID *>(&kCameraInterfaceClass), nullptr,
+                                              list.data(), len,
+                                              CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS)
+                return std::nullopt;
+            for (const wchar_t *p = list.c_str(); *p; p += std::wcslen(p) + 1)
+                paths.push_back(win::Utf8(p));
+        }
     }
-    // SORTED AND DEDUPED: the two classes can both list the same interface, and
-    // the config manager's own order is not part of the answer — only the SET of
-    // devices is, so an unchanged roster must fingerprint the same either way.
+    // SORTED AND DEDUPED: only the SET of devices is the answer — the config
+    // manager's own order is not part of it, so an unchanged roster must
+    // fingerprint identically rather than reporting a change it did not have.
     std::sort(paths.begin(), paths.end());
     paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
     std::string fp;

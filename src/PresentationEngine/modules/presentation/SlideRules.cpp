@@ -62,6 +62,36 @@ bool NeedsDistributedFrame(const std::vector<ContentBlock>& blocks) {
     return false;
 }
 
+StyleLayoutScope LayoutScope(const OutputStyleSpec& style) {
+    const std::size_t shows = kFamilySlotShows;
+    // EXPLICITLY SHOWS: a template PICKED in the style's own Shows slot (the
+    // one act that says "lay my shows out"). This is the case where a show's
+    // own layout steps aside — the same test ComposeSlide makes, so the row's
+    // sentence and the picture on air cannot disagree.
+    //
+    // content type alone is NOT that act: a style's contentType is its own
+    // type (which picker lists it in), and "shows" is merely the default, so
+    // it must not claim an authored show's layout — nor may the whole-style
+    // template, which names no family at all (the report this boundary came
+    // from: "I chose Lower Third for style 2 and it does the opposite").
+    // The KEY is the pick: blocks alone can be the front-end's shows fallback
+    // (the Scripture design baked into an unpicked slot), which is not a
+    // choice — see ComposeSlide's stylePickedShowsLayout.
+    if (!style.familyTemplateKeys[shows].empty())
+        return StyleLayoutScope::Shows;
+    // ANY OTHER TEMPLATE: the whole-style one (which is not keyed to a family,
+    // so it restyles every CONTENT tab) or one of theirs. A show slide keeps its
+    // own blocks under these — see ComposeSlide's shows branch.
+    if (!style.templateBlocks.empty())
+        return StyleLayoutScope::ContentFamilies;
+    for (std::size_t i = 0; i < kFamilySlotCount; ++i) {
+        if (i == shows) continue;
+        if (!style.familyTemplateBlocks[i].empty() || !style.familyTemplateKeys[i].empty())
+            return StyleLayoutScope::ContentFamilies;
+    }
+    return StyleLayoutScope::None;
+}
+
 bool StyleAdmits(const OutputStyleSpec& style, const Slide& slide) {
     if (!style.showShows && !style.showMedia && !style.showScripture
         && !style.showTable)

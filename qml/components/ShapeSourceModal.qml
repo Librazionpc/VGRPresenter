@@ -22,6 +22,23 @@ Item {
 
     property bool open: false
 
+    // ---- Esc = cancel, Enter = Add (qml/settings/Hotkeys.qml) -------------
+    property int hotkeyScope: 0
+    function accept() { root.applied({ shapeType: root.selectedType }) }
+    onOpenChanged: {
+        if (root.open && root.hotkeyScope === 0) {
+            root.hotkeyScope = Hotkeys.open({
+                name: qsTr("Shape"),
+                cancel: function () { root.cancelled() },
+                accept: function () { root.accept() }
+            })
+        } else if (!root.open && root.hotkeyScope !== 0) {
+            Hotkeys.close(root.hotkeyScope)
+            root.hotkeyScope = 0
+        }
+    }
+    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
+
     property var shapeTypes: [
         { key: "rectangle", label: qsTr("Rectangle") },
         { key: "circle", label: qsTr("Circle") },

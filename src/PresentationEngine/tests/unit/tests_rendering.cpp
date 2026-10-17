@@ -2,6 +2,8 @@
 // Split from tests/unit/main.cpp so a single phase can run alone:
 //   ./bps_unit_tests rendering
 #include "TestHarness.hpp"
+#include "modules/presentation/PresentationTypes.hpp"
+#include "modules/presentation/SceneBuilder.hpp"
 #include "modules/rendering/ImageScale.hpp"
 #include "modules/rendering/PngCodec.hpp"
 
@@ -1224,6 +1226,81 @@ void TestRenderEngine() {
     CHECK(engine.Shutdown().ok());
     CHECK(engine.GetHealth().state == HealthState::Degraded);
 }
+// ---------------------------------------------------------------------------
+// WHICH RENDERER A RUN PICKS — the app's own switch vs an explicit choice.
+//
+// The report behind it: "can add a toggle in general so in case a user want to
+// turn it by them self but it should [be] software by default as not all laptops
+// have gpu". The PRECEDENCE is the part that needs pinning, because both writers
+// are real: Settings · General writes the app's preference, and an installed
+// profile or a config file may name `render.backend` outright — and the explicit
+// choice has to keep winning, or the switch would silently defeat a profile.
+//
+// Two thirds of this phase are pure (ResolveBackendName: no GPU, no config
+// store, so the rule is pinned on a machine of any kind), and the third drives
+// the REAL selection through the very keys the app writes, so the wiring the
+// General row depends on is asserted rather than assumed.
+// ---------------------------------------------------------------------------
+void TestRenderBackendPreference() {
+    namespace J = bps::json;
+
+    // 1. THE RULE. Nobody asked for anything -> the software rasterizer: what a
+    //    fresh install runs, on every machine, GPU or not.
+    CHECK(r::RenderEngine::ResolveBackendName("", false) == "software");
+    // The switch on -> the GPU is ASKED for (whether this machine has one is a
+    // different question, answered by the active name below).
+    CHECK(r::RenderEngine::ResolveBackendName("", true) == "directx11");
+    // An explicit choice outranks the switch, in BOTH directions.
+    CHECK(r::RenderEngine::ResolveBackendName("software", true) == "software");
+    CHECK(r::RenderEngine::ResolveBackendName("null", false) == "null");
+    CHECK(r::RenderEngine::ResolveBackendName("auto", false) == "auto");
+    CHECK(r::RenderEngine::ResolveBackendName("directx11", false) == "directx11");
+
+    // 2. THE REAL SELECTION, through the configuration the app writes.
+    auto& config = bps::ConfigurationManager::Instance();
+    auto& engine = r::RenderEngine::Instance();
+    CHECK(engine.Initialize().ok());
+    CHECK(engine.Start().ok());
+
+    // Start from "nobody has asked for anything": the styles phases pin
+    // `render.backend` for their own runs (and this phase puts exactly that back
+    // at the end), so the default the app's switch is measured against has to be
+    // re-established first rather than inherited from whatever ran before.
+    CHECK(config.Reset(bps::ConfigScope::Runtime).ok());
+
+    CHECK(config.Set("render.hardwareAcceleration", J::Value::Bool(false)).ok());
+    CHECK(engine.Reload().ok());
+    CHECK(engine.RequestedBackendName() == "software");
+    CHECK(engine.ActiveBackendName() == "software");
+
+    CHECK(config.Set("render.hardwareAcceleration", J::Value::Bool(true)).ok());
+    CHECK(engine.Reload().ok());
+    CHECK(engine.RequestedBackendName() == "directx11");   // the GPU was asked for
+    // ...and a machine without one answers with the fallback rather than a dead
+    // run: this is the laptop the report is about, and the active name is what
+    // the General row reports instead of the switch's position.
+    CHECK(engine.ActiveBackendName() == "directx11" || engine.ActiveBackendName() == "software");
+    // The app's read of "what is drawing" is the backend that is really installed.
+    CHECK(engine.Backend() != nullptr);
+    if (engine.Backend() != nullptr)
+        CHECK(engine.ActiveBackendName() == engine.Backend()->Capabilities().name);
+
+    // The explicit key outranks the switch through this same path — an installed
+    // profile is not overridden by a settings write.
+    CHECK(config.Set("render.backend", J::Value::String("software")).ok());
+    CHECK(engine.Reload().ok());
+    CHECK(engine.RequestedBackendName() == "software");
+
+    // 3. LEAVE NOTHING BEHIND: the Runtime scope goes back to what this binary
+    //    had before this phase ran (the styles phases pin software the same
+    //    way), so every phase after it renders on the engine's own default.
+    CHECK(config.Reset(bps::ConfigScope::Runtime).ok());
+    CHECK(config.Set("render.backend", J::Value::String("software")).ok());
+    CHECK(engine.Reload().ok());
+    CHECK(engine.RequestedBackendName() == "software");
+    CHECK(engine.ActiveBackendName() == "software");
+}
+
 void TestRenderStress() {
     auto& engine = r::RenderEngine::Instance();
     CHECK(engine.Initialize().ok());
@@ -1677,4 +1754,209 @@ void TestD3D11Backend() {
     CHECK(engine.SetBackend("auto").ok());
     CHECK(engine.SetBackend("software").ok());
     (void)engine.DestroyScene(sceneId);
+}
+
+// ---------------------------------------------------------------------------
+// THE GPU PATH AT THE SIZE THE OUTPUTS ACTUALLY RENDER (2026-10-16).
+//
+// The report: "when i turn on hardware acceleration the output becomes black,
+// but if i turn it off the output becomes clear again". The evidence in
+// engine.log for that session is a frame whose command list is non-empty —
+//     render dispatch: [..._tpl-table_...] objects=5 cmds=122 glyph=95 shape=2
+// — coming back holding NOTHING BUT ITS CLEAR:
+//     output frame sanity: '__live_preview__' meanLuma=0.0 maxLuma=0 allBlack=yes
+// ...while the SAME live scene painted correctly on the GPU twelve seconds
+// earlier (meanLuma=22.6) and paints correctly at 64x64 in the probe above.
+//
+// So the fault is not the D3D11 pipeline in general: it is something about a
+// LARGE, object-dense frame. This phase builds the app's own scene shape —
+// an opaque background fill, a SCALED image blit (the style's backdrop), a
+// glyph-atlas text run and an alpha shape — at the stage size every real
+// output uses, renders it on both backends, and requires the picture to be
+// the same. A backend that returns only its clear fails here, in a suite that
+// runs with every build, instead of in the app where only the NDI feed (which
+// reads ENGINE pixels) shows it.
+// ---------------------------------------------------------------------------
+void TestD3D11StageFrame() {
+    auto& engine = r::RenderEngine::Instance();
+    CHECK(engine.Initialize().ok());
+    CHECK(engine.Start().ok());
+
+    // The style's backdrop: a real image on disk (the app's branded PNG, which
+    // is what the GPU path uploads as one more bound texture).
+    const std::filesystem::path img =
+        std::filesystem::temp_directory_path() / "bps_d3d11_stage_test.png";
+    {
+        r::RgbaImage px;
+        px.width = 64;
+        px.height = 36;
+        px.pixels.assign(px.pixels.capacity(), 0);
+        px.pixels.assign(static_cast<size_t>(px.width) * px.height, 0xFF2020D0u);   // a dark red-blue
+        auto encoded = r::EncodePngRgba8(reinterpret_cast<const uint8_t*>(px.pixels.data()),
+                                         px.width, px.height);
+        CHECK(encoded.ok());
+        std::ofstream file(img, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(encoded.value().data()),
+                   static_cast<std::streamsize>(encoded.value().size()));
+        CHECK(file.good());
+    }
+
+    // THE SCENE, at any size: every rect is expressed in the 1920x1080 grid and
+    // scaled, so the SAME composition is rendered at both.
+    const auto buildScene = [&](const std::string& id, int w, int h) {
+        const float sx = static_cast<float>(w) / 1920.0f;
+        const float sy = static_cast<float>(h) / 1080.0f;
+        const auto scaled = [&](float x, float y, float rw, float rh) {
+            return r::Rect(x * sx, y * sy, rw * sx, rh * sy);
+        };
+        (void)engine.DestroyScene(id);
+        CHECK(engine.CreateScene(id, "stage probe", r::Size(w, h)).ok());
+        CHECK(engine.AddLayer(id, r::Layer("bg", "Background", r::LayerKind::Background, 0)).ok());
+        CHECK(engine.AddLayer(id, r::Layer("img", "Images", r::LayerKind::Image, 1)).ok());
+        CHECK(engine.AddLayer(id, r::Layer("txt", "Text", r::LayerKind::Text, 2)).ok());
+
+        auto bg = std::make_shared<r::BackgroundObject>("s_bg", "Background",
+                                                       r::Color(0.05f, 0.06f, 0.09f));
+        bg->SetBounds(scaled(0, 0, 1920, 1080));
+        CHECK(engine.AddObject(id, bg, "bg").ok());
+
+        // The style's background IMAGE: a large cover-fit blit (the app's is a
+        // 1920x1080 PNG), which is the biggest single texture the GPU path draws.
+        r::RgbaImage backdrop;
+        backdrop.width = 1920;
+        backdrop.height = 1080;
+        backdrop.pixels.assign(static_cast<size_t>(backdrop.width) * backdrop.height, 0xFF3030B0u);
+        auto image = std::make_shared<r::ImageObject>("s_img", "Style backdrop");
+        image->SetImage(backdrop, "stage-probe-backdrop");
+        image->SetBounds(scaled(0, 0, 1920, 1080));
+        CHECK(engine.AddObject(id, image, "img").ok());
+
+        // A run of LARGE text — ninety-odd glyphs of it, like the content slide
+        // that went black — through the shared glyph atlas.
+        // THE SIZE THE APP'S TABLE TEMPLATE USES: the failing frame's own glyph
+        // cells were 150x217 on the 1920x1080 grid (see the dispatch line in
+        // engine.log for 11:21:07), i.e. a ~200px font — an atlas an order of
+        // magnitude bigger than a 17x24 probe glyph's, and the reason a 64x64
+        // probe cannot see whatever this is.
+        const char* lines[] = { "FAITH IS THE SUBSTANCE OF THINGS HOPED FOR",
+                                "AND THE EVIDENCE OF THINGS NOT SEEN BUT BELIEVED",
+                                "HEBREWS ELEVEN ONE THROUGH THREE",
+                                "THE ELDERS OBTAINED A GOOD REPORT THROUGH FAITH" };
+        for (int i = 0; i < 4; ++i) {
+            auto text = std::make_shared<r::TextObject>("s_txt" + std::to_string(i), "Body", lines[i]);
+            text->SetBounds(scaled(90, 380 + i * 165, 1740, 150));
+            r::TextStyle ts;
+            ts.size = 198.0f * sy;
+            ts.color = r::Color::White();
+            text->AddComponent(r::MakeTextStyle(ts));
+            CHECK(engine.AddObject(id, text, "txt").ok());
+        }
+
+        auto shape = std::make_shared<r::ShapeObject>("s_shp", "Shape");
+        shape->SetRectangle(r::Color(1.0f, 0.85f, 0.2f, 0.75f));
+        shape->SetBounds(scaled(60, 60, 420, 90));
+        CHECK(engine.AddObject(id, shape, "img").ok());
+    };
+
+    struct SizeCase { int w; int h; };
+    const SizeCase cases[] = { { 640, 360 }, { 1920, 1080 } };
+    for (const SizeCase& c : cases) {
+        const std::string id = std::format("gpu_stage_probe_{}x{}", c.w, c.h);
+        buildScene(id, c.w, c.h);
+
+        r::RenderOptions opts;
+        opts.distribute = false;
+        opts.capture = true;
+
+        CHECK(engine.SetBackend("software").ok());
+        auto soft = engine.Render(id, opts);
+        CHECK(soft.ok());
+        if (!soft.ok()) continue;
+        // ...TWICE on the software side too, so the reference is the steady
+        // state and not a first-frame fluke.
+        auto softAgain = engine.Render(id, opts);
+        CHECK(softAgain.ok());
+
+        CHECK(engine.SetBackend("directx11").ok());
+        const bool gpu = engine.BackendCaps().gpuAccelerated;
+        if (!gpu) {
+            CHECK(engine.BackendCaps().name == std::string("software"));
+            continue;   // no D3D11 device on this machine: nothing to compare
+        }
+        // AND THE SECOND FRAME IS THE ONE THAT MATTERS. The first render after a
+        // size change is the one the D3D11 backend has just rebuilt and bound its
+        // target for; a live session renders the SAME size frame after frame, and
+        // that is where the frame came back holding only its clear (Submit
+        // unbound the target and nothing re-bound it). Both are compared.
+        auto firstFrame = engine.Render(id, opts);
+        CHECK(firstFrame.ok());
+        auto frame = engine.Render(id, opts);
+        CHECK(frame.ok());
+        if (!frame.ok()) continue;
+
+        // What the frame HOLDS, in the terms the report uses: how much of it is
+        // not the clear (the fault: only the clear), and how much of the text
+        // really made it.
+        const auto countNonBlack = [](const r::RgbaImage& f) {
+            long long n = 0;
+            for (uint32_t px : f.pixels)
+                if (((px >> 24) & 0xFFu) != 0 && (px & 0x00FFFFFFu) != 0)
+                    ++n;
+            return n;
+        };
+        const auto countWhite = [](const r::RgbaImage& f) {
+            long long n = 0;
+            for (uint32_t px : f.pixels)
+                if ((px & 0xFFu) > 0xC0u && ((px >> 8) & 0xFFu) > 0xC0u && ((px >> 16) & 0xFFu) > 0xC0u)
+                    ++n;   // the text is white — this is the glyphs, specifically
+            return n;
+        };
+        // EVERY frame against the software reference: the two software passes,
+        // then the GPU's first AND second pass (see above: the second is the one
+        // a live session actually runs, frame after frame).
+        const auto compare = [&](const r::RgbaImage& reference, const r::RgbaImage& candidate,
+                                 const char* label) {
+            std::fprintf(stderr,
+                         "[d3d11] stage frame %dx%d %s: reference painted %lld px (%lld white), "
+                         "this frame %lld px (%lld white)\n",
+                         c.w, c.h, label, countNonBlack(reference), countWhite(reference),
+                         countNonBlack(candidate), countWhite(candidate));
+            // THE FAULT, named: a frame holding only its clear.
+            CHECK(countNonBlack(candidate) > 0);
+            // ...and the same PICTURE, not merely a non-empty one. The glyphs
+            // are checked on their own because "the background is there and the
+            // text is not" is exactly how a silently failed glyph-atlas upload
+            // (or a missing draw) reads on a screen.
+            CHECK(countWhite(candidate) == countWhite(reference));
+            CHECK(candidate.pixels.size() == reference.pixels.size());
+            if (candidate.pixels.size() != reference.pixels.size())
+                return;
+            size_t within4 = 0;
+            int worst = 0;
+            for (size_t i = 0; i < reference.pixels.size(); ++i) {
+                const uint32_t a = reference.pixels[i];
+                const uint32_t b = candidate.pixels[i];
+                int delta = 0;
+                for (int shift = 0; shift < 32; shift += 8)
+                    delta = std::max(delta, std::abs(static_cast<int>((a >> shift) & 0xFF) -
+                                                     static_cast<int>((b >> shift) & 0xFF)));
+                if (delta <= 4) ++within4;
+                worst = std::max(worst, delta);
+            }
+            std::fprintf(stderr, "[d3d11] stage frame %dx%d %s: %zu/%zu pixels within +-4, worst %d\n",
+                         c.w, c.h, label, within4, reference.pixels.size(), worst);
+            CHECK(within4 == reference.pixels.size());
+        };
+        CHECK(countNonBlack(soft.value()) > 0);
+        CHECK(countWhite(soft.value()) > 0);      // the reference really has its text
+        compare(soft.value(), softAgain.value(), "software again");
+        compare(soft.value(), firstFrame.value(), "gpu first");
+        compare(soft.value(), frame.value(), "gpu second");
+
+        (void)engine.DestroyScene(id);
+    }
+
+    CHECK(engine.SetBackend("software").ok());
+    std::error_code ec;
+    (void)std::filesystem::remove(img, ec);
 }

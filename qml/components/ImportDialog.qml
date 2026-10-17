@@ -30,9 +30,26 @@ Item {
     // arrives on ImportService.clipboardImported — see the Connections below).
     property bool awaitingClipboard: false
 
+    // ---- Esc = close (qml/settings/Hotkeys.qml) ---------------------------
+    // No accept: this dialog has no Save button — the flow completes by picking
+    // a format, so Enter stays with the focused field/list.
+    property int hotkeyScope: 0
     anchors.fill: parent
     visible: root.open
-    onOpenChanged: if (open) root.page = ""
+    onOpenChanged: {
+        if (open)
+            root.page = ""
+        if (root.open && root.hotkeyScope === 0) {
+            root.hotkeyScope = Hotkeys.open({
+                name: qsTr("Import"),
+                cancel: function () { root.closed() }
+            })
+        } else if (!root.open && root.hotkeyScope !== 0) {
+            Hotkeys.close(root.hotkeyScope)
+            root.hotkeyScope = 0
+        }
+    }
+    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
 
     readonly property var formats: ImportService.formats
     function inSection(name, primaryOnly, restOnly) {

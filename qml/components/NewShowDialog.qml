@@ -44,6 +44,23 @@ Item {
     }
     function close() { root.shown = false }
 
+    // Esc closes (qml/settings/Hotkeys.qml). Enter is deliberately NOT claimed:
+    // the dialog is a staged form whose fields use Enter to move between
+    // steps, so Enter belongs to the focused field here, not to a save.
+    property int hotkeyScope: 0
+    onShownChanged: {
+        if (root.shown && root.hotkeyScope === 0) {
+            root.hotkeyScope = Hotkeys.open({
+                name: qsTr("New show"),
+                cancel: function () { root.close() }
+            })
+        } else if (!root.shown && root.hotkeyScope !== 0) {
+            Hotkeys.close(root.hotkeyScope)
+            root.hotkeyScope = 0
+        }
+    }
+    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
+
     anchors.fill: parent
     visible: opacity > 0
     enabled: opacity > 0

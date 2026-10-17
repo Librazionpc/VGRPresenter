@@ -259,6 +259,10 @@ bp::Slide ShowConverter::slideFromVariant(const QVariantMap &s)
                                       : (line2.isEmpty() ? line1 : line1 + QLatin1Char('\n') + line2));
     slide.background = utf8(s.value(QStringLiteral("background"), QStringLiteral("transparent")).toString());
     slide.categoryId = utf8(s.value(QStringLiteral("categoryId")).toString());
+    // A CLEAR carrier (LiveOutputService's goLiveCleared): the engine paints an
+    // empty frame for it — no style colour, no style image — so Clear all really
+    // clears instead of falling back to the output's own look.
+    slide.clearStage = s.value(QStringLiteral("clearStage"), false).toBool();
     // The content family this slide belongs to ("scripture" | "table" | …)
     // rides in the meta (the model has no dedicated field): the output
     // style's own engine template only restyles ITS family, so a style keyed

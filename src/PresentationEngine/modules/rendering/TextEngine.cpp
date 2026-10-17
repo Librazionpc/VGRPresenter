@@ -760,7 +760,14 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
     // the folded string.
     auto raw = SplitLines(text, style.rtl);
     Font f = fonts.Resolve(style.fontId);
-    const float lineHeight = style.size + style.lineSpacing;
+    // A NON-POSITIVE STEP IS NOT A LAYOUT: a style whose lineSpacing cancels its
+    // size (the shape a `lineHeight: 0` produced before SceneBuilder learned
+    // that 0 means "the font's own spacing") measured as zero-height lines and
+    // painted every line onto one baseline. One line's worth of space is the
+    // floor — natural spacing — so a degenerate style still renders a readable
+    // block instead of an overlap. Legitimately tight positive steps pass.
+    const float step = style.size + style.lineSpacing;
+    const float lineHeight = step > 0.0f ? step : style.size;
     const float advance = UniformAdvance(style, f);
     // REAL vertical ink extent when the style names a resolvable system
     // font: ascent+descent, the visible height of ONE line of glyphs. The

@@ -64,6 +64,23 @@ class SettingsService : public QObject
     Q_PROPERTY(QVariantMap caps READ caps NOTIFY changed)              // { gpu, cpu } in force (percent)
     Q_PROPERTY(QVariantMap allocation READ allocation NOTIFY changed)  // { rendering, encoding, output } for the profile (percent)
 
+    // WHAT THE RENDERER IS — the engine's answer, not the setting's value.
+    //
+    // `preferences.hardwareAcceleration` says what the USER ASKED FOR; these say
+    // what the frames are really drawn with, which is the question the General
+    // screen's "Hardware rendering (GPU)" row has to answer honestly: on a
+    // machine with no usable GPU the switch reads ON while the backend that is
+    // installed is the software rasterizer, and a row that echoed the switch
+    // back at the user would hide exactly that.
+    //
+    // `rendererInUse` is the engine's own name for the active backend
+    // ("directx11" | "software" | "null"), empty until the engine has answered
+    // — the choice is pushed to it off the interface thread (see
+    // applyEngineSettingsAsync). `rendererOnGpu` is the same fact as a bool, so
+    // no QML file has to spell a backend's name.
+    Q_PROPERTY(QString rendererInUse READ rendererInUse NOTIFY changed)
+    Q_PROPERTY(bool rendererOnGpu READ rendererOnGpu NOTIFY changed)
+
 public:
     static SettingsService &instance();
     // The instance() reference is the QML singleton; the output models boot
@@ -87,6 +104,8 @@ public:
     QString hardwareDetail() const { return hardwareDetail_; }
     QVariantMap caps() const;
     QVariantMap allocation() const;
+    QString rendererInUse() const { return rendererInUse_; }
+    bool rendererOnGpu() const { return rendererOnGpu_; }
 
     // Sets a setting. The engine checks it; a refused value is reported to the user and false is returned (nothing changes).
     Q_INVOKABLE bool setValue(const QString &key, const QVariant &value);
@@ -283,5 +302,10 @@ private:
     QString recommendedProfile_;
     QString hardwareHeadline_;
     QString hardwareDetail_;
+    // The engine's answer to "what is drawing" (see the rendererInUse property).
+    // Set from the apply worker, delivered here through a queued call, so the
+    // interface thread never reaches into the render engine for it.
+    QString rendererInUse_;
+    bool rendererOnGpu_ = false;
     std::string dataDir_;
 };

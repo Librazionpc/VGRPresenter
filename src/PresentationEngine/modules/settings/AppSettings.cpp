@@ -161,6 +161,17 @@ std::vector<SettingDef> BuildDefinitions() {
                      "Comes back to where you left: the screen, the show or design, and the Settings page you had open — instead of the home screen."));
     d.push_back(Bool("preferences.closeToTray", "preferences", "Close to tray", false,
                      "Closing the window keeps the app running in the system tray; its icon brings the window back or quits."));
+    // HARDWARE RENDERING — OFF by default, and that default is the engine's own
+    // (see RenderEngine::kDefaultRenderBackend for the readback fault behind it,
+    // and ResolveBackendName for how this preference and the explicit
+    // `render.backend` key are ordered). Two reasons a fresh install must not
+    // turn it on by itself: the software rasterizer draws the same frames on
+    // every machine, including the laptops with no GPU at all, and the GPU path
+    // is still being finished. It is a user's choice to make, not a machine's.
+    d.push_back(Bool("preferences.hardwareAcceleration", "preferences", "Hardware rendering (GPU)", false,
+                     "Draws the frames on the graphics card instead of the processor. Off by default: the software "
+                     "renderer works on every machine, and this one falls back to it when no usable GPU is found. "
+                     "The hardware path is still being finished."));
 
     // ---- Backups & recovery ----
     d.push_back(Bool("backups.automatic", "backups", "Automatic backups", true));

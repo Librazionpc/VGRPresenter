@@ -123,6 +123,37 @@ public:
     const BackendCapabilities& BackendCaps() const;
     IGraphicsBackend* Backend() const { return backend_; }
 
+    // WHAT IS DRAWING, AND WHAT WAS ASKED FOR — the two questions the app asks
+    // after a user flips Settings · General's "Hardware rendering (GPU)".
+    //
+    //   ActiveBackendName()     the backend that is really drawing: "software",
+    //                           "directx11", "null" ("" before the first
+    //                           selection). Asked for a GPU on a machine that has
+    //                           none, this is "software" — the fallback, and the
+    //                           fact the app reports instead of an assumption
+    //                           about the switch.
+    //   RequestedBackendName()  the name the last selection was made with.
+    //
+    // Neither touches a device: they are strings the selection left behind, so
+    // the interface thread may ask (and it must not be able to wait for a
+    // frame — see SelectBackend).
+    std::string ActiveBackendName() const;
+    std::string RequestedBackendName() const;
+
+    // Has Initialize() run? The settings layer pushes the user's renderer choice
+    // at the engine at boot, and an engine that has not initialized yet has no
+    // backends to re-bind — the value it writes is read by the Initialize that
+    // follows instead (see SettingsService's applyRenderBackendPreference).
+    bool Initialized() const { return initialized_.load(); }
+
+    // The backend a selection resolves to, from the two things that may ask for
+    // one — `render.backend` (an explicit choice, which WINS) or else the app's
+    // hardware-acceleration preference — and the software rasterizer when
+    // neither asks for the GPU. Pure and static so the rule is pinable without a
+    // GPU and without a config store (see the .cpp for why software is the
+    // default).
+    static std::string ResolveBackendName(std::string_view explicitBackend, bool hardwareAcceleration);
+
     // Where a frame's cost went (see FrameCostProfile). Both are copied out under
     // the render lock, so a caller on another thread (the live loop publishes it
     // to Telemetry) reads a whole profile and never a half-updated one.
@@ -236,6 +267,12 @@ private:
     // including the fallback and the log line that says which one is live).
     Result<void> SelectBackend(std::string_view requested);
 
+    // What the configuration asks for right now (ResolveBackendName over
+    // `render.backend` and `render.hardwareAcceleration`) — the one place
+    // Initialize and Reload read the request from, so a boot and a switch after
+    // it cannot answer differently.
+    static std::string ConfiguredBackendName();
+
     // The backends, in the order the engine prefers them: the D3D11 GPU one
     // exists only when a device could really be made, and stays null on a
     // build/machine that has none — so such a machine runs the software
@@ -249,6 +286,14 @@ private:
     // request (see SelectBackend) — logged once per distinct answer.
     bool loggedBackendOnce_ = false;
     std::string loggedBackend_;
+    // The pair the two accessors above read, under their own lock rather than
+    // renderMutex_ on purpose: SelectBackend runs on the settings worker while
+    // the render thread may be mid-frame, and the only thing shared is these two
+    // strings — nothing here may wait for a frame to finish, and a frame never
+    // waits for this.
+    mutable std::mutex backendNameMutex_;
+    std::string requestedBackendName_;
+    std::string activeBackendName_;
 
     SceneGraph scenes_;
     RenderPipeline pipeline_;

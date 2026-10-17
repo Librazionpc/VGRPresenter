@@ -179,4 +179,42 @@ QtObject {
                 return true
         return /\{[a-z0-9_]+\}/i.test(want)
     }
+
+    // ---- ONE reading of a block's line height and letter spacing -----------
+    //
+    // `lineHeight` is QML's Text.lineHeight: a PROPORTIONAL multiplier of the
+    // font's OWN natural line height. Three surfaces draw the same block — the
+    // Edit canvas (EditScreen's itemTextLabel), every preview tile
+    // (DesignPreview) and the engine's outputs (SceneBuilder::AddStageBlocks) —
+    // and each one used to supply its own default. The Text panel showed 0 for
+    // an item that never set the field (its `?? 0`), while the canvas and the
+    // previews drew `?? 1.2` and the engine drew its own 1.2: the panel said
+    // "Height 0" and the screen showed ~1.2x the font's natural spacing, with no
+    // way to see — let alone change — the number actually in force. That is the
+    // reported "the height is set to zero and look at the line height": the
+    // value was never connected to what was drawn.
+    //
+    // 0 is NOT a line height — it would stack every line on one baseline, and in
+    // QML it is a degenerate Text.lineHeight outright. It (and a missing/NaN
+    // value) therefore means THE FONT'S OWN spacing, Qt's own Text default, and
+    // that is exactly how the engine reads it (SceneBuilder's kNaturalLineHeight
+    // + its non-positive clamp, TextLayout::Measure's step guard). One constant,
+    // one function, every surface — the panel now shows the number that draws.
+    readonly property real naturalLineHeight: 1.0
+    function lineHeight(meta) {
+        const v = meta ? meta.lineHeight : undefined
+        const n = Number(v)
+        return (v === undefined || v === null || isNaN(n) || n <= 0) ? root.naturalLineHeight : n
+    }
+
+    // The same rule for letter spacing: an ADDITIVE px value whose neutral is 0
+    // (the canvas, the previews and the engine all draw 0 when the field is
+    // absent) — but the panel showed 1.0 for an item that never set it, so it
+    // read as a value nothing on screen was using. Shown and painted from here.
+    readonly property real naturalLetterSpacing: 0
+    function letterSpacing(meta) {
+        const v = meta ? meta.letterSpacing : undefined
+        const n = Number(v)
+        return (v === undefined || v === null || isNaN(n)) ? root.naturalLetterSpacing : n
+    }
 }

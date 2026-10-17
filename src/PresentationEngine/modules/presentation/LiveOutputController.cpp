@@ -83,6 +83,13 @@ uint64_t HashSlideContent(const bps::presentation::Slide& s) {
         mixStr(b.text);
         mixStr(b.bind);
     }
+    // THE CLEAR FLAG IS PART OF THE CONTENT. A clear carrier and the blank
+    // GO-LIVE carrier are byte-identical otherwise (no title, no text, no
+    // blocks), so without this they hash to ONE slide id — and since
+    // SceneBuilder keys scenes by it, Clear all would serve the blank carrier's
+    // cached scene (the style painted, which is what the clear exists to take
+    // down) and a later GO LIVE would serve the CLEAR's empty one.
+    mix(s.clearStage ? 1u : 0u);
     return h;
 }
 } // namespace

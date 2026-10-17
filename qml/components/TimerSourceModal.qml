@@ -17,6 +17,30 @@ Item {
 
     property bool open: false
 
+    // ---- Esc = cancel, Enter = Add (qml/settings/Hotkeys.qml) -------------
+    property int hotkeyScope: 0
+    function accept() {
+        root.applied({
+            mode: root.mode,
+            durationSeconds: root.durationSeconds,
+            autoStart: root.autoStart,
+            showOnStage: root.showOnStage
+        })
+    }
+    onOpenChanged: {
+        if (root.open && root.hotkeyScope === 0) {
+            root.hotkeyScope = Hotkeys.open({
+                name: qsTr("Timer"),
+                cancel: function () { root.cancelled() },
+                accept: function () { root.accept() }
+            })
+        } else if (!root.open && root.hotkeyScope !== 0) {
+            Hotkeys.close(root.hotkeyScope)
+            root.hotkeyScope = 0
+        }
+    }
+    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
+
     // "countdown" | "countup" | "timeofday"
     property string mode: "countdown"
     property int hh: 0

@@ -363,6 +363,24 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (!context_ || !rtv)
             return Error::Make(Err::Render_BackendUnavailable, "D3D11", "no render target");
+        // BIND THE TARGET HERE, not only in EnsureFrame.
+        //
+        // This function UNBINDS the render target when it returns (the frame
+        // must not be attached while it is read back), so the NEXT frame at the
+        // same size found it unbound: EnsureFrame only re-binds when the size
+        // CHANGED, and its early return is what a steady live session takes
+        // every single frame. The result was a frame that held nothing but its
+        // clear — ClearRenderTargetView takes the view directly and still
+        // landed, every Draw landed nowhere. It is the reported fault exactly:
+        // "when i turn on hardware acceleration the output becomes black", with
+        // the session's own log saying the command list was non-empty
+        //     render dispatch: [..._tpl-table_...] objects=5 cmds=122 glyph=118 shape=2
+        // while the frame read
+        //     output frame sanity: ... meanLuma=0.0 maxLuma=0 allBlack=yes
+        // and why the FIRST frames after a GO LIVE or a size change looked
+        // right: those are the renders EnsureFrame rebuilt and bound.
+        ID3D11RenderTargetView* rtvs[1] = {rtv.Get()};
+        context_->OMSetRenderTargets(1, rtvs, nullptr);
         for (const DrawCommand& cmd : commands)
             Execute(cmd);
         // Unbind before returning: the frame may not be sampled (effects) or

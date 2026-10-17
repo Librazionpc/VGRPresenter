@@ -268,6 +268,34 @@ QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec 
         ? QStringLiteral("transparent")
         : QString::fromStdString(comp.background);
 
+    // A CLEAR: the frame paints NOTHING of the style's and nothing of the
+    // slide's (see SceneBuilder::ComposeSlide). Every "does the style paint"
+    // fact is answered OFF here — `styleColor` included, because the tile's
+    // pane paints that colour as its base — so a cleared output shows the same
+    // empty frame in the app as it sends, instead of the style's poster.
+    if (comp.source == pl::SceneBuilder::SlideComposition::Source::Cleared) {
+        QVariantMap cleared = styleFacts;
+        cleared.insert(QStringLiteral("styleColor"), QStringLiteral("transparent"));
+        cleared.insert(QStringLiteral("stylePaints"), false);
+        cleared.insert(QStringLiteral("stylePaintless"), true);
+        cleared.insert(QStringLiteral("styleImagePainted"), false);
+        cleared.insert(QStringLiteral("valid"), true);
+        cleared.insert(QStringLiteral("title"), QString());
+        cleared.insert(QStringLiteral("contentType"), QString::fromStdString(comp.contentType));
+        cleared.insert(QStringLiteral("blocks"), QVariantList{});
+        cleared.insert(QStringLiteral("background"), QStringLiteral("transparent"));
+        cleared.insert(QStringLiteral("suppressStyleImage"), true);
+        // Named, like refusedByStyle: a surface can say WHY the frame is empty
+        // instead of it reading as a broken output.
+        cleared.insert(QStringLiteral("cleared"), true);
+        // The flag travels with the composition too: every preview surface hands
+        // this map straight back through previewWithStyle() ->
+        // ShowConverter::slideFromVariant(), and a composition that lost the flag
+        // would recompose as an ordinary empty slide — the style poster again.
+        cleared.insert(QStringLiteral("clearStage"), true);
+        return cleared;
+    }
+
     if (comp.source == pl::SceneBuilder::SlideComposition::Source::Refused) {
         QVariantMap refused = styleFacts;
         refused.insert(QStringLiteral("valid"), true);
@@ -359,6 +387,7 @@ QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec 
     composed.insert(QStringLiteral("body"), QString::fromStdString(slide->text));
     composed.insert(QStringLiteral("fill"),
                     ShowConverter::fillFromMeta(ShowConverter::metaOf(*slide)));
+    composed.insert(QStringLiteral("clearStage"), slide->clearStage);
     return composed;
 }
 
@@ -1637,7 +1666,28 @@ void LiveOutputService::clearOnAirSlide()
 {
     if (!live_)
         return;
-    goLiveBlank();
+    goLiveCleared();
+}
+
+// A CLEAR — NOT the blank carrier above.
+//
+// goLiveBlank() is the GO-LIVE-with-nothing fallback: an empty slide that the
+// active style still paints, because going live with nothing staged is meant to
+// show the output's own look (the branded backdrop, not a black screen). Clear
+// all is the opposite gesture — it is the operator asking for NOTHING on the
+// screens — and sending the blank carrier for it is why the report was "the
+// clear brings the background image back and clears the slide": the outputs
+// went from the slide straight to the style's poster. This carrier says so
+// itself (Slide::clearStage), and the engine composes an empty frame for it.
+void LiveOutputService::goLiveCleared()
+{
+    VGR_CALL_TRACE("LiveOutputService.goLiveCleared");
+    QVariantMap cleared;
+    cleared.insert(QStringLiteral("blocks"), QVariantList{});
+    cleared.insert(QStringLiteral("background"), QStringLiteral("transparent"));
+    cleared.insert(QStringLiteral("title"), QString());
+    cleared.insert(QStringLiteral("clearStage"), true);
+    goLiveWithSlides(QString(), { cleared });
 }
 
 // ---------------------------------------------------------------------------

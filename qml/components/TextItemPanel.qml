@@ -73,8 +73,17 @@ Column {
     // The list style (an ENGINE list style key, see TextFormatService.listStyles): every line of the text becomes a list item.
     readonly property string listStyle: root.meta.list ?? "none"
     readonly property real fontSize: root.meta.fontSize ?? 16
-    readonly property real lineHeight: root.meta.lineHeight ?? 0
-    readonly property real letterSpacing: root.meta.letterSpacing ?? 1.0
+    // WHAT THIS ROW SHOWS IS WHAT EVERY SURFACE DRAWS. These two read through
+    // MetadataFields — the one reading the Edit canvas, every DesignPreview
+    // tile and the engine's SceneBuilder also use — instead of
+    // this panel's own arbitrary `?? 0` / `?? 1.0`. That pair is what produced
+    // the report this replaces: the Height row read 0 for an item whose meta
+    // never named a line height, while the canvas, the previews and the outputs
+    // all drew 1.2x the font's natural spacing. 0 now means "the font's own
+    // line height" and is displayed as that (1.0), so the number in the panel is
+    // the number on screen.
+    readonly property real lineHeight: MetadataFields.lineHeight(root.meta)
+    readonly property real letterSpacing: MetadataFields.letterSpacing(root.meta)
 
     // The largest font size at which this item's text still fits its box's
     // inner area (box minus padding). Measured from fitMeasure below: text

@@ -178,7 +178,9 @@ Item {
                 property real fitAnswer: el.meta.fontSize ?? 16
                 property bool fitSolving: false
                 readonly property var fitInputs: [fitText.text, el.width, el.height, el.fitMode,
-                                                  el.meta.fontSize ?? 16, el.meta.lineHeight ?? 1.2,
+                                                  el.meta.fontSize ?? 16,
+                                                  MetadataFields.lineHeight(el.meta),
+                                                  MetadataFields.letterSpacing(el.meta),
                                                   el.style.padding ?? 0]
                 // EVERY text block solves — "none" included: the box is the master and the
                 // text must always sit inside it (a "none" block renders at its set size
@@ -265,8 +267,10 @@ Item {
                                        : el.meta.textCase === "capitalize" ? Font.Capitalize : Font.MixedCase
                     font.underline: el.meta.underline === true
                     font.strikeout: el.meta.strikethrough === true
-                    font.letterSpacing: el.meta.letterSpacing ?? 0
-                    lineHeight: el.meta.lineHeight ?? 1.2
+                    // Same ONE reading as the Edit canvas and the Text panel —
+                    // 0/absent is the font's own line height, never a hidden 1.2.
+                    font.letterSpacing: MetadataFields.letterSpacing(el.meta)
+                    lineHeight: MetadataFields.lineHeight(el.meta)
                     horizontalAlignment: {
                         const a = el.meta.align ?? "center"
                         return a === "left" ? Text.AlignLeft : a === "right" ? Text.AlignRight

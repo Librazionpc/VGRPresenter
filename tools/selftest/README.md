@@ -874,6 +874,54 @@ How it fits together:
   because the sentence is the deliverable: `Imported 0 sermons · 0 already in ·
   1 failed · 7 not sermon files`, then one clause per refused file.
 
+## What each output's style does to a slide (Settings · Outputs says it)
+
+`run_outputs_layout_test.sh` guards the report "scripture and The Table work,
+shows do not". A style that restyles the content tabs' designs while a show keeps
+its own authored layout, a style that also lays shows out, and a style with no
+template layout at all are three different pictures on air — and the Outputs
+screen made them indistinguishable: a row said WHICH style it wears and nothing
+about what that style does to the slide. The row now carries one muted line under
+its Style pill, and the line is the ENGINE's own answer
+(`OutputListModel::styleLayoutNote` → `SlideRules::LayoutScope`, the same call
+`SceneBuilder::ComposeSlide` composes with), applied to the very spec that row
+pushes — so the sentence on screen cannot drift from the picture on the wire.
+
+This run is also what found the second half of the fault: the composition rule
+had to tell an EXPLICIT shows pick apart from a style that merely names "shows"
+as its own type. A template chosen in the style's Shows slot (Settings · Styles
+→ "Template for Shows" → Change) lays a show out — the picker promises exactly
+that — while the style's whole-style template (and a contentType that is merely
+the default) leaves a slide the operator authored on the canvas alone. The row
+prints whichever of the three answers the engine's rule gives.
+
+```bash
+bash tools/selftest/run_outputs_layout_test.sh 60
+# ... [SELFTEST-OUTS] row=0 output="Main Output" style="New Style 1" scope="Lays out shows too" note="..."
+#     OUTS: PASS rows=2 styled=2 described=2 scopes=2/2
+#     OUTS: FAIL launch | FAIL notrun | FAIL missing | FAIL empty | FAIL undescribed
+```
+
+How it fits together:
+
+- **The scenario** is the `selfTestOuts*` Timer block in `qml/Main.qml`, gated on
+  `VGR_OUTS_TEST` (+ `VGR_SELFTEST`), armed in `src/main.cpp` (a plain
+  `VGR_SELFTEST=1` run must never open Settings or quit early).
+- **It reads the ROW AS RENDERED**, not the model: each card is given an
+  `objectName` (`selfTestOutputRow_<index>`) and the scenario reads the
+  delegate's own `styleLayout` — the value the line under the Style pill binds
+  to — so a role that resolved in the model but never reached the row reads as
+  `described < styled` and fails.
+- **`described` must equal `styled`**: every row wearing a style has to print one
+  of the three documented answers. `scopes=` prints how many rows answered, so a
+  machine whose styles are all background-only is visible in the verdict instead
+  of passing in silence.
+- **The row's wording has one home.** The three phrases live in `Main.qml`'s
+  `outsScopePhrases` and in `OutputListModel::styleLayoutNote`; the scenario
+  matches the row against the former, so a reworded sentence that never reached
+  the row (or one changed on only one side) fails the run rather than passing as
+  a vague success.
+
 ## The media-only GO LIVE: the outputs, not the tile
 
 `run_blank_live_test.sh` guards the report "the moment it is only media it doesn't

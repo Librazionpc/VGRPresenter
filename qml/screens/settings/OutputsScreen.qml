@@ -296,6 +296,10 @@ Item {
 
                 delegate: Rectangle {
                     id: card
+                    // Named so a self-test scenario can read a ROW the way it is
+                    // rendered (its style note included) instead of only through
+                    // the model — see the VGR_OUTS_TEST block in Main.qml.
+                    objectName: "selfTestOutputRow_" + card.index
                     required property int index
                     required property string name
                     required property string badge
@@ -304,6 +308,15 @@ Item {
                     required property bool active
                     required property bool isEnabled
                     required property string styleName
+                    // What that style does with a slide, in the engine's own
+                    // words (OutputListModel::styleLayoutNote): whether it
+                    // restyles the content tabs' designs while a show keeps
+                    // its own authored layout, or it lays shows out too, or it
+                    // has no template layout at all. The report it answers —
+                    // "scripture and The Table work, shows do not" — was
+                    // invisible here: a row said which style it wears and
+                    // nothing about what that style does to the slide.
+                    required property string styleLayout
                     required property string screenName
                     required property bool onAirOnly
 
@@ -401,6 +414,22 @@ Item {
                                 text: card.styleName
                                 tint: false
                             }
+                        }
+
+                        // WHAT THE STYLE DOES TO A SLIDE. One muted line, only
+                        // when the row wears a style (an unstyled output has
+                        // nothing to describe). It reads the same rule the
+                        // engine composes with, so a style that restyles the
+                        // content tabs and one that lays shows out say so here
+                        // instead of showing up as a different picture on air.
+                        Text {
+                            visible: card.styleLayout !== ""
+                            text: card.styleLayout
+                            color: Theme.textMuted
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.textXs
+                            wrapMode: Text.WordWrap
+                            width: parent.width
                         }
 
                         // NETWORK OUTPUTS — real runtime state, not a label.

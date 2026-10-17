@@ -183,6 +183,17 @@ struct Slide {
     // Which category of the show this slide belongs to ("" = uncategorised).
     // Its category's template decides how the slide looks.
     std::string categoryId;
+    // A CLEAR CARRIER — the slide the wall's Clear all (and the per-layer slide
+    // clear) sends. It carries no content and asks every output to paint
+    // NOTHING: not the style's colour, not its background image. Without this a
+    // clear fell back to the style's own look, so the screens went from the
+    // slide straight to the style's poster — reported as "clear all doesn't
+    // clear: it brings the background image back and clears the slide".
+    //
+    // This is NOT the GO-LIVE-with-nothing carrier (LiveOutputService's
+    // goLiveBlank): that one deliberately keeps the style painting, because
+    // going live with nothing staged is meant to show the output's own look.
+    bool clearStage = false;
 };
 
 // --- Show structure: categories, templates, overlays ------------------------------

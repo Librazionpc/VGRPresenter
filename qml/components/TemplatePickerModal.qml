@@ -1,5 +1,8 @@
 import QtQuick
 import QtQuick.Controls
+// For the app's Hotkeys singleton (Esc = cancel, Enter = apply) — this file
+// draws its own literal chrome, but the keys are the app's.
+import VGRPresenterUI
 
 // "Choose template" — opens from EditStyleModal's Template row ("Change"),
 // matching 1BBTIwaya/VGRPresenter_Settings_Outputs_Edit_Template_Pick.qml's
@@ -25,6 +28,27 @@ Item {
     z: 31000
 
     property bool open: false
+
+    // ---- Esc = cancel, Enter = the Apply button (qml/settings/Hotkeys.qml) --
+    // This picker opens ON TOP of the Style dialog, which is exactly why the
+    // stack (not a Keys handler) owns the keys: the newest scope answers, so
+    // Esc closes the picker and leaves the style dialog open.
+    property int hotkeyScope: 0
+    function accept() { root.applied(root.templateFor(root.selectedKey)) }
+    onOpenChanged: {
+        if (root.open && root.hotkeyScope === 0) {
+            root.hotkeyScope = Hotkeys.open({
+                name: qsTr("Choose template"),
+                cancel: function () { root.cancelled() },
+                accept: function () { root.accept() }
+            })
+        } else if (!root.open && root.hotkeyScope !== 0) {
+            Hotkeys.close(root.hotkeyScope)
+            root.hotkeyScope = 0
+        }
+    }
+    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
+
     // "shows" | "media" | "scripture" — which category this picker is
     // filtering for, set by the consumer right before opening.
     property string contentType: "shows"
@@ -656,7 +680,7 @@ Item {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.applied(root.templateFor(root.selectedKey))
+                        onClicked: root.accept()
                     }
                 }
             }

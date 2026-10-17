@@ -899,6 +899,15 @@ int main(int argc, char *argv[])
         QStringLiteral("SelfTestExact"),
         QVariant(qEnvironmentVariableIsSet("VGR_EXACT_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The output-style scope scenario: it opens Settings · Outputs and prints
+    // each row's own line about what that row's style does to a slide (which
+    // families it restyles, and whether a show keeps its own layout) — its own
+    // env var like the rest, because a plain VGR_SELFTEST=1 run must never open
+    // Settings or quit early.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestOutputsLayout"),
+        QVariant(qEnvironmentVariableIsSet("VGR_OUTS_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     // The search-ranking scenario: it types one query into the app-wide search
     // and prints the rows in display order — its own env var like the rest, so a
     // plain VGR_SELFTEST=1 run never opens the dialog.
@@ -1068,6 +1077,15 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty(
         QStringLiteral("SelfTestPill"),
         QVariant(qEnvironmentVariableIsSet("VGR_PILL_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The renderer-switch scenario: it opens Settings · General, scrolls to the
+    // Hardware rendering row, clicks its toggle, reads back what the ENGINE says
+    // is drawing, and puts the switch back where it found it — its own env var
+    // like the rest, so a plain VGR_SELFTEST=1 run never switches the renderer
+    // out from under itself (a test with the GPU path on is a black picture).
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestGpu"),
+        QVariant(qEnvironmentVariableIsSet("VGR_GPU_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     // The bus-status-light scenario: it opens Media · Inputs, lets the status
     // light's own device ping settle and reads each bus card's reported state —

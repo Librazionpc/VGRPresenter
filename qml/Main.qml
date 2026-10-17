@@ -1,6 +1,11 @@
 import QtQuick
 import QtQuick.Controls
 import VGRPresenterUI
+// The app's one keyboard binding type (see qml/shortcuts/Shortcut.qml). Imported
+// AFTER QtQuick so `Shortcut {}` here means the app's action-named binding; it
+// is a drop-in for QtQuick's (sequence/enabled/activated), so the bindings below
+// read `action: "…"` and the chord itself lives in qml/settings/Hotkeys.qml.
+import "shortcuts"
 import "components"
 import "screens"
 import "screens/main"
@@ -394,6 +399,9 @@ ApplicationWindow {
     }
 
     property string settingsSection: "general"
+    // The Hotkeys scope Settings pushes while it is open (Esc closes it) — see
+    // the settingsScrim's onVisibleChanged and qml/settings/Hotkeys.qml.
+    property int settingsHotkeyScope: 0
     // The header is now two rows — the title bar (logo, menu, window buttons), a
     // separator line, then the Show / Edit / Stage tabs. The screens were designed
     // around a 48 px header, so they are pushed down by however much taller it is
@@ -703,8 +711,27 @@ ApplicationWindow {
         EngineBridge.log("info", "OpenTrace",
                          "openSearchResult kind=" + r.kind + " took " + (Date.now() - openT0) + "ms")
     }
+    // ---- Esc = cancel, Enter = accept -------------------------------------
+    // The app's two keys, owned HERE and nowhere else: which surface answers
+    // is the Hotkeys scope stack (qml/settings/Hotkeys.qml) — a dialog pushes
+    // what cancel/accept mean while it is up, so the one the operator is
+    // looking at is the one that answers, and an open confirm beats the dialog
+    // it sits on. Disabled when no scope asks for them, so with nothing open
+    // Esc and Enter reach whatever has focus exactly as before (a canvas item,
+    // a rename field, a search box).
     Shortcut {
-        sequence: "Ctrl+K"
+        action: "cancel"
+        enabled: Hotkeys.canCancel
+        onActivated: Hotkeys.cancel()
+    }
+    Shortcut {
+        action: "accept"
+        enabled: Hotkeys.canAccept
+        onActivated: Hotkeys.accept()
+    }
+
+    Shortcut {
+        action: "search"
         onActivated: quickSearch.openSearch()
     }
 
@@ -746,13 +773,13 @@ ApplicationWindow {
 
     // Ctrl+I: File > Import.
     Shortcut {
-        sequence: "Ctrl+I"
+        action: "importShow"
         onActivated: importDialog.open = true
     }
 
     // Ctrl+R: File > Record… — the same toggle.
     Shortcut {
-        sequence: "Ctrl+R"
+        action: "record"
         onActivated: {
             if (RecordingService.recording)
                 RecordingService.stopRecording()
@@ -763,25 +790,25 @@ ApplicationWindow {
 
     // Ctrl+N / O / S / Shift+S — the same actions as the File menu.
     Shortcut {
-        sequence: "Ctrl+N"
+        action: "newShow"
         onActivated: {
             editScreen.newShow()
             window.currentView = "edit"
         }
     }
     Shortcut {
-        sequence: "Ctrl+O"
+        action: "openShow"
         onActivated: {
             window.currentView = "edit"
             editScreen.openShow()
         }
     }
     Shortcut {
-        sequence: "Ctrl+S"
+        action: "saveShow"
         onActivated: editScreen.saveShow()
     }
     Shortcut {
-        sequence: "Ctrl+Shift+S"
+        action: "saveShowAs"
         onActivated: editScreen.saveShowAs()
     }
 
@@ -861,9 +888,24 @@ ApplicationWindow {
         // ModalScrim's #99000000 is exactly the 0.6 black this overlay
         // always used — no visual change, just the shared behavior.
         onDismissed: settingsScrim.visible = false
-        // Opening and closing Settings is part of "where you were" (see
-        // rememberSettingsPage): open records the page on screen, closed clears it.
-        onVisibleChanged: window.rememberSettingsPage()
+        // Esc closes Settings — the same meaning the card's X has, pushed as a
+        // Hotkeys scope for as long as the card is up. There is no accept: the
+        // sections apply as they are edited and this shell ships no footer.
+        onVisibleChanged: {
+            // Opening and closing Settings is part of "where you were" (see
+            // rememberSettingsPage): open records the page on screen, closed clears it.
+            window.rememberSettingsPage()
+            if (settingsScrim.visible) {
+                window.settingsHotkeyScope = Hotkeys.open({
+                    name: "Settings",
+                    cancel: function () { settingsScrim.visible = false }
+                })
+            } else {
+                Hotkeys.close(window.settingsHotkeyScope)
+                window.settingsHotkeyScope = 0
+            }
+        }
+        Component.onDestruction: Hotkeys.close(window.settingsHotkeyScope)
 
         ModalShell {
             id: settingsShell
@@ -6119,6 +6161,309 @@ ApplicationWindow {
         }
     }
     property int uiWarnTries: 0
+
+    // ---- Hardware rendering switch (VGR_GPU_TEST=1) --------------------------
+    // The report it answers: "can add a toggle in general so in case a user want
+    // to turn it by them self but it should [be] software by default as not all
+    // laptops have gpu". Two things have to be true, and only the RUNNING app can
+    // show either of them: the row is there and its switch really writes the
+    // setting, and the ENGINE really changes what it draws with — including the
+    // case the report is about, a machine whose GPU cannot be used, where the
+    // switch reads ON while the frames are still software.
+    //
+    // Every step prints THREE answers, never one: the stored value, what the
+    // engine says it is drawing with (SettingsService.rendererInUse — the backend
+    // really installed, not the setting), and the sentence the row itself DRAWS
+    // under the switch (selfTestNote_preferences.hardwareAcceleration). A row
+    // that echoed the switch back at the user instead of the truth is then
+    // visible in one line, which is the half no property trace can see.
+    //
+    // Borrow and put back: it flips the switch away from whatever it found and
+    // restores it before quitting, and the runner's verdict requires the restore
+    // — a scenario that left the GPU path on would hand the next launch the black
+    // picture this switch exists to avoid.
+    property int gpuPhase: 0
+    property int gpuTries: 0
+    property bool gpuWasOn: false
+    property bool gpuNowOn: false
+    property bool gpuConsistent: false
+    property int gpuClicks: 0
+    property string gpuBy: ""
+    property string gpuOnEngine: ""
+    property string gpuOffEngine: ""
+    readonly property string gpuKey: "preferences.hardwareAcceleration"
+    readonly property string gpuToggleName: "selfTestToggle_preferences.hardwareAcceleration"
+    function gpuValue() { return SettingsService.values[window.gpuKey] === true }
+    // Is the row's toggle inside the WINDOW (not merely "visible")? An item
+    // scrolled out of a Flickable keeps isVisible() true because the Flickable
+    // CLIPS instead of hiding — which is exactly how a click aimed at it misses:
+    // its centre maps outside the window entirely (measured: y=1208 on a 900-tall
+    // window). The driver's own itemVisible cannot see that, so the scenario
+    // checks the coordinate it is about to click.
+    function gpuToggleOnScreen() {
+        const c = SelfTest.itemCenter(window.gpuToggleName)
+        return c.x > 0 && c.y > 0 && c.x < window.width && c.y < window.height
+    }
+    function gpuNoteText() {
+        const t = SelfTest.findItem("selfTestNote_" + window.gpuKey)
+        return t ? String(t.text) : ""
+    }
+    // The row's own NAME — the line above the note, straight off the setting's
+    // definition. Reported because a row that rendered as a blank line with a
+    // switch on it would still be clickable: this is the difference between
+    // "the switch works" and "the switch is SHOWING", which is the question that
+    // was actually asked. Last on the result line, so its spaces need no quoting.
+    function gpuLabelText() {
+        const t = SelfTest.findItem("selfTestLabel_" + window.gpuKey)
+        return t ? String(t.text) : ""
+    }
+    // Does the row's own sentence agree with the backend that is really
+    // installed? The wording is QML's and stays there; this only asks the two
+    // about the SAME fact — the engine says GPU and the row talks about the card,
+    // or the engine says software while the switch is on and the row says so.
+    function gpuNoteConsistent(note) {
+        const saysNoGpu = note.indexOf("No usable GPU") >= 0
+        const saysCard = note.indexOf("graphics card") >= 0
+        if (SettingsService.rendererOnGpu)
+            return saysCard && !saysNoGpu
+        return window.gpuNowOn ? saysNoGpu : !saysNoGpu
+    }
+    // Writes the value the toggle's own handler writes — the documented fallback
+    // for a synthetic click that missed (see SelfTestDriver's foreground note).
+    function gpuSet(on) {
+        SettingsService.setValue(window.gpuKey, on)
+    }
+    Timer {
+        id: selfTestGpuStart
+        running: typeof SelfTestGpu !== "undefined" && SelfTestGpu
+        interval: 9000            // boot, then the store's own read (see whenReady)
+        onTriggered: {
+            window.openSettings("general")
+            selfTestGpuTick.start()
+        }
+    }
+    Timer {
+        id: selfTestGpuTick
+        interval: 1200
+        repeat: true
+        onTriggered: {
+            switch (window.gpuPhase) {
+            case 0: {
+                // Scroll the row into view FIRST: a click at an unlaid-out item's
+                // coordinates lands on whatever else is there, and the Preferences
+                // card sits below the fold of this page.
+                const flick = SelfTest.findItem("selfTestGeneralFlick")
+                const toggle = SelfTest.findItem(window.gpuToggleName)
+                if (!flick || !toggle) {
+                    if (window.gpuTries++ < 8)
+                        return
+                    console.log("[SELFTEST-GPU] result missing=yes flick=" + !!flick
+                                + " toggle=" + !!toggle)
+                    SelfTest.quit()
+                    return
+                }
+                if (!window.gpuToggleOnScreen()) {
+                    // Scroll the row to the MIDDLE of the viewport and look
+                    // again next tick: the click has to be inside the window.
+                    const y = toggle.mapToItem(flick.contentItem, 0, 0).y
+                    const max = Math.max(0, flick.contentHeight - flick.height)
+                    flick.contentY = Math.min(max, Math.max(0, y - flick.height / 2))
+                    if (window.gpuTries++ < 12) {
+                        const c = SelfTest.itemCenter(window.gpuToggleName)
+                        console.log("[SELFTEST-GPU] scrolling to the row (toggle at "
+                                    + Math.round(c.x) + "," + Math.round(c.y)
+                                    + " contentY=" + Math.round(flick.contentY)
+                                    + " of " + Math.round(max) + ")")
+                        return
+                    }
+                    console.log("[SELFTEST-GPU] result missing=yes toggle=notonscreen")
+                    SelfTest.quit()
+                    return
+                }
+                window.gpuWasOn = window.gpuValue()
+                window.gpuNowOn = !window.gpuWasOn
+                console.log("[SELFTEST-GPU] switch before=" + window.gpuWasOn
+                            + " clicking for=" + window.gpuNowOn)
+                SelfTest.activate()
+                SelfTest.clickItem(window.gpuToggleName)
+                window.gpuClicks = 1
+                window.gpuPhase = 1
+                return
+            }
+            case 1: {
+                if (window.gpuValue() !== window.gpuNowOn) {
+                    // A synthetic click needs window-foreground luck (see
+                    // SelfTestDriver's own note). Twice more before giving up, and
+                    // the path that finally engaged is printed either way — a run
+                    // where the click really took is the one that also proves the
+                    // row is clickable, so a fallback must not read as a pass
+                    // silently.
+                    if (window.gpuClicks < 3) {
+                        window.gpuClicks++
+                        if (window.gpuClicks === 2) {
+                            const c = SelfTest.itemCenter(window.gpuToggleName)
+                            console.log("[SELFTEST-GPU] click missed at " + Math.round(c.x) + "," + Math.round(c.y)
+                                        + " — retrying")
+                        }
+                        SelfTest.activate()
+                        SelfTest.clickItem(window.gpuToggleName)
+                        return
+                    }
+                    window.gpuBy = "setValue"
+                    window.gpuSet(window.gpuNowOn)
+                } else {
+                    window.gpuBy = "click"
+                }
+                window.gpuTries = 0
+                window.gpuPhase = 2
+                return
+            }
+            case 2: {
+                // The apply is a WORKER round-trip (SettingsService pushes the
+                // preference to the engine off the interface thread), so the
+                // engine's answer may arrive a tick or two after the write.
+                if (SettingsService.rendererInUse === "" && window.gpuTries++ < 10)
+                    return
+                window.gpuOnEngine = SettingsService.rendererInUse
+                window.gpuConsistent = window.gpuNoteConsistent(window.gpuNoteText())
+                console.log("[SELFTEST-GPU] on value=" + window.gpuValue()
+                            + " engine=" + window.gpuOnEngine
+                            + " gpu=" + SettingsService.rendererOnGpu
+                            + " consistent=" + window.gpuConsistent
+                            + " by=" + window.gpuBy
+                            + " note=" + window.gpuNoteText())
+                window.gpuTries = 0
+                window.gpuPhase = 3
+                return
+            }
+            case 3: {
+                // Put the operator's switch back exactly where it was found (the
+                // same click, and the same retry-then-write fallback: a miss here
+                // is reported by the field below, never assumed away).
+                SelfTest.activate()
+                SelfTest.clickItem(window.gpuToggleName)
+                window.gpuClicks = 0
+                window.gpuPhase = 4
+                return
+            }
+            case 4: {
+                if (window.gpuValue() !== window.gpuWasOn) {
+                    if (window.gpuClicks < 3) {
+                        window.gpuClicks++
+                        SelfTest.activate()
+                        SelfTest.clickItem(window.gpuToggleName)
+                        return
+                    }
+                    window.gpuSet(window.gpuWasOn)
+                }
+                window.gpuTries = 0
+                window.gpuPhase = 5
+                return
+            }
+            case 5: {
+                if (SettingsService.rendererOnGpu && window.gpuTries++ < 10)
+                    return            // still on the backend the flip installed
+                window.gpuOffEngine = SettingsService.rendererInUse
+                console.log("[SELFTEST-GPU] result restored=" + (window.gpuValue() === window.gpuWasOn)
+                            + " was=" + window.gpuWasOn
+                            + " value=" + window.gpuValue()
+                            + " engine=" + window.gpuOffEngine
+                            + " gpu=" + SettingsService.rendererOnGpu
+                            + " onEngine=" + window.gpuOnEngine
+                            + " onConsistent=" + window.gpuConsistent
+                            + " by=" + (window.gpuBy === "" ? "none" : window.gpuBy)
+                            + " label=" + window.gpuLabelText())
+                selfTestGpuTick.stop()
+                SelfTest.quit()
+                return
+            }
+            }
+        }
+    }
+
+    // ---- What each output's style does to a slide (VGR_OUTS_TEST=1) --------
+    // The report this answers: "scripture and The Table work, shows do not" —
+    // a style that restyles the content tabs' designs, and one that lays shows
+    // out as well, are different pictures on air and were indistinguishable on
+    // this screen (a row said WHICH style it wears and nothing about what that
+    // style does). The row now prints the engine's own answer
+    // (OutputListModel::styleLayoutNote -> SlideRules::LayoutScope), so what is
+    // checked here is the ROW AS RENDERED: the sentence reaches the delegate,
+    // every styled row has one, and it is one of the documented answers rather
+    // than an empty or stale line.
+    //
+    // Reads the card item by its objectName and its own `styleLayout`
+    // property — the same value the Text under the Style pill binds to — so a
+    // role that resolved in the model but never reached the row is visible.
+    property int outsPhase: 0
+    property int outsTries: 0
+    readonly property var outsScopePhrases: [
+        "Restyles Scripture and The Table",   // content families, shows keep their own
+        "Lays out shows too",   // the style's Shows slot names a template
+        "No layout of its own"                // background and placement only
+    ]
+    function outsSample() {
+        const found = { rows: 0, styled: 0, described: 0, lines: [] }
+        for (let i = 0; i < 24; ++i) {
+            const item = SelfTest.findItem("selfTestOutputRow_" + i)
+            if (!item)
+                break
+            ++found.rows
+            const styleName = String(item.styleName)
+            const note = String(item.styleLayout)
+            let named = "none"
+            for (const phrase of window.outsScopePhrases)
+                if (note.indexOf(phrase) === 0) { named = phrase; break }
+            if (styleName !== "None" && styleName !== "") {
+                ++found.styled
+                if (named !== "none")
+                    ++found.described
+            }
+            found.lines.push("[SELFTEST-OUTS] row=" + i + " output=\"" + String(item.name)
+                             + "\" style=\"" + styleName + "\" scope=\"" + named
+                             + "\" note=\"" + note + "\"")
+        }
+        return found
+    }
+    Timer {
+        id: selfTestOutsStart
+        running: typeof SelfTestOutputsLayout !== "undefined" && SelfTestOutputsLayout
+        interval: 9000            // boot, then the style roster adopts
+        onTriggered: {
+            window.openSettings("outputs")
+            selfTestOutsTick.start()
+        }
+    }
+    Timer {
+        id: selfTestOutsTick
+        interval: 700
+        repeat: true
+        onTriggered: {
+            // Wait for the rows to exist AND for their style names to resolve:
+            // the roster is adopted a moment after boot, and a row read before
+            // that says "None" for a style it really wears.
+            if (window.outsPhase === 0) {
+                const probe = SelfTest.findItem("selfTestOutputRow_0")
+                if (!probe) {
+                    if (window.outsTries++ > 20) {
+                        console.log("[SELFTEST-OUTS] result missing=yes rows=0")
+                        selfTestOutsTick.stop()
+                        SelfTest.quit()
+                    }
+                    return
+                }
+                window.outsPhase = 1
+                return
+            }
+            const found = window.outsSample()
+            for (const line of found.lines)
+                console.log(line)
+            console.log("[SELFTEST-OUTS] result missing=no rows=" + found.rows
+                        + " styled=" + found.styled + " described=" + found.described)
+            selfTestOutsTick.stop()
+            SelfTest.quit()
+        }
+    }
 
     // ---- Style background reaches the output tiles (VGR_STYLEBG_TEST=1) -----
     // The second half of the same report ("i select the style for output when

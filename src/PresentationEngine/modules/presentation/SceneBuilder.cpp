@@ -24,6 +24,8 @@
 #include <format>
 #include <map>
 #include <mutex>
+#include <set>
+#include <string_view>
 
 #include "modules/media/FrameSource.hpp"
 #include "modules/rendering/PngCodec.hpp"
@@ -400,6 +402,43 @@ std::vector<ContentBlock> BindTemplateBlocks(const std::vector<ContentBlock>& tm
     return out;
 }
 
+// DOES THIS COMPOSITION PAINT ANYTHING AT ALL?
+//
+// A layout whose every text slot came out EMPTY after binding paints a blank
+// frame: nothing draws an object, so the output is a black (or, under a
+// transparent style, a fully see-through) picture while the app's own tiles —
+// which draw the slide's own blocks — show the sermon. That is the report "the
+// NDI feed says frames are going out and the monitor is black, it does not even
+// show the background image": a style whose table/shows template is a design
+// built out of palette FIELD tokens ("{table_text}", "{table_code_paragraphs}")
+// owned the composition, its tokens had no values to fill, and the slide's own
+// blocks — where the content actually is — were dropped for it.
+//
+// Non-text kinds always paint (a shape, a box, an image, a chip), and a text
+// block paints when what is left in it is more than whitespace.
+// ONE LINE PER SLIDE, not one per build: the live loop rebuilds a scene every
+// time its fingerprint moves, and a diagnostic that repeats on each build is
+// noise in the very log an operator is asked to read (measured: the style-less
+// preview path rebuilt the same blank carrier scene several times a second).
+std::mutex g_blankSlideMutex;
+std::set<std::string> g_blankSlideLogged;
+
+bool CompositionPaints(const std::vector<ContentBlock>& blocks) {
+    for (const ContentBlock& b : blocks) {
+        if (b.kind != "text") return true;
+        if (b.text.find_first_not_of(" \t\r\n") != std::string::npos) return true;
+    }
+    return false;
+}
+
+// Can this slide feed a built-in PRESET? The preset path draws the slide's own
+// title and body and NOTHING else (AddPresetTextObjects), so a slide that
+// carries neither — content-family slides put their text in blocks — has
+// nothing to give a preset, whatever layout it would have worn.
+bool PresetHasContent(const Slide& slide) {
+    return !slide.title.empty() || !slide.text.empty();
+}
+
 // Renders positioned stage blocks (the 754×428 Edit-stage grid template
 // designs and slides share) into a scene layer: text blocks become styled
 // TextObjects, box/shape blocks ShapeObjects; other kinds (clock, timer,
@@ -493,6 +532,13 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
     // template block never reaches this fallback (DesignCatalogs' Text() always
     // writes a fontSize); it is for the hand-made items.
     constexpr double kDefaultTextFontSize = 16.0;
+    // The line height a block gets when its meta names none — or names 0, which
+    // is what the Text panel writes for "the font's own spacing": a
+    // PROPORTIONAL 1.0 of that font's natural line height, nothing added. THE
+    // one value, mirrored by qml/settings/MetadataFields.qml's
+    // naturalLineHeight (the panel, the canvas and the tiles all read it there);
+    // the derivation below is where it becomes an additive lineSpacing.
+    constexpr double kNaturalLineHeight = 1.0;
     // THE SPLIT COMES FROM ITS ONE HOME — the same call the UI's live preview
     // makes, so the tile and every real output read one design the same way.
     // `demoted`/`stageCovered` below are this build's report of it.
@@ -613,10 +659,11 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             styleComp->style.wrap = true;
             styleComp->style.wrapWidth = text->Bounds().width;
             // The typography knobs the canvas/DesignPreview honor and the
-            // engine silently dropped — lineHeight (QML's Text default 1.2,
-            // an empty line of black serif overflows a verse box at output
-            // scale) and letterSpacing. letter-spacing is PER GAP (n-1 gaps
-            // for n glyphs), the same convention TextLayout's width math uses.
+            // engine silently dropped — lineHeight (no added spacing: the
+            // font's own line height, an empty line of black serif made a
+            // verse box overflow at output scale) and letterSpacing.
+            // letter-spacing is PER GAP (n-1 gaps for n glyphs), the same
+            // convention TextLayout's width math uses.
             //
             // lineHeight → lineSpacing: Qt renders Text.lineHeight as a
             // PROPORTIONAL multiplier of the font's OWN natural line height
@@ -633,7 +680,24 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             // same box, one font fits, one clips). Unresolvable metrics
             // (builtin font, off-Windows) keep the legacy formula.
             {
-                const double lh = MetaNumber(block.metaJson, "lineHeight", 1.2);
+                // THE ONE LINE-HEIGHT RULE, shared with every QML surface:
+                // `lineHeight` is a PROPORTIONAL multiplier of the font's own
+                // natural line height (Qt's Text.lineHeight model), and a
+                // non-positive value — 0, or a template that never named it —
+                // means THE FONT'S OWN spacing, nothing added. Its QML twin is
+                // MetadataFields.naturalLineHeight / lineHeight(meta); the two
+                // must stay equal, because three surfaces draw the same block.
+                //
+                // What this replaces: the engine defaulted a missing field to
+                // 1.2 — while the Text panel showed 0 for the very same item
+                // and the canvas/previews drew their own 1.2 — so a template
+                // that said "0" (or said nothing) got ~1.2x the natural
+                // spacing on air with no visible value that produced it. A
+                // stored 0 now reads as natural, exactly as the panel shows it;
+                // the old formula made it `baselineStep * 0 - size`, a ZERO
+                // line step that stacked every line on one baseline.
+                double lh = MetaNumber(block.metaJson, "lineHeight", kNaturalLineHeight);
+                if (!(lh > 0.0)) lh = kNaturalLineHeight;
                 const float sizePx = styleComp->style.size;   // the output-scaled font size
                 rendering::FontManager::LineMetrics lm{};
                 if (rendering::RenderEngine::Instance().Fonts().SystemLineMetrics(
@@ -1100,6 +1164,34 @@ SceneBuilder::SlideComposition SceneBuilder::ComposeSlide(const Slide& slide,
     comp.contentType = SlideRules::ContentType(slide);
     comp.familyIdx = SlideRules::FamilyTemplateSlot(comp.contentType);
 
+    // ---- A CLEAR PAINTS NOTHING AT ALL -------------------------------------
+    // Clear all (and the per-layer slide clear) sends a CLEAR carrier: no
+    // content AND no style. The obvious shape — an empty slide, composed the
+    // same way every other slide is — is what made a clear look like it did not
+    // clear: the style paints onto an empty slide exactly as it does onto a
+    // full one (that is the whole point of the blank GO-LIVE carrier), so the
+    // screens went from the slide to the style's own background IMAGE and the
+    // report was "clear all doesn't clear: the bg brings back the background
+    // image and clears the slide".
+    //
+    // So the clear is its own composition, decided HERE rather than by every
+    // output's style: nothing of the style's (colour, image), nothing of the
+    // slide's, and an explicitly empty frame — `explicitTransparent` marks it
+    // as a CHOSEN empty frame, which is what the monitor tile needs to show its
+    // transparency convention instead of painting the style's colour as the
+    // pane's base.
+    //
+    // GO LIVE with nothing staged does NOT come through here: that carrier is
+    // deliberately not a clear, and keeps the output's own look (see
+    // LiveOutputService::goLiveBlank).
+    if (slide.clearStage) {
+        comp.source = SlideComposition::Source::Cleared;
+        comp.paintBackground = false;
+        comp.explicitTransparent = true;
+        comp.styleImageSuppressed = true;
+        return comp;
+    }
+
     // ---- The background the output paints ---------------------------------
     // THE PRECEDENCE, in one place, because this is the decision the monitor
     // tile and every real output have to agree on:
@@ -1159,10 +1251,132 @@ SceneBuilder::SlideComposition SceneBuilder::ComposeSlide(const Slide& slide,
     }
     const bool slideHasContent = !slide.blocks.empty() || !slide.title.empty()
         || !slide.text.empty();
+
+    // ---- A SHOW'S SLIDE IS ITS OWN DESIGN ---------------------------------
+    // The SCRIPTURE and TABLE tabs build their slides FROM a design: the blocks
+    // a pick carries are that design's field slots, holding content for an
+    // output style to lay out its own way — which is why the branches below
+    // hand such a slide to the style's template first.
+    //
+    // A SHOW is the other way round. Its slide's blocks are the design itself:
+    // every item was placed on the Edit canvas by the operator (a title item, a
+    // text band, a shape), and nothing about them is a slot for a style to
+    // re-fill. An output style's WHOLE-STYLE template is not keyed to a
+    // content family at all (style.contentType empty), so it claimed these
+    // slides too and replaced the authored layout with its own: the outputs
+    // (NDI, HDMI, the distributed frames) drew the style's bound body — the
+    // hymn lines, no title, no authored band — while the monitor tile and the
+    // Edit canvas, which draw the slide's own blocks, showed the whole design.
+    // That is the report "the preview shows all the content but the NDI/HDMI
+    // output does not" for shows only; scripture and The Table were never
+    // affected because their style templates are the fix for THOSE families.
+    //
+    // So an untagged slide (the shows family — see SlideRules::FamilyTemplateSlot)
+    // that carries its own blocks keeps them under the style's WHOLE-STYLE
+    // template (templateKey/templateBlocks), which names no family at all.
+    // That is the template that claimed these slides and drew "the style's
+    // bound body — the hymn lines, no title, no authored band" while the tile
+    // and the canvas showed the whole design. The style still supplies the
+    // BACKGROUND (colour and image, decided above, so a branded backdrop still
+    // lands). The style's gates are untouched (StyleAdmits, above): a style
+    // that switches the shows family OFF still composes background-only for
+    // these slides.
+    //
+    // THE ONE EXCEPTION IS A CHOICE, NOT AN INFERENCE: a template picked in the
+    // style's OWN Shows slot (Settings · Styles → "Template for Shows" →
+    // Change, i.e. familyTemplateKeys/familyTemplateBlocks[shows]) is the
+    // operator saying "lay my shows out with THIS design" — the picker's own
+    // contract ("the engine renders that design as the style's layout"). That
+    // explicit pick wins over the authored layout, exactly like a
+    // scripture/table pick does for its family, and like those it can still
+    // hand the slide back when the design paints nothing (see
+    // fallBackToSlideBlocks). The report "I chose Lower Third for style 2 and
+    // it does the opposite" is exactly this distinction: the general template
+    // is not a layout request for shows, the Shows slot is.
+    const bool slideIsShowsContent =
+        comp.contentType.empty() || comp.contentType == "shows";
+    // THE PICK IS THE KEY, not the blocks: a family slot can carry BAKED blocks
+    // it never selected — the front-end's shows fallback fills the shows slot
+    // with the Scripture design whenever the style names no shows template
+    // (StyleSpecBuilder::bakeFamilyTemplates, its "Bible fallback for show
+    // content"), and the whole-style inherit pass fills the other families —
+    // so "has blocks" would be true for every style and would hand every
+    // authored show to a design its operator never chose. Only a key names a
+    // choice; the blocks are then its baked form.
+    const bool stylePickedShowsLayout =
+        comp.familyIdx < 4 && !style.familyTemplateKeys[comp.familyIdx].empty();
+    if (slideIsShowsContent && !slide.blocks.empty() && !stylePickedShowsLayout) {
+        comp.source = SlideComposition::Source::SlideBlocks;
+        return comp;   // `blocks` stays empty: the caller draws the slide's own
+    }
+
+    // A LAYOUT THAT WOULD PAINT NOTHING HANDS THE COMPOSITION BACK TO THE SLIDE.
+    //
+    // The branches below pick a layout and give it the slide; each of them can
+    // come out BLANK for content-family slides, because those carry their text
+    // in their own blocks while a template/preset renders its own slots (or the
+    // slide's title/body, which such a slide has none of). A blank composition
+    // is a blank output — the tiles draw the slide's blocks themselves and look
+    // right while the NDI feed and the HDMI window show black, and under a
+    // transparent style the frame is fully see-through, which is the report "it
+    // is sending frames but nothing arrives, not even the background image".
+    // FreeShow's precedence (output style > slide) is kept exactly where the
+    // layout has something to draw; where it does not, the slide's own blocks
+    // are the only content there is.
+    const auto fallBackToSlideBlocks = [&comp, &slide, &style](bool layoutPaints,
+                                                              std::string_view what) {
+        if (layoutPaints)
+            return;
+        if (slide.blocks.empty()) {
+            // Nothing of the slide's own to hand the composition to either:
+            // the layout and the slide are BOTH empty, which is a different
+            // bug — the content never reached the engine. Named out loud
+            // because the app's own panes draw their picture from the model
+            // and look populated while every output stays blank.
+            //
+            // Only when the frame ends up with NOTHING in it at all: a blank
+            // GO LIVE carrier reaches this same branch on purpose, and it is
+            // not a fault — the style's image (or the style colour) still
+            // paints there, which is exactly the difference this asks about.
+            const bool frameIsEmpty = !comp.paintBackground
+                && (style.backgroundImage.empty() || comp.styleImageSuppressed);
+            // A style with no name is the engine's own style-less preview build
+            // (no output wears it), so a blank frame there is not a fault.
+            if (!frameIsEmpty || style.name.empty())
+                return;
+            {
+                std::lock_guard<std::mutex> lock(g_blankSlideMutex);
+                if (!g_blankSlideLogged.insert(slide.id).second)
+                    return;   // already said so for this slide
+            }
+            Logger::Instance().Info(
+                std::format("slide '{}' arrived with no blocks, no title and no body, and "
+                            "{} of style '{}' has nothing to fill — the outputs compose a "
+                            "blank frame (the content did not reach the engine)",
+                            slide.id, what, style.name),
+                "SceneBuilder");
+            return;
+        }
+        Logger::Instance().Info(
+            std::format("slide '{}': {} of style '{}' paints nothing (no bound text, no "
+                        "shapes) — the slide's own blocks own the composition, so the outputs "
+                        "and the NDI feed carry the picture instead of a blank frame",
+                        slide.id, what, style.name),
+            "SceneBuilder");
+        comp.source = SlideComposition::Source::SlideBlocks;
+        comp.blocks.clear();
+        comp.presetKey.clear();
+        comp.preset = StyleBuilder::Layout{};
+    };
+
     if (slideHasContent && comp.familyIdx < 4
         && !style.familyTemplateBlocks[comp.familyIdx].empty()) {
         comp.source = SlideComposition::Source::FamilyTemplate;
         comp.blocks = BindTemplateBlocks(style.familyTemplateBlocks[comp.familyIdx], slide);
+        fallBackToSlideBlocks(
+            CompositionPaints(comp.blocks),
+            std::format("family {} template '{}'", comp.familyIdx,
+                        style.familyTemplateKeys[comp.familyIdx]));
         return comp;
     }
     if (slideHasContent && !style.templateBlocks.empty()
@@ -1170,6 +1384,8 @@ SceneBuilder::SlideComposition SceneBuilder::ComposeSlide(const Slide& slide,
             || comp.contentType == style.contentType)) {
         comp.source = SlideComposition::Source::StyleTemplate;
         comp.blocks = BindTemplateBlocks(style.templateBlocks, slide);
+        fallBackToSlideBlocks(CompositionPaints(comp.blocks),
+                              std::format("template '{}'", style.templateKey));
         return comp;
     }
     if (comp.familyIdx < 4 && !style.familyTemplateKeys[comp.familyIdx].empty()
@@ -1177,6 +1393,9 @@ SceneBuilder::SlideComposition SceneBuilder::ComposeSlide(const Slide& slide,
         comp.source = SlideComposition::Source::FamilyPreset;
         comp.presetKey = style.familyTemplateKeys[comp.familyIdx];
         comp.preset = StyleBuilder::LayoutFor(comp.presetKey);
+        fallBackToSlideBlocks(PresetHasContent(slide),
+                              std::format("family {} preset '{}'", comp.familyIdx,
+                                          comp.presetKey));
         return comp;
     }
     if (!slide.blocks.empty()) {
@@ -1186,6 +1405,8 @@ SceneBuilder::SlideComposition SceneBuilder::ComposeSlide(const Slide& slide,
     comp.source = SlideComposition::Source::StylePreset;
     comp.presetKey = style.templateKey;
     comp.preset = StyleBuilder::LayoutFor(comp.presetKey);
+    fallBackToSlideBlocks(PresetHasContent(slide),
+                          std::format("preset '{}'", comp.presetKey));
     return comp;
 }
 
@@ -1561,6 +1782,15 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
                                             sceneId, style.name, n), "SceneBuilder");
         return sceneId;
     }
+    case SlideComposition::Source::Cleared:
+        // A CLEAR: the composition already switched the style's colour and
+        // image off (see ComposeSlide), and there are no blocks to draw, so the
+        // scene is left EMPTY — the frame the outputs show is keyable/black,
+        // which is what clearing means. Logged because "the output is black"
+        // and "the output shows nothing on purpose" have to be told apart.
+        Logger::Instance().Debug(std::format("Scene built: {} (clear — the frame paints nothing)", sceneId),
+                                 "SceneBuilder");
+        return sceneId;
     case SlideComposition::Source::StylePreset:
         break;   // the style's own built-in layout: the two text regions below
     case SlideComposition::Source::Refused:

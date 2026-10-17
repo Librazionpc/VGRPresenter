@@ -1,6 +1,8 @@
 #include "services/SettingsService.h"
 
+#include "core/config/ConfigurationManager.hpp"
 #include "modules/adaptive/AdaptiveRuntime.hpp"
+#include "modules/rendering/RenderEngine.hpp"
 #include "modules/settings/AppSettings.hpp"
 #include "modules/settings/DataProtection.hpp"
 #include "modules/settings/SmartConfig.hpp"
@@ -82,6 +84,62 @@ QVariantMap choiceMap(const bs::SettingChoice &c, bs::SettingKind kind)
     m.insert(QStringLiteral("color"), qstr(c.color));
     m.insert(QStringLiteral("colorLight"), qstr(c.colorLight));
     return m;
+}
+
+// ---------------------------------------------------------------------------
+// The renderer the user asked for (Settings · General's hardware switch)
+// ---------------------------------------------------------------------------
+//
+// The one place the app's `preferences.hardwareAcceleration` is turned into the
+// engine's own configuration, and the only place in the app that asks the render
+// engine to re-install a backend. Its callers are both off the interface thread
+// (see applyEngineSettingsAsync): the reload MAKES A DEVICE — the exact class of
+// call the interface-thread guard exists for.
+//
+// TWO KEYS, on purpose — RenderEngine::ResolveBackendName is the rule, this is
+// the writer that keeps it meaningful:
+//
+//   render.hardwareAcceleration   what THIS writes: the app's preference, used
+//                                 when nobody made an explicit choice.
+//   render.backend                NOT written here, ever. An explicit choice (a
+//                                 config file, an installed profile) OUTRANKS
+//                                 the app's switch, so the switch must not
+//                                 overwrite it — doing so would silently defeat
+//                                 an installed profile and make the switch look
+//                                 like the only truth about the renderer.
+//
+// Written to the Runtime scope: it is this run's answer, not something to persist
+// in the engine's own config file (the user's choice lives in settings.json,
+// which AppSettings owns).
+//
+// A write that changes nothing does NOTHING — no device, no reload — so the app
+// pushing the whole store (every settings write does, coalesced) can never re-make
+// a GPU device per tick.
+struct RenderBackendApply {
+    bool changed = false;   // the preference really changed (only that is announced)
+    bool wantGpu = false;   // what the engine was asked for
+    QString active;         // what it is really drawing with ("" = not initialized yet)
+};
+
+RenderBackendApply ApplyRenderBackendPreference(const bs::AppSettings &settings)
+{
+    RenderBackendApply out;
+    const bool wantGpu = settings.GetBool("preferences.hardwareAcceleration");
+    auto &config = bps::ConfigurationManager::Instance();
+    if (config.GetBool("render.hardwareAcceleration", false) == wantGpu)
+        return out;   // already in force: there is nothing to ask the engine for
+
+    (void)config.Set("render.hardwareAcceleration", bps::json::Value::Bool(wantGpu),
+                     bps::ConfigScope::Runtime);
+    auto &render = bps::rendering::RenderEngine::Instance();
+    // Initialize() reads this very key, so a store that opened before the render
+    // module did has already been obeyed and there is nothing to re-bind yet.
+    if (render.Initialized())
+        (void)render.Reload();
+    out.changed = true;
+    out.wantGpu = wantGpu;
+    out.active = qstr(render.ActiveBackendName());
+    return out;
 }
 
 } // namespace
@@ -169,6 +227,18 @@ void SettingsService::load()
 
     // Whatever the user chose last time takes effect now, and every later change does the same.
     (void)bs::ApplyToEngine(*settings_, bps::adaptive::AdaptiveRuntime::Instance());
+    // The renderer choice goes to a WORKER (see ApplyRenderBackendPreference: the
+    // reload makes a device), so the boot path only arms it here; it lands — and
+    // the General row starts reporting what is really drawing — a moment later.
+    // It is not announced: the user chose this in an earlier session, and a boot
+    // toast re-announcing a setting nobody just touched is noise.
+    {
+        auto settings = settings_;   // shared: the worker holds the store alive
+        runOffThread([settings] {
+            const RenderBackendApply applied = ApplyRenderBackendPreference(*settings);
+            (void)applied;
+        });
+    }
     settings_->Subscribe([this](const std::string &key) {
         refreshValues();
         // The ENGINE apply is not interface-thread work (see
@@ -183,6 +253,13 @@ void SettingsService::load()
             applyLaunchAtLogin();
         else if (key == "appearance.language")
             announceLanguage();   // applies the locale AND says what it did
+        // ...and the push the paragraph above describes, for EVERY write (this
+        // call was missing, so a live write only reached the engine through a
+        // restart or a settings restore: the resource profile, Lock In Mode, the
+        // Smart Config budgets, the log level AND General's hardware switch all
+        // read back as changed and did nothing). Coalesced, so a slider drag is
+        // still one apply, not one per tick.
+        applyEngineSettingsAsync();
         emit valueChanged(qstr(key));
         emit changed();
     });
@@ -275,7 +352,24 @@ QString SettingsService::choiceLabel(const QString &key) const
 
 int SettingsService::resetAll()
 {
-    return settings_ ? static_cast<int>(settings_->ResetAll()) : 0;
+    if (!settings_)
+        return 0;
+    const int count = static_cast<int>(settings_->ResetAll());
+    if (count > 0) {
+        // Bring what reads the store back in line with it — the same three the
+        // restore-a-backup path runs. WITHOUT this the screens keep drawing the
+        // values they had (ResetAll answers a count and tells no listener), so a
+        // reset left every row showing what it showed before the click.
+        refreshValues();
+        applyLaunchAtLogin();
+        applyLanguage();
+        emit changed();
+        // And the engine's runtime copy of the old values is now wrong too (a
+        // reset profile or a reset renderer choice would otherwise keep running
+        // until the next restart). Same off-thread apply every other write uses.
+        applyEngineSettingsAsync();
+    }
+    return count;
 }
 
 void SettingsService::whenReady(std::function<void()> callback)
@@ -546,6 +640,25 @@ void SettingsService::applyEngineSettingsAsync()
     runOffThread([this, settings] {
         for (;;) {
             applyRequested_.store(false);
+            // The renderer first, and only when the user really changed it: this
+            // is the call that makes a GPU device, and the answer it brings back
+            // is what the General screen's row reports (see rendererInUse).
+            const RenderBackendApply render = ApplyRenderBackendPreference(*settings);
+            if (render.changed)
+                QMetaObject::invokeMethod(this, [this, render] {
+                    rendererInUse_ = render.active;
+                    rendererOnGpu_ = render.active == QLatin1String("directx11");
+                    if (render.wantGpu && !rendererOnGpu_)
+                        report(tr("Hardware rendering is on, but no usable GPU was found — frames are drawn in software."),
+                               QStringLiteral("warning"));
+                    else if (render.wantGpu)
+                        report(tr("Hardware rendering is on — frames are drawn on the graphics card."),
+                               QStringLiteral("info"));
+                    else
+                        report(tr("Hardware rendering is off — frames are drawn in software."),
+                               QStringLiteral("info"));
+                    emit changed();
+                }, Qt::QueuedConnection);
             auto applied = bs::ApplyToEngine(*settings, bps::adaptive::AdaptiveRuntime::Instance());
             if (!applied.ok()) {
                 const QString error = qstr(applied.error().message);

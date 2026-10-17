@@ -46,6 +46,26 @@ Item {
 
     property bool open: false
 
+    // ---- Esc = cancel, Enter = the Save button (qml/settings/Hotkeys.qml) --
+    // The picker's own pair, pushed as a Hotkeys scope while it is up; the
+    // footer's Save and this share one `accept()`, so the key and the button
+    // cannot drift.
+    property int hotkeyScope: 0
+    function accept() { root.applied(root.withOpacity(root.selection)) }
+    onOpenChanged: {
+        if (root.open && root.hotkeyScope === 0) {
+            root.hotkeyScope = Hotkeys.open({
+                name: qsTr("Background colour"),
+                cancel: function () { root.cancelled() },
+                accept: function () { root.accept() }
+            })
+        } else if (!root.open && root.hotkeyScope !== 0) {
+            Hotkeys.close(root.hotkeyScope)
+            root.hotkeyScope = 0
+        }
+    }
+    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
+
     // 0-100 — the alpha the item is being edited AT. Seeded from the colour it
     // is opened on (seedWith), written back into the applied colour
     // (withOpacity). No reset-on-open: that reset is what made the picker drop
@@ -908,7 +928,7 @@ Item {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.applied(root.withOpacity(root.selection))
+                    onClicked: root.accept()
                 }
             }
         }

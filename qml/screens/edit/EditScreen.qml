@@ -1,6 +1,10 @@
 import QtQuick
 import QtQuick.Shapes
 import VGRPresenterUI
+// Imported AFTER QtQuick so `Shortcut {}` below means the app's action-named
+// binding (a drop-in for QtQuick's): every sequence this screen uses lives in
+// qml/settings/Hotkeys.qml, not in this file.
+import "../../shortcuts"
 import "../../components"
 
 // The Edit screen: the slide canvas editor shown when the "Edit" tab is
@@ -266,25 +270,14 @@ Rectangle {
     property real canvasZoom: 1
 
     // ---- Keyboard shortcuts --------------------------------------------
-    // One data map, not scattered hardcoded Keys.onPressed conditionals —
-    // every Shortcut element below reads its sequence from here, so a
-    // future rebind-shortcuts settings screen only has to change this map,
-    // never touch the Shortcut elements or add new key-handling code.
+    // The chords are NOT here any more: every Shortcut below names an ACTION
+    // (undo / redo / copy / …) and the sequence lives in the app's one map —
+    // qml/settings/Hotkeys.qml — beside the window's own menu accelerators, so
+    // a future rebind screen has one list to edit instead of one per screen.
     // Delete/Backspace/Escape/arrow-nudge stay on mCanvas's own
     // Keys.onPressed (below) rather than moving here — those are near-
     // universal editing conventions, not the app-specific actions this was
     // asked for (undo/redo/copy/paste/add-content).
-    property var shortcutBindings: ({
-        undo: "Ctrl+Z",
-        redo: "Ctrl+Shift+Z",
-        // The second-standard redo chord — see the Ctrl+Y Shortcut below.
-        redoAlt: "Ctrl+Y",
-        copy: "Ctrl+C",
-        paste: "Ctrl+V",
-        duplicateSelected: "Ctrl+D",
-        addText: "T",
-        addCamera: "Shift+C"
-    })
 
     // ---- Undo/redo -------------------------------------------------------
     // A reusable UndoHistory (see UndoHistory.qml) — now itself backed by
@@ -806,11 +799,13 @@ Rectangle {
     // immediately — see cameraSourceModal/mediaSourceModal/timerSourceModal/
     // clockSourceModal/shapeSourceModal below and the matching branches in
     // the chip row's onClicked above.
-    property bool cameraModalOpen: false
-    property bool mediaModalOpen: false
     property bool timerModalOpen: false
     property bool clockModalOpen: false
     property bool shapeModalOpen: false
+    // The Bus chip's picker — the roster is the engine's own buses
+    // (BusListModel), for the same reason the other pickers exist: an item
+    // that names a bus has to be given one before it can land.
+    property bool busModalOpen: false
     // The Metadata palette (the + menu's Metadata chip). Its fields come from
     // MetadataFields.qml — the one list of placeholders the engine's filler
     // knows, so a template being built here can be given any of them. `group`
@@ -894,12 +889,14 @@ Rectangle {
         // path data), not a Text glyph: the old "⏱"/"◷"/"◎" unicode
         // strings had no glyph coverage in Inter and rendered as missing-
         // glyph tofu boxes on Windows. Kind is the fallback for "text" —
-        // plain letters need no icon.
-        { kind: "text",   icon: "text",   label: "Text" },
-        { kind: "camera", icon: "camera",  label: "Camera" },
-        { kind: "media",  icon: "play",    label: "Media" },
-        { kind: "audio",  icon: "music",   label: "Audio" },
-        { kind: "shape",  icon: "shape",   label: "Shape" },        { kind: "timer",  icon: "timer",  label: "Timer" },
+        // plain letters need no icon.        { kind: "text",   icon: "text",   label: "Text" },
+        // The bus a slide carries. Camera / Media / Audio are gone from this
+        // ring by request — a service puts a BUS on screen, not a device
+        // (Settings · Audio & Video owns the buses and what is routed into
+        // them). The chip opens BusSourceModal below; the engine receives a
+        // block of kind "bus" carrying that bus's stable id.
+        { kind: "bus",    icon: "activity", label: "Bus" },
+        { kind: "shape",  icon: "shape",  label: "Shape" },        { kind: "timer",  icon: "timer",  label: "Timer" },
         { kind: "clock",  icon: "clock",  label: "Clock" },
         // Not an item kind: this chip opens the METADATA palette (MetadataFields.qml)
         // instead of adding an item, because a metadata field is a text item whose
@@ -1419,7 +1416,8 @@ Rectangle {
                         autoSizeMode, baseFontSize,
                         itemTextLabel.tmeta.fontFamily, itemTextLabel.tmeta.fontWeight, itemTextLabel.tmeta.bold,
                         itemTextLabel.tmeta.italic, itemTextLabel.tmeta.textCase,
-                        itemTextLabel.tmeta.letterSpacing, itemTextLabel.tmeta.lineHeight
+                        MetadataFields.letterSpacing(itemTextLabel.tmeta),
+                        MetadataFields.lineHeight(itemTextLabel.tmeta)
                     ]
                     onFitInputsChanged: if (!solving)
                         Qt.callLater(itemTextLabel.recomputeFit)
@@ -1506,8 +1504,11 @@ Rectangle {
                             : itemTextLabel.tmeta.textCase === "lower" ? Font.AllLowercase
                             : itemTextLabel.tmeta.textCase === "capitalize" ? Font.Capitalize
                             : Font.MixedCase
-                        font.letterSpacing: itemTextLabel.tmeta.letterSpacing ?? 0
-                        lineHeight: itemTextLabel.tmeta.lineHeight ?? 1.2
+                        // The ONE reading of these two (see MetadataFields): the twin
+                        // must measure the spacing the display below paints, or the
+                        // auto-size solve is measuring one layout and drawing another.
+                        font.letterSpacing: MetadataFields.letterSpacing(itemTextLabel.tmeta)
+                        lineHeight: MetadataFields.lineHeight(itemTextLabel.tmeta)
                         lineHeightMode: Text.ProportionalHeight
                         wrapMode: Text.WordWrap
                     }
@@ -1539,8 +1540,10 @@ Rectangle {
                         : Font.MixedCase
                     font.underline: itemTextLabel.tmeta.underline === true
                     font.strikeout: itemTextLabel.tmeta.strikethrough === true
-                    font.letterSpacing: itemTextLabel.tmeta.letterSpacing ?? 0
-                    lineHeight: itemTextLabel.tmeta.lineHeight ?? 1.2
+                    font.letterSpacing: MetadataFields.letterSpacing(itemTextLabel.tmeta)
+                    // The panel's Height row reads the same function — 0/absent is
+                    // the font's own line height, never a hidden 1.2 (see MetadataFields).
+                    lineHeight: MetadataFields.lineHeight(itemTextLabel.tmeta)
                     horizontalAlignment: {
                         const a = itemTextLabel.tmeta.align ?? "center"
                         return a === "left" ? Text.AlignLeft
@@ -2416,10 +2419,8 @@ Rectangle {
                 // rather than landing on the canvas immediately — Audio is
                 // the only kind left with no ground-truth picker popup, so
                 // it's the only one that still adds straight away.
-                if (kind === "camera")
-                    root.cameraModalOpen = true
-                else if (kind === "media")
-                    root.mediaModalOpen = true
+                if (kind === "bus")
+                    root.busModalOpen = true
                 else if (kind === "timer")
                     root.timerModalOpen = true
                 else if (kind === "clock")
@@ -2453,7 +2454,10 @@ Rectangle {
             AppCursor.popBlocker(metadataPalette)
     }
     onMetadataPaletteOpenChanged: root.syncMetadataBlocker()
-    Component.onDestruction: AppCursor.popBlocker(metadataPalette)
+    Component.onDestruction: {
+        AppCursor.popBlocker(metadataPalette)
+        Hotkeys.close(root.panelHotkeyScope)
+    }
 
     // The palette's DISMISS layer: a click anywhere outside the panel closes it.
     //
@@ -3518,26 +3522,23 @@ Rectangle {
         onCancelled: root.bgModalOpen = false
     }
 
-    CameraSourceModal {
-        id: cameraSourceModal
-        open: root.cameraModalOpen
-        onApplied: (source) => {
-            const item = root.addCanvasItem("camera")
-            item.text = source.name
-            root.cameraModalOpen = false
+    // The Bus chip's picker. What lands on the slide carries the bus's STABLE
+    // id in its meta (and its name as the item's text), so renaming or
+    // reordering the bus later leaves the item pointing at the same bus.
+    BusSourceModal {
+        id: busSourceModal
+        open: root.busModalOpen
+        onApplied: (bus) => {
+            const item = root.addCanvasItem("bus")
+            if (item) {
+                item.text = bus.name
+                item.width = 200
+                item.height = 120
+                item.meta = { busId: bus.id, busName: bus.name, busType: bus.type }
+            }
+            root.busModalOpen = false
         }
-        onCancelled: root.cameraModalOpen = false
-    }
-
-    MediaSourceModal {
-        id: mediaSourceModal
-        open: root.mediaModalOpen
-        onApplied: (item) => {
-            const canvasItem = root.addCanvasItem("media")
-            canvasItem.text = item.name
-            root.mediaModalOpen = false
-        }
-        onCancelled: root.mediaModalOpen = false
+        onCancelled: root.busModalOpen = false
     }
 
     TimerSourceModal {
@@ -3580,6 +3581,31 @@ Rectangle {
         onCancelled: root.shapeModalOpen = false
     }
 
+    // ---- Esc closes the Edit screen's own transient panels -----------------
+    // The + ring and the metadata palette are not modals, but they do take
+    // over the screen (the palette even owns the pointer), so Esc has to be
+    // able to put them away — and the ring has to answer it ahead of the
+    // canvas' own Escape (which only clears the selection). No accept: neither
+    // panel has anything to confirm. A picker opened FROM the ring pushes its
+    // own scope on top, so that one answers first and closing it leaves the
+    // ring as it was.
+    property int panelHotkeyScope: 0
+    readonly property bool anyPanelOpen: root.addMenuOpen || root.metadataPaletteOpen
+    onAnyPanelOpenChanged: {
+        if (root.anyPanelOpen && root.panelHotkeyScope === 0) {
+            root.panelHotkeyScope = Hotkeys.open({
+                name: qsTr("Add content"),
+                cancel: function () {
+                    root.addMenuOpen = false
+                    root.metadataPaletteOpen = false
+                }
+            })
+        } else if (!root.anyPanelOpen && root.panelHotkeyScope !== 0) {
+            Hotkeys.close(root.panelHotkeyScope)
+            root.panelHotkeyScope = 0
+        }
+    }
+
     // ---- Keyboard shortcuts ---------------------------------------------
     // Every sequence reads from root.shortcutBindings (see its header
     // comment) rather than being written here — rebinding later means
@@ -3601,12 +3627,12 @@ Rectangle {
     // edit mode and press Ctrl+Z before typing anything; anyTextEditing
     // flips true the instant edit mode itself starts.
     Shortcut {
-        sequence: root.shortcutBindings.undo
+        action: "undo"
         enabled: mCanvas.activeFocus || root.anyTextEditing
         onActivated: root.undo()
     }
     Shortcut {
-        sequence: root.shortcutBindings.redo
+        action: "redo"
         enabled: mCanvas.activeFocus || root.anyTextEditing
         onActivated: root.redo()
     }
@@ -3614,22 +3640,22 @@ Rectangle {
     // Both map to the same redo; applications that ship only one of the two
     // are why users report "redo is broken" on the other.
     Shortcut {
-        sequence: root.shortcutBindings.redoAlt
+        action: "redoAlt"
         enabled: mCanvas.activeFocus || root.anyTextEditing
         onActivated: root.redo()
     }
     Shortcut {
-        sequence: root.shortcutBindings.copy
+        action: "copy"
         enabled: mCanvas.activeFocus && root.selectedCanvasObjects.length > 0
         onActivated: root.copySelectedCanvasObjects()
     }
     Shortcut {
-        sequence: root.shortcutBindings.paste
+        action: "paste"
         enabled: mCanvas.activeFocus && root.clipboardItems.length > 0
         onActivated: root.pasteClipboardItems()
     }
     Shortcut {
-        sequence: root.shortcutBindings.duplicateSelected
+        action: "duplicateSelected"
         enabled: mCanvas.activeFocus && root.selectedCanvasObjects.length > 0
         onActivated: {
             const src = root.canvasObjectByKey(root.selectedCanvasObjects[0])
@@ -3638,13 +3664,8 @@ Rectangle {
         }
     }
     Shortcut {
-        sequence: root.shortcutBindings.addText
+        action: "addText"
         enabled: mCanvas.activeFocus && root.hasActiveSlide
         onActivated: root.addCanvasItem("text")
-    }
-    Shortcut {
-        sequence: root.shortcutBindings.addCamera
-        enabled: mCanvas.activeFocus && root.hasActiveSlide
-        onActivated: root.cameraModalOpen = true
     }
 }

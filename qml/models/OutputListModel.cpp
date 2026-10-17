@@ -8,6 +8,7 @@
 #include "services/ShowConverter.h"
 #include "services/StyleSpecBuilder.h"
 #include "modules/presentation/PresentationTypes.hpp"
+#include "modules/presentation/SlideRules.hpp"
 #include "modules/project/OutputStore.hpp"
 
 #include <QGuiApplication>
@@ -359,7 +360,7 @@ void OutputListModel::connectToStyleRoster()
         // StyleBackgroundRole rides along: a Save Changes on a style any
         // output wears (colour or background image) must repaint that
         // output's monitor tile the moment the dialog closes.
-        emit dataChanged(first, last, { StyleIdRole, StyleNameRole, StyleBackgroundRole, FrameBufferRole });
+        emit dataChanged(first, last, { StyleIdRole, StyleNameRole, StyleBackgroundRole, FrameBufferRole, StyleLayoutRole });
         // Save Changes on a style that is ON AIR must reach the engine NOW
         // (FreeShow's reactive output.style — the live render loop picks the
         // new spec up within a frame). pushEngineStyle only ran on output
@@ -427,6 +428,8 @@ QVariant OutputListModel::data(const QModelIndex &index, int role) const
             list.append(QVariantMap{ { "key", toggle.key }, { "label", toggle.label }, { "enabled", toggle.enabled } });
         return list;
     }
+    case StyleLayoutRole:
+        return styleLayoutNote(item.styleId);
     case StyleBackgroundRole:
         return styleBackground(index.row());
     case FrameBufferRole:
@@ -461,6 +464,7 @@ QHash<int, QByteArray> OutputListModel::roleNames() const
         { ContentRole, "content" },
         { StyleBackgroundRole, "styleBackground" },
         { FrameBufferRole, "frameBuffer" },
+        { StyleLayoutRole, "styleLayout" },
     };
 }
 
@@ -692,7 +696,7 @@ void OutputListModel::setStyle(int index, const QString &styleId)
 
     m_outputs[index].styleId = normalized;
     const QModelIndex changed = this->index(index);
-    emit dataChanged(changed, changed, { StyleIdRole, StyleNameRole, StyleBackgroundRole, FrameBufferRole });
+    emit dataChanged(changed, changed, { StyleIdRole, StyleNameRole, StyleBackgroundRole, FrameBufferRole, StyleLayoutRole });
     saveRoster();
 
     // Restyling the output that is on air takes effect immediately —
@@ -976,7 +980,7 @@ void OutputListModel::styleRosterChanged()
     // wears (colour or background image) must repaint that output's monitor
     // tile the moment the dialog closes.
     emit dataChanged(index(0), index(m_outputs.size() - 1),
-                     { StyleIdRole, StyleNameRole, StyleBackgroundRole, FrameBufferRole });
+                     { StyleIdRole, StyleNameRole, StyleBackgroundRole, FrameBufferRole, StyleLayoutRole });
     // An edit to a style that is ON AIR must reach the engine NOW: the live
     // render loop picks the new spec up on its next frame.
     pushActiveEngineStyle();
@@ -1010,6 +1014,28 @@ void OutputListModel::adoptStyleRoster(StyleListModel *styles)
     // engine's spec — against the roster that is now authoritative. This is the
     // half that makes an in-session style edit visible without a restart.
     styleRosterChanged();
+}
+
+QString OutputListModel::styleLayoutNote(const QString &styleId) const
+{
+    const int row = styleRowForId(styleId);
+    if (row < 0)
+        return {};   // no style on this output: there is no layout to describe
+    // THE SPEC THIS OUTPUT ACTUALLY PUSHES, not a re-reading of the style map:
+    // its per-family template keys, its baked blocks and its content type are
+    // exactly what the engine composes with, so the answer below is the
+    // engine's own.
+    const bps::presentation::OutputStyleSpec spec =
+        StyleSpecBuilder::specForStyleRow(row, styleRoster());
+    switch (bps::presentation::SlideRules::LayoutScope(spec)) {
+    case bps::presentation::SlideRules::StyleLayoutScope::Shows:
+        return QStringLiteral("Lays out shows too — the Shows template replaces a show\u2019s own layout");
+    case bps::presentation::SlideRules::StyleLayoutScope::ContentFamilies:
+        return QStringLiteral("Restyles Scripture and The Table — a show keeps its own layout");
+    case bps::presentation::SlideRules::StyleLayoutScope::None:
+        break;
+    }
+    return QStringLiteral("No layout of its own — background and placement only");
 }
 
 int OutputListModel::styleRowForId(const QString &styleId) const
@@ -1209,7 +1235,7 @@ void OutputListModel::detachStyleEverywhere(const QString &styleId)
             continue;
         m_outputs[i].styleId = QString();
         const QModelIndex changed = index(i);
-        emit dataChanged(changed, changed, { StyleIdRole, StyleNameRole, StyleBackgroundRole, FrameBufferRole });
+        emit dataChanged(changed, changed, { StyleIdRole, StyleNameRole, StyleBackgroundRole, FrameBufferRole, StyleLayoutRole });
         touched = true;
     }
     if (touched)

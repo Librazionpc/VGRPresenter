@@ -59,6 +59,9 @@ void TestGoLivePaths();
 void TestStyleBackgroundImagePixels();
 void TestBlankCarrierCompositorPixels();
 void TestStyleBackgroundImage();
+// Clear all's carrier (Slide::clearStage): the engine paints NOTHING for it,
+// while the GO-LIVE-with-nothing carrier beside it keeps the style painting.
+void TestClearCarrierPaintsNothing();
 void TestBlockScenes();
 void TestBlockTextBox();
 void TestBlockCornerRadius();
@@ -66,7 +69,10 @@ void TestAutoSizeVocabulary();
 void TestPlaceholderBinding();
 void TestPlaceholderBodyNotFirstSlot();
 void TestFontMetricsFitParity();
+void TestLineHeightObeysTheTemplate();
 void TestTemplateStyleScenes();
+void TestBlankTemplateFallsBackToSlideBlocks();
+void TestShowSlideKeepsItsOwnDesign();
 void TestTransparentBackground();
 void TestFrameRule();
 void TestImageScale();
@@ -101,6 +107,14 @@ void TestRenderEngine();
 // The D3D11 GPU backend behind the same IGraphicsBackend seam: the CPU frame and
 // the GPU frame of one scene compared, plus the software fallback's contract.
 void TestD3D11Backend();
+// The same GPU path at the STAGE size every output renders (a styled 1920x1080
+// frame with a cover-fit backdrop and a large text run) — the app's own
+// "hardware acceleration makes the output black" case.
+void TestD3D11StageFrame();
+// Which renderer a run picks: the app's hardware-acceleration switch (software
+// by default) against an explicit `render.backend`, and the fallback on a
+// machine that has no usable GPU.
+void TestRenderBackendPreference();
 void TestRenderStress();
 void TestPngCodec();
 void TestDisplayProviders();

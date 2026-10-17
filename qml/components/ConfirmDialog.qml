@@ -41,6 +41,26 @@ Item {
     // dialog was up) can reset their bindings via onOpenCountChanged.
     property int openCount: 0
 
+    // ---- Esc = dismiss, Enter = confirm (qml/settings/Hotkeys.qml) --------
+    // Esc means what the scrim and the Cancel button mean. Enter is claimed
+    // ONLY for a non-destructive confirm: a "Delete this?" answered by a stray
+    // Enter is the one thing this dialog exists to prevent, so its accept is
+    // null and Enter falls through to whatever has focus.
+    property int hotkeyScope: 0
+    onShownChanged: {
+        if (root.shown && root.hotkeyScope === 0) {
+            root.hotkeyScope = Hotkeys.open({
+                name: root.title !== "" ? root.title : "Confirm",
+                cancel: function () { root.dismissed() },
+                accept: root.confirmVariant !== "danger" ? function () { root.confirmed() } : null
+            })
+        } else if (!root.shown && root.hotkeyScope !== 0) {
+            Hotkeys.close(root.hotkeyScope)
+            root.hotkeyScope = 0
+        }
+    }
+    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
+
     // Shared scrim — also consumes wheel events so scrolling can't leak
     // into the page's Flickable behind the dialog.
     ModalScrim {

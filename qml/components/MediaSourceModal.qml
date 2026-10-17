@@ -31,6 +31,30 @@ Item {
 
     property bool open: false
 
+    // ---- Esc = cancel, Enter = Insert (qml/settings/Hotkeys.qml) ----------
+    // The Insert button's own condition, so a key that presses it cannot
+    // insert a pick the button itself would have refused (no selection yet).
+    property int hotkeyScope: 0
+    function accept() { if (root.selectedItem !== null) root.applied(root.selectedItem) }
+    onOpenChanged: {
+        // Reset the pick whenever the modal (re)opens on a fresh item set —
+        // an open with no items yet (async library scan) must not carry the
+        // PREVIOUS session's pick forward as a silently-wrong default.
+        if (root.open)
+            root.selectedId = ""
+        if (root.open && root.hotkeyScope === 0) {
+            root.hotkeyScope = Hotkeys.open({
+                name: qsTr("Media source"),
+                cancel: function () { root.cancelled() },
+                accept: function () { root.accept() }
+            })
+        } else if (!root.open && root.hotkeyScope !== 0) {
+            Hotkeys.close(root.hotkeyScope)
+            root.hotkeyScope = 0
+        }
+    }
+    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
+
     readonly property var libraryItems: {
         void MediaLibraryService.totalCount
         const list = MediaLibraryService.items()
@@ -65,10 +89,6 @@ Item {
 
     property string selectedId: ""
     readonly property var selectedItem: root.items.find((it) => it.id === root.selectedId) ?? null
-    // Reset the pick whenever the modal (re)opens on a fresh item set —
-    // an open with no items yet (async library scan) must not carry the
-    // PREVIOUS session's pick forward as a silently-wrong default.
-    onOpenChanged: if (root.open) root.selectedId = ""
 
     // Fired when "Insert" is clicked, carrying the picked media item.
     signal applied(var item)

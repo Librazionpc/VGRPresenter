@@ -104,6 +104,7 @@ public:
     // background" is how a tile comes to show a picture no output is sending.
     struct SlideComposition {
         enum class Source {
+            Cleared,          // a CLEAR carrier (Slide::clearStage): the frame paints NOTHING
             Refused,          // the style's gates refuse this slide's family
             FamilyTemplate,   // the style's per-family engine template (blocks)
             StyleTemplate,    // the style's whole-style template (blocks)

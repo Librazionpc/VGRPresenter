@@ -495,6 +495,10 @@ set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/AppScale.q
 # lands. The engine's half is in DesignLibrary.hpp (kStageWidth/kStageHeight).
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/StageGrid.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/MetadataFields.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
+# The app's keyboard map + the Esc/Enter scope stack (qml/shortcuts/Shortcut.qml
+# is the component that reads it): a hotkey is added here, and a surface names
+# its action instead of spelling a chord.
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/Hotkeys.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 # The hover tooltip's one source (who wants a tip / what it says) — the L/R
 # pills and the gain knob publish into it, the window-level ToolTipLayer draws it.
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/TipService.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)

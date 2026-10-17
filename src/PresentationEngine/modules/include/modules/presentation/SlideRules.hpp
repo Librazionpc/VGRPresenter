@@ -59,6 +59,31 @@ std::string ContentText(const Slide& slide);
 // tile's gate-free preview painted the text.
 bool StyleAdmits(const OutputStyleSpec& style, const Slide& slide);
 
+// WHICH SLIDES THIS STYLE'S TEMPLATE LAYS OUT — the rule the scene builder's
+// composition uses, asked as a question a surface can PRINT instead of
+// re-deriving. Settings · Outputs says it per row, and a sentence that disagreed
+// with what the engine does would be worse than saying nothing: the whole
+// report this answers ("scripture and The Table work, shows do not") was two
+// surfaces reading one slide differently, so the row is fed from the same call
+// ComposeSlide makes.
+//
+//   Shows            the style carries a template PICKED in its Shows slot
+//                    (Settings · Styles → "Template for Shows"). That is an
+//                    explicit "lay my shows out with this design", so it lays
+//                    out shows content — including a slide the operator
+//                    authored on the canvas — the same rule ComposeSlide
+//                    applies. Naming "shows" as the style's content type is
+//                    NOT that pick (it is a default), and neither is the
+//                    whole-style template: those two never take an authored
+//                    show's layout apart.
+//   ContentFamilies  a whole-style or per-family template restyles the content
+//                    tabs' designs (scripture/table/media), while a show's own
+//                    authored blocks are kept exactly as the operator drew them.
+//   None             no template layout at all: only the background (colour,
+//                    image) and the layout PRESET apply.
+enum class StyleLayoutScope { None, ContentFamilies, Shows };
+StyleLayoutScope LayoutScope(const OutputStyleSpec& style);
+
 // CAN A BLOCK RENDER OF THIS CONTENT SHOW THE REAL PICTURE?
 //
 // A camera / media / audio / image block carries no pixels of its own — a

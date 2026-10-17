@@ -74,6 +74,46 @@ Item {
     function open() { shown = true }
     function close() { shown = false }
 
+    // ---- Esc = cancel, Enter = accept (qml/settings/Hotkeys.qml) ---------
+    // Every dialog built on this card answers the app's two keys while it is
+    // open, with no per-dialog key code: Esc is this card's own cancel path
+    // (the same one the X and the scrim call), Enter is the footer's Save —
+    // and ONLY when the card has a Save, so a read-only card (showSave: false)
+    // leaves Enter to whatever has focus.
+    //
+    // A scope, not a Keys handler, because the focus inside a form is usually
+    // a text field and a field consumes Enter; the window's Shortcut sees the
+    // key first and the Hotkeys stack routes it to the dialog on top.
+    property int hotkeyScope: 0
+    function syncHotkeyScope() {
+        if (root.shown && root.hotkeyScope === 0) {
+            root.hotkeyScope = Hotkeys.open({
+                name: root.title !== "" ? root.title : "ModalCard",
+                cancel: function () { root.cancelled() },
+                // A card with no footer, or no Save in it, has nothing for
+                // Enter to press (the quick-search card is the important one:
+                // its Enter opens the selected result, so claiming the key for
+                // an `accepted()` nobody listens to would break it).
+                accept: (root.showSave && root.showFooter)
+                        ? function () { root.accepted() } : null
+            })
+        } else if (!root.shown && root.hotkeyScope !== 0) {
+            Hotkeys.close(root.hotkeyScope)
+            root.hotkeyScope = 0
+        }
+    }
+    onShownChanged: root.syncHotkeyScope()
+    // A dialog that gains or loses its Save (or its footer) while open must
+    // claim/release Enter with it.
+    onShowSaveChanged: root.rebuildHotkeyScope()
+    onShowFooterChanged: root.rebuildHotkeyScope()
+    function rebuildHotkeyScope() {
+        Hotkeys.close(root.hotkeyScope)
+        root.hotkeyScope = 0
+        root.syncHotkeyScope()
+    }
+    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
+
     // Brings an item from the content column into view. A selection that
     // REVEALS a new section (AudioEffectsPanel's selected-effect editor)
     // otherwise materializes below the fold of a tall dialog — which reads

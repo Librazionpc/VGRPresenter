@@ -135,6 +135,14 @@ public:
         // image://livepreview/<name> so a live output shows ITS OWN gated
         // pass (its style's content rules), not the shared preview feed.
         FrameBufferRole,
+        // What this output's STYLE does with a slide, in the words Settings ·
+        // Outputs shows under the Style pill: whether it restyles the content
+        // tabs' designs while a show keeps its own authored layout, or it lays
+        // shows out too, or it has no template layout at all (background only).
+        // Computed from the SAME engine rule the scene builder composes with
+        // (SlideRules::LayoutScope), so the sentence cannot drift from what the
+        // NDI/HDMI picture does — which is the whole point of printing it.
+        StyleLayoutRole,
     };
     Q_ENUM(Role)
 
@@ -326,6 +334,12 @@ private:
     // Style lookup helpers over styleRoster() (null-safe).
     QString styleIdAt(int row) const;
     QString styleNameAt(int row) const;
+    // What this style's TEMPLATE lays out, in the one sentence Settings ·
+    // Outputs prints under the Style pill. Answered by the engine's own rule
+    // (SlideRules::LayoutScope) applied to the very spec this output pushes, so
+    // the sentence and the picture cannot disagree; "" when the row has no
+    // style (nothing to describe).
+    QString styleLayoutNote(const QString &styleId) const;
     // Composes the engine spec for `styleId` and pushes it to the
     // PresentationEngine. styleId "" pushes an empty spec (unstyled).
     //

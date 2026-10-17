@@ -54,6 +54,23 @@ Item {
     }
     function flip(key) { SettingsService.setValue(key, !root.values[key]) }
 
+    // What is DRAWING, for the line under the hardware switch — the ENGINE's
+    // answer (SettingsService.rendererInUse, read back from the backend that is
+    // really installed), never the switch's own position: on a machine with no
+    // usable GPU the switch reads ON and the frames are still drawn in software,
+    // and a row that repeated the switch back at the user would be the one thing
+    // this page must not do. Empty means the engine has not answered yet (the
+    // choice is pushed to it off the interface thread).
+    function hardwareRenderingNote() {
+        if (root.values["preferences.hardwareAcceleration"] !== true)
+            return qsTr("Frames are drawn in software — it works on every machine, GPU or not.")
+        if (SettingsService.rendererOnGpu)
+            return qsTr("Frames are drawn on the graphics card.")
+        if (SettingsService.rendererInUse === "")
+            return qsTr("Asking the engine for the graphics card…")
+        return qsTr("No usable GPU was found — frames are drawn in software.")
+    }
+
     // A backup's engine stamp ("yyyymmdd-hhmmss") as a person reads a time, and
     // a byte count as KB/MB. Shared by the open-show row and the all-shows
     // browser below so both format identically.
@@ -862,12 +879,25 @@ Item {
                         spacing: 2
 
                         Text {
+                            // Named too, and for a different reason than the toggle:
+                            // a row whose label came out EMPTY still has a toggle to
+                            // click, so a scenario that only grabs the switch cannot
+                            // tell "the row is showing" from "the row is a blank line
+                            // with a switch on it". The label comes from the setting's
+                            // own definition, so this is also the check that the new
+                            // setting really reached the interface.
+                            objectName: prefRow.key !== "" ? "selfTestLabel_" + prefRow.key : ""
                             text: prefRow.label
                             color: Theme.textPrimary
                             font.family: Theme.fontFamily
                             font.pixelSize: Theme.textSm
                         }
                         Text {
+                            // Named per row, like the toggle: a self-test reads the
+                            // SECOND LINE THIS ROW DRAWS rather than composing the
+                            // sentence a second time (see GeneralScreen's
+                            // crashToolingLabel for the same rule).
+                            objectName: prefRow.key !== "" ? "selfTestNote_" + prefRow.key : ""
                             visible: prefRow.sub !== ""
                             text: prefRow.sub
                             color: Theme.textMuted
@@ -878,6 +908,11 @@ Item {
 
                     SettingsToggle {
                         visible: prefRow.key !== ""
+                        // ONE name per row, derived from the setting's own key, so a
+                        // self-test scenario can click the row it means instead of a
+                        // coordinate that drifts with the layout (the reason every
+                        // other grab target in this app is named too).
+                        objectName: prefRow.key !== "" ? "selfTestToggle_" + prefRow.key : ""
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
                         checked: prefRow.key !== "" && root.values[prefRow.key] === true
@@ -1130,7 +1165,13 @@ Item {
                 title: qsTr("Preferences")
                 PrefRow { key: "preferences.startMinimized" }
                 PrefRow { key: "preferences.restoreLastSession" }
-                PrefRow { key: "preferences.closeToTray"; last: true }
+                PrefRow { key: "preferences.closeToTray" }
+                // The renderer switch. Its second line is what is DRAWING, not
+                // what the switch says (hardwareRenderingNote): on a machine with
+                // no usable GPU the two disagree, and this row is where that has
+                // to be visible instead of silent.
+                PrefRow { key: "preferences.hardwareAcceleration"
+                          sub: root.hardwareRenderingNote(); last: true }
             }
 
             SettingsSection {

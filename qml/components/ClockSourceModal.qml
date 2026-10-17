@@ -21,6 +21,33 @@ Item {
 
     property bool open: false
 
+    // ---- Esc = cancel, Enter = the Add button (qml/settings/Hotkeys.qml) --
+    // The picker's own pair, pushed as a Hotkeys scope while it is up.
+    property int hotkeyScope: 0
+    function accept() {
+        root.applied({
+            format: root.format,
+            style: root.style,
+            showSeconds: root.showSeconds,
+            showDate: root.showDate,
+            color: root.tint,
+            background: root.background
+        })
+    }
+    onOpenChanged: {
+        if (root.open && root.hotkeyScope === 0) {
+            root.hotkeyScope = Hotkeys.open({
+                name: qsTr("Clock"),
+                cancel: function () { root.cancelled() },
+                accept: function () { root.accept() }
+            })
+        } else if (!root.open && root.hotkeyScope !== 0) {
+            Hotkeys.close(root.hotkeyScope)
+            root.hotkeyScope = 0
+        }
+    }
+    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
+
     property string format: "12"
     property string style: "digital"
     property bool showSeconds: true
@@ -486,14 +513,7 @@ Item {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.applied({
-                            format: root.format,
-                            style: root.style,
-                            showSeconds: root.showSeconds,
-                            showDate: root.showDate,
-                            color: root.tint,
-                            background: root.background
-                        })
+                        onClicked: root.accept()
                     }
                 }
             }

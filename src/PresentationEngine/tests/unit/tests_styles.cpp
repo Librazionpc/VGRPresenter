@@ -1817,6 +1817,95 @@ void TestFontMetricsFitParity() {
 }
 
 // ---------------------------------------------------------------------------
+// LINE HEIGHT IS ONE RULE — the report "the height in the template is set to
+// zero and look at the line height ... this height is too much and it makes no
+// sense, let things obey the template".
+//
+// A block's `lineHeight` is a PROPORTIONAL multiplier of the font's own natural
+// line height; 0 — and a template that never names the field — means THE FONT'S
+// OWN spacing. Three surfaces draw one block (the Edit canvas, every preview
+// tile, this engine) and each used to supply its own default: the Text panel
+// showed 0 for the very item the canvas, the tiles and the engine all drew at
+// 1.2. The value the operator could see was never the value on air. This pins
+// the engine's half of the one rule (the QML half is
+// MetadataFields.lineHeight / naturalLineHeight):
+//   1. absent and 0 render the SAME, natural step;
+//   2. that step is the font's own baseline step — NOT the old hidden 1.2;
+//   3. an explicit 2.0 still scales it, so the knob keeps working.
+// ---------------------------------------------------------------------------
+void TestLineHeightObeysTheTemplate() {
+    p::Presentation pres;
+    pres.id = "pres-lineheight";
+    r::RenderEngine& engine = r::RenderEngine::Instance();
+    p::SceneBuilder builder;
+    p::OutputStyleSpec style;
+    style.templateKey = "fullscreen";
+    style.backgroundColor = "#ff101020";
+
+    const auto builtText = [&](const std::string& lineHeightJson) -> r::TextStyle {
+        p::Slide slide;
+        slide.id = "lh-" + lineHeightJson;
+        p::ContentBlock verse;
+        verse.id = "b1";
+        verse.kind = "text";
+        verse.x = 40; verse.y = 40; verse.width = 674; verse.height = 348;
+        verse.text = "He reigns";
+        verse.metaJson = std::format(
+            R"({{"color":"#ffffff","fontSize":40,"align":"center","verticalAlign":"center",)"
+            R"("autoSize":"none","fontFamily":"Segoe UI"{}}})", lineHeightJson);
+        slide.blocks = {verse};
+        auto built = builder.BuildSlideScene(pres, slide, style, engine);
+        r::TextStyle out;
+        if (!built.ok()) return out;
+        for (const r::RenderObject* obj : engine.CollectObjects(built.value()))
+            if (const auto* t = dynamic_cast<const r::TextObject*>(obj); t && t->Id() == "blk1")
+                for (const auto& c : t->Components())
+                    if (const auto* sc = dynamic_cast<const r::TextStyleComponent*>(c.get()))
+                        out = sc->style;
+        (void)engine.DestroyScene(built.value());
+        return out;
+    };
+
+    // A proportional lineHeight of `lh` on the engine side is a line STEP of
+    // lh x the font's own baseline step (SceneBuilder: baselineStep x lh - size,
+    // then Measure adds the size back). The fallback formula, for a font
+    // without metrics, lands on the same lh x size.
+    const auto expectedStep = [&](float sizePx, double lh) {
+        r::FontManager::LineMetrics lm{};
+        if (engine.Fonts().SystemLineMetrics("Segoe UI", sizePx, false, false, lm))
+            return lm.baselineStep * static_cast<float>(lh);
+        return static_cast<float>(lh) * sizePx;
+    };
+    const auto stepOf = [](const r::TextStyle& s) { return s.size + s.lineSpacing; };
+
+    const r::TextStyle absent = builtText("");                                    // no lineHeight key
+    const r::TextStyle zero = builtText(R"(,"lineHeight":0)");
+    const r::TextStyle wide = builtText(R"(,"lineHeight":2)");
+    CHECK(absent.size > 1.0f && zero.size > 1.0f && wide.size > 1.0f);
+
+    // 1. "Set to zero" and "never set" are the same layout — not one of them
+    //    quietly inflated to a default the panel never shows.
+    CHECK(std::abs(stepOf(zero) - stepOf(absent)) < 0.5f);
+    // 2. That shared layout is the font's NATURAL step (proportional 1.0), and
+    //    it is tighter than the 1.2 this used to hardcode for a missing field.
+    CHECK(std::abs(stepOf(absent) - expectedStep(absent.size, 1.0)) < 0.5f);
+    CHECK(stepOf(absent) < expectedStep(absent.size, 1.2) - 1.0f);
+    // 3. An explicit value still scales the step — the knob is not a constant.
+    CHECK(std::abs(stepOf(wide) - expectedStep(wide.size, 2.0)) < 0.5f);
+
+    // 4. And the layout never collapses: a style whose lineSpacing cancels its
+    //    size (the zero step a "lineHeight":0 used to derive) still gets one
+    //    line's worth of space instead of stacking every line on one baseline.
+    r::TextStyle collapsed;
+    collapsed.fontId = "Segoe UI";
+    collapsed.size = 40.0f;
+    collapsed.lineSpacing = -40.0f;
+    const auto measured = r::TextLayout::Measure("one\ntwo", collapsed, engine.Fonts());
+    CHECK(measured.lines.size() == 2);
+    CHECK(measured.lineStep >= 39.9f);
+}
+
+// ---------------------------------------------------------------------------
 // Engine-template styles — a style wearing a template design (templateKey
 // "tpl-…", blocks baked into the spec) renders THE TEMPLATE with the slide's
 // content bound in; the fingerprint hashes the blocks.
@@ -1888,6 +1977,12 @@ void TestTemplateStyleScenes() {
     //    template — the output style wins (FreeShow: output style > slide).
     p::Slide dressed = slide;
     dressed.id = "tplstyle-dressed";
+    // TAGGED with the content family: this is the case the rule is FOR — a
+    // scripture/table slide's blocks are the content tab's own template, laid
+    // out for a different design, and the output style is what restyles them.
+    // An UNTAGGED slide is SHOWS content, whose blocks ARE its design and must
+    // survive (see TestShowSlideKeepsItsOwnDesign).
+    dressed.metaJson = R"({"contentType":"scripture"})";
     dressed.blocks = {chip};   // a stray box from the tab's own template
     auto dressedScene = builder.BuildSlideScene(pres, dressed, style, engine);
     CHECK(dressedScene.ok());
@@ -2253,12 +2348,18 @@ void TestFrameRule() {
 
     // A style's TEMPLATE owns the layout instead: what is composed is the
     // template's own blocks (its text regions), so the frame is not wanted —
-    // the blocks are the picture, and they cannot lag a slide change.
+    // the blocks are the picture, and they cannot lag a slide change. A
+    // CONTENT-FAMILY slide is the case (a scripture pick restyled by an output
+    // style): a show's own authored blocks keep their layout, see
+    // TestShowSlideKeepsItsOwnDesign.
     p::ContentBlock bound = text;
     bound.bind = "text";
+    bound.text = "a line the template paints";
+    p::Slide tagged = slide;
+    tagged.metaJson = R"({"contentType":"scripture"})";
     p::OutputStyleSpec templated;
-    templated.familyTemplateBlocks[0] = { bound };
-    const auto owned = p::SceneBuilder::ComposeSlide(slide, templated, /*applyGates=*/true);
+    templated.familyTemplateBlocks[p::SlideRules::FamilyTemplateSlot("scripture")] = { bound };
+    const auto owned = p::SceneBuilder::ComposeSlide(tagged, templated, /*applyGates=*/true);
     CHECK(owned.source == p::SceneBuilder::SlideComposition::Source::FamilyTemplate);
     CHECK(!p::SlideRules::NeedsDistributedFrame(owned.blocks));
 }
@@ -2480,5 +2581,489 @@ void TestPlaceholderBodyNotFirstSlot() {
         CHECK(lastScene.blocks.size() == 3);
         if (lastScene.blocks.size() == 3)
             CHECK(lastScene.blocks[2].text == "47-0412 - Faith Is The Substance 3");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A LAYOUT WITH NOTHING TO DRAW DOES NOT GET TO SEND A BLANK FRAME.
+//
+// Reported live: the NDI output read "sending - 2205 frames - 2 monitor(s)"
+// while the receiving monitor stayed black, and — from the operator — "it did
+// not even show the background image before you even get to slides". The engine
+// frame the feed carried was EMPTY (the presenter's own sanity line: maxAlpha=0,
+// not one object painted anything) while the app's tiles showed the sermon,
+// because the tiles draw the slide's own blocks and the style's family template
+// had claimed the composition. That template is a TABLE design whose slots are
+// palette FIELD tokens ({table_text}, {table_code_paragraphs}) and the slide
+// that went on air carried its content in its OWN blocks, so every token bound
+// to nothing: a layout of empty text, under a transparent style whose
+// clearBackgroundOnText had hidden the style image, is a fully see-through
+// frame. Squarely the rule this file exists to keep: the engine must not render
+// a picture the preview already shows content in.
+//
+// The rule the suite pins: a template or preset that would paint NOTHING hands
+// the composition back to the slide's own blocks (the same picture the preview
+// draws), while a template that DOES paint keeps FreeShow's precedence — output
+// style > slide — exactly as before.
+// ---------------------------------------------------------------------------
+void TestBlankTemplateFallsBackToSlideBlocks() {
+    r::RenderEngine& engine = r::RenderEngine::Instance();
+    CHECK(engine.SetBackend("software").ok());
+
+    p::Presentation pres;
+    pres.id = "pres-blank-tpl";
+    p::SceneBuilder builder;
+
+    const auto textBlock = [](const char* id, const char* text, double y) {
+        p::ContentBlock b;
+        b.id = id;
+        b.kind = "text";
+        b.x = 40; b.y = y; b.width = 674; b.height = 90;
+        b.text = text;
+        return b;
+    };
+
+    // The slide the Table tab puts on air: its content IS its own blocks (the
+    // fill put the sermon there) and it carries no title/body of its own — the
+    // exact shape a template's field slots and a preset's title/body cannot draw.
+    p::Slide tableSlide;
+    tableSlide.id = "blank-tpl-1";
+    tableSlide.metaJson = R"({"contentType":"table"})";
+    tableSlide.blocks = {
+        textBlock("b1", "Faith is the substance of things hoped for...", 60),
+    };
+
+    // The style an NDI row wears: a transparent background, the branded image
+    // stepping aside for content, and a TABLE family template made of the
+    // palette's field slots (id values the slide was never given).
+    p::OutputStyleSpec style;
+    style.name = "NDI screen";
+    style.backgroundColor = "transparent";
+    style.clearBackgroundOnText = true;
+    style.backgroundImage = "";   // no disk dependency in a unit test
+    style.familyTemplateKeys[p::SlideRules::FamilyTemplateSlot("table")] = "tpl-3";
+    style.familyTemplateBlocks[p::SlideRules::FamilyTemplateSlot("table")] = {
+        // The slots a palette design carries: field tokens whose values the
+        // slide was never given (the slide's own block holds the sermon, and
+        // SlideValues has no `table_notes` to hand this slot), so both bind to
+        // nothing and the layout is a line-up of empty text.
+        textBlock("t1", "{table_code_paragraphs}", 45),
+        textBlock("t2", "{table_notes}", 150),
+    };
+
+    // 1. The decision itself: the template cannot paint, so the slide's own
+    //    blocks own the composition (and `blocks` stays empty, which is what
+    //    tells the renderer to draw the slide's own).
+    const auto comp = p::SceneBuilder::ComposeSlide(tableSlide, style, /*applyGates=*/true);
+    CHECK(comp.source == p::SceneBuilder::SlideComposition::Source::SlideBlocks);
+    CHECK(comp.blocks.empty());
+
+    // 2. ...and the real scene the outputs render carries the picture: the
+    //    slide's own block is a real object in it AND the raster is not a blank
+    //    frame. This is the assertion the black monitor failed — before the
+    //    fallback the same scene rasterized to maxAlpha=0.
+    auto scene = builder.BuildSlideScene(pres, tableSlide, style, engine);
+    CHECK(scene.ok());
+    if (scene.ok()) {
+        bool sawSlideBlock = false;
+        for (const r::RenderObject* obj : engine.CollectObjects(scene.value()))
+            if (const auto* t = dynamic_cast<const r::TextObject*>(obj);
+                t != nullptr && t->Text() == tableSlide.blocks[0].text)
+                sawSlideBlock = true;
+        CHECK(sawSlideBlock);
+
+        r::RenderOptions opts;
+        opts.distribute = false;
+        opts.capture = true;
+        auto img = engine.Render(scene.value(), opts);
+        CHECK(img.ok());
+        if (img.ok() && !img.value().empty()) {
+            bool painted = false;
+            for (const uint32_t px : img.value().pixels)
+                if (((px >> 24) & 0xFFu) != 0u) { painted = true; break; }
+            CHECK(painted);   // the frame is no longer see-through
+        }
+        (void)engine.DestroyScene(scene.value());
+    }
+
+    // 3. CONTROL: a template that DOES paint keeps the composition, and the
+    //    slide's own block stays out of it — the fallback is for a blank layout,
+    //    not a licence for the slide to overrule a style that says something.
+    p::OutputStyleSpec labelled = style;
+    labelled.familyTemplateBlocks[p::SlideRules::FamilyTemplateSlot("table")] = {
+        textBlock("t1", "{table_notes}", 45),   // resolves to nothing here too...
+        textBlock("t2", "BRANDED", 300),         // ...but this slot really paints
+    };
+    const auto kept = p::SceneBuilder::ComposeSlide(tableSlide, labelled, /*applyGates=*/true);
+    CHECK(kept.source == p::SceneBuilder::SlideComposition::Source::FamilyTemplate);
+    CHECK(kept.blocks.size() == 2);
+
+    // 4. The PRESET half of the same rule: a family key with no baked blocks is
+    //    rendered as the slide's own title/body, and this slide has neither — so
+    //    a preset may not claim a blocks-only slide either.
+    p::OutputStyleSpec presetStyle;
+    presetStyle.name = "Legacy lower third";
+    presetStyle.templateKey = "lowerThird";
+    presetStyle.familyTemplateKeys[p::SlideRules::FamilyTemplateSlot("table")] = "lowerThird";
+    const auto presetComp = p::SceneBuilder::ComposeSlide(tableSlide, presetStyle, /*applyGates=*/true);
+    CHECK(presetComp.source == p::SceneBuilder::SlideComposition::Source::SlideBlocks);
+
+    // 5. ...while a slide that HAS a title/body still gets the preset it names:
+    //    the fallback fires on an empty layout, it does not ban presets.
+    p::Slide titled = tableSlide;
+    titled.id = "blank-tpl-2";
+    titled.blocks.clear();
+    titled.title = "47-0412 - Faith Is The Substance 2";
+    titled.text = "Faith is the substance of things hoped for...";
+    const auto presetKept = p::SceneBuilder::ComposeSlide(titled, presetStyle, /*applyGates=*/true);
+    CHECK(presetKept.source == p::SceneBuilder::SlideComposition::Source::FamilyPreset);
+}
+
+// ---------------------------------------------------------------------------
+// CLEAR ALL REALLY CLEARS — the report "the clear all doesn't clear well: it
+// shows the style bg image ... the bg brings back the background image and
+// clears the slide".
+//
+// Clear all used to send the SAME carrier GO LIVE-with-nothing sends, and the
+// engine composites the output's style onto an empty slide exactly as it does
+// onto a full one — which is deliberate there (going live with nothing is meant
+// to show the output's own look) and wrong here: pressing Clear all took the
+// slide down and put the style's poster back up. The clear is now its own
+// carrier (Slide::clearStage) composed to paint NOTHING.
+//
+// Both halves are asserted, because only the pair says anything: the blank
+// carrier must KEEP the style (nothing here may regress the GO LIVE promise),
+// and the clear must take every last bit of it down — including at the pixel
+// level, which is what the operator actually sees on the screens.
+// ---------------------------------------------------------------------------
+void TestClearCarrierPaintsNothing() {
+    // A real red PNG on disk — the style's branded backdrop, the thing the
+    // report says comes back.
+    const std::filesystem::path img =
+        std::filesystem::temp_directory_path() / "bps_clear_carrier_test.png";
+    {
+        r::RgbaImage px;
+        px.width = 4;
+        px.height = 4;
+        px.pixels.assign(16, 0xFF0000FFu);   // opaque red (R in the low byte)
+        auto encoded = r::EncodePngRgba8(reinterpret_cast<const uint8_t *>(px.pixels.data()),
+                                         px.width, px.height);
+        CHECK(encoded.ok());
+        std::ofstream file(img, std::ios::binary);
+        file.write(reinterpret_cast<const char *>(encoded.value().data()),
+                   static_cast<std::streamsize>(encoded.value().size()));
+        CHECK(file.good());
+    }
+
+    (void)bps::ConfigurationManager::Instance().Set(
+        "render.backend", bps::json::Value::String("software"));
+    auto &render = r::RenderEngine::Instance();
+    CHECK(render.Initialize().ok());
+    CHECK(render.Start().ok());
+    CHECK(render.SetBackend("software").ok());
+
+    // DISTINCT IDs, the way the live path names them: SceneBuilder keys scenes
+    // by "pres:<presentation>:<slide id>", so two slides with the same id share
+    // one cached scene and the second build would be served the first one
+    // (StartFromSlides does exactly this naming, folding the slide's content
+    // into the id — see HashSlideContent, which is where the flag has to be too).
+    p::Slide blank;                 // the GO-LIVE-with-nothing carrier
+    blank.id = "clear-test-blank";
+    p::Slide clear = blank;
+    clear.id = "clear-test-clear";
+    clear.clearStage = true;        // ...and the CLEAR
+
+    p::OutputStyleSpec style;
+    style.name = "Clear Test Style";
+    style.templateKey = "fullscreen";
+    style.backgroundColor = "#ff000000";    // a colour that really paints
+    style.backgroundImage = img.string();   // ...and a background image
+    // ...and a template DESIGN as well, so "the layout paints nothing either"
+    // is under test, not only the background pair.
+    p::ContentBlock slab;
+    slab.id = "clear-slab";
+    slab.kind = "box";
+    slab.x = 0; slab.y = 0; slab.width = 754; slab.height = 428;
+    slab.style.backgroundColor = "#ff00ff00";
+    style.templateBlocks = { slab };
+
+    // 1. THE COMPOSITION, the two carriers side by side.
+    const auto blankComp = p::SceneBuilder::ComposeSlide(blank, style, /*applyGates=*/true);
+    const auto clearComp = p::SceneBuilder::ComposeSlide(clear, style, /*applyGates=*/true);
+    CHECK(blankComp.source != p::SceneBuilder::SlideComposition::Source::Cleared);
+    CHECK(blankComp.paintBackground);          // the style paints...
+    CHECK(!blankComp.styleImageSuppressed);    // ...its image included
+    CHECK(clearComp.source == p::SceneBuilder::SlideComposition::Source::Cleared);
+    CHECK(!clearComp.paintBackground);         // the clear paints NOTHING...
+    CHECK(clearComp.explicitTransparent);      // ...as a CHOSEN empty frame
+    CHECK(clearComp.styleImageSuppressed);     // ...not even the background image
+    CHECK(clearComp.blocks.empty());           // ...and no layout of its own
+
+    // 2. THE PIXELS, at the stage size the outputs actually use.
+    p::Presentation pres;
+    pres.id = "pres-clear-carrier";
+    {
+        p::SceneBuilder builder;
+        r::RenderOptions opts;
+        opts.capture = true;
+        opts.distribute = false;
+        const auto countNonBlack = [](const r::RgbaImage &f) {
+            long long n = 0;
+            for (uint32_t px : f.pixels)
+                if ((px & 0x00FFFFFFu) != 0)
+                    ++n;
+            return n;
+        };
+        const auto countVisible = [](const r::RgbaImage &f) {
+            long long n = 0;
+            for (uint32_t px : f.pixels)
+                if (((px >> 24) & 0xFFu) != 0 && (px & 0x00FFFFFFu) != 0)
+                    ++n;
+            return n;
+        };
+
+        auto builtBlank = builder.BuildSlideScene(pres, blank, style, render, r::Size(1920, 1080));
+        CHECK(builtBlank.ok());
+        if (builtBlank.ok()) {
+            auto frame = render.Render(builtBlank.value(), opts);
+            CHECK(frame.ok());
+            if (frame.ok()) {
+                // The control: an empty slide on a painting style is NOT an empty
+                // frame — this is the GO-LIVE-with-nothing promise, untouched.
+                CHECK(countNonBlack(frame.value()) > 0);
+                CHECK(countVisible(frame.value()) > 0);
+            }
+            (void)render.DestroyScene(builtBlank.value());
+        }
+
+        auto builtClear = builder.BuildSlideScene(pres, clear, style, render, r::Size(1920, 1080));
+        CHECK(builtClear.ok());
+        if (builtClear.ok()) {
+            auto frame = render.Render(builtClear.value(), opts);
+            CHECK(frame.ok());
+            if (frame.ok() && !frame.value().empty()) {
+                // THE FIX, in the operator's own terms: not one pixel of the
+                // style's colour, its background image or its design survives —
+                // the frame is the empty one a keyer/black screen gets.
+                CHECK(countNonBlack(frame.value()) == 0);
+                CHECK(countVisible(frame.value()) == 0);
+            }
+            (void)render.DestroyScene(builtClear.value());
+        }
+    }
+
+    // 3. THE LIVE PATH the button really takes — and the trap beside it.
+    //
+    // Clear all reaches the engine as StartFromSlides(name, {carrier}), and the
+    // slide id those pushed slides get is a CONTENT fingerprint: an empty clear
+    // carrier and an empty blank carrier fingerprint identically unless the flag
+    // is part of the hash. SceneBuilder caches scenes by that id, so a collision
+    // means the clear is SERVED THE BLANK CARRIER'S SCENE — the style painted
+    // again, no matter how right the composition is. Nothing else can catch
+    // this: the composition is correct in both runs.
+    auto &eng = p::PresentationEngine::Instance();
+    CHECK(eng.Initialize().ok());
+    auto &live = l::LiveOutputController::Instance();
+    CHECK(live.Initialize().ok());
+    CHECK(live.Start().ok());
+    {
+        // Both pushes under the SAME name — the way the wall does it (the
+        // "temp:<name>" presentation, a fresh carrier each press). STOPPED
+        // between them because a live REPLACE is applied by the render worker
+        // (LiveOutputController::StartFromSlides queues it), so reading the
+        // compiled set straight after the second push would read the FIRST
+        // one's scenes and assert nothing.
+        CHECK(live.StartFromSlides("Clear Test", { blank }).ok());
+        const std::string blankScene = eng.Runtime().Compiled().slides[0].sceneId;
+        CHECK(live.StopLive().ok());
+        CHECK(live.StartFromSlides("Clear Test", { clear }).ok());
+        const std::string clearScene = eng.Runtime().Compiled().slides[0].sceneId;
+        CHECK(!blankScene.empty());
+        CHECK(!clearScene.empty());
+        CHECK(blankScene != clearScene);
+        CHECK(live.StopLive().ok());
+        CHECK(eng.Delete("temp:Clear Test").ok());
+    }
+
+    std::error_code ec;
+    (void)std::filesystem::remove(img, ec);
+}
+
+// ---------------------------------------------------------------------------
+// A SHOW'S SLIDE KEEPS ITS OWN DESIGN ON THE OUTPUTS
+// ---------------------------------------------------------------------------
+//
+// The reported shape: a show authored on the Edit canvas — a title item, a text
+// band, a shape — showed completely in the monitor preview and only partly on
+// the real outputs ("scripture and The Table work, shows do not"): the NDI feed
+// and HDMI window drew the output style's whole-style template instead, which
+// binds the slide's BODY into the style's own slots (the hymn lines, the
+// operator's title gone, the band resized or squeezed small), while the tile and
+// canvas — which draw the slide's blocks — showed the whole design.
+//
+// Why only shows: a scripture/table slide's blocks are a DESIGN's field slots,
+// so a style template restyling them is the feature. A show's blocks ARE the
+// design, and the style's template (style.contentType empty, so not keyed to any
+// family) was claiming them as well. ComposeSlide now keeps a shows-family
+// slide's own blocks; the style still paints the background, and a style that
+// explicitly keys shows keeps the old precedence.
+void TestShowSlideKeepsItsOwnDesign() {
+    const auto textBlock = [](const char* id, const char* text, double y, double h) {
+        p::ContentBlock b;
+        b.id = id;
+        b.kind = "text";
+        b.x = 40; b.y = y; b.width = 674; b.height = h;
+        b.text = text;
+        return b;
+    };
+
+    // The show slide: authored items only — no title, no body, no content family.
+    p::Slide showSlide;
+    showSlide.id = "show-1";
+    showSlide.blocks = {
+        textBlock("s1", "VICTORY AHEAD", 20, 60),                     // the title item
+        textBlock("s2", "When the host of Israel led by God,", 300, 60),
+    };
+    // (Untagged is what the shows family IS — SlideRules::FamilyTemplateSlot.)
+
+    // The style a show's output wears: a whole-style template (NOT keyed to any
+    // content family), its own layout of literal text.
+    p::OutputStyleSpec style;
+    style.name = "Main Output";
+    style.backgroundColor = "#ff000000";
+    style.templateKey = "big-bold";
+    style.templateBlocks = { textBlock("t1", "STYLE LAYOUT", 300, 200) };
+
+    // 1. THE SHOW keeps its own composition: both authored items, not the style's
+    //    single body slot. This is the assertion the outputs failed.
+    const auto showComp = p::SceneBuilder::ComposeSlide(showSlide, style, /*applyGates=*/true);
+    CHECK(showComp.source == p::SceneBuilder::SlideComposition::Source::SlideBlocks);
+    CHECK(showComp.blocks.empty());      // empty = "draw the slide's own blocks"
+    // ...and the style still supplies the background.
+    CHECK(showComp.paintBackground);
+    CHECK(showComp.background == std::string("#ff000000"));
+
+    // 2. A CONTENT-FAMILY slide of the same shape is untouched: its blocks are
+    //    the design's slots, so the style's template still owns it.
+    p::Slide scriptureSlide = showSlide;
+    scriptureSlide.id = "scripture-1";
+    scriptureSlide.metaJson = R"({"contentType":"scripture"})";
+    const auto scriptureComp =
+        p::SceneBuilder::ComposeSlide(scriptureSlide, style, /*applyGates=*/true);
+    CHECK(scriptureComp.source == p::SceneBuilder::SlideComposition::Source::StyleTemplate);
+    CHECK(scriptureComp.blocks.size() == 1);
+
+    // 3. A template PICKED IN THE STYLE'S SHOWS SLOT (Settings · Styles →
+    //    "Template for Shows" → Change) DOES lay the show out — that pick is an
+    //    explicit request, and the picker promises it ("the engine renders that
+    //    design as the style's layout"). The report behind this assertion:
+    //    "I chose Lower Third for style 2 and it does the opposite" — the pick
+    //    was being ignored on every authored show, so choosing a lower third
+    //    left the full-frame canvas layout on air.
+    //
+    //    Still NOT a licence for the WHOLE-STYLE template to do the same
+    //    (assertion 1: that one names no family and must leave an authored show
+    //    alone), and a style that merely NAMES "shows" as its content type is
+    //    not a pick either (assertion 3c).
+    p::OutputStyleSpec showsStyle = style;
+    showsStyle.familyTemplateKeys[p::SlideRules::FamilyTemplateSlot("shows")] = "shows-tpl";
+    showsStyle.familyTemplateBlocks[p::SlideRules::FamilyTemplateSlot("shows")] = {
+        textBlock("f1", "SHOWS LAYOUT", 300, 200),
+    };
+    const auto showsComp = p::SceneBuilder::ComposeSlide(showSlide, showsStyle, /*applyGates=*/true);
+    CHECK(showsComp.source == p::SceneBuilder::SlideComposition::Source::FamilyTemplate);
+    CHECK(showsComp.blocks.size() == 1);
+
+    // 3b. ...and that template IS the layout for a show slide with none of its
+    //     own — the case it exists for.
+    p::Slide plainForShows;
+    plainForShows.id = "show-3";
+    plainForShows.title = "Welcome";
+    plainForShows.text = "Glad you are here";
+    const auto plainShowsComp =
+        p::SceneBuilder::ComposeSlide(plainForShows, showsStyle, /*applyGates=*/true);
+    CHECK(plainShowsComp.source == p::SceneBuilder::SlideComposition::Source::FamilyTemplate);
+    CHECK(plainShowsComp.blocks.size() == 1);
+
+    // 3c. ...while a style that only NAMES "shows" as its own content type —
+    //     both of the operator's styles do — is not a pick: the authored show
+    //     still keeps its layout. This is the shape the picker has to beat.
+    p::OutputStyleSpec namedShowsStyle = style;
+    namedShowsStyle.contentType = "shows";
+    const auto namedShowsComp =
+        p::SceneBuilder::ComposeSlide(showSlide, namedShowsStyle, /*applyGates=*/true);
+    CHECK(namedShowsComp.source == p::SceneBuilder::SlideComposition::Source::SlideBlocks);
+    CHECK(namedShowsComp.blocks.empty());
+
+    // 3d. BAKED BLOCKS ARE NOT A PICK. The front-end's shows fallback bakes the
+    //     Scripture design into an UNPICKED shows slot (keys stay ""); both of
+    //     the operator's styles carry exactly that, so "has blocks" would send
+    //     every authored show to a scripture layout they never chose — the same
+    //     "hymn lines, no title, no authored band" fault in a new coat. Only a
+    //     KEY names a choice.
+    p::OutputStyleSpec fallbackShowsStyle = style;
+    fallbackShowsStyle.familyTemplateBlocks[p::SlideRules::FamilyTemplateSlot("shows")] = {
+        textBlock("b1", "SCRIPTURE FALLBACK", 0, 400),
+    };
+    const auto fallbackShowsComp =
+        p::SceneBuilder::ComposeSlide(showSlide, fallbackShowsStyle, /*applyGates=*/true);
+    CHECK(fallbackShowsComp.source == p::SceneBuilder::SlideComposition::Source::SlideBlocks);
+    CHECK(fallbackShowsComp.blocks.empty());
+
+    // 4. A show slide with NO authored blocks (a plain title/body show) still
+    //    wears the style's template: there is no design of its own to keep.
+    p::Slide plainShow;
+    plainShow.id = "show-2";
+    plainShow.title = "Announcements";
+    plainShow.text = "Youth night on Friday";
+    const auto plainComp = p::SceneBuilder::ComposeSlide(plainShow, style, /*applyGates=*/true);
+    CHECK(plainComp.source == p::SceneBuilder::SlideComposition::Source::StyleTemplate);
+
+    // 4b. THE SAME RULE, ASKED AS A QUESTION Settings · Outputs PRINTS. The row
+    //     under a style's name says what that style does to a slide, and it is
+    //     this call — so the sentence on the row and the picture on air cannot
+    //     drift apart.
+    CHECK(p::SlideRules::LayoutScope(style) == p::SlideRules::StyleLayoutScope::ContentFamilies);
+    CHECK(p::SlideRules::LayoutScope(showsStyle) == p::SlideRules::StyleLayoutScope::Shows);
+    {
+        p::OutputStyleSpec bare;
+        bare.backgroundColor = "#ff101020";       // a background with no template
+        CHECK(p::SlideRules::LayoutScope(bare)
+              == p::SlideRules::StyleLayoutScope::None);
+        p::OutputStyleSpec keyedOnly;
+        keyedOnly.familyTemplateKeys[p::SlideRules::FamilyTemplateSlot("table")] = "tpl-3";
+        CHECK(p::SlideRules::LayoutScope(keyedOnly)
+              == p::SlideRules::StyleLayoutScope::ContentFamilies);
+        // Naming "shows" as the style's own type is not a layout request (a
+        // new style defaults to it) — the row must not claim it lays shows
+        // out when ComposeSlide keeps the authored show.
+        p::OutputStyleSpec named;
+        named.contentType = "shows";
+        CHECK(p::SlideRules::LayoutScope(named) == p::SlideRules::StyleLayoutScope::None);
+    }
+
+    // 5. ...and the SCENE every output rasterizes really carries both authored
+    //    items. The decision above is the fix; this is the frame the NDI sender,
+    //    the HDMI window and the distributed outputs are handed.
+    r::RenderEngine& engine = r::RenderEngine::Instance();
+    CHECK(engine.SetBackend("software").ok());
+    p::Presentation pres;
+    pres.id = "pres-show-design";
+    p::SceneBuilder builder;
+    auto scene = builder.BuildSlideScene(pres, showSlide, style, engine);
+    CHECK(scene.ok());
+    if (scene.ok()) {
+        bool sawTitle = false, sawBand = false, sawTemplate = false;
+        for (const r::RenderObject* obj : engine.CollectObjects(scene.value())) {
+            const auto* t = dynamic_cast<const r::TextObject*>(obj);
+            if (!t) continue;
+            if (t->Text() == "VICTORY AHEAD") sawTitle = true;
+            if (t->Text().rfind("When the host of Israel", 0) == 0) sawBand = true;
+            if (t->Id() == "tpl1") sawTemplate = true;   // the style's own slot
+        }
+        CHECK(sawTitle);
+        CHECK(sawBand);
+        CHECK(!sawTemplate);
+        (void)engine.DestroyScene(scene.value());
     }
 }

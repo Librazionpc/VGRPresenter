@@ -21,6 +21,25 @@ Item {
     z: 31000
 
     property bool open: false
+
+    // ---- Esc = cancel, Enter = Select (qml/settings/Hotkeys.qml) ----------
+    // "" is a real answer here (the None card), so accept never asks whether
+    // a style was picked — the button it mirrors does not either.
+    property int hotkeyScope: 0
+    function accept() { root.applied(root.selectedId) }
+    onOpenChanged: {
+        if (root.open && root.hotkeyScope === 0) {
+            root.hotkeyScope = Hotkeys.open({
+                name: qsTr("Style"),
+                cancel: function () { root.cancelled() },
+                accept: function () { root.accept() }
+            })
+        } else if (!root.open && root.hotkeyScope !== 0) {
+            Hotkeys.close(root.hotkeyScope)
+            root.hotkeyScope = 0
+        }
+    }
+    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
     // Selection by the style's STABLE id ("" = the None card). Ids survive
     // roster edits between the dialog opening and the pick landing; an id
     // that no longer exists reads as None.

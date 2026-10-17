@@ -66,6 +66,27 @@ Item {
 
     Keys.onEscapePressed: root.dismiss()
 
+    // ---- Esc = dismiss, Enter = accept (qml/settings/Hotkeys.qml) --------
+    // The dialog's existing keys, routed through the app's stack as well: the
+    // window's Shortcut sees the key before the focused field does, so Enter in
+    // the name field accepts here instead of only when the field happens to
+    // forward it. The Keys handler above stays as the fallback for a keyboard
+    // focus path that reaches this item directly.
+    property int hotkeyScope: 0
+    onShownChanged: {
+        if (root.shown && root.hotkeyScope === 0) {
+            root.hotkeyScope = Hotkeys.open({
+                name: root.title !== "" ? root.title : "Name dialog",
+                cancel: function () { root.dismiss() },
+                accept: function () { root.accept() }
+            })
+        } else if (!root.shown && root.hotkeyScope !== 0) {
+            Hotkeys.close(root.hotkeyScope)
+            root.hotkeyScope = 0
+        }
+    }
+    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
+
     ModalScrim {
         anchors.fill: parent
         onDismissed: root.dismiss()
