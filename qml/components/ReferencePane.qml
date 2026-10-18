@@ -2994,7 +2994,13 @@ Item {
                         DesignPreview {
                             anchors.fill: parent
                             blocks: root.currentPreviewSlide ? root.currentPreviewSlide.blocks : root.preview.blocks
-                            background: (root.preview.background ?? "") === "" || root.preview.background === "transparent" ? "#000000" : root.preview.background
+                            // THE DESIGN'S OWN ANSWER, not an opaque plate of
+                            // this pane's: an unpainted background keeps
+                            // painting nothing, and the shared transparency
+                            // convention (DesignPreview's checkerboard) shows
+                            // there — the canvas's rule, not a black slab
+                            // standing in for a keyable frame.
+                            background: root.preview.background ?? "transparent"
                         }
                         Text {
                             visible: root.selected.length === 0

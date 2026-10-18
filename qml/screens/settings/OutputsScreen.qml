@@ -161,11 +161,14 @@ Item {
     // by row index (deleting a style would re-point every later output at
     // the wrong theme).
     property string editStyleId: ""
-    // How a media file taken on air sits on THIS output — "contain" (the
-    // whole picture, its own aspect kept), "cover" (cropped to fill) or
-    // "fill" (stretched). FreeShow's MediaStyle.fit; the engine applies it in
-    // SceneBuilder (OutputStyleSpec::mediaFit).
-    property string editMediaFit: "contain"
+    // NO FILL PICKER. How a taken file sits is the FILE's own choice (Media
+    // right-click → Fill), else contain: one picture, one shape on every
+    // output. A per-output Fill is what showed one take two ways on the monitor
+    // wall, and it could not even be corrected here for the ACTIVE output —
+    // the engine compared every style-spec field except the fit, so the save
+    // was read as a no-op and nothing on air moved ("why can't I change the
+    // fits in Settings · Outputs?"). The roster's old value is still loaded
+    // and saved; nothing composes from it.
 
     function openEdit(index) {
         const data = OutputListModel.getOutput(index)
@@ -179,7 +182,6 @@ Item {
         root.editLocked = data.boundsLocked
         root.editStayOnTop = data.stayOnTop
         root.editStyleId = data.styleId
-        root.editMediaFit = data.mediaFit !== undefined && data.mediaFit !== "" ? data.mediaFit : "contain"
         root.editOriginalName = data.name
     }
 
@@ -235,7 +237,6 @@ Item {
         OutputListModel.setTestPattern(root.editIndex, root.editPattern)
         OutputListModel.setBoundsLocked(root.editIndex, root.editLocked)
         OutputListModel.setStayOnTop(root.editIndex, root.editStayOnTop)
-        OutputListModel.setMediaFit(row, root.editMediaFit)
         OutputListModel.setStyle(row, requestedStyleId)
         const savedOutput = OutputListModel.getOutput(row)
         if (!savedOutput || savedOutput.styleId !== requestedStyleId) {
@@ -754,90 +755,6 @@ Item {
             }
         }
 
-        // ---- Media fill (how a taken file sits on this output) ----
-        // The picture the operator takes is composed by the engine at THIS
-        // output's own size; "contain" keeps a portrait photo portrait
-        // (default), "cover" crops it to fill, "fill" stretches it. One
-        // choice per output, never per style: two outputs can wear the same
-        // style and need different fits (a 4:3 projector next to a 16:9 one).
-        Column {
-            width: parent.width
-            spacing: Theme.space2
-
-            Text {
-                text: "Media fill"
-                color: Theme.textSecondary
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textXs
-            }            // A DROPDOWN, not a row of buttons: three words in a modal are not a
-            // segmented control (the row ran past the card and clipped), and the
-            // roster's other per-output choices are pickers too.
-            Rectangle {
-                id: fillRow
-                width: parent.width
-                height: 46
-                radius: Theme.radiusMd
-                color: Theme.inset
-
-                Text {
-                    x: 14
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: {
-                        if (root.editMediaFit === "cover")
-                            return qsTr("Cover — fills the output, cropped centered")
-                        if (root.editMediaFit === "fill")
-                            return qsTr("Fill — stretched to the output's shape")
-                        return qsTr("Contain — whole picture, own aspect kept")
-                    }
-                    color: Theme.textPrimary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
-                }
-
-                Text {
-                    anchors.right: parent.right
-                    anchors.rightMargin: 14
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "\u2304"
-                    color: Theme.textMuted
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    // openAt(), not a bare visible toggle: the panel lifts
-                    // itself into the window's overlay, measures the room
-                    // around this row and clamps/flips there (a bare toggle
-                    // left it at the dialog's top-left corner).
-                    onClicked: {
-                        if (fillMenu.visible)
-                            fillMenu.visible = false
-                        else
-                            fillMenu.openAt(fillRow, 0, fillRow.height + 4, editDialog)
-                    }
-                }
-            }
-
-            DropdownPanel {
-                id: fillMenu
-                visible: false
-                model: [
-                    { label: "Contain — whole picture, own aspect kept" },
-                    { label: "Cover — fills the output, cropped centered" },
-                    { label: "Fill — stretched to the output's shape" }
-                ]
-                onItemActivated: (label) => {
-                    root.editMediaFit = label.indexOf("Cover") === 0 ? "cover"
-                                      : label.indexOf("Fill") === 0 ? "fill"
-                                                                    : "contain"
-                    fillMenu.visible = false
-                }
-            }
-        }
-
         Column {
             width: parent.width
             spacing: Theme.space2
@@ -914,6 +831,26 @@ Item {
                         }
                     }
                 }
+            }
+
+            // THE FILL PICKER THAT USED TO SIT HERE IS GONE ON PURPOSE — said
+            // out loud, in the one place an operator goes looking for it, so
+            // its absence doesn't read as "the fit setting broke again". How a
+            // taken file sits is the PICTURE's own choice now (the file's fit,
+            // else contain — SceneBuilder::AddCompositorLayers composes every
+            // output with it), so the control lives where the picture is: Media
+            // right-click → Fill, and the Show Center's fit chips for what is on
+            // air. A per-output fill is what made one take show as two pictures
+            // across the wall, and it could not even be corrected for the ACTIVE
+            // output (the engine compared every style-spec field except the fit,
+            // so the change was swallowed as a no-op).
+            Text {
+                width: parent.width
+                text: qsTr("Pictures keep their own shape on every output. Set Fill on the file in Media (right-click → Fill), or on the Show Center's fit chips for what is on air.")
+                color: Theme.textMuted
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
+                wrapMode: Text.WordWrap
             }
         }
 

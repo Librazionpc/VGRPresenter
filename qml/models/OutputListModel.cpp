@@ -617,27 +617,11 @@ void OutputListModel::renameOutput(int index, const QString &name)
     saveRoster();
 }
 
-// Settings · Outputs → Fill. Guarded to the three fits the engine's
-// AddCompositorLayers understands; an unknown string would silently fall back
-// to "contain" there, which is honest but would make a corrupt roster look
-// like a broken picker.
-void OutputListModel::setMediaFit(int index, const QString &fit)
-{
-    if (index < 0 || index >= m_outputs.size())
-        return;
-    const QString normalized = (fit == QLatin1String("cover") || fit == QLatin1String("fill"))
-        ? fit : QStringLiteral("contain");
-    if (m_outputs[index].mediaFit == normalized)
-        return;
-    m_outputs[index].mediaFit = normalized;
-    const QModelIndex changed = this->index(index);
-    emit dataChanged(changed, changed, { MediaFitRole });
-    saveRoster();
-    // The fit rides the style spec into the engine (OutputStyleSpec::mediaFit);
-    // push again so a take already on air re-fits without waiting for the next
-    // style edit.
-    pushEngineStyle(activeStyleId());
-}
+// THERE IS NO setMediaFit ANY MORE. A take's shape is the PICTURE's (the file's
+// own fit, else contain — see SceneBuilder::AddCompositorLayers), so a per-output
+// Fill could only ever make two outputs show one file differently. The roster
+// field is still loaded and saved (an older roster keeps its value), and nothing
+// composes from it.
 
 void OutputListModel::setResolution(int index, const QString &res)
 {
@@ -1075,42 +1059,42 @@ int OutputListModel::styleRowForId(const QString &styleId) const
 
 bool OutputListModel::activeStyleAllows(const QString &contentType) const
 {
-    const int row = styleRowForId(activeStyleId());
-    if (row < 0)
+    const QString styleId = activeStyleId();
+    if (styleId.isEmpty() || styleRowForId(styleId) < 0)
         return true;   // no style on the active output: everything is allowed
-    // The gate's NAME comes from the one family table (FamilySlots.h). It used to
-    // be BUILT by capitalising the content type ("scripture" -> "showScripture"),
-    // so a tag that did not follow that convention asked for a property that does
-    // not exist and was read as "not gated" — a style that meant to switch a
-    // family off let it through in silence.
-    const FamilySlots::Family *fam = FamilySlots::RowFor(contentType);
-    if (!fam)
-        return true;   // names no family: not gated
-    const QVariantMap style = styleRoster()->getStyle(row);
-    const QString key = QString::fromLatin1(fam->showProperty);
-    if (!style.contains(key))
-        return true;   // a style from before the key existed: not gated
-    return style.value(key).toBool();
+    // THE GATE'S ANSWER IS THE ENGINE'S, not a second copy of the rule kept
+    // here. This used to test the style's own show* boolean and answer
+    // differently from SlideRules::StyleAdmits in the one state where the two
+    // could part: ALL FOUR GATES OFF is "unconfigured, admit everything" to the
+    // engine, but read as four refusals here — so the reference pane warned
+    // "switched off in this output's style" and never sent the verse, while the
+    // engine would have composed it (the same slide, two answers, one click
+    // apart). The spec builder is the other half: a style's gates reach the
+    // engine through THAT composition, so asking it here means the chip, the
+    // warning and the frame cannot disagree.
+    const auto spec = StyleSpecBuilder::specForStyleId(styleId);
+    return bps::presentation::SlideRules::StyleAdmitsFamily(spec, contentType.toStdString());
 }
 
 QString OutputListModel::activeStyleTemplateId(const QString &contentType) const
 {
     if (contentType.isEmpty())
         return {};
-    const int row = styleRowForId(activeStyleId());
-    if (row < 0)
+    const QString styleId = activeStyleId();
+    if (styleId.isEmpty() || styleRowForId(styleId) < 0)
         return {};   // no style on the active output: the slides' own template governs
-    // The same family table activeStyleAllows reads (FamilySlots.h): the pick's
-    // property name is the table's, so this and the style editor cannot disagree
-    // about what a family's pick is called.
-    const FamilySlots::Family *fam = FamilySlots::RowFor(contentType);
-    if (!fam)
-        return {};   // names no family, so it names no template
-    const QVariantMap style = styleRoster()->getStyle(row);
-    const QString key = QString::fromLatin1(fam->templateProperty);
-    if (!style.contains(key))
+    // THE SPEC'S BAKED PICK — the same value SceneBuilder lays the family out
+    // through (StyleSpecBuilder bakes a family's slot from the style row, and
+    // the engine reads `familyTemplateKeys`). Reading the row's property here
+    // was a second resolution of the same pick: it could not see the fallbacks
+    // the bake applies, so the pane could name a template the output would not
+    // render.
+    const auto spec = StyleSpecBuilder::specForStyleId(styleId);
+    const std::size_t slot =
+        bps::presentation::SlideRules::FamilyTemplateSlot(contentType.toStdString());
+    if (slot >= bps::presentation::kFamilySlotCount)
         return {};
-    return style.value(key).toString();
+    return QString::fromStdString(spec.familyTemplateKeys[slot]);
 }
 
 QVariantMap OutputListModel::styleBackground(int index) const
@@ -1185,15 +1169,6 @@ void OutputListModel::pushEngineStyle(const QString &styleId)
     // one way on an output and another way on a monitor tile.
     bps::presentation::OutputStyleSpec spec =
         StyleSpecBuilder::specForStyleRow(styleRowForId(styleId), styleRoster());
-    // ...and the ACTIVE output's own media fill (Settings · Outputs → Fill):
-    // the main deck's shared preview/main pass composes with THIS spec, so a
-    // file taken on air must land in it with the fit its output was given.
-    for (const OutputItem &activeItem : std::as_const(m_outputs)) {
-        if (activeItem.active) {
-            spec.mediaFit = activeItem.mediaFit.toStdString();
-            break;
-        }
-    }
     if (SettingsService *settings = SettingsService::instancePtr())
         settings->setActiveOutputStyle(spec);
     // THE OTHER LIVE OUTPUTS: push the per-output style set so the engine's
@@ -1216,10 +1191,12 @@ void OutputListModel::pushEngineStyle(const QString &styleId)
             if (styleRow >= 0) {
                 bps::presentation::OutputStyleSpec outSpec =
                     StyleSpecBuilder::specForStyleRow(styleRow, styleRoster());
-                // THIS output's fill choice (Settings · Outputs → Fill). It
-                // lives on the OUTPUT, not the style: two outputs can wear one
-                // style and fit a taken file differently.
-                outSpec.mediaFit = item.mediaFit.toStdString();
+                // (NO mediaFit here: how a taken file sits is the FILE's own
+                // choice, else contain — one picture, one shape on every output.
+                // A per-output fill is what made the wall show one take two
+                // ways, and the field it read could not even be corrected on the
+                // active output: PresentationEngine::SetActiveOutputStyle did
+                // not compare mediaFit, so the change was swallowed as a no-op.)
                 // Buffer name keyed by output identity (qHash(name) — the same
                 // keying saveRoster uses for StoredOutput ids).
                 specs.push_back(std::move(outSpec));

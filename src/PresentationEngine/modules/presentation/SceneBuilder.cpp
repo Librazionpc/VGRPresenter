@@ -959,6 +959,11 @@ void RefreshBusPlanes(rendering::RenderEngine& engine, const std::string& sceneI
 struct OverlaySceneCache {
     std::string signature;
     std::vector<std::string> objectIds;
+    // TRUE while a thread is building this scene's overlays OUTSIDE the lock
+    // (see AddCompositorLayers). The signature stays empty until that build
+    // lands, so a second caller during the same window returns instead of
+    // stacking a duplicate set of overlay objects onto the same scene.
+    bool building = false;
 };
 std::mutex g_overlayCacheMutex;
 std::map<std::string, OverlaySceneCache> g_overlayCache;
@@ -1003,8 +1008,7 @@ void ReportLayerState(const std::string& sceneId, const std::string& label, std:
 // BuildGatedSlideScene invocation, INCLUDING cache hits (see UpsertVideoLayer's
 // comment) — never gated behind the "already built" early return.
 void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sceneId,
-                         const rendering::Size& size, bool showOverlay = true,
-                         std::string_view mediaFit = {}) {
+                         const rendering::Size& size, bool showOverlay = true) {
     // Taken camera/screen input: pulled straight from the PAL's own
     // thread-safe tap (this runs on SceneBuilder's own worker thread) —
     // CompositorState only mirrors WHICH device, not its pixels, so a live
@@ -1055,17 +1059,22 @@ void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sce
     // image is portrait and you made it landscape".
     const auto media = presentation::CompositorState::Instance().GetMediaFrame();
     const rendering::RgbaImage mediaImg = ToRgbaImage(media.width, media.height, media.rgba);
-    // THE OUTPUT'S OWN FILL CHOICE (Settings · Outputs → Fill, FreeShow's
-    // MediaStyle.fit). "contain" is the default — the whole picture, its own
-    // aspect kept — because a take is the operator's picture and cropping it is
-    // a decision, not a default. "cover" crops to fill, "fill" stretches; an
-    // unknown/empty value (an older roster) is the default.
-    // THE FILE'S OWN FIT WINS over this output's default: a per-media choice is
-    // the operator saying "this picture, like this" and it travels with the
-    // frame (CompositorState::MediaFrame::fit — the optional override); the
-    // output's Fill setting is the fallback for files nobody has said anything
-    // about.
-    const std::string_view effectiveFit = media.fit.empty() ? mediaFit
+    // ONE PICTURE, ONE SHAPE: the FILE's own fit (a per-media choice is the
+    // operator saying "this picture, like this", and it travels with the frame
+    // — CompositorState::MediaFrame::fit), else CONTAIN. Nothing about the
+    // OUTPUT decides a take's shape any more.
+    //
+    // This is where two outputs came to show one take as two pictures: the
+    // per-output "Fill" setting (Settings · Outputs) was the fallback, so a
+    // screen left on "cover" cropped the photo while its neighbour letterboxed
+    // it — one monitor wall, two looks, for one file. The setting also could not
+    // be corrected on the ACTIVE output at all (PresentationEngine
+    // ::SetActiveOutputStyle compared every spec field EXCEPT mediaFit, so a
+    // Fill change on it was read as a no-op push and never rebuilt a frame —
+    // "why can't I change the fits?" for the Main Output while the others
+    // obeyed). A take's shape belongs to the PICTURE; the roster's old per-output
+    // value is still loaded and saved, and no longer composes anything.
+    const std::string_view effectiveFit = media.fit.empty() ? std::string_view("contain")
                                                             : std::string_view(media.fit);
     rendering::Rect mediaRect(0, 0, size.width, size.height);
     if (!mediaImg.empty()) {
@@ -1142,41 +1151,60 @@ void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sce
     for (const auto& ov : overlays)
         signature += ov.id + (ov.placeUnderSlide ? "u," : "o,");
 
-    std::lock_guard<std::mutex> lock(g_overlayCacheMutex);
-    OverlaySceneCache& cache = g_overlayCache[sceneId];
-    if (cache.signature == signature)
-        return;   // unchanged since last call — the objects already in the scene are still current
+    // THE CACHE LOCK GUARDS THE BOOKKEEPING, NEVER THE BUILD. It used to be
+    // held across AddStageBlocks, which reaches RenderEngine::Fonts() (GDI+ line
+    // metrics) and the scene graph — so one slow overlay build parked every
+    // other scene's overlay pass (the exact lock pile-up the lock-scope guard
+    // exists to stop). The atomicity that mattered is kept: ids are claimed
+    // under the lock (the previous set is taken out, `building` set, signature
+    // cleared), the engine work runs unlocked, and the new ids land under the
+    // lock again. A second caller for the SAME scene during the build sees
+    // `building` (or the empty signature) and returns — the next frame finds
+    // the finished build — instead of interleaving AddObject calls, which is
+    // what left duplicate overlay objects on an output.
+    std::vector<std::string> staleIds;
+    {
+        std::lock_guard<std::mutex> lock(g_overlayCacheMutex);
+        OverlaySceneCache& cache = g_overlayCache[sceneId];
+        if (cache.signature == signature)
+            return;   // unchanged since last call — the objects already in the scene are still current
+        if (cache.building)
+            return;   // another thread is composing this scene's overlays; they land on its next call
+        cache.building = true;
+        cache.signature.clear();
+        staleIds.swap(cache.objectIds);
+    }
 
-    for (const std::string& objId : cache.objectIds)
+    // Removals and the build itself, OUTSIDE the lock (see the note above).
+    for (const std::string& objId : staleIds)
         (void)engine.RemoveObject(sceneId, objId);
-    cache.objectIds.clear();
-    cache.signature = signature;
 
+    std::vector<std::string> builtIds;
     int overlayIdx = 0;
     for (const auto& ov : overlays) {
         ++overlayIdx;
         const std::string layer = ov.placeUnderSlide ? "media" : "overlay";
         const std::string tag = std::format("ov{}_", overlayIdx);
-        // Builds into the cross-engine RenderEngine while g_overlayCacheMutex is
-        // held, on purpose: the object ids registered just below are the ONLY
-        // way a later call removes what an earlier one added (AddObject has no
-        // upsert), so a concurrent build of the same scene interleaving here
-        // would leave duplicate overlay objects on the output. The lock is what
-        // makes the build and its bookkeeping one step.
-        // (The lock is held on purpose here — see the note above; this is not a
-        // waiver, the call no longer trips the guard's own reachability rule.)
         AddStageBlocks(engine, sceneId, ov.blocks, size, tag, layer);
         for (size_t i = 0; i < ov.blocks.size(); ++i) {
             const std::string id = std::format("{}{}", tag, i + 1);
-            cache.objectIds.push_back(id);
+            builtIds.push_back(id);
             // A text block whose own style carries a box fill is TWO objects
             // (AddStageBlocks adds `<id>box` under the text) — registering only
             // the text would leave every previous overlay's box in the scene
             // when the overlay set changes (AddObject has no upsert; the diff
             // loop above is the ONLY thing that removes them). A missing id is
             // a harmless no-op for the removals.
-            cache.objectIds.push_back(id + "box");
+            builtIds.push_back(id + "box");
         }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_overlayCacheMutex);
+        OverlaySceneCache& cache = g_overlayCache[sceneId];
+        cache.objectIds = std::move(builtIds);
+        cache.signature = std::move(signature);
+        cache.building = false;
     }
 }
 
@@ -1725,7 +1753,7 @@ Result<std::string> SceneBuilder::BuildGatedSlideScene(const Presentation& prese
         + "@gated" + StyledSceneIdFor(presentation, slide, style, size).substr(SceneIdFor(presentation, slide).size());
 
     if (engine.GetScene(sceneId).ok()) {
-        AddCompositorLayers(engine, sceneId, size, style.showOverlay, style.mediaFit);   // same cache-hit refresh as BuildSlideScene
+        AddCompositorLayers(engine, sceneId, size, style.showOverlay);   // same cache-hit refresh as BuildSlideScene
         RefreshBusPlanes(engine, sceneId);   // ...and the bus windows' frames (none recorded for a refused scene)
         return sceneId;
     }
@@ -1778,7 +1806,7 @@ Result<std::string> SceneBuilder::BuildGatedSlideScene(const Presentation& prese
             (void)engine.AddObject(sceneId, imageObj, "bg");
         }
     }
-    AddCompositorLayers(engine, sceneId, size, style.showOverlay, style.mediaFit);
+    AddCompositorLayers(engine, sceneId, size, style.showOverlay);
     Logger::Instance().Debug(std::format("Gated scene built: {} (family refused by style '{}')",
                                         sceneId, style.name), "SceneBuilder");
     return sceneId;
@@ -1800,7 +1828,7 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
     // moment this scene was first built (see AddCompositorLayers/
     // UpsertVideoLayer's own comments).
     if (engine.GetScene(sceneId).ok()) {
-        AddCompositorLayers(engine, sceneId, size, style.showOverlay, style.mediaFit);
+        AddCompositorLayers(engine, sceneId, size, style.showOverlay);
         RefreshBusPlanes(engine, sceneId);   // bus windows keep flowing on a cache hit (see BusPlane)
         return sceneId;
     }
@@ -1923,7 +1951,7 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
     // AddCompositorLayers' own comment. Runs ONCE here, before every content
     // branch below (each returns early after its own content), so every
     // path gets these layers regardless of which one executes.
-    AddCompositorLayers(engine, sceneId, size, style.showOverlay, style.mediaFit);
+    AddCompositorLayers(engine, sceneId, size, style.showOverlay);
 
     // Bus windows: a "bus" block is a live feed in the design's own rectangle,
     // so its plane is recorded from the composition that owns this scene's

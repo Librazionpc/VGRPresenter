@@ -334,13 +334,16 @@ QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec 
         // A take owns the frame: surfaces use it to clear anything of the
         // style's they would otherwise paint under the picture.
         { QStringLiteral("clearedByTake"), comp.clearedByTake },
-        // THIS OUTPUT'S OWN FILL, which is only the FALLBACK now: a file that
-        // names its own (LiveOutputService::mediaFit) wins over it, exactly as
-        // SceneBuilder lays it out. A preview that laid the picture out by the
-        // output alone would letterbox what the output crops.
-        { QStringLiteral("mediaFit"), QString::fromStdString(style.mediaFit.empty()
-                                                             ? std::string("contain")
-                                                             : style.mediaFit) },
+        // THE EFFECTIVE FILL, answered ONCE, here, so no surface re-states it:
+        // the taken FILE's own fit (its library entry), else contain — the same
+        // rule SceneBuilder lays the frame out by (`media.fit.empty() ?
+        // "contain" : media.fit`). Nothing about the OUTPUT decides a take's
+        // shape: per-output fills are what showed one file two ways on the wall,
+        // and the roster's old value is ignored (a preview that recomputed this
+        // precedence — as the monitor tile and the output window each did — could
+        // letterbox what the output crops).
+        { QStringLiteral("mediaFit"), QString::fromStdString(
+              g_mediaFitOnAir.empty() ? std::string("contain") : g_mediaFitOnAir) },
     };
 
     // The background, as a QML string: an EXPLICITLY transparent style is
@@ -2535,6 +2538,7 @@ QVariantMap LiveOutputService::previewWithStyle(const QVariantMap &slide,
     const pl::Slide engineSlide = ShowConverter::slideFromVariant(slide);
     return slideToVariantMap(&engineSlide, outputStyleForPreview(styleId));
 }
+
 
 // ---------------------------------------------------------------------------
 // Poll (onAir titles + frame counter while live)

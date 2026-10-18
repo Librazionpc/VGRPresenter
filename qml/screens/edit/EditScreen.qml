@@ -103,20 +103,6 @@ Rectangle {
         }
     }
 
-    // Same tie-to-parent rule for the canvas context menu: if the item it
-    // was opened for disappears while the menu is up (Delete key with the
-    // canvas focused, an undo that restores an earlier item set, ...), the
-    // menu closes instead of offering Duplicate/Delete on a ghost.
-    Connections {
-        target: slideStore.current
-        function onItemsChanged() {
-            if (root.canvasContextTarget !== "" && !root.canvasObjectByKey(root.canvasContextTarget)) {
-                canvasContextMenu.visible = false
-                root.canvasContextTarget = ""
-            }
-        }
-    }
-
     // True when a slide is active — the roster starts EMPTY (no hardcoded
     // slides), so this is false on a fresh launch until "Add slide" is used.
     // Drives the empty state: canvas and right panel grey out (nothing to
@@ -251,6 +237,71 @@ Rectangle {
     // instance can serve both instead of duplicating it.
     property bool bgModalOpen: false
     property string bgModalTarget: "background"
+    // WHICH ITEMS THE PICKER WAS OPENED FOR, captured at OPEN time. The apply
+    // used to read `selectedCanvasObjects` when Save was pressed, so anything
+    // that emptied the selection while the dialog was up (Escape in the modal's
+    // own hotkey scope, a selection change racing the open) turned Apply into a
+    // silent no-op: the colour never reached the shape, and its swatch stayed
+    // put — the reported "opacity does nothing, no matter how I drag it". The
+    // targets are a fact about the DIALOG, so they are latched with its target
+    // kind and used by the apply.
+    property var bgModalTargetKeys: []
+    // One entry point for every "Change" chip that opens the shared picker, so
+    // the target kind and its items can never be latched separately (or one of
+    // them forgotten, which is how the item case went dead).
+    function openBackgroundPicker(target) {
+        root.bgModalTarget = target
+        root.bgModalTargetKeys = root.selectedCanvasObjects.slice()
+        root.bgModalOpen = true
+    }
+    // The items the picker is acting on: what it was OPENED for, falling back
+    // to the live selection (a caller that opened the dialog without latching).
+    function bgPickerKeys() {
+        return root.bgModalTargetKeys.length > 0 ? root.bgModalTargetKeys
+                                                 : root.selectedCanvasObjects
+    }
+    // The first of those items, resolved now rather than at every read of the
+    // live selection (see bgModalTargetKeys).
+    function bgPickerPrimaryItem() {
+        if (root.bgPickerKeys().length === 0)
+            return null
+        return root.canvasObjectByKey(root.bgPickerKeys()[0])
+    }
+
+    // ---- ONE WAY TO COLOUR AN ITEM ----------------------------------------
+    // The TEXT item's colour has always been applied by building a NEW value and
+    // reassigning the whole property (`item.meta = Object.assign({}, item.meta,
+    // { color })`), and it works. Item fills and borders instead mutated a nested
+    // CanvasItemStyle in place, and that write never reached the shape on the
+    // canvas. So every item kind now uses the text item's shape: a fresh style
+    // object, reassigned, so the item's `style` property itself changes and every
+    // consumer (the delegate's fill, the panel's swatch, the thumbnails) is told
+    // to re-read it instead of relying on a notification from inside the style.
+    // `target` is "itemBackground" or "border", as the picker names them.
+    function applyItemColor(item, target, hex) {
+        if (!item || !item.style)
+            return false
+        const old = item.style
+        const isBorder = target === "border"
+        const next = canvasItemStylePrototype.createObject(item, {
+            kind: old.kind,
+            padding: old.padding,
+            cornerRadius: old.cornerRadius,
+            borderEnabled: old.borderEnabled,
+            borderWidth: old.borderWidth,
+            borderStyle: old.borderStyle,
+            backgroundColor: isBorder ? old.backgroundColor : hex,
+            borderColor: isBorder ? hex : old.borderColor
+        })
+        if (!next)
+            return false
+        item.style = next
+        return true
+    }
+
+    // Prototype for applyItemColor. Parented per apply (see that function), so it
+    // dies with the item it belongs to.
+    Component { id: canvasItemStylePrototype; CanvasItemStyle {} }
 
     // Which canvas object(s) are currently selected — drives which ones show
     // the border+handle "selected" chrome (see DraggableCanvasText). Empty
@@ -421,12 +472,6 @@ Rectangle {
                         "success", "Edit", "ui.edit.itemsPasted")
     }
 
-    // Right-click context menu for canvas text objects (Edit / Duplicate /
-    // Delete) — see canvasContextMenu near the end of this file. Tracks
-    // which object it was opened for, since only one shared DropdownPanel
-    // instance exists (same pattern as slideContextMenu above).
-    property string canvasContextTarget: ""
-
     function isCanvasObjectSelected(key) {
         return root.selectedCanvasObjects.indexOf(key) >= 0
     }
@@ -476,6 +521,7 @@ Rectangle {
     readonly property var primarySelectedItem: root.selectedCanvasObjects.length > 0
         ? root.canvasObjectByKey(root.selectedCanvasObjects[0])
         : null
+
 
     // The font dropdowns (textFontMenu, textFontFamilyMenu) are opened FOR this item, so they must not outlive it: deleting the
     // item, clicking empty canvas or switching slides all drop this to null, and the menus close with it instead of floating
@@ -705,9 +751,8 @@ Rectangle {
     }
 
     // Delete actually removes an item from the canvas entirely — nothing is
-    // a permanent slot anymore. Shared by deleteSelectedCanvasObjects below
-    // and canvasContextMenu's own "Delete" case, so the two delete paths
-    // can't drift apart.
+    // a permanent slot anymore. The single delete path (the Delete key, the
+    // panel's own button) funnels through here.
     function removeCanvasItems(keys) {
         canvasHistory.push(qsTr("Delete"))
         showSession.removeItems(keys)   // the engine deletes them first
@@ -781,16 +826,6 @@ Rectangle {
                 return d
         }
         return null
-    }
-
-    // sourceItem is whichever DraggableCanvasText fired contextMenuRequested
-    // — mapToItem from it (not from root directly) since (mx, my) are in
-    // that object's own local space. Clamped to root's current bounds, same
-    // reasoning as slideContextMenu's positioning below.
-    function openCanvasContextMenu(sourceItem, mx, my, key) {
-        // Shared map+clamp helper (see slideContextMenu's usage above).
-        canvasContextMenu.openAt(sourceItem, mx, my, root)
-        root.canvasContextTarget = key
     }
 
     // Add-content chip + its popover menu (bottom of the canvas).
@@ -1334,10 +1369,9 @@ Rectangle {
                 // DraggableCanvasText.handleSuffix), so a scenario reaches THIS
                 // item's adjustment points — not another item's.
                 objectName: "canvasItem_" + modelData.key
-                // Exposed so canvasContextMenu's "Edit" case (below) can
-                // reach into whichever delegate matches the clicked item and
-                // enter edit mode directly, without a fixed/named id to
-                // reference the way the old title/verse/ref/date objects had.
+                // Named so the canvas can reach whichever delegate matches a
+                // selected item and enter edit mode on it directly, without a
+                // fixed/named id the way the old title/verse/ref/date objects had.
                 property alias textLabel: itemTextLabel
                 // The bus this item carries — resolved from the STABLE id in its
                 // meta (ids survive renames and row moves), then read exactly
@@ -1372,7 +1406,6 @@ Rectangle {
                     : modelData.kind === "bus" ? busDragArea.containsMouse
                     : placeholderDragArea.containsMouse
                 onSelectedRequested: (mods) => root.handleCanvasSelect(modelData.key, mods)
-                onContextMenuRequested: (mx, my) => root.openCanvasContextMenu(canvasItemObject, mx, my, modelData.key)
                 onResizing: (geom) => root.applyCanvasResize(modelData.key, geom)
                 onMoving: (dx, dy, snapDisabled) => root.applyCanvasMove(modelData.key, dx, dy, snapDisabled)
                 onDragEnded: root.endCanvasDrag()
@@ -3298,10 +3331,7 @@ Rectangle {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        root.bgModalTarget = root.primarySelectedItemStyle ? "itemBackground" : "background"
-                        root.bgModalOpen = true
-                    }
+                    onClicked: root.openBackgroundPicker(root.primarySelectedItemStyle ? "itemBackground" : "background")
                 }
             }
             Text {
@@ -3329,10 +3359,7 @@ Rectangle {
             fillSupported: root.primarySelectedSupportsFill
             undoHook: root.pushUndoSnapshot
             focusHook: function () { mCanvas.forceActiveFocus() }
-            onChangeBorderRequested: {
-                root.bgModalTarget = "border"
-                root.bgModalOpen = true
-            }
+            onChangeBorderRequested: root.openBackgroundPicker("border")
         }
 
                 // Bottom gutter: the card's last control (the Line/Dotted/
@@ -3389,8 +3416,7 @@ Rectangle {
                 undoHook: root.pushUndoSnapshot
                 focusHook: function () { mCanvas.forceActiveFocus() }
                 onChangeColorRequested: {
-                    root.bgModalTarget = "textColor"
-                    root.bgModalOpen = true
+                    root.openBackgroundPicker("textColor")
                 }
                 onChangeFontRequested: textFontMenu.openAt(textItemPanel, 14, 96, root)
                 onChangeFontFamilyRequested: textFontFamilyMenu.openAt(textItemPanel, 14, 96, root)
@@ -3443,10 +3469,9 @@ Rectangle {
     // catcher.
     MouseArea {
         anchors.fill: parent
-        enabled: slideContextMenu.visible || canvasContextMenu.visible || textFontMenu.visible || textFontFamilyMenu.visible
+        enabled: slideContextMenu.visible || textFontMenu.visible || textFontFamilyMenu.visible
         onClicked: {
             slideContextMenu.visible = false
-            canvasContextMenu.visible = false
             textFontMenu.visible = false
             textFontFamilyMenu.visible = false
         }
@@ -3508,39 +3533,11 @@ Rectangle {
         }
     }
 
-    // Right-click menu for canvas items: "Duplicate" copies this one item
-    // (offset one tile down-right, like the item add cascading), "Delete"
-    // removes just it.
-    DropdownPanel {
-        id: canvasContextMenu
-        visible: false
-        model: [
-            { label: "Edit" },
-            { label: "Duplicate" },
-            { divider: true },
-            { label: "Delete", danger: true }
-        ]
-        onItemActivated: (label) => {
-            switch (label) {
-            case "Edit": {
-                const d = root.delegateForKey(root.canvasContextTarget)
-                if (d && d.modelData && d.modelData.kind === "text")
-                    d.textLabel.editing = true
-                break
-            }
-            case "Duplicate":
-                const src = root.canvasObjectByKey(root.canvasContextTarget)
-                if (src)
-                    root.addCanvasItem(src.kind, src)
-                break
-            case "Delete":
-                // removeCanvasItems also deselects the removed keys.
-                root.removeCanvasItems([root.canvasContextTarget])
-                break
-            }
-            canvasContextMenu.visible = false
-        }
-    }
+    // NO RIGHT-CLICK MENU ON THE CANVAS (user request: "the edit canvas should
+    // not have a right click feature that shows edit, delete..."). Right-clicking
+    // an item does nothing now; the panel's own controls are how an item is
+    // edited, duplicated or deleted, and the Delete key still removes the
+    // selection.
 
     // Font-weight picker for TextItemPanel's weight pill (see its changeFontRequested signal) - the short, fixed presets its
     // rendering already understands (see itemTextLabel's font.weight ternary above).
@@ -3585,45 +3582,63 @@ Rectangle {
 
     BackgroundColorModal {
         id: bgColorModal
+        // Self-test hook (run_item_color_test.sh): the scenario has to reach the
+        // ONE shared picker to set an opacity and press Save the way the button
+        // does, instead of re-running the apply from outside.
+        objectName: "selfTestBgPicker"
         open: root.bgModalOpen
         // Seeded from the CURRENT value each time it opens — the palette
         // highlights the color being edited instead of the component's
         // hardcoded defaults (seedWith is pure; assigning `open` here would
         // break the binding above).
-        onOpenChanged: if (open) bgColorModal.seedWith(
-            root.bgModalTarget === "itemBackground" || root.bgModalTarget === "border"
-                ? (root.primarySelectedItemStyle ? (root.bgModalTarget === "border"
-                    ? root.primarySelectedItemStyle.borderColor
-                    : root.primarySelectedItemStyle.backgroundColor) : "")
-            : root.bgModalTarget === "textColor"
-                ? (root.primarySelectedItem ? String(root.primarySelectedItem.meta?.color ?? "") : "")
-                : slideStore.current.background)
+        onOpenChanged: if (open) {
+            // Seeded from the LATCHED item, not the live selection: the two are
+            // the same object at open time, and only the latched one is still
+            // there when the dialog closes.
+            const item = root.bgPickerPrimaryItem()
+            const style = item ? item.style : null
+            bgColorModal.seedWith(root.bgModalTarget === "itemBackground" || root.bgModalTarget === "border"
+                ? (style ? (root.bgModalTarget === "border" ? style.borderColor : style.backgroundColor) : "")
+                : root.bgModalTarget === "textColor"
+                    ? (item ? String(item.meta?.color ?? "") : "")
+                    : slideStore.current.background)
+        }
         title: root.bgModalTarget === "border" ? qsTr("Border Color")
             : root.bgModalTarget === "textColor" ? qsTr("Text Color") : qsTr("Background Color")
         onApplied: (selection) => {
             canvasHistory.push(qsTr("Change color"))
+            // Solid colors only for the item rows (gradients aren't a border /
+            // item-fill concept here); the picker is shared with the slide
+            // Background case, which does support gradients.
+            const hex = selection.kind === "color" ? selection.color : selection.from
             if (root.bgModalTarget === "border" || root.bgModalTarget === "itemBackground") {
-                // Solid colors only (gradients aren't a border/item-fill
-                // concept here); the picker is shared with the slide
-                // Background case, which does support gradients.
-                const hex = selection.kind === "color" ? selection.color : selection.from
-                root.selectedCanvasObjects.forEach((k) => {
-                    const s = root.canvasObjectByKey(k)?.style
-                    if (!s) return
-                    if (root.bgModalTarget === "border") s.borderColor = hex
-                    else s.backgroundColor = hex
+                let touched = 0
+                root.bgPickerKeys().forEach((k) => {
+                    if (root.applyItemColor(root.canvasObjectByKey(k), root.bgModalTarget, hex))
+                        ++touched
                 })
+                // AN APPLY THAT LANDED NOWHERE MUST SAY SO. Silently dropping it
+                // is what made the picker read as "opacity doesn't work": the
+                // slider and its Apply looked live, and the item never got the
+                // colour.
+                if (touched === 0)
+                    EventBus.notify(qsTr("Colour not applied — the item it was opened for is no longer selected. Select it and try again."),
+                                    "warning", qsTr("Edit"), "ui.edit.color.noTarget")
             } else if (root.bgModalTarget === "textColor") {
                 // Solid only, same reasoning as border/itemBackground above.
-                const hex = selection.kind === "color" ? selection.color : selection.from
-                if (root.primarySelectedItem)
-                    root.primarySelectedItem.meta = Object.assign({}, root.primarySelectedItem.meta, { color: hex })
+                const item = root.bgPickerPrimaryItem() ?? root.primarySelectedItem
+                if (item)
+                    item.meta = Object.assign({}, item.meta, { color: hex })
             } else {
-                slideStore.current.background = selection.kind === "color" ? selection.color : selection.from
+                slideStore.current.background = hex
             }
+            root.bgModalTargetKeys = []
             root.bgModalOpen = false
         }
-        onCancelled: root.bgModalOpen = false
+        onCancelled: {
+            root.bgModalTargetKeys = []
+            root.bgModalOpen = false
+        }
     }
 
     // The Bus chip's picker — the SAME picker Media › Inputs' "New bus" uses

@@ -3239,14 +3239,16 @@ void TestBusWindowPlane() {
 }
 
 // ---------------------------------------------------------------------------
-// A FILE'S OWN FILL WINS OVER THE OUTPUT'S DEFAULT — and a take clears the
-// style's background.
+// ONE PICTURE, ONE SHAPE: the FILE's own fill decides, else contain — and a take
+// clears the style's background.
 //
 // The operator's ask, in two halves:
-//   * "per-media fill override (Contain/Cover/Fill on the file itself) that wins
-//     over the output's default fit" — the choice belongs to the PICTURE, so a
-//     portrait photo marked "cover" must crop on every output, whatever each
-//     output's Fill setting says;
+//   * "per-media fill override (Contain/Cover/Fill on the file itself)" — the
+//     choice belongs to the PICTURE, so a portrait photo marked "cover" crops
+//     on every output, and one nobody has said anything about is CONTAIN
+//     everywhere. The output's own (Settings · Outputs) value no longer decides
+//     a take at all: two outputs left on different values showed one file two
+//     ways on the monitor wall, for the same slide, at the same moment;
 //   * "the style already said shows should clear bg — anything that wants to
 //     show removes the style's bg" — a take is the frame, not a guest inside the
 //     style's poster, so the style's colour (and image) must not survive under
@@ -3326,9 +3328,10 @@ void TestMediaFitOnTheFileWins() {
         return video ? video->Bounds() : r::Rect();
     };
 
-    // 1. THE OUTPUT'S DEFAULT applies when the file names none: contain keeps the
-    //    100x200 picture's aspect (a narrow band down the middle), and the
-    //    picture itself continues behind the margins as the bar fill.
+    // 1. CONTAIN IS THE DEFAULT when the file names none — the whole picture,
+    //    its own aspect kept (a narrow band down the middle, empty space either
+    //    side). NOT the output's fill: this style says "contain" here and the
+    //    check below says a style saying "cover" answers the same way.
     takeWithFit("");
     auto built = builder.BuildSlideScene(pres, slide, style, engine);
     CHECK(built.ok());
@@ -3405,6 +3408,21 @@ void TestMediaFitOnTheFileWins() {
     {
         const r::Rect rect = mediaBounds(sceneId, "mediaonair");
         CHECK(rect.width < 700.0f);            // the FILE's answer, not the output's
+        CHECK(rect.height > 1079.0f);
+        CHECK(!engine.GetObject(sceneId, "mediabars").ok());
+    }
+
+    // 3b. AND THE OUTPUT'S FILL DECIDES NOTHING — with the style asking for
+    //     "cover" and the file naming none, the take is CONTAIN (the whole
+    //     picture). This is the promise that makes every output track the one
+    //     picture instead of cropping on the screens whose Fill said so, so it is
+    //     pinned here rather than left to the style push to honour.
+    style.mediaFit = "cover";
+    takeWithFit("");
+    (void)builder.BuildSlideScene(pres, slide, style, engine);
+    {
+        const r::Rect rect = mediaBounds(sceneId, "mediaonair");
+        CHECK(rect.width < 700.0f);            // NOT the style/output's "cover"
         CHECK(rect.height > 1079.0f);
         CHECK(!engine.GetObject(sceneId, "mediabars").ok());
     }

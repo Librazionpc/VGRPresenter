@@ -92,17 +92,20 @@ StyleLayoutScope LayoutScope(const OutputStyleSpec& style) {
     return StyleLayoutScope::None;
 }
 
-bool StyleAdmits(const OutputStyleSpec& style, const Slide& slide) {
+bool StyleAdmitsFamily(const OutputStyleSpec& style, const std::string& contentType) {
     if (!style.showShows && !style.showMedia && !style.showScripture
         && !style.showTable)
         return true;
-    const std::string fam = ContentType(slide);
-    if (fam.empty())        return true;
-    if (fam == "shows")     return style.showShows;
-    if (fam == "media")     return style.showMedia;
-    if (fam == "scripture") return style.showScripture;
-    if (fam == "table")     return style.showTable;
+    if (contentType.empty())        return true;
+    if (contentType == "shows")     return style.showShows;
+    if (contentType == "media")     return style.showMedia;
+    if (contentType == "scripture") return style.showScripture;
+    if (contentType == "table")     return style.showTable;
     return true;
+}
+
+bool StyleAdmits(const OutputStyleSpec& style, const Slide& slide) {
+    return StyleAdmitsFamily(style, ContentType(slide));
 }
 
 } // namespace bps::presentation::SlideRules

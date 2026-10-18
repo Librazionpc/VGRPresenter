@@ -51,12 +51,24 @@ std::size_t ContentFamilySlot(ContentFamily family);
 // ("{scripture_name}") is not content — it would render as the raw token.
 std::string ContentText(const Slide& slide);
 
+// Does the style's show* gates admit this CONTENT FAMILY? ("shows" | "media" |
+// "scripture" | "table"; empty or unrecognised = admitted, it belongs to no
+// gated tab.) ALL FOUR GATES OFF is an UNCONFIGURED style rather than a
+// deliberate refusal — an output wearing one would otherwise compose
+// background-only scenes forever, which is how "the real output shows the
+// style image but no text" looked while the tile's gate-free preview painted
+// the text.
+//
+// THE family question, and the one a surface holding a content TAG (not a
+// slide) must ask. It exists because the QML side answered it for itself, from
+// the style's four booleans, and answered differently: with every gate off (the
+// state this function calls "unconfigured") the copy refused the content, so
+// the reference pane warned "switched off in this output's style" and never
+// sent the verse, while the engine would have composed it.
+bool StyleAdmitsFamily(const OutputStyleSpec& style, const std::string& contentType);
+
 // Does the style's show* gates admit this slide? Untagged and unrecognised
-// families are admitted (they belong to no gated tab), and ALL FOUR GATES OFF
-// is an UNCONFIGURED style rather than a deliberate refusal — an output
-// wearing one would otherwise compose background-only scenes forever, which is
-// how "the real output shows the style image but no text" looked while the
-// tile's gate-free preview painted the text.
+// families are admitted; see StyleAdmitsFamily for the all-gates-off rule.
 bool StyleAdmits(const OutputStyleSpec& style, const Slide& slide);
 
 // WHICH SLIDES THIS STYLE'S TEMPLATE LAYS OUT — the rule the scene builder's

@@ -7013,6 +7013,166 @@ ApplicationWindow {
                     + " modelHasImage=" + (modelBg ? String(modelBg.hasImage) : "?")
                     + " styleImage=" + JSON.stringify(String(StyleListModel.getStyle(window.bsStyleRow).backgroundImage)))
     }
+    // ---- What each wall tile is drawing (VGR_TILEFACTS_TEST=1) -------------
+    // A DIAGNOSTIC, not a gate: the reported two-tile disagreement is a question
+    // about STATE, and only the tiles' own facts can answer it — two tiles are
+    // fed the same on-air/staged slide but wear their OWN style, and each draws
+    // from its own layer stack (the pane's checkerboard, the style image, a
+    // taken file's frames, the design blocks, the distributed frame). It prints,
+    // per tile, the style it wears, the composition's own facts and which of the
+    // pane's layers is visible, in three states: nothing on air, a media FILE
+    // taken, and live.
+    property string tfMedia: "C:/Users/znwaj/Documents/Iwaya Churh Live Stream/9_16 harvest.jpeg"
+    // The tile is reached by DESCENDING FROM THE WALL, never by a window-wide
+    // findItem: both hosts name their tiles "selfTestMonitorTile<n>", so a
+    // window search can hand back the OTHER surface's tile — the very mistake
+    // bsFindTile's comment records from an earlier scenario.
+    function tfTile(i) {
+        return window.bsFindTile(SelfTest.findItem("selfTestMonitorWall"), i)
+    }
+    function tfLine(phase, i) {
+        const tile = window.tfTile(i)
+        if (!tile)
+            return "[SELFTEST-TILES] phase=" + phase + " tile=" + i + " missing=yes"
+        const s = tile.onAirSlide ? tile.onAirSlide : ({})
+        const row = OutputListModel.getOutput(i) || {}
+        const pane = window.bsLayerFacts_find(tile, "selfTestTilePane")
+        const checkers = window.bsLayerFacts_find(tile, "selfTestTileCheckers")
+        const design = window.bsLayerFacts_find(tile, "selfTestTileDesignPreview")
+        const media = window.bsLayerFacts_find(tile, "selfTestTileMediaFrame")
+        const feed = window.bsLayerFacts_find(tile, "selfTestTileInputFeed")
+        const frame = window.bsLayerFacts_find(tile, "selfTestTileFrame")
+        return "[SELFTEST-TILES] phase=" + phase + " tile=" + i
+             + " styleId=" + JSON.stringify(String(tile.styleId))
+             + " active=" + tile.active + " enabled=" + tile.isEnabled
+             + " modelFit=" + JSON.stringify(String(row.mediaFit))
+             + " live=" + LiveOutputService.live
+             + " hasFrame=" + tile.hasFrame + " framePriority=" + tile.framePriority
+             + " hasSlidePreview=" + tile.hasSlidePreview
+             + " mediaOnAir=" + tile.mediaOnAir + " inputTaken=" + tile.inputTaken
+             + " fit=" + JSON.stringify(String(tile.effectiveFit))
+             + " fillMode=" + tile.effectiveFillMode
+             + " | map valid=" + s.valid
+             + " explicitTransparent=" + s.explicitTransparent
+             + " stylePaintless=" + s.stylePaintless
+             + " frameTransparent=" + s.frameTransparent
+             + " styleColor=" + JSON.stringify(String(s.styleColor))
+             + " background=" + JSON.stringify(String(s.background))
+             + " styleImagePainted=" + s.styleImagePainted
+             + " mediaFitComposed=" + JSON.stringify(String(s.mediaFit))
+             + " clearedByTake=" + s.clearedByTake
+             + " blocks=" + (s.blocks ? s.blocks.length : -1)
+             + " | layers paneColor=" + JSON.stringify(String(pane ? pane.color : "?"))
+             + " checkers=" + (checkers ? checkers.visible : "?")
+             + " design=" + (design ? design.visible : "?")
+             + " media=" + (media ? media.visible : "?") + "/fill" + (media ? String(media.fillMode) : "?")
+             + "/src" + (media ? String(media.source).substring(0, 24) : "?")
+             + " frame=" + (frame ? frame.visible : "?") + "/src" + (frame ? String(frame.source).substring(0, 40) : "?")
+             + " input=" + (feed ? feed.visible : "?")
+             + " | tileW=" + Math.round(tile.width) + " paneW=" + Math.round(pane ? pane.width : 0)
+    }
+    function tfReport(phase) {
+        const count = OutputListModel.rowCount()
+        for (let i = 0; i < count; ++i) {
+            console.log(window.tfLine(phase, i))
+            // A FRESH composition for the same (slide, style) as the tile just
+            // read. The tile's binding recomposes only when its INPUTS move, and
+            // the take is not one of them — so comparing the tile's cached
+            // answer with a call made now separates "the composition is stale"
+            // from "the composition really says this".
+            const tile = window.tfTile(i)
+            if (!tile)
+                continue
+            const raw = LiveOutputService.stagedSlideRaw
+            const useRaw = (raw && Object.keys(raw).length > 0) ? raw : LiveOutputService.onAirSlideRaw
+            const fresh = LiveOutputService.previewWithStyle(
+                (useRaw && typeof useRaw === "object") ? useRaw : {}, String(tile.styleId))
+            console.log("[SELFTEST-TILES] phase=" + phase + " tile=" + i + " fresh"
+                        + " clearedByTake=" + fresh.clearedByTake
+                        + " frameTransparent=" + fresh.frameTransparent
+                        + " stylePaintless=" + fresh.stylePaintless
+                        + " styleImagePainted=" + fresh.styleImagePainted
+                        + " styleColor=" + JSON.stringify(String(fresh.styleColor))
+                        + " blocks=" + (fresh.blocks ? fresh.blocks.length : -1))
+        }
+        // The shared state both tiles read, printed once: anything that differs
+        // per tile above is NOT sourced here.
+        const staged = LiveOutputService.stagedSlideRaw
+        console.log("[SELFTEST-TILES] phase=" + phase + " roster=" + count
+                    + " live=" + LiveOutputService.live
+                    + " mediaOnAir=" + LiveOutputService.mediaOnAir
+                    + " mediaLabel=" + JSON.stringify(String(LiveOutputService.mediaMeterLabel))
+                    + " mediaFitService=" + JSON.stringify(String(LiveOutputService.mediaFit))
+                    + " frameRev=" + LiveOutputService.frameRev
+                    + " mediaRev=" + LiveOutputService.mediaRev
+                    + " stagedKeys=" + (staged ? Object.keys(staged).length : 0))
+    }
+    // A PNG of every tile, so the facts above can be checked against what the
+    // operator actually sees (the report is about a PICTURE, not a property).
+    function tfGrab(phase) {
+        const count = OutputListModel.rowCount()
+        for (let i = 0; i < count; ++i) {
+            const ok = SelfTest.grab("selfTestMonitorTile" + i,
+                                     "tilefacts_" + phase + "_" + i + ".png")
+            console.log("[SELFTEST-TILES] grab phase=" + phase + " tile=" + i + " ok=" + ok)
+        }
+    }
+    Timer {
+        id: selfTestTileFactsStart
+        running: typeof SelfTestTileFacts !== "undefined" && SelfTestTileFacts
+        interval: 9000
+        onTriggered: {
+            window.tfReport("idle")
+            window.tfGrab("idle")
+            selfTestTileFactsMedia.restart()
+        }
+    }
+    Timer {
+        id: selfTestTileFactsMedia
+        interval: 3000
+        onTriggered: {
+            LiveOutputService.takeMedia(window.tfMedia, "9_16 harvest.jpeg")
+            console.log("[SELFTEST-TILES] takeMedia label=" + JSON.stringify(String(LiveOutputService.mediaMeterLabel)))
+            selfTestTileFactsAfterMedia.restart()
+        }
+    }
+    Timer {
+        id: selfTestTileFactsAfterMedia
+        interval: 5000
+        onTriggered: {
+            window.tfReport("media")
+            window.tfGrab("media")
+            selfTestTileFactsAfterLive.restart()
+        }
+    }
+    Timer {
+        id: selfTestTileFactsAfterLive
+        interval: 4000
+        onTriggered: {
+            window.tfReport("media2")
+            window.tfGrab("media2")
+            LiveOutputService.goLive()
+            selfTestTileFactsLiveReport.start()
+        }
+    }
+    Timer {
+        id: selfTestTileFactsLiveReport
+        interval: 6000
+        onTriggered: {
+            window.tfReport("live")
+            window.tfGrab("live")
+            // The grabs are PNG writes queued on the GUI thread; quitting in
+            // this same tick dropped the last phase's files, so the quit waits
+            // one more turn.
+            selfTestTileFactsQuit.start()
+        }
+    }
+    Timer {
+        id: selfTestTileFactsQuit
+        interval: 1500
+        onTriggered: SelfTest.quit()
+    }
+
     // ---- Blank GO LIVE carrier + a live input (VGR_BLANKLIVE_TEST=1) --------
     // The reported "the moment it is only media it doesn't go": take a real
     // window input, then press GO LIVE with nothing staged — which sends the ONE
@@ -7853,6 +8013,160 @@ ApplicationWindow {
         id: selfTestMetaDone
         interval: 2500              // the grab saves asynchronously
         onTriggered: SelfTest.quit()
+    }
+
+    // ---- item colour/opacity reaches the canvas (VGR_ITEMCOLOR_TEST=1) -------
+    // The report: "the opacity in the colour picker shows well but it never
+    // applies to the shape in the edit canvas — the text item does apply it".
+    // Both kinds go through the SAME picker, so if one works and the other does
+    // not, the difference is either in the apply or in what the canvas reads
+    // back — and no amount of reading the code settles which. This drives the
+    // real path (add the item, open the picker the row's Change chip opens, set
+    // the opacity, press Save) and prints what the ITEM holds beside what its
+    // DELEGATE is drawing, since the delegate is what the operator sees. The
+    // text item's colour is applied in the SAME run, so the two answers sit side
+    // by side in one log instead of one run each.
+    property var itemColorShape: null
+    property var itemColorText: null
+    property string itemColorShapeKey: ""
+    property string itemColorTextKey: ""
+    property string itemColorShapeBefore: ""
+    property string itemColorShapeAfter: ""
+    property string itemColorShapeDelegate: ""
+    property string itemColorTextBefore: ""
+    property string itemColorTextAfter: ""
+
+    // -1 for anything that is not a colour at all, so a missing value is a
+    // NUMBER in the report instead of an exception that ends the run (Qt.color()
+    // throws on an empty string, and that is exactly the kind of hole this
+    // scenario has to survive to report).
+    function itemColorAlpha(hex) {
+        const s = String(hex)
+        if (s.length === 0 || s.charAt(0) !== "#")
+            return -1
+        return Qt.color(s).a
+    }
+    // The item's own meta colour, or "" when it has none yet (a fresh text item
+    // has no meta.color at all, and "undefined" in the log reads as a value).
+    function itemColorMetaOf(item) {
+        if (!item || !item.meta || item.meta.color === undefined || item.meta.color === null)
+            return ""
+        return String(item.meta.color)
+    }
+
+    Timer {
+        id: selfTestItemColorStart
+        running: typeof SelfTestItemColor !== "undefined" && SelfTestItemColor
+        interval: 9000              // boot, then a show to put on the canvas
+        onTriggered: {
+            SelfTest.activate()
+            window.currentView = "edit"
+            editScreen.newShow()
+            selfTestItemColorAdd.restart()
+        }
+    }
+    Timer {
+        id: selfTestItemColorAdd
+        interval: 2500              // the edit screen and its canvas
+        onTriggered: {
+            const shape = editScreen.addCanvasItem("shape")
+            if (!shape) {
+                console.log("[SELFTEST-ITEMCOLOR] no shape item — the scenario cannot run")
+                SelfTest.quit()
+                return
+            }
+            // The shape modal's own starting fill, written the way that modal
+            // writes it, so the run starts where the report starts.
+            shape.style.backgroundColor = "#3a3f55"
+            window.itemColorShape = shape
+            window.itemColorShapeKey = shape.key
+            window.itemColorShapeBefore = shape.style.backgroundColor.toString()
+            // addCanvasItem selects what it adds, so the picker latches it.
+            editScreen.openBackgroundPicker("itemBackground")
+            selfTestItemColorApply.restart()
+        }
+    }
+    Timer {
+        id: selfTestItemColorApply
+        interval: 700               // the dialog's own open + seed
+        onTriggered: {
+            const picker = SelfTest.findItem("selfTestBgPicker")
+            if (!picker) {
+                console.log("[SELFTEST-ITEMCOLOR] no picker instance found")
+                SelfTest.quit()
+                return
+            }
+            console.log("[SELFTEST-ITEMCOLOR] picker open=" + picker.open
+                        + " seeded=" + String(picker.selection && picker.selection.color)
+                        + " customHex=" + String(picker.customHex)
+                        + " liveKind=" + String(picker.liveKind)
+                        + " selectedColorIndex=" + picker.selectedColorIndex
+                        + " selection=" + JSON.stringify(picker.selection)
+                        + " opacity=" + picker.opacityPct
+                        + " targetItemSelected=" + (editScreen.selectedCanvasObjects.length > 0))
+            picker.opacityPct = 30
+            // The Save path itself, guarded: a throw inside it used to end this
+            // scenario at this line with nothing reported, which is a worse
+            // failure than the one being diagnosed.
+            try { picker.accept() } catch (e) { console.log("[SELFTEST-ITEMCOLOR] save threw: " + e) }
+            selfTestItemColorReport.restart()
+        }
+    }
+    Timer {
+        id: selfTestItemColorReport
+        interval: 600
+        onTriggered: {
+            const shape = window.itemColorShape
+            const del = SelfTest.findItem("canvasItem_" + window.itemColorShapeKey)
+            window.itemColorShapeAfter = shape ? shape.style.backgroundColor.toString() : ""
+            window.itemColorShapeDelegate = del ? del.styleBackgroundColor.toString() : "(no delegate)"
+            console.log("[SELFTEST-ITEMCOLOR] shape key=" + window.itemColorShapeKey
+                        + " before=" + window.itemColorShapeBefore
+                        + " after=" + window.itemColorShapeAfter
+                        + " a=" + window.itemColorAlpha(window.itemColorShapeAfter).toFixed(3)
+                        + " delegate=" + window.itemColorShapeDelegate
+                        + " delegateA=" + window.itemColorAlpha(window.itemColorShapeDelegate).toFixed(3)
+                        + " dialogOpenAfter=" + editScreen.bgModalOpen
+                        + " styleIsNull=" + (window.itemColorShape ? (window.itemColorShape.style === null) : "no-item"))
+            // THE SAME RUN, THE KNOWN-GOOD PATH — a text item's own colour.
+            const text = editScreen.addCanvasItem("text")
+            window.itemColorText = text
+            window.itemColorTextKey = text ? text.key : ""
+            window.itemColorTextBefore = window.itemColorMetaOf(text)
+            editScreen.openBackgroundPicker("textColor")
+            selfTestItemColorTextApply.restart()
+        }
+    }
+    Timer {
+        id: selfTestItemColorTextApply
+        interval: 700
+        onTriggered: {
+            const picker = SelfTest.findItem("selfTestBgPicker")
+            if (picker) {
+                picker.opacityPct = 30
+                picker.accept()
+            }
+            selfTestItemColorTextReport.restart()
+        }
+    }
+    Timer {
+        id: selfTestItemColorTextReport
+        interval: 600
+        onTriggered: {
+            window.itemColorTextAfter = window.itemColorMetaOf(window.itemColorText)
+            console.log("[SELFTEST-ITEMCOLOR] text before=" + window.itemColorTextBefore
+                        + " after=" + window.itemColorTextAfter
+                        + " a=" + window.itemColorAlpha(window.itemColorTextAfter).toFixed(3))
+            // The verdict is about the SHAPE: the item holds a faded colour AND
+            // the delegate the operator looks at draws it. A pass on the item
+            // alone would not have caught "the model changed, the canvas did not".
+            const held = window.itemColorAlpha(window.itemColorShapeAfter) < 0.9
+            const drawn = window.itemColorAlpha(window.itemColorShapeDelegate) < 0.9
+            console.log("[SELFTEST-ITEMCOLOR] summary shapeItemFaded=" + held
+                        + " shapeCanvasFaded=" + drawn)
+            console.log("[SELFTEST-ITEMCOLOR] verdict=" + (held && drawn ? "APPLIED" : "NOT-APPLIED"))
+            SelfTest.quit()
+        }
     }
 
     // ---- The sermon-folder sweep's OWN notice, read off the screen ----

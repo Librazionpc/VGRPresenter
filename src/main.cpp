@@ -919,6 +919,14 @@ int main(int argc, char *argv[])
         QStringLiteral("SelfTestOutputsLayout"),
         QVariant(qEnvironmentVariableIsSet("VGR_OUTS_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The monitor-wall tile-facts diagnostic (VGR_TILEFACTS_TEST=1): prints what
+    // EACH wall tile is drawing — its own style, the composition's facts and
+    // which of its pane's layers is visible — in three states (nothing on air, a
+    // media file taken, live). Read-only; its own env var like the rest.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestTileFacts"),
+        QVariant(qEnvironmentVariableIsSet("VGR_TILEFACTS_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     // The search-ranking scenario: it types one query into the app-wide search
     // and prints the rows in display order — its own env var like the rest, so a
     // plain VGR_SELFTEST=1 run never opens the dialog.
@@ -1144,6 +1152,14 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty(
         QStringLiteral("SelfTestMetaPalette"),
         QVariant(qEnvironmentVariableIsSet("VGR_METAPAL_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The item-colour scenario (VGR_ITEMCOLOR_TEST=1): adds a shape and a text
+    // item, applies a faded colour to each through the REAL picker, and reads
+    // back what the canvas delegate is drawing. Its own env var like the rest — a
+    // plain VGR_SELFTEST=1 run must never edit a show.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestItemColor"),
+        QVariant(qEnvironmentVariableIsSet("VGR_ITEMCOLOR_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     // The sermon-folder scenario: it runs the real "Add sermons folder" sweep
     // over a folder the runner prepared, reads the toast it produced and quits —

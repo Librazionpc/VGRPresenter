@@ -101,11 +101,24 @@ Rectangle {
     // or a tile would paint another output's look.
     readonly property var onAirSlide: {
         void root.stylePulse
+        // THE TAKE IS AN INPUT OF THE COMPOSITION. SceneBuilder::ComposeSlide
+        // reads CompositorState — is a file/camera up, is its picture
+        // transparent, does a take clear the style's background — so a take
+        // CHANGES what this slide composes to, and none of that is a
+        // QML-notifiable property. The binding used to re-run only on a slide or
+        // style change, so after a take the tile kept drawing the PRE-take
+        // answer (clearedByTake=false, styleImagePainted=true,
+        // styleColor=<the style's poster>) until GO LIVE replaced the slide:
+        // one tile painted checkers where its neighbour painted its card
+        // colour, for the same picture on the same slide.
+        void LiveOutputService.mediaOnAir
+        void LiveOutputService.mediaRev
+        void LiveOutputService.inputLabel
         const stagedRaw = LiveOutputService.stagedSlideRaw
         const raw = (stagedRaw && Object.keys(stagedRaw).length > 0)
             ? stagedRaw : LiveOutputService.onAirSlideRaw
-        return LiveOutputService.previewWithStyle((raw && typeof raw === "object") ? raw : ({}),
-                                                 root.styleId)
+        return LiveOutputService.previewWithStyle(
+            (raw && typeof raw === "object") ? raw : ({}), root.styleId)
     }
     readonly property bool hasSlidePreview: onAirSlide.valid === true
                                             && onAirSlide.blocks
@@ -235,32 +248,21 @@ Rectangle {
     // with it, so there is nothing left here to derive — see the composition
     // property above.
 
-    // A REAL frame sitting directly under the on-air content in z-order must
-    // always win over ANY background paint above it, unconditionally (unlike
-    // the composition's clear-on-text step-aside, which is a per-style opt-in
-    // for the text-vs-baked-image case with no video involved) — otherwise
-    // DesignPreview's own opaque fill paints straight over the video even
-    // though the text visually sits "on top".
-    // Only the TAKEN INPUT still occupies a QML layer of its own below the
-    // engine frame (its tap is the PAL's, not the compositor's). Media is no
-    // longer part of this: it arrives with the engine frame, above this
-    readonly property bool videoUnderneath: root.inputTaken
+    // A TAKE OWNS THE FRAME, AND THE COMPOSITION SAYS SO. This used to be a
+    // pair of local flags ("videoUnderneath" = input taken, "videoLayerUp" =
+    // input or media) gating the pane's colour, its style image and the slide's
+    // own background — a second answer to a question SceneBuilder already
+    // answers, and one that could disagree with the frame: a take whose picture
+    // is opaque gets frameTransparent=false and clearedByTake=true, which is
+    // exactly what the pane's colour/image checks now read. One answer, no
+    // surface-local "is something showing" test left.
 
-
-    // A TAKE OWNS THE PANE. While an input or a file is showing, nothing of the
-    // style's paints its own colour underneath: the picture is the frame, and a
-    // branded poster showing through the margins of a portrait photo (or behind
-    // a warmed-up taking) is exactly the "the style bg is still showing" report.
-    // The engine's answer travels in the composition (clearedByTake) — this is
-    // the pane's base reading the same answer.
-    readonly property bool videoLayerUp: root.inputTaken || root.mediaOnAir
-
-    // THE PICTURE'S OWN FILL: the file's if it names one, else THIS OUTPUT's
-    // default (Settings · Outputs → Fill) — the same precedence SceneBuilder
-    // applies, so the tile letterboxes what the output letterboxes.
-    readonly property string effectiveFit:
-        LiveOutputService.mediaFit !== "" ? LiveOutputService.mediaFit
-                                          : (root.onAirSlide.mediaFit || "contain")
+    // THE PICTURE'S OWN FILL, as the composition answered it: the taken file's
+    // own choice, else contain — ONE shape for a take on every output (the
+    // precedence lives in LiveOutputService::slideToVariantMap, beside the map
+    // SceneBuilder lays the frame out by). The tile used to re-state that order
+    // on its own, so a preview could letterbox what the output cropped.
+    readonly property string effectiveFit: root.onAirSlide.mediaFit || "contain"
     readonly property int effectiveFillMode: effectiveFit === "cover" ? Image.PreserveAspectCrop
                                             : effectiveFit === "fill" ? Image.Stretch
                                                                       : Image.PreserveAspectFit
@@ -339,9 +341,12 @@ Rectangle {
         // part of it ("the style already said shows should clear bg — change it
         // so anything that wants to show removes the style's bg"). The empty
         // margins around a letterboxed file stay EMPTY, not styled.
-        color: root.videoLayerUp || root.onAirSlide.styleColor === ""
-               ? "transparent"
-               : root.onAirSlide.styleColor
+        // A TAKE CLEARS IT, answered by the composition itself: clearedByTake
+        // zeroes styleColor, so the pane paints exactly what the frame painted.
+        // (`videoLayerUp` used to force transparent here — a second decision on
+        // top of the composed one.)
+        color: root.onAirSlide.styleColor === "" ? "transparent"
+                                                  : root.onAirSlide.styleColor
 
         // TRANSPARENCY CONVENTION: the checkerboard lives at the BOTTOM of this
         // pane's stack — under the style image, the taken input/media layer, the
@@ -360,11 +365,18 @@ Rectangle {
         // keyable frames in the engine, see ComposeSlide) — and for an UNSTYLED
         // output's clear slide; never while a video layer underneath IS the
         // picture, exactly as before.
+        // THE COMPOSITION'S ANSWER, not a second opinion about it:
+        // `frameTransparent` is "this frame is see-through where nothing
+        // paints" — a style that CHOSE transparency, a slide that names no
+        // background, and a take whose PICTURE carries alpha (SceneBuilder
+        // composes all three; an opaque photo or video is NOT transparent, its
+        // letterbox margins are the output's empty pixels). Reading the style's
+        // own flags instead is what put checkerboard pillarbox bars behind an
+        // opaque taken photo, on one tile and not its neighbour.
         Checkerboard {
             objectName: "selfTestTileCheckers"
             anchors.fill: parent
-            visible: root.onAirSlide.explicitTransparent === true
-                     || (root.onAirSlide.stylePaintless === true && !root.videoUnderneath)
+            visible: root.onAirSlide.frameTransparent === true
             tileSize: 9
             shadeA: "#3a3c48"
             shadeB: "#25262f"
@@ -376,10 +388,12 @@ Rectangle {
         // WHETHER it paints (and which file) is the composition's answer.
         Image {
             anchors.fill: parent
-            visible: root.onAirSlide.styleImagePainted === true && !root.videoUnderneath
-                     && !root.mediaOnAir
-            source: (root.onAirSlide.styleImagePainted === true && !root.videoUnderneath
-                     && !root.mediaOnAir)
+            // `styleImagePainted` is the composition's whole answer: the file is
+            // on disk AND the engine paints it for this slide (clear-on-text
+            // step-aside and a take's clear included). A second take gate here
+            // could only disagree with the frame.
+            visible: root.onAirSlide.styleImagePainted === true
+            source: root.onAirSlide.styleImagePainted === true
                     ? "file:///" + root.onAirSlide.styleImage : ""
             fillMode: Image.PreserveAspectCrop
         }
@@ -522,8 +536,7 @@ Rectangle {
             // under its blocks) so a video layer underneath is never hidden
             // by it. The clear-on-text step-aside rides `styleImagePainted`:
             // the composition's answer, not a second test here.
-            backgroundImage: (root.onAirSlide.styleImagePainted === true && !root.videoUnderneath
-                              && !root.mediaOnAir)
+            backgroundImage: root.onAirSlide.styleImagePainted === true
                 ? root.onAirSlide.styleImage : ""
             // Marked blocks (the engine's own backdrop answer, above) draw here
             // WITHOUT their own paint: the backdrop pass below the feed already
@@ -531,11 +544,11 @@ Rectangle {
             // stage's slab back OVER the feed — the whole defect. Their text
             // still draws here, on top, exactly as the engine composes it.
             blocks: root.markedBlocks
-            // The slide's OWN composed colour is just as opaque as the style
-            // image — with a video layer underneath, it must step aside the
-            // same way (the video is the true background; the slide's colour
-            // never applies while a real frame is already there).
-            background: root.videoUnderneath ? "transparent" : (root.onAirSlide.background ?? "transparent")
+            // The slide's composed background — `frameTransparent` is the
+            // composition's own "nothing paints here", so a take (or any other
+            // frame that owns the picture) arrives already stepped aside.
+            background: root.onAirSlide.frameTransparent === true
+                        ? "transparent" : (root.onAirSlide.background ?? "transparent")
         }
 
         // (The transparency checkerboard for an explicitly transparent style —
@@ -559,6 +572,10 @@ Rectangle {
         // an identically-fed engine frame would simply cover it.
         Image {
             id: frameImage
+            // Self-test hook (run_tile_facts_test.sh): the distributed frame is
+            // a layer of its own, and which tiles draw it instead of the taken
+            // file's own image is exactly what a two-tile disagreement turns on.
+            objectName: "selfTestTileFrame"
             anchors.fill: parent
             visible: root.hasFrame
                      && (root.framePriority || !root.hasSlidePreview)
@@ -600,20 +617,14 @@ Rectangle {
             }
         }
 
-        // Transparency checkerboard — ONLY for an unstyled output with
-        // nothing on air AND no taken input/media (the input layer IS content:
-        // over an unstyled output the checker painted ON TOP of the feed
-        // and the picture read broken/dimmed). A styled output shows its
-        // colour/image instead ("black bg + image" looked unstyled before).
-        Checkerboard {
-            anchors.fill: parent
-            visible: !root.hasFrame && !root.hasSlidePreview
-                     && root.onAirSlide.stylePaintless === true
-                     && !root.inputTaken && !root.mediaOnAir
-            tileSize: 9
-            shadeA: "#3a3c48"
-            shadeB: "#25262f"
-        }
+        // NO SECOND CHECKERBOARD. There used to be one here — above the whole
+        // stack, with its own test ("unstyled, nothing on air, no take") — beside
+        // the pane's own at the bottom. Two copies of the transparency
+        // convention is two gates for one fact, and this one could paint OVER
+        // whatever was already drawn. The pane's checkerboard, gated on the
+        // composition's `frameTransparent`, covers every state these conditions
+        // described (an empty pane IS a transparent frame) and can never cover
+        // content.
 
         // (The LIVE pill was removed by request — the red border alone marks
         // the active output.)

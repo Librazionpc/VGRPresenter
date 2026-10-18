@@ -68,10 +68,12 @@ struct OutputItem
     // a style can't re-point every later output at the wrong theme the way an
     // index reference would (FreeShow keys outputs→styles by id the same way).
     QString styleId;
-    // How a taken media file sits on THIS output (Settings · Outputs → Fill):
-    // "contain" (default — the whole picture, its own aspect kept), "cover"
-    // (cropped to fill) or "fill" (stretched). FreeShow's MediaStyle.fit, which
-    // is what its media renderer reads per output.
+    // LEGACY — a per-output Fill that NOTHING composes from any more. How a
+    // taken file sits is the FILE's own choice (Media right-click → Fill), else
+    // contain: one picture, one shape on every output (SceneBuilder
+    // ::AddCompositorLayers). Two outputs left on different fills is what made
+    // one take read as two pictures on the wall. The field is still read from
+    // and written back to the roster so an older store round-trips unchanged.
     QString mediaFit = QStringLiteral("contain");
     // NDI (and other network) outputs: carry ONLY their own transport — no
     // physical screen window, and no audience-facing window on this machine
@@ -148,7 +150,8 @@ public:
         // (SlideRules::LayoutScope), so the sentence cannot drift from what the
         // NDI/HDMI picture does — which is the whole point of printing it.
         StyleLayoutRole,
-        // This output's media fill choice ("contain" | "cover" | "fill").
+        // This output's media fill choice ("contain" | "cover" | "fill") —
+        // legacy, see OutputItem::mediaFit: reported, never composed from.
         MediaFitRole,
     };
     Q_ENUM(Role)
@@ -216,9 +219,6 @@ public:
     Q_INVOKABLE void setTestPattern(int index, const QString &pattern);
     // Assign a style by row (the picker's natural currency; "" = None).
     Q_INVOKABLE void setStyle(int index, const QString &styleId);
-    // Settings · Outputs → Fill: how a media file taken on air sits on THIS
-    // output. Pushes the engine spec again (the fit travels with it).
-    Q_INVOKABLE void setMediaFit(int index, const QString &fit);
     Q_INVOKABLE void toggleContent(int index, const QString &key);
 
     // Snapshot for edit dialogs — one QVariantMap per output with the same
@@ -274,6 +274,11 @@ public:
     // FreeShow's "this output is not meant for that content" contract.) No
     // style on the active output = everything is allowed. PUBLIC: QML calls
     // this before going live (a private Q_INVOKABLE is invisible to QML).
+    //
+    // The ANSWER is the engine's (SlideRules::StyleAdmitsFamily, asked through
+    // the spec the style reaches the outputs as): a second reading of the four
+    // flags answered differently in the all-gates-off state, where the engine
+    // says "unconfigured — admit everything" and the copy said "refused".
     Q_INVOKABLE bool activeStyleAllows(const QString &contentType) const;
 
     // The template the OUTPUT really renders `contentType` with: the active
@@ -285,6 +290,9 @@ public:
     // family, and the tab's own pick is what reaches the output. QML calls
     // this for the pane's template row and its edit pencil ("edit template: I
     // meant the template selected in Styles and used by output and go live").
+    // Read off the style's COMPOSED spec (its baked family slots), not off the
+    // style row's property: the bake is what SceneBuilder lays the family out
+    // through, fallbacks included.
     Q_INVOKABLE QString activeStyleTemplateId(const QString &contentType) const;
 
     // This output's style background AS THE MODEL ROLE sees it: { color, image,

@@ -34,9 +34,8 @@ Item {
     property bool contentHovered: false
 
     signal selectedRequested(var modifiers)
-    // (x, y) in local coordinates — consumer maps into its own space to
-    // escape mCanvas's clip.
-    signal contextMenuRequested(real x, real y)
+    // (NO contextMenuRequested: the canvas's right-click item menu is gone by
+    // request — see the note where its MouseArea used to be.)
     signal resizing(var geom)
     // Shift+drag-the-ring — per-event incremental deltas (not total-since-
     // press), matching EditableCanvasLabel.moveRequested's exact contract so
@@ -148,15 +147,10 @@ Item {
         }
     }
 
-    MouseArea {
-        anchors.fill: parent
-        anchors.margins: -root.edgeMargin
-        acceptedButtons: Qt.RightButton
-        onClicked: (mouse) => {
-            const p = mapToItem(root, mouse.x, mouse.y)
-            root.contextMenuRequested(p.x, p.y)
-        }
-    }
+    // NO RIGHT-CLICK HANDLER (user request: "the edit canvas should not have a
+    // right click feature that shows edit, delete"). The canvas used to open a
+    // shared item menu from here; nothing listens for a right-click on an item
+    // any more, on the canvas or anywhere else.
 
     // NO ALWAYS-ON OUTLINE, NO HOVER WASH (user request: "the fake border
     // around both text and shape items — remove it completely … let me set it

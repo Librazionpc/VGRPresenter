@@ -398,6 +398,15 @@ Result<void> PresentationEngine::SetActiveOutputStyle(const OutputStyleSpec& sty
             || activeStyle_.backgroundColor != style.backgroundColor
             || activeStyle_.backgroundImage != style.backgroundImage
             || activeStyle_.clearBackgroundOnText != style.clearBackgroundOnText
+            // THE FIT IS COMPARED EVEN THOUGH NOTHING COMPOSES FROM IT ANY MORE
+            // (a take's shape is the file's, else contain — see SceneBuilder
+            // ::AddCompositorLayers). Leaving it out is what made the Settings ·
+            // Outputs → Fill control look dead on the ACTIVE output: a push that
+            // differed only in mediaFit was called a no-op, so no revision bump,
+            // no rebuild, and the picture on air kept the old fit while the other
+            // outputs (whose set is re-read every frame) obeyed. Any field a
+            // frame can depend on belongs in this list.
+            || activeStyle_.mediaFit != style.mediaFit
             // The BAKED template blocks: an edit to the template design the
             // style wears re-pushes the same key with different blocks — the
             // comparison above alone would call that push a no-op and the

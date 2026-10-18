@@ -258,11 +258,19 @@ Window {
     // disagree).
     readonly property var onAirSlide: {
         void root.stylePulse
+        // THE TAKE IS AN INPUT OF THE COMPOSITION (see OutputMonitorTile.qml's
+        // own binding for the full reasoning): SceneBuilder composes differently
+        // while a file or camera is up, and none of that is QML-notifiable, so
+        // without these the window kept drawing its PRE-take composition until
+        // the slide changed.
+        void LiveOutputService.mediaOnAir
+        void LiveOutputService.mediaRev
+        void LiveOutputService.inputLabel
         const stagedRaw = LiveOutputService.stagedSlideRaw
         const raw = (stagedRaw && Object.keys(stagedRaw).length > 0)
             ? stagedRaw : LiveOutputService.onAirSlideRaw
-        return LiveOutputService.previewWithStyle((raw && typeof raw === "object") ? raw : ({}),
-                                                 root.outputStyleId)
+        return LiveOutputService.previewWithStyle(
+            (raw && typeof raw === "object") ? raw : ({}), root.outputStyleId)
     }
     readonly property bool hasSlidePreview: onAirSlide.valid === true
                                             && onAirSlide.blocks
@@ -292,15 +300,17 @@ Window {
     // one, so gating it on outputActive made a non-active live Output bake the
     // branded image under its slide text on the real audience screen.
 
-    readonly property bool videoUnderneath: root.inputTaken
-        || (root.mediaOnAir && !LiveOutputService.mediaIsAudio)
+    // A TAKE OWNS THE FRAME, and the composition says which parts of the style
+    // stop painting for it (clearedByTake zeroes styleColor, styleImagePainted
+    // goes false). The window used to keep its own `videoUnderneath` flag and
+    // gate both layers on it — a second answer, which is exactly the kind of
+    // split this window's own comment above says it removed for every OTHER
+    // rule.
 
-    // THE PICTURE'S OWN FILL: the file's if it names one, else THIS output's
-    // default — the same precedence the engine composes with (SceneBuilder),
-    // and the very one the monitor tile uses.
-    readonly property string effectiveFit:
-        LiveOutputService.mediaFit !== "" ? LiveOutputService.mediaFit
-                                          : (root.onAirSlide.mediaFit || "contain")
+    // THE PICTURE'S OWN FILL, as the composition answered it (the taken file's
+    // own choice, else contain): one precedence, in LiveOutputService, beside
+    // the map SceneBuilder lays the frame out by.
+    readonly property string effectiveFit: root.onAirSlide.mediaFit || "contain"
     readonly property int effectiveFillMode: effectiveFit === "cover" ? Image.PreserveAspectCrop
                                             : effectiveFit === "fill" ? Image.Stretch
                                                                       : Image.PreserveAspectFit
@@ -329,21 +339,18 @@ Window {
         tileSize: 64
     }
 
-    // THE STYLE'S COLOUR — unless a take owns the frame (videoUnderneath), in
-    // which case the picture is the base layer and a style colour behind it only
-    // shows in the margins of what the output letterboxes. The composition says
-    // so itself (clearedByTake zeroes styleColor), but the explicit gate here
-    // keeps an off-air stage from painting it either.
+    // THE STYLE'S COLOUR — as the composition answered it. A take owns the frame
+    // and the composition has already zeroed styleColor for it (clearedByTake),
+    // so there is nothing left for a local "is a take up" test to add.
     Rectangle {
         anchors.fill: parent
         visible: root.onAirSlide.styleColor !== "" && root.onAirSlide.styleColor !== "transparent"
-                 && !root.videoUnderneath
         color: root.onAirSlide.styleColor
     }
     Image {
         anchors.fill: parent
-        visible: root.onAirSlide.styleImagePainted === true && !root.videoUnderneath
-        source: (root.onAirSlide.styleImagePainted === true && !root.videoUnderneath)
+        visible: root.onAirSlide.styleImagePainted === true
+        source: root.onAirSlide.styleImagePainted === true
                 ? "file:///" + root.onAirSlide.styleImage : ""
         fillMode: Image.PreserveAspectCrop
     }
@@ -393,7 +400,7 @@ Window {
         visible: root.hasSlidePreview && !root.framePriority
         showBindPlaceholders: false
         showCheckerboard: false
-        backgroundImage: (root.onAirSlide.styleImagePainted === true && !root.videoUnderneath)
+        backgroundImage: root.onAirSlide.styleImagePainted === true
             ? root.onAirSlide.styleImage : ""
         blocks: root.onAirSlide.blocks ?? []
         // THE COMPOSITION'S ANSWER, not this window's own idea of what a take
