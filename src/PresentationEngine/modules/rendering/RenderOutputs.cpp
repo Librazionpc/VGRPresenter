@@ -8,6 +8,7 @@
 #include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <format>
 #include <map>
@@ -119,6 +120,13 @@ void ReportPresentSanity(const std::string& name, const std::string& sceneId, in
 
 Result<void> FrameBufferOutput::Present(const Frame& frame) {
     if (!enabled_.load()) return Ok();
+    // THE FEED HEARTBEAT (see IRenderOutput::LastPresentSteadyMs): stamped on
+    // every accepted present, INCLUDING the live loop's once-a-second copy of
+    // an unchanged frame — that is what makes "no stamp for seconds" a stall
+    // rather than "the slide is still".
+    lastPresentMs_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count());
     auto next = std::make_shared<Frame>();
     next->sceneId = frame.sceneId;
     next->frame = frame.frame;

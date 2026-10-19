@@ -12,6 +12,7 @@
 #include "modules/display/IDisplayProvider.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -167,6 +168,12 @@ private:
     float frameRate_ = 30.0f;       // advertised fps (SetFrameRate; legacy default)
     std::string senderId_;          // BroadcastEngine sender id (lazily created)
     std::atomic<uint64_t> framesSent_{0};
+    // SELF-HEAL state (guarded by sendMutex_, the lock every send already
+    // holds): how many sends have failed in a row, and when the last sender
+    // reset was attempted. The counter is what makes the reset coalesced and
+    // what the log line reports — see the failure branch in SendFrame.
+    int sendFailStreak_ = 0;
+    std::chrono::steady_clock::time_point lastHeal_{};
     // THE SEND BUFFER, OWNED BY THE PROVIDER — the crash fix for "GO LIVE
     // crashes the app" (heap corruption 0xc0000374 in ntdll). NDI's contract:
     // a frame's buffer must stay valid from its send UNTIL THE NEXT SEND CALL

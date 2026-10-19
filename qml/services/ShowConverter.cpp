@@ -259,9 +259,10 @@ bp::Slide ShowConverter::slideFromVariant(const QVariantMap &s)
                                       : (line2.isEmpty() ? line1 : line1 + QLatin1Char('\n') + line2));
     slide.background = utf8(s.value(QStringLiteral("background"), QStringLiteral("transparent")).toString());
     slide.categoryId = utf8(s.value(QStringLiteral("categoryId")).toString());
-    // A CLEAR carrier (LiveOutputService's goLiveCleared): the engine paints an
-    // empty frame for it — no style colour, no style image — so Clear all really
-    // clears instead of falling back to the output's own look.
+    // A CLEAR carrier (Slide::clearStage): the engine paints an empty frame for
+    // it — no style colour, no style image. Clear all no longer sends one (it
+    // keeps the output's own look — see LiveOutputService::clearOnAirSlide), but
+    // a show saved while it did still round-trips honestly.
     slide.clearStage = s.value(QStringLiteral("clearStage"), false).toBool();
     // The content family this slide belongs to ("scripture" | "table" | …)
     // rides in the meta (the model has no dedicated field): the output

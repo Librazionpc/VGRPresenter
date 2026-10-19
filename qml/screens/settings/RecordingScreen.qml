@@ -518,7 +518,7 @@ Item {
                                     return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0")
                                 }
                                 color: Theme.textPrimary
-                                font.family: "Consolas"; font.pixelSize: 15
+                                font.family: FontService.monoFamily; font.pixelSize: 15
                             }
                         }
                         Column {
@@ -527,7 +527,7 @@ Item {
                             Text {
                                 text: (root.recStatus.sizeMb ?? 0).toFixed(1) + " MB"
                                 color: Theme.textPrimary
-                                font.family: "Consolas"; font.pixelSize: 15
+                                font.family: FontService.monoFamily; font.pixelSize: 15
                             }
                         }
                         Column {
@@ -536,7 +536,7 @@ Item {
                             Text {
                                 text: root.recStatus.encoder ?? "—"
                                 color: Theme.textPrimary
-                                font.family: "Consolas"; font.pixelSize: 15
+                                font.family: FontService.monoFamily; font.pixelSize: 15
                             }
                         }
                         Column {
@@ -545,7 +545,7 @@ Item {
                             Text {
                                 text: String(root.recStatus.droppedFrames ?? 0)
                                 color: (root.recStatus.droppedFrames ?? 0) > 0 ? Theme.warningLight : Theme.textPrimary
-                                font.family: "Consolas"; font.pixelSize: 15
+                                font.family: FontService.monoFamily; font.pixelSize: 15
                             }
                         }
                     }
@@ -557,7 +557,7 @@ Item {
                         text: root.recStatus.filePath ?? ""
                         color: Theme.textMuted
                         elide: Text.ElideMiddle
-                        font.family: "Consolas"; font.pixelSize: Theme.textXs
+                        font.family: FontService.monoFamily; font.pixelSize: Theme.textXs
                     }
                 }
             }

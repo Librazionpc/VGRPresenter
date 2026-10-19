@@ -1,4 +1,5 @@
 import QtQuick
+import VGRPresenterUI
 
 // A thin vertical scrollbar for a Flickable/ListView. QtQuick.Controls'
 // ScrollBar doesn't match this app's track/thumb visual language, so this
@@ -67,9 +68,10 @@ Item {
     // "The user is using me right now". Every term is LATCHED by an event or by
     // an explicit call — none is read back from the MouseAreas below, whose
     // `enabled` comes from `revealed`, which comes from these:
-    //   * `pointerOnBar` — the two HoverHandlers. NEVER `thumbArea.containsMouse`:
-    //     that closes `revealed` -> `enabled` -> `containsMouse` -> ... , the
-    //     "binding loop detected for property barBusy" report.
+    //   * `pointerOnBar` — the strip's PositionHoverArea (see below). NEVER
+    //     `thumbArea.containsMouse`: that closes `revealed` -> `enabled` ->
+    //     `containsMouse` -> ... , the "binding loop detected for property
+    //     barBusy" report.
     //   * `holding` — a press on the bar or its thumb, latched on press and
     //     cleared on release/cancel. Reading `thumbArea.pressed`/`drag.active`
     //     here would both re-close that loop and flip once per frame while a
@@ -90,7 +92,7 @@ Item {
     // and without it, and no difference in frame cost — so this term was NOT
     // proven to be the lag. It is removed because it is the wrong shape (scroll
     // state in the bar's own visibility), not because it measured hot.
-    readonly property bool pointerOnBar: trackHover.hovered || thumbHover.hovered
+    readonly property bool pointerOnBar: stripHover.hovered
     property bool holding: false
     property bool revealing: false
     // When the tail was last (re)armed — what revealCoalesceMs measures against.
@@ -188,17 +190,38 @@ Item {
         HoverGlow {
             anchors.fill: parent
             radius: parent.radius
-            hovered: trackHover.hovered
+            hovered: root.pointerOnBar
             glowColor: Qt.rgba(1, 1, 1, 0.12)
             quick: true
         }
+    }
 
-        // `margin` extends the hover zone over the thumb's grip, which the
-        // old `thumbArea.containsMouse` term used to cover.
-        HoverHandler {
-            id: trackHover
-            margin: root.gripMargin
-        }
+    // HOVER = POINTER POSITION, not hover events. The point of this strip is
+    // that a faded-out bar must come back the moment the pointer touches it —
+    // and a hover that never registers is a bar that never comes back at all
+    // (the reported "the scrollbar just isn't there" on a pane you can't
+    // wheel). PositionHoverArea is the app's reliable hover source (see its
+    // header: enter delivers, exit does not, so state is derived from
+    // AppCursor's position truth on every pointer move instead).
+    //
+    //  * `-gripMargin` — the strip covers the whole fat grab zone, so hovering
+    //    beside the thin track (where the thumb can actually be grabbed)
+    //    reveals it too, not just the 8 px the track draws.
+    //  * `clickEnabled: false` — reveal only. Its click sink is disabled, so
+    //    the track/thumb MouseAreas below keep every press and drag.
+    //  * `showCursor: false` — the MouseAreas own the pointing hand; two
+    //    equal-priority claims over the same point would flash the cursor.
+    PositionHoverArea {
+        id: stripHover
+        anchors.fill: parent
+        anchors.margins: -root.gripMargin
+        clickEnabled: false
+        showCursor: false
+        // No hover-gated visibility in the chain (the bar's own `visible` is
+        // the scrollable check) — same as every other row-level call site.
+        // Walking it here also re-entered the panes' content bindings and
+        // tripped a `shownChain` binding loop at startup.
+        checkAncestors: false
     }
 
     function scrollPos() {
@@ -266,7 +289,9 @@ Item {
         HoverGlow {
             anchors.fill: parent
             radius: parent.radius
-            hovered: thumbArea.containsMouse
+            // Position truth, not `thumbArea.containsMouse` (that latches true
+            // in this build — the glow would never go out).
+            hovered: root.pointerOnBar
             glowColor: Qt.rgba(1, 1, 1, 0.12)
             quick: true
         }
@@ -295,17 +320,10 @@ Item {
             root.setScrollPos(span > 0 ? (at / span) * root.maxScroll : 0)
         }
 
-        // Hover-only twin of the thumb's MouseArea (see the pointerOnBar note).
-        HoverHandler {
-            id: thumbHover
-            margin: root.gripMargin
-        }
-
         MouseArea {
             id: thumbArea
             anchors.fill: parent
             anchors.margins: -root.gripMargin   // the fat invisible grip
-            hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             enabled: root.revealed
             // Same latches as the track (see the note on `holding`). Latching

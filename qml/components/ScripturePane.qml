@@ -29,6 +29,9 @@ ReferencePane {
         // sessions (the old code wrote "session.referenceSource", which was
         // never declared — every open toasted "there is no setting …").
         readonly property string sessionSourceKey: "session.scriptureBible"
+        // WHERE THE READER WAS: the open Bible, book, chapter, picked verses and the
+        // row at the top of the list, as one JSON value (ReferencePane's readingKey).
+        readonly property string readingKey: "session.scriptureReading"
         readonly property var setTemplate: (id) => SettingsService.setValue("scripture.template", id)
 
         readonly property var sources: () => ScriptureService.bibles

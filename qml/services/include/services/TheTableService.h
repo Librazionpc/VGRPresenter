@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
 #include <optional>
 #include <thread>
 
@@ -205,6 +206,16 @@ private:
     void indexPassDone();
 
     void *library_ = nullptr;   // bps::library::TheTableLibrary* (void* keeps the engine header out of QML builds)
+    // THE LIBRARY IS OPENED OFF THE INTERFACE THREAD (user call: "make The Table's
+    // library load happen off the interface thread so opening the tab never blocks on
+    // reading the sermon JSON"). `libraryOwner_` owns the engine object for the
+    // process (typed void* here for the same reason as `library_`). All three are read
+    // and written on the INTERFACE thread only: loadLibrary() starts the read, and the
+    // publish — the assignment, the flags, the index and the notify — is a queued
+    // callback that runs there, never on the worker.
+    std::shared_ptr<void> libraryOwner_;
+    bool loadStarted_ = false;
+    bool loadFailed_ = false;
     bool loading_ = false;
     bool importing_ = false;
     QVariantMap progress_;

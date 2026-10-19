@@ -353,12 +353,17 @@ void SoftwareGraphicsBackend::Execute(const DrawCommand& cmd) {
         }
         case DrawCommand::Type::SetBlend:
             break;   // per-command blend stored in cmd.blend
-        case DrawCommand::Type::FillRect:
-            FillRectBlended(static_cast<int>(cmd.rect.x), static_cast<int>(cmd.rect.y),
-                            static_cast<int>(cmd.rect.width),
-                            static_cast<int>(cmd.rect.height), cmd.color,
+        case DrawCommand::Type::FillRect: {
+            // EDGE-SNAPPED (RenderTypes' SnapRectToPixelEdges): a filled box must
+            // share its boundary with a box that abuts it in stage units, or the
+            // fractional edge leaves a one-pixel seam of the frame underneath.
+            const Rect r = SnapRectToPixelEdges(cmd.rect);
+            FillRectBlended(static_cast<int>(r.x), static_cast<int>(r.y),
+                            static_cast<int>(r.width),
+                            static_cast<int>(r.height), cmd.color,
                             static_cast<BlendMode>(cmd.blend));
             break;
+        }
         case DrawCommand::Type::BlitImage: {
             auto it = textures_.find(cmd.texture.id);
             if (it == textures_.end()) {
@@ -553,7 +558,11 @@ void SoftwareGraphicsBackend::Blit(int x, int y, int w, int h, const RgbaImage& 
 }
 
 void SoftwareGraphicsBackend::RasterizeShape(const DrawCommand& cmd) {
-    const auto& r = cmd.rect;
+    // SNAP THE EDGES, NOT THE SIZE (see SnapRectToPixelEdges): a template's
+    // stacked bands are authored flush on the stage, and rounding x/y and
+    // w/h separately used to leave a one-pixel seam of the video between them
+    // on the outputs while the canvas showed none.
+    const Rect r = SnapRectToPixelEdges(cmd.rect);
     // Shapes are rasterized as filled rects/ellipses; polygons are handled by
     // the scene layer above as a list of rects in the common cases.
     if (cmd.color.a <= 0.0f) return;

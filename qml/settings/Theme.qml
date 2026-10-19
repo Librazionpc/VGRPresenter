@@ -1,5 +1,6 @@
 pragma Singleton
 import QtQuick
+import VGRPresenterUI
 
 QtObject {
     id: theme
@@ -256,10 +257,14 @@ QtObject {
     readonly property int radiusXl: 16
 
     // ---- Typography ----
-    // Windows' own system UI font - always installed, unlike a webfont ("Inter", this app's previous choice) that has to be
-    // installed separately and silently falls back to something else when it isn't. FreeShow's own app chrome (not its output/
-    // stage display, which does ship a font) takes the same approach: the OS's native font, not a bundled one.
-    readonly property string fontFamily: "Segoe UI"
+    // THE HOST'S OWN UI FACE, asked of the engine (FontManager::SystemUiFamily —
+    // the shell's message font), never a font name compiled into this app. That
+    // was the same font-agnostic gap the outputs had: a literal "Segoe UI" is
+    // fine on a stock Windows box and wrong on a stripped or localised one, and
+    // it is exactly the hard-coding a design that names a missing family used to
+    // fall into. Everything in the chrome reads THIS property, so no surface
+    // names a family of its own.
+    readonly property string fontFamily: FontService.defaultFamily
     readonly property int textXs: 10
     readonly property int textSm: 13
     // ---- The SETTINGS SUBSCRIPT ----

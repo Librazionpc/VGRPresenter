@@ -47,7 +47,7 @@ Item {
         anchors.top: parent.top
         text: root.label
         color: "#aeb6c8"
-        font.family: "Segoe UI"
+        font.family: Theme.fontFamily
         font.pixelSize: 14
     }
     Text {
@@ -55,7 +55,7 @@ Item {
         anchors.top: parent.top
         text: (root.decimals > 0 ? root.value.toFixed(root.decimals) : Math.round(root.value)) + root.suffix
         color: "#aeb6c8"
-        font.family: "Segoe UI"
+        font.family: Theme.fontFamily
         font.pixelSize: 14
     }
 

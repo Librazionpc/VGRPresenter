@@ -368,8 +368,23 @@ std::string WindowsVideo::Fingerprint() const
 // or their mutexes.
 struct VideoTapShared {
     std::atomic<bool> running{false};   // the stop flag the table's Erase/Clear sets
-    std::mutex mutex;                   // guards latestJpeg + the read handshake below
+    std::mutex mutex;                   // guards latestJpeg/latestRgba + the read handshake below
     std::vector<uint8_t> latestJpeg;    // swapped wholesale, copied out under `mutex`
+    // ---- the LIVE half (see IVideo::SetPreviewLive) -----------------------
+    // A program feed (a bus window on the on-air slide, a taken input) needs
+    // every frame at native size and native rate. The pane contract cannot
+    // carry that: it encodes a JPEG per frame (which the QML side then decodes
+    // on the GUI thread) and — the actual defect — gates publication to one
+    // frame per kPreviewFrameMs. A 30 fps camera therefore reached the
+    // compositor at 15 fps, and since both outputs render that compositor, the
+    // video bus "lagged on HDMI and NDI" together. Live taps store the newest
+    // frame as unpacked RGBA and advance `frameSeq` once per stored sample;
+    // the JPEG stays for the small tiles, at a much lower rate.
+    std::atomic<bool> live{false};
+    std::vector<uint8_t> latestRgba;    // tightly packed RGBA8, guarded by `mutex`
+    uint32_t rgbaW = 0, rgbaH = 0;
+    uint64_t frameSeq = 0;              // bumped per stored frame, read under `mutex`
+    int64_t lastStoreMs = 0;            // the PANE gate (unused by a live tap)
 
     void Publish(std::vector<uint8_t> jpeg)
     {
@@ -380,6 +395,20 @@ struct VideoTapShared {
     {
         const std::lock_guard<std::mutex> lock(mutex);
         return latestJpeg;
+    }
+
+    // The screen/window worker's live publish: that thread does NOT hold the
+    // mutex when it hands a grab over (the camera callback is called with it
+    // held), so this takes it itself. `seq` is bumped under the same lock as the
+    // pixels, which is what makes PreviewFrameSeq/PreviewFramePixels a
+    // consistent pair for the puller.
+    void PublishRgba(uint32_t w, uint32_t h, std::vector<uint8_t> rgba)
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        latestRgba = std::move(rgba);
+        rgbaW = w;
+        rgbaH = h;
+        ++frameSeq;
     }
 
     // ---- the ASYNC camera read: the MF callback <-> this tap's worker ----
@@ -443,7 +472,16 @@ struct WindowsVideo::PreviewTap {
 // the same ceiling the synchronous loop's Sleep(66) imposed, now a throttle on
 // the encode instead of a sleep between reads. The reader therefore always
 // holds the newest frame the device delivered while the CPU cost stays put.
+// A LIVE tap ignores this gate entirely (it stores every sample as pixels — see
+// VideoTapShared::live); the constant is the pane rate and, for a live tap, the
+// rate at which the pixels are re-encoded for the small tiles that read JPEG.
 constexpr int64_t kPreviewFrameMs = 66;
+// The live tap's JPEG cadence. Its pixels are the program feed; the JPEG exists
+// for the on-screen tiles that read the SAME tap through the QML image provider
+// (a monitor tile showing the taken input, a bus card's thumbnail). It keeps the
+// pane's own 15 fps — the tiles had that before the pixel path existed and must
+// not lose it — while the frames BETWEEN jpeg ticks cost nothing but the store.
+constexpr int64_t kLiveJpegMs = 66;
 // How long the worker waits for OnFlush after cancelling the pending read. The
 // flush IS the interruptibility: past this backstop the device is ignoring the
 // cancellation, and the tap is abandoned (see the table's Clear) instead of
@@ -530,11 +568,41 @@ void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
             cur->GetGUID(MF_MT_SUBTYPE, &subtype);
             cur->Release();
         }
+        // ONE publish path for every subtype: the branch below only decides how
+        // to reach a packed BGRA picture, and this does the rest — store the
+        // pixels for a live tap (swizzled to RGBA8, the IVideo contract), then
+        // encode the JPEG a live tap re-encodes at kLiveJpegMs, a pane tap at
+        // the kPreviewFrameMs gate its caller already applied.
+        // CALLER HOLDS `shared.mutex`.
+        const auto publish = [&shared, w, h](const uint8_t *bgra, UINT32 stride) {
+            const bool live = shared.live.load(std::memory_order_relaxed);
+            if (live) {
+                std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4);
+                for (UINT32 y = 0; y < h; ++y) {
+                    const uint8_t *src = bgra + static_cast<size_t>(y) * stride;
+                    uint8_t *dst = rgba.data() + static_cast<size_t>(y) * w * 4;
+                    for (UINT32 x = 0; x < w; ++x, src += 4, dst += 4) {
+                        dst[0] = src[2];   // R <- the BGRA picture's red
+                        dst[1] = src[1];
+                        dst[2] = src[0];
+                        dst[3] = 0xFF;
+                    }
+                }
+                shared.latestRgba = std::move(rgba);
+                shared.rgbaW = w;
+                shared.rgbaH = h;
+                ++shared.frameSeq;   // the pullers' "is there anything new?"
+            }
+            const int64_t now = SteadyMs();
+            if (live && now - shared.lastEncodeMs < kLiveJpegMs)
+                return;
+            shared.lastEncodeMs = now;
+            std::vector<uint8_t> jpeg = EncodeJpeg(bgra, w, h, stride, 70);
+            if (!jpeg.empty()) shared.latestJpeg = std::move(jpeg);
+        };
         if (w > 0 && h > 0 && subtype == MFVideoFormat_RGB32
             && curLen >= static_cast<DWORD>(w) * h * 4) {
-            const UINT32 stride = w * 4;   // contiguous RGB32
-            std::vector<uint8_t> jpeg = EncodeJpeg(data, w, h, stride, 70);
-            if (!jpeg.empty()) shared.latestJpeg = std::move(jpeg);
+            publish(data, w * 4);   // contiguous RGB32, BGRA byte order
         } else if (w > 0 && h > 0 && subtype == MFVideoFormat_YUY2
                    && curLen >= static_cast<DWORD>(w) * h * 2) {
             // YUY2 packed 4:2:2 — [Y0 U Y1 V] per pixel pair. The
@@ -561,8 +629,7 @@ void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
                     dst += 8;
                 }
             }
-            std::vector<uint8_t> jpeg = EncodeJpeg(rgb.data(), w, h, w * 4, 70);
-            if (!jpeg.empty()) shared.latestJpeg = std::move(jpeg);
+            publish(rgb.data(), w * 4);
         } else if (w > 0 && h > 0 && subtype == MFVideoFormat_NV12
                    && curLen >= static_cast<DWORD>(w) * h * 3 / 2) {
             // NV12 planar 4:2:0 — full-res Y plane, then interleaved
@@ -591,8 +658,7 @@ void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
                     dst += 4;
                 }
             }
-            std::vector<uint8_t> jpeg = EncodeJpeg(rgb.data(), w, h, w * 4, 70);
-            if (!jpeg.empty()) shared.latestJpeg = std::move(jpeg);
+            publish(rgb.data(), w * 4);
         } else if (w > 0 && h > 0) {
             WCHAR subName[64] = {};
             StringFromGUID2(subtype, subName, 64);
@@ -659,9 +725,15 @@ public:
                     return S_OK;
                 }
         if (sample && !(flags & MF_SOURCE_READERF_ENDOFSTREAM)) {
+            // A LIVE tap stores EVERY sample — the camera's own rate is the
+            // program rate (the missing half of the "video bus lags on HDMI and
+            // NDI" fix; the other half is that this gate used to be the only
+            // rate the compositor ever saw). A pane tap keeps the 15 fps gate,
+            // which is what keeps a wall of thumbnails cheap.
+            const bool live = shared_->live.load(std::memory_order_relaxed);
             const int64_t now = SteadyMs();
-            if (now - shared_->lastEncodeMs >= kPreviewFrameMs) {
-                shared_->lastEncodeMs = now;
+            if (live || now - shared_->lastStoreMs >= kPreviewFrameMs) {
+                shared_->lastStoreMs = now;
                 StoreSampleFrame(*shared_, sample);
             }
         }
@@ -1511,8 +1583,13 @@ void WindowsVideo::ScreenPreviewThread(PreviewTap &tap)
         // quality-70 JPEG: fine text needs more source pixels before
         // compression, not just a higher quality setting, or the encoder
         // is starting from data that's already lost the detail.
-        const int dstW = std::min(srcW, 960);
-        const int dstH = std::max(1, srcH * dstW / srcW);
+        //
+        // A LIVE tap (a screen/window bus on the on-air slide) is not a pane:
+        // it grabs at the source's own size, so the picture the outputs show is
+        // the desk's, not a 960-wide blow-up of it.
+        const bool live = tap.shared->live.load(std::memory_order_relaxed);
+        const int dstW = live ? srcW : std::min(srcW, 960);
+        const int dstH = live ? srcH : std::max(1, srcH * dstW / srcW);
         BITMAPINFO bi{};
         bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         bi.bmiHeader.biWidth = dstW;
@@ -1566,14 +1643,38 @@ void WindowsVideo::ScreenPreviewThread(PreviewTap &tap)
             }
             if (blitOk) {
                 const UINT32 stride = static_cast<UINT32>(dstW) * 4;
-                // Quality 85 (was 70) — quality-70 JPEG blocking on fine UI
-                // text is what "rumbled up" chat text actually was.
-                std::vector<uint8_t> jpeg = EncodeJpeg(static_cast<const uint8_t *>(bits),
-                                                       static_cast<UINT32>(dstW),
-                                                       static_cast<UINT32>(dstH), stride, 85);
-                if (!jpeg.empty()) {
-                    tap.shared->Publish(std::move(jpeg));
+                const int64_t now = SteadyMs();
+                if (live) {
+                    // Pixels for the compositor: the DIB is BGRA top-down, the
+                    // IVideo contract is RGBA8 — the same swizzle the camera
+                    // tap's live publish does, for the same reason (one format
+                    // between the PAL and every puller).
+                    std::vector<uint8_t> rgba(static_cast<size_t>(stride) * dstH);
+                    const uint8_t *src = static_cast<const uint8_t *>(bits);
+                    for (size_t i = 0; i < rgba.size(); i += 4) {
+                        rgba[i] = src[i + 2];
+                        rgba[i + 1] = src[i + 1];
+                        rgba[i + 2] = src[i];
+                        rgba[i + 3] = 0xFF;
+                    }
+                    tap.shared->PublishRgba(static_cast<uint32_t>(dstW),
+                                            static_cast<uint32_t>(dstH), std::move(rgba));
                     gotFrame = true;
+                }
+                // The JPEG is the small tiles' feed: every grab for a pane (the
+                // caller's own ~15 fps wait paces it), 5 Hz for a live tap whose
+                // real output is the pixels above.
+                if (!live || now - tap.shared->lastEncodeMs >= kLiveJpegMs) {
+                    tap.shared->lastEncodeMs = now;
+                    // Quality 85 (was 70) — quality-70 JPEG blocking on fine UI
+                    // text is what "rumbled up" chat text actually was.
+                    std::vector<uint8_t> jpeg = EncodeJpeg(static_cast<const uint8_t *>(bits),
+                                                           static_cast<uint32_t>(dstW),
+                                                           static_cast<uint32_t>(dstH), stride, 85);
+                    if (!jpeg.empty()) {
+                        tap.shared->Publish(std::move(jpeg));
+                        gotFrame = true;
+                    }
                 }
             }
         }
@@ -1591,7 +1692,9 @@ void WindowsVideo::ScreenPreviewThread(PreviewTap &tap)
             WaitOrStop(tap.shared, 30);   // a failed grab retries a bit slower; success loops at ~15 fps
         } else {
             consecutiveFailures = 0;
-            WaitOrStop(tap.shared, 66);
+            // A live tap grabs as fast as GDI will let it (16 ms = the display
+            // refresh a bus window is meant to follow); a pane keeps ~15 fps.
+            WaitOrStop(tap.shared, live ? 16 : 66);
         }
     }
 }
@@ -1717,22 +1820,74 @@ std::vector<uint8_t> WindowsVideo::PreviewFrame(const std::string &deviceId)
 
 IVideo::DecodedFrame WindowsVideo::PreviewFramePixels(const std::string &deviceId)
 {
+    IVideo::DecodedFrame out;
     std::vector<uint8_t> jpeg;
     {
         const std::lock_guard<std::mutex> lock(previews_->mutex);
         auto it = previews_->taps.find(deviceId);
         if (it == previews_->taps.end())
             return {};
-        jpeg = it->second->shared->Frame();   // copy under the slot's lock, decode outside it
+        auto &shared = *it->second->shared;
+        const std::lock_guard<std::mutex> frameLock(shared.mutex);
+        out.seq = shared.frameSeq;
+        // A LIVE tap already keeps the frame unpacked, in the contract's own
+        // format — one copy, no JPEG decode on the puller. That is the whole
+        // program path; the decode below only serves a pane tap.
+        if (!shared.latestRgba.empty()) {
+            out.width = shared.rgbaW;
+            out.height = shared.rgbaH;
+            out.rgba = shared.latestRgba;
+            return out;
+        }
+        jpeg = shared.latestJpeg;
     }
     if (jpeg.empty())
         return {};
-    RawRgba raw = DecodeJpeg(jpeg.data(), jpeg.size());
-    IVideo::DecodedFrame out;
+    RawRgba raw = DecodeJpeg(jpeg.data(), jpeg.size());   // decode outside the table's lock
     out.width = raw.width;
     out.height = raw.height;
     out.rgba = std::move(raw.rgba);
     return out;
+}
+
+uint64_t WindowsVideo::PreviewFrameSeq(const std::string &deviceId)
+{
+    const std::lock_guard<std::mutex> lock(previews_->mutex);
+    auto it = previews_->taps.find(deviceId);
+    if (it == previews_->taps.end())
+        return 0;
+    const std::lock_guard<std::mutex> frameLock(it->second->shared->mutex);
+    return it->second->shared->frameSeq;
+}
+
+void WindowsVideo::SetPreviewLive(const std::string &deviceId, bool live)
+{
+    const std::lock_guard<std::mutex> lock(previews_->mutex);
+    auto it = previews_->taps.find(deviceId);
+    if (it == previews_->taps.end())
+        return;
+    auto &shared = *it->second->shared;
+    shared.live.store(live, std::memory_order_relaxed);
+    {
+        const std::lock_guard<std::mutex> frameLock(shared.mutex);
+        if (live) {
+            // Nothing already held should count against the first live store:
+            // the pane gate's timestamp is about the pane rate.
+            shared.lastStoreMs = 0;
+        } else {
+            // Back to a pane: the stale pixels must not keep answering as the
+            // newest frame (the JPEG path is the pane's, and the next grab or
+            // sample overwrites it).
+            shared.latestRgba.clear();
+            shared.rgbaW = shared.rgbaH = 0;
+        }
+    }
+    // A tap that only ever ran as a pane has pixels only as JPEG; the FIRST
+    // live pull may still answer through the decode path (PreviewFramePixels).
+    // Nothing to clear.
+    std::printf("[videopreview] tap %s -> %s\n", deviceId.c_str(),
+                live ? "live (program rate, native size)" : "pane (15 fps JPEG)");
+    std::fflush(stdout);
 }
 
 std::string WindowsVideo::PreviewFailure(const std::string &deviceId) const

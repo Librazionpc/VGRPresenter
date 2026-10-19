@@ -47,6 +47,57 @@ Item {
     property string selection: "all"   // "all" | "unlabeled" | a category's id
     readonly property bool categorySelected: selection !== "all" && selection !== "unlabeled"
 
+    // ---- WHERE THE GRID WAS LEFT (user call: "make the app remember its state and
+    // position") ---------------------------------------------------------------
+    // The pane names ONE registered settings key (stateKey): the category that was
+    // being browsed and the card that was at the top of the grid, as JSON. Written on
+    // a short idle as the operator moves, read back when the pane is built or its
+    // roster reloads, so the grid does not drop back to "All" at the first card.
+    property string stateKey: ""
+    property bool placeRestored: false
+    function placeIndex(id) {
+        if (id === "") return -1
+        for (let i = 0; i < gridRows.count; ++i)
+            if (root.gridRowId(i) === String(id)) return i
+        return -1
+    }
+    function savePlace() {
+        if (root.stateKey === "" || !SettingsService.ready) return
+        const at = gridRows.count > 0 ? grid.indexAt(8, grid.contentY + 8) : -1
+        const top = at >= 0 ? root.gridRowId(at) : ""
+        const text = JSON.stringify({ selection: root.selection, top: top })
+        if (String(SettingsService.values[root.stateKey] ?? "") !== text)
+            SettingsService.setValue(root.stateKey, text)
+    }
+    function touchPlace() {
+        if (root.stateKey !== "") placeTimer.restart()
+    }
+    function restorePlace() {
+        if (root.placeRestored || root.stateKey === "" || !SettingsService.ready) return
+        // Read once: a pre-boot read sees nothing, and a later retry is what fixes it.
+        root.placeRestored = true
+        const raw = String(SettingsService.values[root.stateKey] ?? "")
+        let state = null
+        if (raw !== "") {
+            try { state = JSON.parse(raw) } catch (e) { state = null }
+        }
+        if (state && typeof state === "object") {
+            const wanted = typeof state.selection === "string" ? state.selection : "all"
+            if (wanted !== root.selection
+                    && (wanted === "all" || wanted === "unlabeled" || root.categoryExists(wanted)))
+                root.selection = wanted        // its own handler reloads the grid
+        }
+        // A baseline for the next run (see savePlace): the first move would otherwise
+        // be the only thing that ever records a place, and a session that only opened
+        // a card would come back to the first row.
+        Qt.callLater(function () {
+            const at = state ? root.placeIndex(state.top) : -1
+            if (at >= 0) grid.positionViewAtIndex(at, GridView.Beginning)
+            root.savePlace()
+        })
+    }
+    Timer { id: placeTimer; interval: 350; onTriggered: root.savePlace() }
+
     property var gridItems: []
     // ---- the grid's MODEL: rows that are INSERTED, REMOVED and UPDATED, not reset --------
     // `gridItems` is what the SERVICE says (a fresh array per reload); this ListModel is what
@@ -154,7 +205,7 @@ Item {
         gridItems = service.designs(filter, query)
         syncGridRows()
     }
-    onSelectionChanged: reload()
+    onSelectionChanged: { reload(); root.touchPlace() }
     onQueryChanged: reload()
     // The grid's refresh trigger as a PROPERTY BINDING, not just a signal:
     // the singletons are created when QML first touches them, which can be
@@ -166,8 +217,8 @@ Item {
     readonly property int serviceRevision: (service ? service.totalCount : 0)
                                          + (service ? service.unlabeledCount : 0)
                                          + (service ? service.categories.length : 0)
-    onServiceRevisionChanged: reload()
-    Component.onCompleted: reload()
+    onServiceRevisionChanged: { reload(); root.restorePlace() }
+    Component.onCompleted: { reload(); root.restorePlace(); SettingsService.whenReady(root.restorePlace) }
 
     function categoryExists(id) {
         const list = service.categories
@@ -188,6 +239,7 @@ Item {
             if (root.categorySelected && !root.categoryExists(root.selection))
                 root.selection = "all"
             root.reload()
+            root.restorePlace()
         }
     }
 
@@ -431,6 +483,9 @@ Item {
             // (cacheBuffer: 0) measured only ~35 ms of the phase and would move card building
             // into the scroll.
             model: gridRows
+
+            // The card at the top of the grid is part of the remembered place.
+            onMovementEnded: root.touchPlace()
 
             readonly property int columns: Math.max(2, Math.floor(width / 230))
             cellWidth: Math.floor(width / columns)

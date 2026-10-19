@@ -101,7 +101,7 @@ Rectangle {
                 id: emptyLabel
                 anchors.centerIn: parent
                 color: "#8a91a3"
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 10
                 text: qsTr("Empty slide")
             }
@@ -119,7 +119,7 @@ Rectangle {
         Text {
             anchors.centerIn: parent
             color: "#c9cedd"
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 9
             text: String(root.num)
         }

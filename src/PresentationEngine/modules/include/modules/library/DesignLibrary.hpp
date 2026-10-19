@@ -45,6 +45,31 @@ inline constexpr double kStageHeight = 428.0;
 // Filter value for "designs that are in no category".
 inline constexpr std::string_view kUnlabeled = "unlabeled";
 
+// THE SHIPPED CONTENT'S REVISION. It is stored in each library document, and a
+// library written under an older revision is migrated ONCE on Load. The installer
+// seed catalogs (installer/seed-data/local/*.json) carry the same number, so a
+// fresh install starts current instead of rewriting itself on first boot.
+//
+// Why it has to exist: shipped designs are seeded into a store only when the
+// store does not already hold them (EnsureDefaultsLocked), so a change to the
+// catalog only ever reached a fresh install.
+//
+// Revision 2 made the catalogs FONT-FREE (no design names a font family — the
+// renderer resolves "none" to the host's UI face) and stripped the two faces the
+// catalogs used to write by name, "Segoe UI" and "Arial". That was too narrow: the
+// seeded catalogs had also picked up the AUTHORING MACHINE's faces on a handful of
+// shipped designs ("TT Nooks Trial", "Cambria Math", "Inter", "Segoe UI Semibold"),
+// and those survived the migration — a shipped template still naming a font no
+// other install has, which is the exact defect the font-free catalog removes.
+//
+// Revision 3 is the rule stated plainly: a SHIPPED design names no font at all, so
+// the migration drops the fontFamily key from every block of a default design. The
+// user's own designs — and a copy they made of a shipped one — keep the family they
+// chose; refreshing the app's defaults never reaches into their work.
+//
+// Bump this when the catalog changes something an existing install must pick up.
+inline constexpr int kCatalogRevision = 3;
+
 struct Design {
     std::string id;
     std::string name;
@@ -150,6 +175,13 @@ public:
 
     // The design as a slide template (its blocks keep their `bind`), e.g. to embed a library template in a show.
     Result<presentation::SlideTemplate> AsTemplate(std::string_view id) const;
+
+    // The document this library saves — categories, designs, which shipped ones were deleted, and the
+    // shipped-content revision. It is also the SEED the installer ships: tools/make_installer.sh asks
+    // bps_cli for it (see SeedStoreJson), so a shipped library is always what THIS build's catalogs say
+    // — never a copy of somebody's appdata, which is how the shipped templates once carried the fonts
+    // of the machine they were copied from.
+    std::string StoreJson() const;
 
     const DesignLibraryConfig& Config() const { return config_; }
 

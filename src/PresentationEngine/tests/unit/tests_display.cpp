@@ -248,6 +248,22 @@ void TestDisplayNdi() {
         (void)bc.DisconnectReceiver(recv.value());
     }
 
+    // ---- SELF-HEAL: a sender the engine no longer knows -------------------
+    // The reported failure: an NDI row created after the feed had armed sat at
+    // 0 frames until the app was restarted, because every send failed against a
+    // sender id the engine had forgotten. The provider must notice the failure,
+    // drop the dead id, and let the NEXT frame recreate the sender by itself.
+    {
+        auto& bc = broadcast::BroadcastEngine::Instance();
+        const std::string dead = ndi.SenderId();
+        CHECK(!dead.empty());
+        CHECK(bc.StopSender(dead).ok());          // the engine forgets it...
+        CHECK(!ndi.SendFrame(view).ok());         // ...so this send fails...
+        CHECK(ndi.SenderId().empty());            // ...and the provider lets go of it
+        CHECK(ndi.SendFrame(view).ok());          // the next frame heals it
+        CHECK(!ndi.SenderId().empty());
+    }
+
     // Nonsense rate → the legacy 30 fallback (never advertise <= 0).
     ndi.SetFrameRate(0.0f);
     CHECK(ndi.FrameRate() == 30.0f);

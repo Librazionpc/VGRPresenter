@@ -403,7 +403,7 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.title
                 color: Theme.textPrimary
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 21
                 font.weight: Font.DemiBold
             }
@@ -462,7 +462,7 @@ Item {
                     width: parent.width
                     text: qsTr("Pick a color or gradient for the slide background")
                     color: Theme.textSecondary
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 13
                     wrapMode: Text.Wrap
                 }
@@ -543,14 +543,14 @@ Item {
                                 return Qt.color(root.selection.color).a < 1 ? qsTr("Tint") : qsTr("Custom color")
                             }
                             color: Theme.textPrimary
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 15
                             font.weight: Font.Medium
                         }
                         Text {
                             text: root.selection.kind === "gradient" ? root.selection.subtitle : root.selection.color
                             color: Theme.textMuted
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 12
                         }
                     }
@@ -565,7 +565,7 @@ Item {
                 Text {
                     text: qsTr("COLORS")
                     color: Theme.textMuted
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 10
                     font.weight: Font.Bold
                 }
@@ -669,7 +669,7 @@ Item {
                 Text {
                     text: qsTr("GRADIENTS")
                     color: Theme.textMuted
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 10
                     font.weight: Font.Bold
                 }
@@ -708,7 +708,7 @@ Item {
                 Text {
                     text: qsTr("CUSTOM COLOR")
                     color: Theme.textMuted
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 10
                     font.weight: Font.Bold
                 }
@@ -745,7 +745,7 @@ Item {
                             width: parent.width - 30
                             text: root.customHex
                             color: Theme.textPrimary
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 14
                             selectByMouse: true
                             // Live preview on every keystroke, not just once
@@ -776,7 +776,7 @@ Item {
                 Text {
                     text: qsTr("CUSTOM GRADIENT")
                     color: Theme.textMuted
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 10
                     font.weight: Font.Bold
                 }
@@ -816,7 +816,7 @@ Item {
                             width: 140
                             text: root.customGradFrom
                             color: Theme.textPrimary
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 14
                             selectByMouse: true
                             onTextChanged: {
@@ -844,7 +844,7 @@ Item {
                             width: 140
                             text: root.customGradTo
                             color: Theme.textPrimary
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 14
                             selectByMouse: true
                             onTextChanged: {
@@ -893,7 +893,7 @@ Item {
                     anchors.centerIn: parent
                     text: qsTr("Cancel")
                     color: Theme.textPrimary
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                     font.weight: Font.Medium
                 }
@@ -918,7 +918,7 @@ Item {
                     anchors.centerIn: parent
                     text: qsTr("Apply")
                     color: "#ffffff"
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                     font.weight: Font.Medium
                 }

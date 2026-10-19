@@ -97,7 +97,7 @@ Column {
             Text {
                 text: qsTr("Size & Style")
                 color: Theme.textPrimary
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 14
                 font.weight: Font.Medium
             }
@@ -201,7 +201,7 @@ Column {
                     anchors.verticalCenter: parent.verticalCenter
                     text: qsTr("Border")
                     color: Theme.textPrimary
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                 }
 
@@ -276,7 +276,7 @@ Column {
                         anchors.centerIn: parent
                         text: qsTr("Change")
                         color: Theme.textSecondary
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 12
                         font.weight: Font.Medium
                     }
@@ -295,7 +295,7 @@ Column {
                     anchors.rightMargin: 8
                     anchors.verticalCenter: parent.verticalCenter
                     color: Theme.textMuted
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 16
                     text: "›"
                 }
@@ -354,7 +354,7 @@ Column {
                             anchors.centerIn: parent
                             text: styleBtn.modelData.label
                             color: styleBtn.active ? "#ffffff" : Theme.textSecondary
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 13
                             font.weight: Font.Medium
                         }

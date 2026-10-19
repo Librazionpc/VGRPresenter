@@ -152,7 +152,7 @@ Rectangle {
             y: 32
             text: root.live ? qsTr("STOP") : qsTr("GO LIVE")
             color: root.live ? Theme.dangerLight : Theme.textPrimary
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 13
             font.weight: Font.DemiBold
             font.letterSpacing: 0.5
@@ -233,7 +233,7 @@ Rectangle {
             y: 32
             text: qsTr("Search")
             color: searchHover.hovered ? Theme.textPrimary : Theme.textSecondary
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 15
             font.bold: true
             textFormat: Text.PlainText
@@ -260,6 +260,25 @@ Rectangle {
         anchors.right: windowButtons.left
         anchors.rightMargin: 8
         y: 9
+    }
+
+    // FEED HEALTH — a second pill in the same row, immediately left of
+    // Connected and deliberately NOT part of it. Connected answers "is the
+    // engine there"; this answers "is the picture still reaching the outputs",
+    // which is the failure the frozen-frame look hides. It is driven entirely
+    // by LiveOutputService (see sampleFeedHealth): silent while frames flow,
+    // "M1, M2 · No live feed" while any output is stalled, "… · Feed restored"
+    // for a few seconds after. Empty text = the item is simply not there, so
+    // nothing shifts while the feed is healthy.
+    FeedStallPill {
+        id: feedPill
+        anchors.right: status.left
+        anchors.rightMargin: 16
+        // Lined up with the WORDS, not with the 32 px status item: HeaderStatus's
+        // own content (the dot and "Connected") is a 14 px band at its TOP, so
+        // centring on status.verticalCenter put this pill visibly lower than the
+        // label it sits beside. 7 = that band's own centre inside HeaderStatus.
+        y: status.y + 7 - height / 2
     }
 
     // Settings - second from the right now (GO LIVE took the end), still mirroring Search on
@@ -322,7 +341,7 @@ Rectangle {
             y: 32
             text: qsTr("Settings")
             color: gearHover.hovered ? Theme.textPrimary : Theme.textSecondary
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 15
             font.bold: true
             textFormat: Text.PlainText

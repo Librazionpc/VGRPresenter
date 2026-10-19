@@ -1,7 +1,10 @@
 #include "modules/rendering/TextEngine.hpp"
 
+#include "core/logging/Logger.hpp"
+
 #include <algorithm>
 #include <cstring>
+#include <format>
 #include <mutex>
 
 // ---------------------------------------------------------------------------
@@ -53,6 +56,25 @@ void EnsureGdiplusStarted() {
 std::mutex& GdiplusMutex() {
     static std::mutex m;
     return m;
+}
+
+std::string WideToUtf8(const wchar_t* wide) {
+    std::string out;
+    if (!wide) return out;
+    for (const wchar_t* p = wide; *p; ++p) {
+        const unsigned long cp = static_cast<unsigned long>(*p);
+        if (cp < 0x80) {
+            out.push_back(static_cast<char>(cp));
+        } else if (cp < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else {
+            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        }
+    }
+    return out;
 }
 
 std::wstring Utf8ToWide(const std::string& s) {
@@ -583,6 +605,86 @@ RgbaImage FontManager::BuildSystemAtlas(const std::string&, float, bool, bool,
                                         std::map<uint8_t, FontGlyph>&) const { return {}; }
 #endif
 
+std::string FontManager::SubstituteFamily(std::string_view family) const {
+    const std::string name(family);
+    // "" and "builtin" are not missing fonts — they are the styles that never
+    // named one, and the builtin bitmap font is exactly what they asked for.
+    if (name.empty() || name == "builtin") return {};
+    {
+        std::lock_guard<std::mutex> lock(substituteMutex_);
+        const auto it = substitutes_.find(name);
+        if (it != substitutes_.end()) return it->second;
+    }
+#ifdef _WIN32
+    // The resolve itself is GDI+ work (its own lock, its own font cache) and the
+    // logger is another engine singleton — both run OUTSIDE the cache lock, which
+    // only ever guards the map lookup/insert above and below.
+    std::string resolved = name;
+    if (!HasSystemFont(name)) {
+        // THE HOST'S OWN UI FACE, not a literal. Nothing in this renderer needs to
+        // name a font: the machine already has one, and using it means a design
+        // authored on another PC draws in the same shape and spacing as the
+        // fallback every other design gets.
+        resolved = SystemUiFamily();
+        // ONE line per requested family: this is the answer to "why does the
+        // output look wrong on that machine and not mine" — the design names a
+        // font that machine does not have.
+        Logger::Instance().Warning(
+            std::format("font family '{}' is not installed — drawing it with '{}' instead "
+                        "(the builtin 5x7 bitmap it used to fall back to paints pixel blocks "
+                        "at output sizes)",
+                        name, resolved.empty() ? "the builtin bitmap font" : resolved),
+            "TextEngine");
+    }
+#else
+    // No system-font backend on this platform, so there is nothing to substitute
+    // WITH: keep the requested name and let the callers' own HasSystemFont gate
+    // keep them on the builtin font, exactly as before.
+    const std::string resolved = name;
+#endif
+    {
+        std::lock_guard<std::mutex> lock(substituteMutex_);
+        substitutes_[name] = resolved;
+    }
+    return resolved;
+}
+
+std::string FontManager::SystemUiFamily() const {
+    {
+        std::lock_guard<std::mutex> lock(substituteMutex_);
+        if (systemUiFamilyResolved_) return systemUiFamily_;
+    }
+    // Asked OUTSIDE the cache lock: it is a system query (and a font-set probe),
+    // not map work.
+    std::string family;
+#ifdef _WIN32
+    NONCLIENTMETRICSW ncm{};
+    ncm.cbSize = sizeof(ncm);
+    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0) &&
+        ncm.lfMessageFont.lfFaceName[0] != L'\0') {
+        family = WideToUtf8(ncm.lfMessageFont.lfFaceName);
+    }
+    // The shell's font is a NAME, not a promise: it has to be drawable through
+    // this backend too, or the callers keep the builtin bitmap rather than
+    // handing GDI+ a family it cannot open.
+    if (!family.empty() && !HasSystemFont(family)) family.clear();
+#endif
+    {
+        std::lock_guard<std::mutex> lock(substituteMutex_);
+        systemUiFamily_ = family;
+        systemUiFamilyResolved_ = true;
+    }
+    return family;
+}
+
+std::string FontManager::DefaultFamily() const {
+    // The host's own UI face — never a family name this app picked. "builtin"
+    // only when the platform cannot answer at all, which is the one case where
+    // the bitmap font is the honest answer.
+    const std::string preferred = SystemUiFamily();
+    return preferred.empty() ? "builtin" : preferred;
+}
+
 // ---------------------------------------------------------------------------
 // TextLayout
 // ---------------------------------------------------------------------------
@@ -728,8 +830,13 @@ float UniformAdvance(const TextStyle& style, const Font& f) {
 std::vector<float> RealAdvances(const std::string& text, const TextStyle& style,
                                 const FontManager& fonts) {
     if (style.fontId.empty() || style.fontId == "builtin") return {};
-    if (!fonts.HasSystemFont(style.fontId)) return {};
-    return fonts.SystemCharAdvances(style.fontId, style.size, style.bold, style.italic, text);
+    // The SUBSTITUTED family, never the raw name: a design that names a font this
+    // machine lacks is measured with the face it will actually be painted with,
+    // so wrapping and the painted width agree (measuring with the builtin
+    // estimate while painting a real font is its own mis-wrap).
+    const std::string family = fonts.SubstituteFamily(style.fontId);
+    if (family.empty() || !fonts.HasSystemFont(family)) return {};
+    return fonts.SystemCharAdvances(family, style.size, style.bold, style.italic, text);
 }
 } // namespace
 
@@ -782,8 +889,10 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
     // Windows / unresolved family: ink == lineHeight and every total is
     // byte-for-byte the legacy n·lineHeight.
     FontManager::LineMetrics fm{};
-    const bool haveReal = fonts.SystemLineMetrics(style.fontId, style.size, style.bold,
-                                                  style.italic, fm);
+    const std::string family = fonts.SubstituteFamily(style.fontId);
+    const bool haveReal = !family.empty() && fonts.HasSystemFont(family)
+                          && fonts.SystemLineMetrics(family, style.size, style.bold,
+                                                     style.italic, fm);
     const float ink = haveReal ? fm.inkHeight : lineHeight;
     result.totalHeight = 0.0f;
     result.lineStep = lineHeight;   // the step every line below advances by

@@ -189,12 +189,49 @@ void TestAppSettings() {
         CHECK(again.GetString("song.template") == "tpl-default");
     }
 
+    // ---- the library tabs' remembered PLACE (user call: "make the app remember its
+    // state and position ... if i go to another page and come back it will go number
+    // one and i was in para 35") ------------------------------------------------
+    // One declared JSON key per tab. DECLARED is the whole point: an undeclared key
+    // refuses every write, so the place would silently never come back — the same trap
+    // session.audioRoster / session.recordingConfig document. The value has to survive a
+    // reload too, or "come back to paragraph 35" only ever works within one run.
+    const std::string scripturePlace =
+        R"({"source":"ENGLISHK21","book":"Psalms","chapter":119,"picked":[35],"row":{"number":35,"partIndex":0}})";
+    const std::string tablePlace =
+        R"({"source":"table","book":"Y1953","chapter":12,"picked":[35],"row":{"number":35,"partIndex":1}})";
+    CHECK(s.Set("session.scriptureReading", J::String(scripturePlace)).ok());
+    CHECK(s.Set("session.tableReading", J::String(tablePlace)).ok());
+    CHECK(s.Set("session.showsReading", J::String(R"({"category":2,"top":"C:/shows/Sunday.vgr"})")).ok());
+    CHECK(s.Set("session.overlaysReading", J::String(R"({"selection":"cat-1","top":"ov-3"})")).ok());
+    CHECK(s.Set("session.templatesReading", J::String(R"({"selection":"all","top":"tpl-2"})")).ok());
+    CHECK(s.Set("session.tableReading", J::String(std::string(5000, 'x'))).ok() == false);   // still a bounded Text
+    {
+        st::AppSettings again(file);
+        CHECK(again.Load().ok());
+        CHECK(again.GetString("session.scriptureReading") == scripturePlace);
+        CHECK(again.GetString("session.tableReading") == tablePlace);
+        CHECK(again.GetString("session.showsReading") == R"({"category":2,"top":"C:/shows/Sunday.vgr"})");
+        CHECK(again.GetString("session.overlaysReading") == R"({"selection":"cat-1","top":"ov-3"})");
+        CHECK(again.GetString("session.templatesReading") == R"({"selection":"all","top":"tpl-2"})");
+    }
+    for (const char* key : { "session.scriptureReading", "session.tableReading",
+                             "session.showsReading", "session.overlaysReading",
+                             "session.templatesReading" }) {
+        const st::SettingDef* def = st::AppSettings::Find(key);
+        CHECK(def != nullptr && def->group == "session" && def->kind == st::SettingKind::Text);
+    }
+
     // ---- ResetAll: back to the defaults, remembering where the user was ----
     CHECK(s.Set("smart.mode", J::String("manual")).ok());
     const size_t changed = s.ResetAll();
     CHECK(changed >= 4);
     CHECK(s.Mode() == "smart" && s.GetString("appearance.accent") == "purple" && !s.GetBool("startup.autosave"));
     CHECK(s.GetString("session.lastShowPath") == "C:/shows/Sunday.vgr");
+    // A reset is not a reason to lose the reader's place: the reading keys are
+    // session state, and ResetAll deliberately leaves the whole group alone.
+    CHECK(s.GetString("session.tableReading") == tablePlace);
+    CHECK(s.GetString("session.scriptureReading") == scripturePlace);
     CHECK(s.ResetAll() == 0);
 
     // ---- the resource caps: the profile's own, until the user takes over in Manual ----
@@ -469,5 +506,57 @@ void TestDataProtection() {
     CHECK(!recovery.RestoreTo(sunday).ok() && recovery.Info().has_value());         // would overwrite: refused, still waiting
     CHECK(recovery.RestoreTo(shows + "/Recovered.vgr").ok());
     CHECK(Fs().ReadText(shows + "/Recovered.vgr").value() == "unsaved work" && !recovery.Info().has_value());
+    (void)Fs().RemoveAll(kRoot);
+}
+
+// THE SHIPPED BASELINE FILLS, IT NEVER OVERRIDES.
+//
+// The installer packages the operator's own configuration as
+// assets/settings.shipped.json (tools/make_seed_config.mjs), and every build
+// replaces it. A store adopts a baseline value ONLY for a setting it has no
+// value for, which is the answer to "update the app without making anyone
+// reconfigure": new settings arrive configured, a key the install already chose
+// keeps its value, and settings.json itself is never rewritten at load.
+void TestAppSettingsShippedBaseline() {
+    (void)Fs().RemoveAll(kRoot);
+    const std::string file = kRoot + "/settings.json";
+    const std::string shipped = kRoot + "/settings.shipped.json";
+
+    // The install has made ONE choice of its own.
+    {
+        st::AppSettings s(file);
+        CHECK(s.Load().ok());
+        CHECK(s.Set("appearance.theme", J::String("light")).ok());
+    }
+
+    // The build ships a baseline that names that same key differently, plus keys
+    // this store has never set, an unknown key and an invalid value.
+    const std::string baseline = R"({"version":1,"settings":{
+        "appearance.theme":"dark",
+        "appearance.accent":"blue",
+        "backups.includeSettings":true,
+        "nope.nothing":true,
+        "appearance.lockInMode":"not-a-bool"}})";
+    CHECK(Fs().WriteAtomic(shipped, baseline).ok());
+
+    st::AppSettings s(file, shipped);
+    CHECK(s.Load().ok());
+    CHECK(s.GetString("appearance.theme") == "light");   // the install's own choice, untouched
+    CHECK(s.GetString("appearance.accent") == "blue");   // never set here: the build's value
+    CHECK(s.GetBool("backups.includeSettings"));         // ditto
+    CHECK(s.Get("nope.nothing").isNull());               // not a setting: ignored
+    CHECK(!s.GetBool("appearance.lockInMode"));          // an invalid value is refused, never stored
+    CHECK(s.Profile() == "performance");                 // the code default still answers for the rest
+
+    // Nothing was written back at load: the store still holds only its one choice.
+    auto stored = Fs().ReadText(file);
+    CHECK(stored.ok());
+    CHECK(std::string(stored.value()).find("blue") == std::string::npos);
+
+    // With no baseline file (a dev build, or an install predating this) behaviour
+    // is exactly what it was.
+    st::AppSettings plain(file, kRoot + "/absent.json");
+    CHECK(plain.Load().ok());
+    CHECK(plain.GetString("appearance.accent") == "purple" && plain.GetString("appearance.theme") == "light");
     (void)Fs().RemoveAll(kRoot);
 }

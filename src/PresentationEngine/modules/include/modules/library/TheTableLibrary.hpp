@@ -138,6 +138,12 @@ public:
     // open means the words are looked for in that sermon, not in the 1,205 others.
     // `scopeChapter == 0` = every sermon of `scopeBookId`; empty `scopeBookId` =
     // the whole library, which is the search every other surface still gets.
+    //
+    // INSIDE A SCOPE, a bare paragraph number is a LOCATION, not a word: "50",
+    // "¶50", "p50", "para 50" resolve to the fiftieth paragraph of what the lock
+    // names ("current book for paragraph search — turn it on, type 50, it brings
+    // it up"). Without a scope the same text stays an ordinary search, and a
+    // paragraph the scope does not have falls through to the word scan.
     Result<std::vector<TheTableSearchHit>> Search(std::string_view query, size_t limit = 60,
                                                  bool exactWords = false,
                                                  std::string_view scopeBookId = "",

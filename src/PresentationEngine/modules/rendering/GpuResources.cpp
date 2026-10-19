@@ -179,8 +179,16 @@ Result<const RenderCache::AtlasEntry*> RenderCache::GlyphAtlas(float sizePx) {
 
 Result<const RenderCache::AtlasEntry*> RenderCache::GlyphAtlas(const TextStyle& style,
                                                                 const FontManager& fonts) {
+    // WHICH FACE THIS ATLAS IS FOR — resolved before the cache lock, because the
+    // substitution asks the system's font set (GDI+) and no lock here may be held
+    // across that. A design naming a font this machine lacks lands on the
+    // substitute (see FontManager::SubstituteFamily) instead of the builtin 5x7
+    // bitmap, and the KEY carries the resolved family so two styles that named
+    // different missing fonts share ONE correct atlas instead of one wrong one.
+    const std::string substituted = fonts.SubstituteFamily(style.fontId);
+    const std::string drawFamily = substituted.empty() ? style.fontId : substituted;
     std::lock_guard<std::mutex> lock(mutex_);
-    const FontAtlasKey key{style.fontId, static_cast<int>(style.size + 0.5f),
+    const FontAtlasKey key{drawFamily, static_cast<int>(style.size + 0.5f),
                            style.bold, style.italic};
     auto it = fontAtlases_.find(key);
     if (it != fontAtlases_.end()) return it->second.get();
@@ -191,8 +199,8 @@ Result<const RenderCache::AtlasEntry*> RenderCache::GlyphAtlas(const TextStyle& 
     // font at all) falls back to the SAME builtin atlas every other caller
     // already gets, so a style with no real font behaves exactly as before
     // this cache existed.
-    if (!style.fontId.empty() && style.fontId != "builtin" && fonts.HasSystemFont(style.fontId))
-        entry->atlas = fonts.BuildSystemAtlas(style.fontId, style.size, style.bold,
+    if (!drawFamily.empty() && drawFamily != "builtin" && fonts.HasSystemFont(drawFamily))
+        entry->atlas = fonts.BuildSystemAtlas(drawFamily, style.size, style.bold,
                                               style.italic, entry->glyphs);
     if (entry->atlas.empty())
         entry->atlas = fonts.BuildAtlas(style.size, entry->glyphs);

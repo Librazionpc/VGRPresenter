@@ -676,9 +676,19 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             // app's own UI default so plain/legacy blocks with no family
             // still get real typography instead of reading as "no font
             // chosen, so no real font" and falling all the way back.
+            //
+            // FONT-AGNOSTIC BY CONSTRUCTION: the block's family stays the
+            // REQUEST here and every consumer resolves it through
+            // FontManager::SubstituteFamily, so a design that names a font this
+            // machine lacks draws with an installed face at the same size
+            // instead of collapsing into the 5x7 bitmap (the giant pixel-block
+            // verse reported from another install). The no-family default is
+            // the host's own UI face for the same reason — not a literal name.
             {
                 const std::string family = MetaString(block.metaJson, "fontFamily");
-                styleComp->style.fontId = family.empty() ? "Segoe UI" : family;
+                styleComp->style.fontId = family.empty()
+                    ? rendering::RenderEngine::Instance().Fonts().DefaultFamily()
+                    : family;
             }
             styleComp->style.italic = MetaBool(block.metaJson, "italic");
             styleComp->style.wrap = true;
@@ -724,9 +734,17 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                 double lh = MetaNumber(block.metaJson, "lineHeight", kNaturalLineHeight);
                 if (!(lh > 0.0)) lh = kNaturalLineHeight;
                 const float sizePx = styleComp->style.size;   // the output-scaled font size
+                // THE FACE IT WILL ACTUALLY BE DRAWN WITH, not the raw name: a
+                // design that names a font this machine does not have is painted
+                // with the substitute (FontManager::SubstituteFamily), so the
+                // spacing must come from THAT font — measuring the missing name
+                // returns no metrics and fell back to the legacy formula, which
+                // is a line-height the real face does not have.
+                const auto& fonts = rendering::RenderEngine::Instance().Fonts();
+                const std::string family = fonts.SubstituteFamily(styleComp->style.fontId);
                 rendering::FontManager::LineMetrics lm{};
-                if (rendering::RenderEngine::Instance().Fonts().SystemLineMetrics(
-                        styleComp->style.fontId, sizePx, styleComp->style.bold,
+                if (!family.empty() && fonts.SystemLineMetrics(
+                        family, sizePx, styleComp->style.bold,
                         styleComp->style.italic, lm)) {
                     styleComp->style.lineSpacing = lm.baselineStep * static_cast<float>(lh) - sizePx;
                 } else {
@@ -1007,6 +1025,13 @@ void ReportLayerState(const std::string& sceneId, const std::string& label, std:
 // into a QML service itself. MUST be called on every BuildSlideScene/
 // BuildGatedSlideScene invocation, INCLUDING cache hits (see UpsertVideoLayer's
 // comment) — never gated behind the "already built" early return.
+//
+// THE ONE EXCEPTION IS A CLEAR CARRIER (`Slide::clearStage`, the Blackout
+// control): nothing being composited is the POINT of it, so its callers skip
+// this pass entirely (see ComposeSlide's clear branch). Leaving the layers in
+// would make "nothing at all on screen" still show a taken camera in the middle
+// of a service — and skipping it leaves the state itself untouched, so the
+// blackout can be lifted with the feed and overlays exactly as they were.
 void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sceneId,
                          const rendering::Size& size, bool showOverlay = true) {
     // Taken camera/screen input: pulled straight from the PAL's own
@@ -1356,6 +1381,15 @@ SceneBuilder::SlideComposition SceneBuilder::ComposeSlide(const Slide& slide,
     // GO LIVE with nothing staged does NOT come through here: that carrier is
     // deliberately not a clear, and keeps the output's own look (see
     // LiveOutputService::goLiveBlank).
+    //
+    // "NOTHING" ALSO INCLUDES THE COMPOSITOR'S OWN LAYERS: a taken camera or
+    // screen, a media file on air and the overlay stack are composited INTO the
+    // scene by AddCompositorLayers, and that pass used to run for this carrier
+    // like any other slide — so the Blackout control's "nothing at all on
+    // screen" still showed the camera in the middle of a service. The callers
+    // skip that pass for a Cleared composition (see BuildSlideScene /
+    // BuildGatedSlideScene); the layers themselves are untouched, so ending the
+    // blackout brings the feed and the overlays back exactly as they were.
     if (slide.clearStage) {
         comp.source = SlideComposition::Source::Cleared;
         comp.paintBackground = false;
@@ -1753,8 +1787,12 @@ Result<std::string> SceneBuilder::BuildGatedSlideScene(const Presentation& prese
         + "@gated" + StyledSceneIdFor(presentation, slide, style, size).substr(SceneIdFor(presentation, slide).size());
 
     if (engine.GetScene(sceneId).ok()) {
-        AddCompositorLayers(engine, sceneId, size, style.showOverlay);   // same cache-hit refresh as BuildSlideScene
-        RefreshBusPlanes(engine, sceneId);   // ...and the bus windows' frames (none recorded for a refused scene)
+        // A CLEAR CARRIER OWNS NO COMPOSITOR LAYERS (see ComposeSlide): the
+        // blackout is "nothing on screen", the feed included.
+        if (!slide.clearStage) {
+            AddCompositorLayers(engine, sceneId, size, style.showOverlay);   // same cache-hit refresh as BuildSlideScene
+            RefreshBusPlanes(engine, sceneId);   // ...and the bus windows' frames (none recorded for a refused scene)
+        }
         return sceneId;
     }
     auto scene = engine.CreateScene(sceneId, slide.title, size);
@@ -1806,7 +1844,8 @@ Result<std::string> SceneBuilder::BuildGatedSlideScene(const Presentation& prese
             (void)engine.AddObject(sceneId, imageObj, "bg");
         }
     }
-    AddCompositorLayers(engine, sceneId, size, style.showOverlay);
+    if (!slide.clearStage)
+        AddCompositorLayers(engine, sceneId, size, style.showOverlay);
     Logger::Instance().Debug(std::format("Gated scene built: {} (family refused by style '{}')",
                                         sceneId, style.name), "SceneBuilder");
     return sceneId;
@@ -1828,8 +1867,13 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
     // moment this scene was first built (see AddCompositorLayers/
     // UpsertVideoLayer's own comments).
     if (engine.GetScene(sceneId).ok()) {
-        AddCompositorLayers(engine, sceneId, size, style.showOverlay);
-        RefreshBusPlanes(engine, sceneId);   // bus windows keep flowing on a cache hit (see BusPlane)
+        // A CLEAR CARRIER OWNS NO COMPOSITOR LAYERS (see ComposeSlide): no
+        // taken input, no media file, no overlay stack — the blackout is a
+        // program black, not a slide whose background happens to be empty.
+        if (!slide.clearStage) {
+            AddCompositorLayers(engine, sceneId, size, style.showOverlay);
+            RefreshBusPlanes(engine, sceneId);   // bus windows keep flowing on a cache hit (see BusPlane)
+        }
         return sceneId;
     }
 
@@ -1950,19 +1994,24 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
     // Taken camera/screen input, media file on air, active overlays — see
     // AddCompositorLayers' own comment. Runs ONCE here, before every content
     // branch below (each returns early after its own content), so every
-    // path gets these layers regardless of which one executes.
-    AddCompositorLayers(engine, sceneId, size, style.showOverlay);
+    // path gets these layers regardless of which one executes — EXCEPT the
+    // clear carrier, whose whole meaning is that nothing is composited (see
+    // ComposeSlide): not the taken input, not the media file, not the overlays.
+    if (comp.source != SlideComposition::Source::Cleared) {
+        AddCompositorLayers(engine, sceneId, size, style.showOverlay);
 
-    // Bus windows: a "bus" block is a live feed in the design's own rectangle,
-    // so its plane is recorded from the composition that owns this scene's
-    // layout (the style's template when one owns the composition, the slide's
-    // own blocks otherwise — the SAME selection slideToVariantMap hands the QML
-    // preview surfaces) and painted straight away.
-    RecordBusPlanes(sceneId,
-                    comp.source == SlideComposition::Source::SlideBlocks ? slide.blocks
-                                                                        : comp.blocks,
-                    size);
-    RefreshBusPlanes(engine, sceneId);
+        // Bus windows: a "bus" block is a live feed in the design's own
+        // rectangle, so its plane is recorded from the composition that owns
+        // this scene's layout (the style's template when one owns the
+        // composition, the slide's own blocks otherwise — the SAME selection
+        // slideToVariantMap hands the QML preview surfaces) and painted
+        // straight away.
+        RecordBusPlanes(sceneId,
+                        comp.source == SlideComposition::Source::SlideBlocks ? slide.blocks
+                                                                            : comp.blocks,
+                        size);
+        RefreshBusPlanes(engine, sceneId);
+    }
 
     // ---- Content blocks ---------------------------------------------------
     // The on-air layout when the style wears an ENGINE TEMPLATE: the baked

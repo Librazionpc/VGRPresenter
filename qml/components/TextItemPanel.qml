@@ -1,4 +1,5 @@
 import QtQuick
+import VGRPresenterUI
 
 // The right panel's "TEXT" tab content — shown when a "text" kind canvas
 // item is selected (see EditScreen.qml's rightPanelTab). Edits the item's
@@ -65,7 +66,11 @@ Column {
     // Mirrors `align` but for the vertical axis ("top" | "center" | "bottom") - DesignPreview.qml and
     // EditScreen.qml's canvas both already read this key; only this panel's picker was missing.
     readonly property string verticalAlign: root.meta.verticalAlign ?? "center"
-    readonly property string fontFamily: root.meta.fontFamily ?? "Segoe UI"
+    // What the item ASKS FOR (shown in the picker, so the stored name is visible)
+    // and what every surface actually DRAWS with — the engine's resolution, so
+    // this panel's fit measurement matches the canvas and the frame.
+    readonly property string fontFamily: root.meta.fontFamily ?? FontService.defaultFamily
+    readonly property string drawFamily: FontService.resolve(root.meta.fontFamily)
     readonly property string fontWeight: root.meta.fontWeight ?? "SemiBold"
     readonly property string autoSize: root.meta.autoSize ?? "none"
     // How the text is SHOWN whatever was typed: "none" | "upper" | "lower" | "capitalize". The typed text itself is never changed.
@@ -151,7 +156,7 @@ Column {
         id: fitMeasure
         visible: false
         text: root.target ? TextFormatService.applyList(root.target.text, root.listStyle) : ""
-        font.family: root.fontFamily
+        font.family: root.drawFamily
         font.pixelSize: Math.max(1, root.fontSize)
         font.weight: root.bold ? Font.Bold
             : root.fontWeight === "Regular" ? Font.Normal
@@ -174,7 +179,7 @@ Column {
             anchors.centerIn: parent
             text: qsTr("TEXT ITEM")
             color: "#ffffff"
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 10
             font.weight: Font.Bold
         }
@@ -203,7 +208,7 @@ Column {
                 anchors.centerIn: parent
                 text: toggle.label
                 color: toggle.active ? "#ffffff" : Theme.textSecondary
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 15
                 font.bold: toggle.label === "B"
                 font.italic: toggle.label === "I"
@@ -256,7 +261,7 @@ Column {
                 Text {
                     text: qsTr("Align")
                     color: Theme.textPrimary
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                     font.weight: Font.Medium
                 }
@@ -355,7 +360,7 @@ Column {
                 anchors.verticalCenter: parent.verticalCenter
                 text: "Aa"
                 color: Theme.textPrimary
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 16
                 font.weight: Font.DemiBold
             }
@@ -364,7 +369,7 @@ Column {
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.fontFamily
                 color: Theme.textSecondary
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 14
                 elide: Text.ElideRight
                 width: Math.min(implicitWidth, 120)
@@ -405,7 +410,7 @@ Column {
                     anchors.verticalCenter: parent.verticalCenter
                     text: root.fontWeight
                     color: Theme.textSecondary
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 13
                 }
                 IconGlyph {
@@ -457,7 +462,7 @@ Column {
                     anchors.centerIn: parent
                     text: qsTr("Change")
                     color: Theme.textSecondary
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 12
                     font.weight: Font.Medium
                 }
@@ -481,7 +486,7 @@ Column {
         Text {
             text: qsTr("CASE")
             color: Theme.textMuted
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 10
             font.weight: Font.Bold
         }
@@ -514,7 +519,7 @@ Column {
                         anchors.centerIn: parent
                         text: caseBtn.modelData.label
                         color: caseBtn.active ? "#ffffff" : Theme.textSecondary
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: caseBtn.active ? Font.DemiBold : Font.Medium
                     }
@@ -538,7 +543,7 @@ Column {
         Text {
             text: qsTr("AUTO SIZE")
             color: Theme.textMuted
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 10
             font.weight: Font.Bold
         }
@@ -574,7 +579,7 @@ Column {
                         anchors.centerIn: parent
                         text: sizeBtn.modelData.label
                         color: sizeBtn.active ? "#ffffff" : Theme.textSecondary
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: sizeBtn.active ? Font.DemiBold : Font.Medium
                     }
@@ -659,7 +664,7 @@ Column {
                 Text {
                     text: qsTr("List")
                     color: Theme.textPrimary
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                     font.weight: Font.Medium
                 }
@@ -705,7 +710,7 @@ Column {
                         anchors.centerIn: parent
                         text: listBtn.modelData.key === "none" ? qsTr("None") : listBtn.modelData.sample
                         color: listBtn.active ? "#ffffff" : Theme.textSecondary
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: listBtn.active ? Font.DemiBold : Font.Medium
                     }
@@ -729,7 +734,7 @@ Column {
         Text {
             text: qsTr("POSITION & SIZE")
             color: Theme.textMuted
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 10
             font.weight: Font.Bold
         }
@@ -764,14 +769,14 @@ Column {
                             anchors.horizontalCenter: parent.horizontalCenter
                             text: geomBox.modelData.label
                             color: Theme.textMuted
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 9
                         }
                         TextInput {
                             id: geomInput
                             anchors.horizontalCenter: parent.horizontalCenter
                             color: Theme.textPrimary
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 14
                             font.weight: Font.Medium
                             validator: IntValidator { bottom: -100000; top: 100000 }

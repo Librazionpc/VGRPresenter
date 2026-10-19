@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(VGRPresenterUI VERSION 0.0.6 LANGUAGES CXX)
+project(VGRPresenterUI VERSION 0.0.9 LANGUAGES CXX)
 
 # C++23 project-wide — the Qt app and the engine (src/PresentationEngine/)
 # build as one project now, one CMakeLists.txt, so they share one dialect
@@ -218,6 +218,7 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/project/WorkspaceManager.cpp
     ${BPS_ROOT}/modules/project/StyleStore.cpp
     ${BPS_ROOT}/modules/project/OutputStore.cpp
+    ${BPS_ROOT}/modules/project/ShippedConfig.cpp
     ${BPS_ROOT}/modules/project/DocumentManager.cpp
     ${BPS_ROOT}/modules/project/UndoRedoManager.cpp
     ${BPS_ROOT}/modules/project/HistoryManager.cpp
@@ -452,6 +453,8 @@ qt_add_executable(appVGRPresenterUI
     qml/services/MediaThumbnailProvider.cpp
     qml/services/include/services/TextFormatService.h
     qml/services/TextFormatService.cpp
+    qml/services/include/services/FontService.h
+    qml/services/FontService.cpp
     qml/services/include/services/TheTableService.h
     qml/services/TheTableService.cpp
     qml/services/include/services/DesignLibraryService.h

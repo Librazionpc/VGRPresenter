@@ -37,7 +37,7 @@ Item {
     readonly property color cText: "#f0f0ff"
     // Selection and focus accents follow the user's Appearance setting.
     readonly property color cSecondary: Theme.accent
-    readonly property string mono: "Consolas"
+    readonly property string mono: FontService.monoFamily
     property bool headerMenuOpen: false
     // the colour of a slide's group (verse, chorus...): the bar under its picture
     function groupColor(slide) {
@@ -404,7 +404,7 @@ Item {
                         text: root.slideText(listRow.modelData)
                         color: "#8a94a6"; wrapMode: TextEdit.Wrap
                         selectByMouse: true
-                        font.family: "Segoe UI"; font.pixelSize: 14
+                        font.family: Theme.fontFamily; font.pixelSize: 14
 
                         property bool ready: false
                         Component.onCompleted: lyricText.ready = true
@@ -482,7 +482,7 @@ Item {
                 width: lyricsCol.width
                 wrapMode: TextEdit.Wrap
                 color: "#e2e8f0"
-                font.family: "Segoe UI"; font.pixelSize: 17
+                font.family: Theme.fontFamily; font.pixelSize: 17
                 selectByMouse: true
                 onTextChanged: if (lyricsCol.loaded) autosaveTimer.restart()
             }
@@ -570,7 +570,7 @@ Item {
                         x: 16; y: 14; width: parent.width - 32
                         spacing: 12
 
-                        Text { text: qsTr("NEXT TIMER"); color: "#8a94a6"; font.family: "Segoe UI"; font.pixelSize: 12; font.weight: Font.Bold; font.letterSpacing: 1.2 }
+                        Text { text: qsTr("NEXT TIMER"); color: "#8a94a6"; font.family: Theme.fontFamily; font.pixelSize: 12; font.weight: Font.Bold; font.letterSpacing: 1.2 }
 
                         // seconds: - [ 10 ] +
                         Rectangle {
@@ -588,7 +588,7 @@ Item {
                                     id: timerInput
                                     width: 44; horizontalAlignment: TextInput.AlignRight
                                     color: "#ffffff"; selectByMouse: true
-                                    font.family: "Segoe UI"; font.pixelSize: 18; font.weight: Font.DemiBold
+                                    font.family: Theme.fontFamily; font.pixelSize: 18; font.weight: Font.DemiBold
                                     validator: IntValidator { bottom: 0; top: 3600 }
                                     inputMethodHints: Qt.ImhDigitsOnly
                                     onTextEdited: root.timerSeconds = Number(text) || 0
@@ -598,7 +598,7 @@ Item {
                                         function onTimerSecondsChanged() { if (timerInput.text !== String(root.timerSeconds)) timerInput.text = String(root.timerSeconds) }
                                     }
                                 }
-                                Text { anchors.baseline: timerInput.baseline; text: qsTr("seconds"); color: "#5c6475"; font.family: "Segoe UI"; font.pixelSize: 14 }
+                                Text { anchors.baseline: timerInput.baseline; text: qsTr("seconds"); color: "#5c6475"; font.family: Theme.fontFamily; font.pixelSize: 14 }
                             }
                             Item {
                                 anchors.right: parent.right
@@ -631,7 +631,7 @@ Item {
                             visible: root.timerTotal > 0
                             width: parent.width; horizontalAlignment: Text.AlignHCenter
                             text: qsTr("Duration: %1").arg(root.formatTime(root.timerTotal))
-                            color: "#8a94a6"; font.family: "Segoe UI"; font.pixelSize: 13
+                            color: "#8a94a6"; font.family: Theme.fontFamily; font.pixelSize: 13
                         }
                     }
                 }
@@ -663,7 +663,7 @@ Item {
                         anchors.fill: parent; anchors.topMargin: 1
                         Item {
                             width: parent.width; height: 38
-                            Text { anchors.centerIn: parent; text: Math.round(100 / root.columns) + "%"; color: "#8a94a6"; font.family: "Segoe UI"; font.pixelSize: 13 }
+                            Text { anchors.centerIn: parent; text: Math.round(100 / root.columns) + "%"; color: "#8a94a6"; font.family: Theme.fontFamily; font.pixelSize: 13 }
                             HoverHandler { cursorShape: Qt.PointingHandCursor }
                             TapHandler { onTapped: root.setColumns(4) }   // the usual size
                         }
@@ -721,7 +721,7 @@ Item {
         visible: root.type === "show" && root.show === null
         anchors.centerIn: parent
         text: root.loaded && root.loaded.error ? qsTr("This show could not be read: %1").arg(root.loaded.error) : ""
-        color: Theme.dangerLight; font.family: "Segoe UI"; font.pixelSize: 15
+        color: Theme.dangerLight; font.family: Theme.fontFamily; font.pixelSize: 15
     }
 
     // ---- a picture ----
@@ -970,7 +970,7 @@ Item {
                     anchors.right: parent.right
                     anchors.top: parent.bottom
                     color: "#8a90a5"
-                    font.family: "Segoe UI"; font.pixelSize: 11
+                    font.family: Theme.fontFamily; font.pixelSize: 11
                     text: mediaView.onAir
                         ? LiveOutputService.formatMediaTime(LiveOutputService.mediaPosition)
                           + " / " + LiveOutputService.formatMediaTime(LiveOutputService.mediaDuration)
@@ -1057,7 +1057,7 @@ Item {
             anchors.horizontalCenter: parent.horizontalCenter
             visible: root.type === "section"
             text: root.item ? root.item.name : ""
-            color: "#e2e8f0"; font.family: "Segoe UI"; font.pixelSize: 30; font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase
+            color: "#e2e8f0"; font.family: Theme.fontFamily; font.pixelSize: 30; font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase
         }
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
@@ -1065,7 +1065,7 @@ Item {
             width: Math.min(root.width - 60, 520); horizontalAlignment: Text.AlignHCenter
             text: root.item ? String(root.item.ref) : ""
             color: "#5c6475"; elide: Text.ElideMiddle
-            font.family: "Segoe UI"; font.pixelSize: 14
+            font.family: Theme.fontFamily; font.pixelSize: 14
         }
     }
 }

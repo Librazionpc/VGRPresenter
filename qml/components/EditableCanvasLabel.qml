@@ -78,7 +78,11 @@ Item {
     // `editing` alone, the object would go from selected to unselected
     // right as you started dragging its ring, disabling the very MouseArea
     // handling that drag and aborting it.
-    signal selectRequested(var modifiers)
+    // Carries the pointer position (in THIS label's coordinates) beside the
+    // modifiers: the canvas uses it to tell a click on an item from a click
+    // that should reach through to the item underneath (see EditScreen's
+    // canvasCycleKey), and only a real position can make that decision.
+    signal selectRequested(var modifiers, real x, real y)
     // Fired repeatedly (in scene-coordinate deltas) while dragging the
     // label body past a small threshold — the consumer (EditScreen.qml)
     // adds these straight onto the owning DraggableCanvasText's x/y (and,
@@ -369,7 +373,7 @@ Item {
             // onDoubleClicked's job now), so this always has to steal
             // focus itself to commit/exit whatever else might be mid-edit.
             root.forceActiveFocus()
-            root.selectRequested(mouse.modifiers)
+            root.selectRequested(mouse.modifiers, mouse.x, mouse.y)
         }
         onDoubleClicked: (mouse) => {
             if (dragMoved)

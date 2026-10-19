@@ -286,6 +286,21 @@ std::vector<SettingDef> BuildDefinitions() {
     // JSON object written by RecordingService — declared here or every
     // write/read refuses with "there is no setting 'session.recordingConfig'".
     d.push_back(Text("session.recordingConfig", "session", "Recording config"));
+    // WHERE EACH LIBRARY TAB WAS LEFT (user call: "make the app remember its state
+    // and position ... if I go to another page and come back it will go number one
+    // and I was in para 35"). ONE JSON string per tab: the open book/sermon (or the
+    // shows/designs category) plus the picked rows and the row that was at the top
+    // of the list. Written by the panes as the operator moves and read back when the
+    // pane is built, so a restart — or any reload that rebuilds the pane — comes back
+    // to the passage and the paragraph that were on screen, not to paragraph one.
+    // Declared here for the same reason every session key is: an undeclared key
+    // refuses every write with "there is no setting '...'" and the place would
+    // silently never come back.
+    d.push_back(Text("session.scriptureReading", "session", "Scripture position"));
+    d.push_back(Text("session.tableReading", "session", "The Table position"));
+    d.push_back(Text("session.showsReading", "session", "Shows position"));
+    d.push_back(Text("session.overlaysReading", "session", "Overlays position"));
+    d.push_back(Text("session.templatesReading", "session", "Templates position"));
     // The Plugins screen's feature switches ({"ndi": true, ...}), written by
     // EngineBridge::setPluginFeatureEnabled and replayed at boot — declared
     // here or every write/read refuses with "there is no setting
@@ -368,7 +383,8 @@ ProfileAllocation AppSettings::AllocationFor(std::string_view profile) {
 // Load / save
 // ---------------------------------------------------------------------------
 
-AppSettings::AppSettings(std::string storageFile) : storageFile_(std::move(storageFile)) {}
+AppSettings::AppSettings(std::string storageFile, std::string baselineFile)
+    : storageFile_(std::move(storageFile)), baselineFile_(std::move(baselineFile)) {}
 
 Result<void> AppSettings::Load() {
     // The PAL read, the parse AND the set-aside of a damaged file all run with
@@ -410,15 +426,48 @@ Result<void> AppSettings::Load() {
         }
     }
 
+    // The SHIPPED baseline (what the installer packages) is read the same way —
+    // before the lock, because a PAL read never runs under it.
+    J baselineDocument;
+    bool haveBaseline = false;
+    if (!baselineFile_.empty()) {
+        auto& fs = platform::PlatformAccessor::Get().Filesystem();
+        if (fs.Exists(baselineFile_)) {
+            if (auto text = fs.ReadText(baselineFile_); text.ok()) {
+                if (auto parsed = json::Parse(text.value()); parsed.ok()) {
+                    if (const J* shipped = parsed.value().Find("settings"); shipped && shipped->asObject()) {
+                        baselineDocument = *shipped;
+                        haveBaseline = true;
+                    }
+                }
+            }
+        }
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
     values_.clear();
-    if (!haveStored) return {};
+    if (haveStored) {
+        // Only values that still pass the current rules are kept: a hand-edited or older file cannot smuggle in a bad one.
+        for (const auto& [key, value] : *storedDocument.asObject()) {
+            const SettingDef* def = Find(key);
+            if (def && Validate(*def, value).ok() && !(value.ToString() == def->dflt.ToString()))
+                values_[key] = value;
+        }
+    }
 
-    // Only values that still pass the current rules are kept: a hand-edited or older file cannot smuggle in a bad one.
-    for (const auto& [key, value] : *storedDocument.asObject()) {
-        const SettingDef* def = Find(key);
-        if (def && Validate(*def, value).ok() && !(value.ToString() == def->dflt.ToString()))
+    // THE SHIPPED BASELINE FILLS; IT NEVER OVERRIDES. A key this store already
+    // holds is the install's own choice and stays; a key it has never set takes
+    // the value the build ships. That is how an update reaches an existing
+    // install configured without anyone reconfiguring — and it is why the
+    // installer never has to delete settings.json to make a fix visible.
+    if (haveBaseline) {
+        for (const auto& [key, value] : *baselineDocument.asObject()) {
+            if (values_.contains(key)) continue;
+            const SettingDef* def = Find(key);
+            if (!def || !Validate(*def, value).ok()) continue;
+            if (value.ToString() == def->dflt.ToString()) continue;   // same as the code default: nothing to adopt
             values_[key] = value;
+        }
     }
     return {};
 }

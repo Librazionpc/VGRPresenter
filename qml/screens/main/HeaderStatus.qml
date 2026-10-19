@@ -92,7 +92,7 @@ Item {
             height: 13
             width: 59
             color: root.kernelUp ? Theme.textSecondary : Theme.warning
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 13
             font.weight: Font.Normal
             text: root.kernelUp ? qsTr("Connected") : root.kernelState

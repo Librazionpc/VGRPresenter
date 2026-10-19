@@ -75,6 +75,17 @@ public:
     // the output's own scene. Every other output (preview, screenshot, real
     // display) keeps the default.
     virtual bool AcceptsDistributedFrames() const { return true; }
+
+    // WHEN this output last received a frame — steady-clock milliseconds of its
+    // last Present(), 0 = never. This is a FEED HEARTBEAT, not a picture-change
+    // counter: the live loop re-presents the composed frame to every output once
+    // a second even while the scene is static (LiveOutputController's
+    // kHeartbeatMs), so a healthy output's stamp advances ~1/s whatever the
+    // slides are doing. A stamp that stops moving while the session is live is a
+    // genuine stall (a dead loop, a dropped device, a buffer nobody writes) and
+    // NOT "the verse did not change" — which is the distinction the automatic
+    // feed blackout depends on.
+    virtual int64_t LastPresentSteadyMs() const { return 0; }
 };
 
 // --- Concrete outputs --------------------------------------------------------
@@ -92,6 +103,7 @@ public:
     // Live consumers use this to hand frames to worker threads cheaply.
     std::shared_ptr<const Frame> LastFrameSnapshot() const;
     uint64_t FramesReceived() const override { return received_.load(); }
+    int64_t LastPresentSteadyMs() const override { return lastPresentMs_.load(); }
     Size TargetSize() const override { return target_; }
     void SetTargetSize(Size s) override { target_ = s; }
     bool Enabled() const override { return enabled_.load(); }
@@ -109,6 +121,7 @@ protected:
     Size target_;
     std::shared_ptr<const Frame> lastFrame_;
     std::atomic<uint64_t> received_{0};
+    std::atomic<int64_t> lastPresentMs_{0};
     std::atomic<bool> enabled_{true};
     std::atomic<bool> acceptsDistributed_{true};
 };

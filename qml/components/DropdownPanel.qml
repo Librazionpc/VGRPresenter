@@ -386,7 +386,7 @@ Rectangle {
                 Text {
                     id: labelSizer
                     visible: false
-                    font.family: "Segoe UI" // Theme.fontFamily
+                    font.family: Theme.fontFamily
                     font.pixelSize: 15 // Theme.textMd
                     font.weight: Font.Medium
                     text: parent.isDivider || parent.modelData.label === undefined
@@ -395,7 +395,7 @@ Rectangle {
                 Text {
                     id: trailingSizer
                     visible: false
-                    font.family: "Segoe UI" // Theme.fontFamily
+                    font.family: Theme.fontFamily
                     font.pixelSize: 10 // Theme.textXs
                     text: parent.hasTrailing ? parent.modelData.trailing : ""
                 }
@@ -406,7 +406,7 @@ Rectangle {
     Text {
         id: headerTitleSizer
         visible: false
-        font.family: "Segoe UI" // Theme.fontFamily
+        font.family: Theme.fontFamily
         font.pixelSize: 15 // Theme.textMd
         font.weight: Font.Bold
         text: root.headerTitle
@@ -414,7 +414,7 @@ Rectangle {
     Text {
         id: headerSubSizer
         visible: false
-        font.family: "Segoe UI" // Theme.fontFamily
+        font.family: Theme.fontFamily
         font.pixelSize: 10 // Theme.textXs
         text: root.headerSubtitle
     }
@@ -488,7 +488,7 @@ Rectangle {
                 topPadding: 4 // Theme.space1
                 text: root.headerTitle
                 color: Theme.accent
-                font.family: "Segoe UI" // Theme.fontFamily
+                font.family: Theme.fontFamily
                 font.pixelSize: 15 // Theme.textMd
                 font.weight: Font.Bold
             }
@@ -497,7 +497,7 @@ Rectangle {
                 bottomPadding: 8 // Theme.space2
                 text: root.headerSubtitle
                 color: Theme.textMuted
-                font.family: "Segoe UI" // Theme.fontFamily
+                font.family: Theme.fontFamily
                 font.pixelSize: 10 // Theme.textXs
             }
             Rectangle { width: parent.width; height: 1; color: Theme.border }
@@ -623,7 +623,7 @@ Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     text: alive ? modelData.trailing || "" : ""
                                     color: Theme.textMuted
-                                    font.family: "Segoe UI" // Theme.fontFamily
+                                    font.family: Theme.fontFamily
                                     font.pixelSize: 10 // Theme.textXs
                                 }
 
@@ -643,7 +643,7 @@ Rectangle {
                                     color: alive ? (modelData.disabled ? Theme.textMuted
                                         : modelData.danger ? Theme.dangerLight : Theme.textPrimary)
                                         : Theme.textMuted
-                                    font.family: "Segoe UI" // Theme.fontFamily
+                                    font.family: Theme.fontFamily
                                     font.pixelSize: 15 // Theme.textMd
                                     font.weight: Font.Medium
                                 }

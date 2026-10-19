@@ -1,6 +1,7 @@
 #include "modules/library/DesignLibrary.hpp"
 
 #include "core/config/Json.hpp"
+#include "core/logging/Logger.hpp"
 #include "core/recovery/DocumentRecovery.hpp"
 #include "modules/presentation/BlockValidator.hpp"
 #include "modules/presentation/PresentationSerializer.hpp"
@@ -156,6 +157,41 @@ bool FromJson(const J& o, Design& out) {
     return true;
 }
 
+// ---- the catalog-revision migration (see kCatalogRevision) ------------------
+//
+// A shipped design names NO font. The catalogs write none, so the renderer
+// resolves every shipped block to the HOST's UI face; a store seeded by an older
+// catalog still holds the faces that machine happened to have ("Segoe UI",
+// "Arial", and the authoring install's own picks — "TT Nooks Trial", "Cambria
+// Math", "Inter", "Segoe UI Semibold"). Load() clears them once, when the stored
+// revision is behind — this is the function that does it.
+//
+// EVERY family goes, not a list of known ones: the rule is about the DESIGN being
+// shipped, not about which face it happened to name. Shipped designs only. Any
+// other design is the user's, and a font they chose there is theirs; refreshing
+// the app's own defaults must not reach into their work.
+bool StripShippedFontFamilies(Design& d) {
+    bool changed = false;
+    for (pres::ContentBlock& block : d.blocks) {
+        if (block.metaJson.empty()) continue;
+        auto parsed = json::Parse(block.metaJson);
+        if (!parsed.ok()) continue;   // a malformed meta is not ours to rewrite
+        const J& meta = parsed.value();
+        if (meta.Find("fontFamily") == nullptr) continue;
+        // Rebuild the object without the key (Json::Value exposes only a const
+        // view of an object): everything else the block's meta says — color,
+        // size, alignment, autoSize — rides through untouched, and the absent
+        // key is exactly what the catalogs write.
+        J::Object rewritten;
+        if (const J::Object* object = meta.asObject())
+            for (const auto& [key, value] : *object)
+                if (key != "fontFamily") rewritten.emplace(key, value);
+        block.metaJson = J(std::move(rewritten)).ToString();
+        changed = true;
+    }
+    return changed;
+}
+
 // ShowEditor's block rules (ids, stacking, validation), applied to a design's blocks by lending them to a
 // scratch presentation with one slide.
 template <typename Op>
@@ -238,35 +274,77 @@ Result<void> DesignLibrary::Load() {
         }
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    categories_.clear();
-    designs_.clear();
-    deletedDefaults_.clear();
-
+    // Which revision of the SHIPPED content this file was written under — a
+    // document without the field predates revisioning (revision 0), and a fresh
+    // library (no document at all) is current by definition.
+    long long storedCatalogRevision = kCatalogRevision;
     if (haveDocument) {
-        const J& root = document;
-        if (const J* cats = root.Find("categories"); cats && cats->asArray())
-            for (const J& c : *cats->asArray()) {
-                DesignCategory cat{ Str(c, "id"), Str(c, "name"), Str(c, "icon", "folder"), Flag(c, "default") };
-                if (!cat.id.empty() && !cat.name.empty()) categories_.push_back(std::move(cat));
-            }
-        if (const J* list = root.Find("designs"); list && list->asArray())
-            for (const J& o : *list->asArray()) {
-                Design d;
-                if (FromJson(o, d)) designs_.push_back(std::move(d));
-            }
-        if (const J* gone = root.Find("deletedDefaults"); gone && gone->asArray())
-            for (const J& id : *gone->asArray()) deletedDefaults_.insert(std::string(id.asString()));
+        const J* revision = document.Find("catalogRevision");
+        storedCatalogRevision = revision ? revision->asInt(0) : 0;
+    }
+    std::string migrationJson;
+    bool migrationTouchedDesigns = false;
+    {
+        // The lock's own scope: it ends BEFORE the migration's write below.
+        std::lock_guard<std::mutex> lock(mutex_);
+        categories_.clear();
+        designs_.clear();
+        deletedDefaults_.clear();
+
+        if (haveDocument) {
+            const J& root = document;
+            if (const J* cats = root.Find("categories"); cats && cats->asArray())
+                for (const J& c : *cats->asArray()) {
+                    DesignCategory cat{ Str(c, "id"), Str(c, "name"), Str(c, "icon", "folder"), Flag(c, "default") };
+                    if (!cat.id.empty() && !cat.name.empty()) categories_.push_back(std::move(cat));
+                }
+            if (const J* list = root.Find("designs"); list && list->asArray())
+                for (const J& o : *list->asArray()) {
+                    Design d;
+                    if (FromJson(o, d)) designs_.push_back(std::move(d));
+                }
+            if (const J* gone = root.Find("deletedDefaults"); gone && gone->asArray())
+                for (const J& id : *gone->asArray()) deletedDefaults_.insert(std::string(id.asString()));
+        }
+
+        EnsureDefaultsLocked();
+        // A design filed in a category that no longer exists is just unlabeled.
+        for (Design& d : designs_)
+            if (!d.category.empty() && !CategoryLocked(d.category)) d.category.clear();
+        if (!readFailure.empty())
+            return Error::Make(Err::IoError, kModule,
+                               std::format("cannot read the {} library: {}", config_.noun, readFailure));
+
+        // THE SHIPPED CATALOG MOVED SINCE THIS FILE WAS WRITTEN (kCatalogRevision):
+        // refresh the app's own designs in place, and write the new revision back.
+        // The document is built HERE (under the lock) and committed BELOW (after
+        // it is released) — a PAL write never runs under a module lock.
+        if (storedCatalogRevision < kCatalogRevision) {
+            for (Design& d : designs_)
+                if (d.isDefault && StripShippedFontFamilies(d)) migrationTouchedDesigns = true;
+            // Written even when nothing needed stripping: the new revision has to
+            // be RECORDED, or every load would re-run this migration.
+            migrationJson = BuildStoreJsonLocked();
+        }
     }
 
-    EnsureDefaultsLocked();
-    // A design filed in a category that no longer exists is just unlabeled.
-    for (Design& d : designs_)
-        if (!d.category.empty() && !CategoryLocked(d.category)) d.category.clear();
-    if (!readFailure.empty())
-        return Error::Make(Err::IoError, kModule,
-                           std::format("cannot read the {} library: {}", config_.noun, readFailure));
+    if (!migrationJson.empty()) {
+        // CommitSave is the lock-free half of a save (its own contract): the
+        // caller has already released mutex_ by now.
+        if (CommitSave(migrationJson).ok())
+            Logger::Instance().Info(
+                std::format("{} library: catalog revision {} recorded{}", config_.noun,
+                            kCatalogRevision,
+                            migrationTouchedDesigns ? " (shipped designs refreshed)" : ""),
+                kModule);
+    }
     return {};
+}
+
+std::string DesignLibrary::StoreJson() const {
+    // Pure serialization of what is already in memory: no PAL, no provider.
+    std::lock_guard<std::mutex> lock(mutex_);
+    return BuildStoreJsonLocked();
 }
 
 std::string DesignLibrary::BuildStoreJsonLocked() const {
@@ -278,6 +356,9 @@ std::string DesignLibrary::BuildStoreJsonLocked() const {
     for (const std::string& id : deletedDefaults_) gone.push_back(J::String(id));
     J::Object root;
     root["version"] = J::Number(1);
+    // The shipped-content revision this file was written under — see
+    // kCatalogRevision; Load() migrates a document that is behind it.
+    root["catalogRevision"] = J::Number(kCatalogRevision);
     root["categories"] = J(std::move(cats));
     root["designs"] = J(std::move(designs));
     root["deletedDefaults"] = J(std::move(gone));

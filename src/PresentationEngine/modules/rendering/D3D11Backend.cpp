@@ -803,16 +803,16 @@ private:
             }
             case DrawCommand::Type::SetBlend:
                 break;   // the blend travels on each command (cmd.blend)
-            case DrawCommand::Type::FillRect:
+            case DrawCommand::Type::FillRect: {
                 SetScissor(full);
+                // EDGE-SNAPPED (RenderTypes' SnapRectToPixelEdges) — the CPU
+                // path's rule, so abutting fills share one pixel boundary.
+                const Rect r = SnapRectToPixelEdges(cmd.rect);
                 DrawQuad(cmd.blend == static_cast<int>(BlendMode::Multiply) ? 8 : 0,
-                         Rect(static_cast<float>(static_cast<int>(cmd.rect.x)),
-                              static_cast<float>(static_cast<int>(cmd.rect.y)),
-                              static_cast<float>(static_cast<int>(cmd.rect.width)),
-                              static_cast<float>(static_cast<int>(cmd.rect.height))),
-                         Rect(0, 0, 0, 0), cmd.color, 0.0f, nullptr,
+                         r, Rect(0, 0, 0, 0), cmd.color, 0.0f, nullptr,
                          static_cast<BlendMode>(cmd.blend), 0.0f, 0.0f);
                 break;
+            }
             case DrawCommand::Type::BlitImage:
             case DrawCommand::Type::DrawGlyph: {
                 auto it = textures_.find(cmd.texture.id);
@@ -862,11 +862,12 @@ private:
                 if (cmd.color.a <= 0.0f)
                     break;
                 SetScissor(full);
-                DrawQuad(cmd.cornerRadius >= 0.5f ? 2 : 0,
-                         Rect(static_cast<float>(static_cast<int>(cmd.rect.x)),
-                              static_cast<float>(static_cast<int>(cmd.rect.y)),
-                              static_cast<float>(static_cast<int>(cmd.rect.width)),
-                              static_cast<float>(static_cast<int>(cmd.rect.height))),
+                // SNAP THE EDGES, NOT THE SIZE — see SnapRectToPixelEdges. This
+                // is what removed the one-pixel video seam between two template
+                // bands that touch on the stage (they are authored flush; the
+                // old int-cast of y and height separately opened a hole).
+                const Rect r = SnapRectToPixelEdges(cmd.rect);
+                DrawQuad(cmd.cornerRadius >= 0.5f ? 2 : 0, r,
                          Rect(0, 0, 0, 0), cmd.color, cmd.cornerRadius, nullptr, BlendMode::Alpha,
                          0.0f, 0.0f);
                 break;

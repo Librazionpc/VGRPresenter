@@ -34,7 +34,7 @@ namespace bs = bps::settings;
 namespace {
 
 // One place the app's version is written for the Settings screens (the nav rail and menus still carry their own copy).
-constexpr const char *kAppVersion = "0.0.8";
+constexpr const char *kAppVersion = "0.0.9";
 
 QString qstr(const std::string &s) { return QString::fromStdString(s); }
 
@@ -221,7 +221,14 @@ void SettingsService::load()
         if (!sandbox.isEmpty())
             dataDir_ = sandbox.toStdString();
     }
-    settings_ = std::make_shared<bs::AppSettings>(platform.Filesystem().Join(dataDir_, "settings.json"));
+    // The SHIPPED baseline beside the exe (assets/settings.shipped.json): the installer replaces it
+    // with the build's own configuration on every install, and the store adopts only what it has no
+    // value for — an update arrives configured without resetting anyone's choices. A dev build has no
+    // such file, so nothing changes there.
+    const std::string baseline =
+        platform.Filesystem().Join(platform.Paths().ExecutableDir(), "assets/settings.shipped.json");
+    settings_ = std::make_shared<bs::AppSettings>(
+        platform.Filesystem().Join(dataDir_, "settings.json"), baseline);
     if (auto loaded = settings_->Load(); !loaded.ok())
         report(tr("Your settings could not be read (%1). The defaults are in use.").arg(qstr(loaded.error().message)), QStringLiteral("warning"));
 

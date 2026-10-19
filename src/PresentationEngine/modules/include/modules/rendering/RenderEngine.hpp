@@ -22,6 +22,7 @@
 #include "modules/rendering/TextEngine.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -221,6 +222,28 @@ public:
     // Goes through the same OutputManager::Distribute the render path uses, so
     // the telemetry output meter counts these presents exactly as it always has.
     void Distribute(const Frame& frame) { outputs_.Distribute(frame); }
+
+    // ---- Feed health (the automatic blackout's inputs) --------------------
+    // HOW LONG AGO each output last received a frame, in milliseconds, with
+    // -1 for an output that has never been presented to. The live loop's 1 Hz
+    // heartbeat re-presents a static picture, so these ages advance about once
+    // a second on every enabled output while a session is healthy — an age that
+    // keeps climbing is a stalled feed, not an unchanged slide (see
+    // IRenderOutput::LastPresentSteadyMs). A plain read: names and atomic
+    // stamps under the manager's lock, no device and no frame copy.
+    struct OutputFeedAge {
+        std::string name;
+        int64_t ageMs = -1;   // -1 = this output has never been presented to
+        bool enabled = false;
+    };
+    std::vector<OutputFeedAge> OutputFeedAges() const;
+    // Present an opaque BLACK frame to the named outputs — what a live output
+    // whose feed has stalled puts up instead of holding its last picture (a
+    // frozen frame reads as a live feed, which is the one thing it must not
+    // do). Nothing needs to be undone: the live loop's next present overwrites
+    // it the moment frames flow again, so recovery is automatic. Returns how
+    // many outputs were blacked.
+    int BlackoutOutputs(const std::vector<std::string>& names);
 
     // --- Resources (async) ---
     Result<TextureId> UploadTexture(std::string_view name, const RgbaImage& image);

@@ -11,6 +11,7 @@
 #include "modules/presentation/SceneBuilder.hpp"
 #include "modules/presentation/SlideRules.hpp"
 #include "modules/project/OutputStore.hpp"
+#include "modules/project/ShippedConfig.hpp"
 #include "modules/project/StyleStore.hpp"
 #include "modules/rendering/PngCodec.hpp"
 #include "modules/settings/Telemetry.hpp"
@@ -2871,6 +2872,59 @@ void TestClearCarrierPaintsNothing() {
             }
             (void)render.DestroyScene(builtClear.value());
         }
+
+        // 2b. "NOTHING" INCLUDES THE COMPOSITOR'S OWN LAYERS.
+        //
+        // The wall's Blackout control sends this same carrier, and the report
+        // it exists for is "nothing at all on screen". The engine used to
+        // composite a taken camera/screen, a media file and the overlay stack
+        // INTO every scene before the content switch — the clear included — so
+        // a blackout mid-service still showed the camera. The clear carrier now
+        // owns no compositor layers; the state itself is untouched, which is
+        // what lets the blackout be lifted with the feed and overlays back.
+        auto &compositor = p::CompositorState::Instance();
+        p::CompositorState::MediaFrame onAirFrame;
+        onAirFrame.width = 4;
+        onAirFrame.height = 4;
+        onAirFrame.rgba.assign(4 * 4 * 4, 0xFFu);   // opaque
+        compositor.SetMediaFrame(onAirFrame);
+        p::CompositorState::ActiveOverlay overlay;
+        overlay.id = "clear-test-overlay";
+        p::ContentBlock overlayText;
+        overlayText.id = "clear-test-overlay-text";
+        overlayText.kind = "text";
+        overlayText.text = "overlay";
+        overlayText.x = 60; overlayText.y = 60;
+        overlayText.width = 300; overlayText.height = 80;
+        overlay.blocks = { overlayText };
+        compositor.SetActiveOverlays({ overlay });
+
+        // THE CONTROL: the blank GO-LIVE carrier DOES carry those layers — the
+        // media-only GO LIVE promise, untouched by this rule.
+        auto blankWithLayers = builder.BuildSlideScene(pres, blank, style, render, r::Size(1920, 1080));
+        CHECK(blankWithLayers.ok());
+        if (blankWithLayers.ok()) {
+            CHECK(render.GetObject(blankWithLayers.value(), "mediaonair").ok());
+            CHECK(render.GetObject(blankWithLayers.value(), "ov1_1").ok());
+            (void)render.DestroyScene(blankWithLayers.value());
+        }
+        // THE BLACKOUT: none of them, and still not one painted pixel.
+        auto clearWithLayers = builder.BuildSlideScene(pres, clear, style, render, r::Size(1920, 1080));
+        CHECK(clearWithLayers.ok());
+        if (clearWithLayers.ok()) {
+            CHECK(!render.GetObject(clearWithLayers.value(), "mediaonair").ok());
+            CHECK(!render.GetObject(clearWithLayers.value(), "ov1_1").ok());
+            CHECK(!render.GetObject(clearWithLayers.value(), "takeninput").ok());
+            auto frame = render.Render(clearWithLayers.value(), opts);
+            CHECK(frame.ok());
+            if (frame.ok() && !frame.value().empty()) {
+                CHECK(countNonBlack(frame.value()) == 0);
+                CHECK(countVisible(frame.value()) == 0);
+            }
+            (void)render.DestroyScene(clearWithLayers.value());
+        }
+        compositor.ClearMedia();
+        compositor.SetActiveOverlays({});
     }
 
     // 3. THE LIVE PATH the button really takes — and the trap beside it.
@@ -3461,4 +3515,138 @@ void TestMediaFitOnTheFileWins() {
         (void)engine.DestroyScene(plain.value());
     }
     (void)engine.DestroyScene(sceneId);
+}
+
+// ---------------------------------------------------------------------------
+// ShippedConfig — the BUILD's configuration reaching an install that exists
+// ---------------------------------------------------------------------------
+// An install that had already run kept its styles and outputs forever: the
+// installer only copies seed files that do not exist. This merges
+// <install>/assets/kernel.shipped.json once per CONTENT FINGERPRINT — shipped
+// entries are refreshed in place or appended, the user's own entries keep their
+// place, and nothing is ever removed. A graph is per-machine and is not merged.
+void TestShippedConfig() {
+    using J = bps::json::Value;
+    auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    const std::string root = "/tmp/bps_shipped_config";
+    (void)fs.RemoveAll(root);
+    const std::string dbFile = root + "/kernel.json";
+    const std::string baseline = root + "/kernel.shipped.json";
+
+    auto& db = DatabaseManager::Instance();
+    CHECK(db.Open(dbFile).ok());
+
+    const auto entry = [](const char* id, const char* name) {
+        J::Object o;
+        o["id"] = J::String(id);
+        o["name"] = J::String(name);
+        return J(std::move(o));
+    };
+
+    // The install's rosters: a style the build ALSO ships (older definition) and
+    // one style of the user's own.
+    {
+        J::Array styles;
+        styles.push_back(entry("s1", "Main Output (old)"));
+        styles.push_back(entry("mine", "My Sunday look"));
+        CHECK(db.Put("styles", "roster", J(std::move(styles))).ok());
+    }
+
+    // What this build ships: refreshed s1, a new style, a new output, and a
+    // production graph (which is this machine's hardware and must be left alone).
+    const auto baselineJson = [&](const char* secondName, bool withOutput) {
+        J::Array shippedStyles;
+        shippedStyles.push_back(entry("s1", "Main Output"));
+        shippedStyles.push_back(entry("s2", secondName));
+        J::Object styles;
+        styles["roster"] = J(std::move(shippedStyles));
+
+        J::Object collections;
+        collections["styles"] = J(std::move(styles));
+        if (withOutput) {
+            J::Array outputs;
+            outputs.push_back(entry("out-1", "Main Output"));
+            J::Object outs;
+            outs["roster"] = J(std::move(outputs));
+            collections["outputs"] = J(std::move(outs));
+        }
+        J::Array nodes;
+        nodes.push_back(entry("bus:this-machine", "Studio"));
+        J::Object graph;
+        graph["nodes"] = J(std::move(nodes));
+        J::Object production;
+        production["graph"] = J(std::move(graph));
+        collections["production"] = J(std::move(production));
+
+        J::Object document;
+        document["version"] = J::Number(1);
+        document["collections"] = J(std::move(collections));
+        return J(std::move(document)).ToString();
+    };
+    CHECK(fs.WriteAtomic(baseline, baselineJson("NDI Screen", true)).ok());
+
+    // ---- first application: refresh, add, keep, never delete ----
+    const auto first = proj::ApplyShippedConfigurationFrom(baseline);
+    CHECK(first.applied && !first.fingerprint.empty());
+    CHECK(first.added == 2 && first.refreshed == 1);   // s2 + out-1 added, s1 refreshed
+
+    auto styles = db.Get("styles", "roster");
+    CHECK(styles.ok() && styles.value().asArray() && styles.value().asArray()->size() == 3);
+    if (styles.ok() && styles.value().asArray()) {
+        const auto& list = *styles.value().asArray();
+        CHECK(list[0].Find("name")->asString() == std::string("Main Output"));   // refreshed in place
+        CHECK(list[1].Find("id")->asString() == std::string("mine"));            // the user's, same place
+        CHECK(list[2].Find("id")->asString() == std::string("s2"));              // appended
+    }
+    auto outputs = db.Get("outputs", "roster");
+    CHECK(outputs.ok() && outputs.value().asArray() && outputs.value().asArray()->size() == 1);
+    CHECK(!db.Get("production", "graph").ok());   // a per-machine graph is not merged
+
+    // ---- the same file again is a no-op (the fingerprint gate) ----
+    const auto again = proj::ApplyShippedConfigurationFrom(baseline);
+    CHECK(!again.applied && again.fingerprint.empty());
+
+    // ---- a DIFFERENT build applies once more; the user's entry still wins ----
+    CHECK(fs.WriteAtomic(baseline, baselineJson("NDI Screen 2", false)).ok());
+    const auto second = proj::ApplyShippedConfigurationFrom(baseline);
+    CHECK(second.applied && second.refreshed == 1 && second.added == 0);
+    styles = db.Get("styles", "roster");
+    CHECK(styles.ok() && styles.value().asArray() && styles.value().asArray()->size() == 3);
+    if (styles.ok() && styles.value().asArray()) {
+        const auto& list = *styles.value().asArray();
+        CHECK(list[1].Find("id")->asString() == std::string("mine"));            // still there
+        CHECK(list[2].Find("name")->asString() == std::string("NDI Screen 2"));  // refreshed
+    }
+
+    // ---- the record and the rosters survive a reopen (Flush did its job) ----
+    CHECK(db.Flush().ok());
+    CHECK(db.Open(dbFile).ok());
+    CHECK(db.Get("config", "shipped").ok());
+    auto persisted = db.Get("styles", "roster");
+    CHECK(persisted.ok() && persisted.value().asArray() && persisted.value().asArray()->size() == 3);
+
+    // ---- the rule itself, without a store ----
+    size_t added = 0, refreshed = 0;
+    J::Array unidentified;
+    J::Object noId;
+    noId["name"] = J::String("unmatched");
+    unidentified.push_back(J(std::move(noId)));
+    J::Array storedList;
+    J::Object storedSingle;
+    storedSingle["id"] = J::String("x");
+    storedList.push_back(J(std::move(storedSingle)));
+    const auto untouched =
+        proj::MergeShippedEntries(J(std::move(storedList)), J(std::move(unidentified)), added, refreshed);
+    CHECK(added == 0 && refreshed == 0 && untouched.asArray() && untouched.asArray()->size() == 1
+          && (*untouched.asArray())[0].Find("id")->asString() == std::string("x"));
+
+    added = refreshed = 0;
+    J::Array onlyUser;
+    onlyUser.push_back(entry("a", "A"));
+    const auto unchanged =
+        proj::MergeShippedEntries(J(std::move(onlyUser)), J::String("not a list"), added, refreshed);
+    CHECK(added == 0 && refreshed == 0 && unchanged.asArray() && unchanged.asArray()->size() == 1);
+
+    (void)fs.RemoveAll(root);
+    CHECK(db.Open("").ok());   // leave the shared store in-memory for the next suite
 }

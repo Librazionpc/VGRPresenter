@@ -20,7 +20,7 @@ Item {
     readonly property color cLighter: "#2f3542"
     readonly property color cDarkest: "#12121c"
     readonly property color cText: "#f0f0ff"
-    readonly property string mono: "Consolas"
+    readonly property string mono: FontService.monoFamily
 
     property int openSub: -1          // the row whose submenu is showing
     property real subY: 0             // where that row is, in the panel

@@ -32,7 +32,7 @@ Item {
     readonly property color cDarkest: "#12121c"
     readonly property color cText: "#f0f0ff"
     readonly property color cSecondary: Theme.accent
-    readonly property string mono: "Consolas"
+    readonly property string mono: FontService.monoFamily
 
     readonly property bool inProject: ProjectService.activeProjectId !== ""
     readonly property var items: ProjectService.activeProject.items ?? []

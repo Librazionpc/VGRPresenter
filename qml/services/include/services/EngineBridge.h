@@ -448,6 +448,14 @@ public:
     // detect first frames itself, instead of QML confirming back (a write
     // into the tile's own URL binding = binding loop).
     QImage previewFrameFor(const QString &label);
+    // THE PROGRAM FEED — the same tap's newest frame as PIXELS, at native size
+    // and the device's own rate. This is what a live bus window and a taken
+    // input must read: previewFrameFor goes through the tap's JPEG (a pane
+    // contract — encoded on the capture thread, decoded HERE on the GUI thread,
+    // and published by a pane tap only ~15 times a second), which is exactly the
+    // 15 fps ceiling the outputs inherited. The pull is gated on the tap's frame
+    // counter, so an idle tick copies nothing and hands back the last frame.
+    QImage previewPixelsFor(const QString &label);
     // WHY a held camera/screen tap will never produce a frame, in the platform's
     // own words ("device activation failed", "window closed", …), or "" while the
     // tap is fine — which includes merely warming up. This is the answer the UI
@@ -715,6 +723,15 @@ private:
     // construction rather than by a waiver.
     void openTapOffThread(const QString &label, const QString &kind, const QString &owner,
                           const QString &deviceId, const QString &mode);
+    // Ask the PAL for a RUNNING camera/screen tap to feed the program (see
+    // IVideo::SetPreviewLive): packed pixels at the device's rate instead of a
+    // 15 fps JPEG. Queued for the same reason openTapOffThread is (it takes the
+    // preview-table mutex), and a no-op for a "card" owner — a thumbnail does
+    // not need, and must not pay for, a program feed. Called on EVERY start of a
+    // non-card owner, including the ones that find the tap already running: that
+    // is the common case (a card opened it first), and it is precisely where the
+    // live flag was missing.
+    void markTapLiveOffThread(const QString &label, const QString &kind, const QString &owner);
     // What that verdict does back on THIS thread: publish the tap (a receiver id
     // exists only for NDI — a camera/screen id was decided before the hop), or
     // release the claim again, record WHY in previewOpenRefusals_ and emit
@@ -865,6 +882,12 @@ private:
     QMap<QString, QImage> previewDecoded_;
     QMap<QString, int> previewRawLen_;
     QMap<QString, quint32> previewFrameHash_;   // FNV-1a of the JPEG bytes
+    // The pixel puller's own cache (see previewPixelsFor): the tap's frame
+    // counter the held image came from, and that image. A tap whose counter has
+    // not moved answers from here — the copy a 1080p frame would cost happens
+    // once per NEW frame, not once per pump tick.
+    QHash<QString, quint64> previewPixelsSeq_;
+    QHash<QString, QImage> previewPixelsLast_;
     // One-shot diagnostics: the first-frame log line (tap→publish→fetch→
     // decode works end to end) and the per-label no-tap warning.
     QSet<QString> previewFirstFrameLogged_;

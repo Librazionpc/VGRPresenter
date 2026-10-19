@@ -2,7 +2,7 @@
 # ============================================================================
 # tools/set_version.sh <version> — single-source the app version.
 #
-# The version lives in exactly TWO files (everything else READS them):
+# The version lives in exactly THREE files (everything else READS them):
 #
 #   qml/services/SettingsService.cpp   kAppVersion — the canonical value; the
 #                                      QML binds it live via the exposed
@@ -12,6 +12,10 @@
 #                                      drift from the shipped build.
 #   assets/app.rc.in                   Windows FILEVERSION/PRODUCTVERSION
 #                                      (numeric quad + the string form).
+#   CMakeLists.txt                     project(... VERSION) — build metadata.
+#                                      Nothing reads it, so it silently sat at
+#                                      0.0.6 while the app shipped 0.0.8; it is
+#                                      owned (and verified) here now.
 #
 # The script also GUARDS the QML: if a hardcoded version literal ever
 # reappears there (the drift that started this), the run fails loudly.
@@ -34,6 +38,7 @@ fi
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || (cd "$(dirname "$0")/.." && pwd))"
 SETTINGS="$ROOT/qml/services/SettingsService.cpp"
+CMAKE="$ROOT/CMakeLists.txt"
 
 # The canonical CURRENT version, read from the one file that defines it.
 OLD="$(grep -oE 'kAppVersion = "[^"]+"' "$SETTINGS" | head -1 | sed -E 's/.*"([^"]+)"/\1/')"
@@ -66,6 +71,14 @@ sed -i -E \
     -e "s/(VALUE \"ProductVersion\",[[:space:]]*)\"[^\"]*\"/\1\"$NEW\"/" \
     "$RC"
 
+# ---- 2b. the CMake project version ------------------------------------------
+# Nothing reads PROJECT_VERSION (the installer and every screen take kAppVersion),
+# which is exactly why it drifted: CMakeLists still declared 0.0.6 two releases
+# later. It is updated here so the metadata cannot disagree with the build.
+if [ -f "$CMAKE" ]; then
+    sed -i -E "s/^(project\([A-Za-z0-9_]+ VERSION )[0-9]+\.[0-9]+\.[0-9]+/\1$NUM/" "$CMAKE"
+fi
+
 # ---- 3. verify ----------------------------------------------------------------
 # (a) no OTHER version string may survive in the two owned files;
 # (b) no hardcoded version literal may reappear in the QML — the UI binds
@@ -86,10 +99,24 @@ for f in \
         BAD="$BAD $f (hardcoded version literal — bind SettingsService.appVersion instead)"
     fi
 done
+if [ -f "$CMAKE" ]; then
+    # (`|| true`: under pipefail a grep with no match would end the script here,
+    # before the check below could report what is wrong)
+    DECLARED="$(grep -oE '^project\([A-Za-z0-9_]+ VERSION [0-9]+\.[0-9]+\.[0-9]+' "$CMAKE" | head -1 \
+                | sed -E 's/.*VERSION //' || true)"
+    if [ -n "$DECLARED" ] && [ "$DECLARED" != "$NUM" ]; then
+        BAD="$BAD $CMAKE (project VERSION $DECLARED)"
+    elif [ -z "$DECLARED" ] && grep -qE '^project\(' "$CMAKE"; then
+        # The project() line is there but not in the shape this script rewrites:
+        # say so instead of passing a file it could not version.
+        BAD="$BAD $CMAKE (no parseable project VERSION)"
+    fi
+fi
 if [ -n "$BAD" ]; then
     echo "set_version.sh: version drift detected in:$BAD"
     exit 1
 fi
 
 echo "set_version.sh: OK — $NEW is the single version (QML reads it live)"
+echo "  (files owned: SettingsService.cpp, assets/app.rc.in, CMakeLists.txt)"
 echo "  (rebuild to bake it into the exe: the resource + all UI screens read it at build/run time)"

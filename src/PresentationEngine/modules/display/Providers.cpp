@@ -1,10 +1,12 @@
 #include "modules/display/Providers.hpp"
 
+#include "core/logging/Logger.hpp"
 #include "modules/broadcast/BroadcastEngine.hpp"
 #include "platform/IPlatform.hpp"
 #include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -264,7 +266,11 @@ Result<void> NdiDisplayProvider::SendFrame(const RenderFrameView& frame) {
     // lock-scope guard forbids (see tools/check_lock_scope.mjs).
     auto& bc = broadcast::BroadcastEngine::Instance();
 
-    std::lock_guard<std::mutex> sendLock(sendMutex_);
+    // unique_lock (not lock_guard): the SELF-HEAL below must drop it before the
+    // SDK teardown, exactly like ResetSender — StopSender enters the
+    // BroadcastEngine, and holding this lock across a cross-engine call is the
+    // pile-up the lock-scope guard exists to stop.
+    std::unique_lock<std::mutex> sendLock(sendMutex_);
 
     std::string senderName;
     float frameRate = 30.0f;
@@ -334,7 +340,42 @@ Result<void> NdiDisplayProvider::SendFrame(const RenderFrameView& frame) {
 
     const size_t bytes = count * 4u;
     auto r = bc.SendVideoFrame(senderId, info, sendBuffer_.data(), bytes);   // SDK send, no state lock
-    if (r.ok()) framesSent_.fetch_add(1);
+    if (r.ok()) {
+        framesSent_.fetch_add(1);
+        sendFailStreak_ = 0;
+        return r;
+    }
+
+    // ---- SELF-HEAL: "NDI stays at zero until the app is restarted" ----------
+    // A send that FAILS here is the SENDER, not the picture: an SDK sender the
+    // engine no longer recognises (a new output unit created after the sender
+    // was armed, a runtime that came up after the first frame, a fourCC the
+    // runtime refused once), and every later frame would fail the same way —
+    // the frame counter sits at 0 while the app looks healthy until a restart.
+    // Tear the sender down here so the NEXT frame (≈33 ms later, on the feed's
+    // own tick) recreates it under the current name and format, which is the
+    // same reset a session arm does — just driven by the failure itself.
+    //
+    // Coalesced: a genuinely broken runtime must not turn a 30 fps feed into a
+    // 30 Hz Create/Stop loop. One heal per second, and the streak counter is
+    // what the log line reports so a persistent failure is visible without one
+    // log line per frame.
+    const auto now = std::chrono::steady_clock::now();
+    const bool firstOfStreak = sendFailStreak_ == 0;
+    ++sendFailStreak_;
+    if (firstOfStreak || now - lastHeal_ > std::chrono::seconds(1)) {
+        lastHeal_ = now;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            senderId_.clear();   // next SendFrame recreates it (lazily, same name)
+        }
+        sendLock.unlock();       // no provider lock across the engine teardown
+        (void)bc.StopSender(senderId);
+        Logger::Instance().Warning(
+            "NdiDisplayProvider: frame send failed (" + r.error().message
+                + ") — sender reset; the next frame recreates it as '" + senderName + "'",
+            "Display");
+    }
     return r;
 }
 

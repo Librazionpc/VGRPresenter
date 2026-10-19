@@ -1,5 +1,9 @@
 import QtQuick
 import VGRPresenterUI
+// The app's action-named keyboard binding (qml/shortcuts/Shortcut.qml), imported
+// AFTER QtQuick so `Shortcut {}` below is this type rather than the QtQuick one:
+// the chords themselves live in qml/settings/Hotkeys.qml.
+import "../shortcuts"
 
 // The REFERENCE-LIBRARY pane — the Scripture tab's UI, generalized so the
 // Scripture tab and The Table tab are the SAME component driven by different
@@ -107,6 +111,10 @@ Item {
     property int chapterToken: 0
     property bool chapterLoading: false
     property bool chapterSelectFirst: false
+    // A step BACK into the previous passage picks its LAST paragraph, not its first
+    // (the row the reader walked in from). Applied when the chapter's rows land, so
+    // the step never reads a list that has not been filled yet.
+    property bool chapterSelectLast: false
     property double chapterStartedAt: 0
     property var pendingGoTo: null
     property var selected: []            // verse numbers, ascending
@@ -320,14 +328,126 @@ Item {
         Qt.callLater(function () { versesFlick.positionViewAtIndex(index, ListView.Beginning) })
     }
 
+    // Put a row in the MIDDLE of the list (user call: "sometimes the selected list
+    // that is showing doesn't stay in the centre"). Used when a remembered place is
+    // restored, where the point is to see the paragraph that was being read with the
+    // passage around it — not to pin it to the top edge.
+    function revealRowCentered(index) {
+        if (index < 0 || index >= root.mainRows.length)
+            return
+        Qt.callLater(function () { versesFlick.positionViewAtIndex(index, ListView.Center) })
+    }
+
+    // Keep the row of (passage, piece) on screen, and re-centre it only when it
+    // has to move. The ‹ › pair — and a pick's own slide walk — moves the
+    // highlight one row at a time; scrolling to the middle on EVERY step slid the
+    // whole list under the eye on each press, which reads as motion sickness ("let
+    // it get to one end of the list before you move back to the centre"). So the
+    // list stays put while the walking row is fully visible, and only when the row
+    // reaches an edge does the view snap it back to the middle.
+    //
+    // Resolved inside the deferred call because the row INDEX is not stable yet
+    // when a step lands right after a rows delivery — and positionViewAtIndex is
+    // also what realizes a row the list has virtualized away (no item to measure
+    // means it cannot be on screen).
+    function centerRow(number, partIndex) {
+        Qt.callLater(function () {
+            const index = root.rowIndexForPart(number, partIndex ?? 0)
+            if (index < 0)
+                return
+            const row = versesFlick.itemAtIndex(index)
+            if (row) {
+                // Row geometry is in the list's CONTENT space (delegates are children
+                // of contentItem), so this is a plain viewport test.
+                const pad = 6
+                const top = row.y
+                const bottom = row.y + row.height
+                const viewTop = versesFlick.contentY
+                const viewBottom = viewTop + versesFlick.height
+                if (top - pad >= viewTop && bottom + pad <= viewBottom)
+                    return          // already fully on screen: do not move the list
+            }
+            versesFlick.positionViewAtIndex(index, ListView.Center)
+        })
+    }
+
+    // The row a remembered place names. A PICK is centred (the paragraph being read,
+    // with the passage around it, which is what "it doesn't stay in the centre" asked
+    // for); a place with no pick is the top of the list, and it goes back to the top.
+    function revealRemembered(at, picked) {
+        if (picked && picked.length > 0) {
+            let index = root.mainRows.findIndex((row) => Number(row.number) === Number(picked[0])
+                                                        && row.continuation !== true)
+            if (index < 0 && at)
+                index = root.mainRows.findIndex((row) => Number(row.number) === Number(at.number)
+                                                            && Number(row.partIndex ?? 0) === Number(at.partIndex ?? 0))
+            root.revealRowCentered(index)
+            return
+        }
+        let index = -1
+        if (at)
+            index = root.mainRows.findIndex((row) => Number(row.number) === Number(at.number)
+                                                        && Number(row.partIndex ?? 0) === Number(at.partIndex ?? 0))
+        root.revealRow(index)
+    }
+
+    // ---- the rows did not survive the tab (the reported "the split disappears …
+    // I have to toggle Divide long paragraphs again") ------------------------------
+    // The list shows the passage's own cut (mainRows carries `split`), and that cut is
+    // made when the chapter is READ. A pane that comes back after a template edit, a
+    // reload, or an option written behind it can therefore hold rows cut from what the
+    // tab no longer says — or, when the cut landed while the background pass was being
+    // rebuilt, no cut at all. The passage is read again with the options the tab says
+    // now, and the reader's place is put back, so the divide is on screen without
+    // toggling it off and on.
+    function rowsHaveSplit() {
+        for (const verse of root.chapterVerses)
+            if (verse.split && verse.split.length > 0)
+                return true
+        return false
+    }
+    function refillIfStale() {
+        if (!root.book || !root.adapter || root.chapterVerses.length === 0)
+            return
+        const p = String(root.adapter.optionsPrefix || "")
+        const wantsSplit = root.options[p + ".splitLongVerses"] === true
+        // A chapter with nothing long enough to divide legitimately has no split rows,
+        // so "missing" is only evidence ONCE per (passage, options): the re-read is
+        // tried, and a second empty answer is the truth. Only The Table is checked —
+        // its paragraphs are whole sermon thoughts, while a Bible's verses are short
+        // by nature and would be re-read for nothing.
+        const stamp = String(root.book.id) + ":" + root.chapterNumber + "@" + root.fillSignature
+        const signatureMoved = root.rowsFillSignature !== ""
+                                && root.rowsFillSignature !== root.fillSignature
+        const missing = wantsSplit && root.adapter.contentType === "table" && !root.rowsHaveSplit()
+        if (!signatureMoved && !missing)
+            return
+        if (root.refillTriedFor === stamp)
+            return
+        root.refillTriedFor = stamp
+        root.restorePicked = root.selected.slice()
+        root.restoreRow = root.topRowIdentity()
+        root.openChapter(root.chapterNumber, false)
+    }
+
     // The same by paragraph NUMBER — the identity the rest of the app speaks in. A
     // number is not an index once the chapter is divided (the fortieth paragraph can
     // be row 78: a divided paragraph contributes one row per piece), so it is resolved
     // through the model, to the row that HEADS the paragraph (a continuation hangs off
     // its head, and the head is the row worth showing).
+    function rowIndexFor(number) {
+        return root.mainRows.findIndex((row) => Number(row.number) === Number(number)
+                                                 && row.continuation !== true)
+    }
     function revealVerse(number) {
-        root.revealRow(root.mainRows.findIndex((row) => Number(row.number) === Number(number)
-                                                     && row.continuation !== true))
+        root.revealRow(root.rowIndexFor(number))
+    }
+
+    // The row that shows one PIECE of a paragraph — the (paragraph, part) pair a
+    // divided pick walks with ‹ › (4 -> 4-2 -> 4-3 are separate rows).
+    function rowIndexForPart(number, partIndex) {
+        return root.mainRows.findIndex((row) => Number(row.number) === Number(number)
+                                                 && Number(row.partIndex ?? 0) === Number(partIndex))
     }
 
     // ---- the list's place, across a cut that lands behind the operator ---------
@@ -461,6 +581,113 @@ Item {
            + (root.templateFromOutputStyle ? qsTr(" (from style)") : ""))
     readonly property var options: SettingsService.values
 
+    // ---- WHERE THE READER WAS (user call: "make the app remember its state and
+    // position ... if i go to another page and come back it will go number one and
+    // i was in para 35") -------------------------------------------------------
+    // The adapter names ONE registered settings key (readingKey, like
+    // sessionSourceKey) and the pane keeps its place there as a JSON value: the open
+    // source, book and chapter, the rows that were picked, and the row that was at
+    // the top of the list. A pane that is built again — a restart, a reload, a tab
+    // rebuilt by the engine — comes back to all of it instead of to the first
+    // chapter and paragraph one.
+    readonly property string readingKey: (root.adapter && root.adapter.readingKey)
+        ? String(root.adapter.readingKey) : ""
+    // The place read back from the store, held until the open it belongs to has
+    // applied it (then it is cleared, so a later open never jumps backwards).
+    property var readingRestore: null
+    // THE PLACE AS LAST CAPTURED IN MEMORY (user call: "keep the panes' open passage
+    // in memory as well as in settings, so an engine reload can restore instantly
+    // without waiting on the settings store"). It is captured the moment the reader
+    // moves — before the debounced write, and whether or not the store is up — so a
+    // reload inside the same session restores from here: no settings load, no write
+    // debounce, no dependency on the engine's store having come back yet. The store
+    // stays the cross-restart copy (see saveReading).
+    property var readingPlace: null
+    property string readingStamp: ""
+    // What the NEXT open puts back: the picked numbers, and the row that was on
+    // screen (paragraph + piece — see topRowIdentity).
+    property var restorePicked: []
+    property var restoreRow: null
+    // The fill options the rows ON SCREEN were cut with, captured when their chapter
+    // was opened; and the one stale state a re-read was already tried for.
+    property string openFillSignature: ""
+    property string rowsFillSignature: ""
+    property string refillTriedFor: ""
+    // Everything the DIVISION of this tab's rows depends on (see SlideBuilder's
+    // attachSplit): the template and this tab's own fill options. A change here
+    // means the rows on screen were cut from something the tab no longer says.
+    readonly property string fillSignature: {
+        const p = root.adapter ? String(root.adapter.optionsPrefix || "") : ""
+        const v = root.options || ({})
+        return [root.templateId, p, v[p + ".verseNumbers"],
+                v[p + ".splitLongVerses"], v[p + ".wordsPerSlide"]].join("|")
+    }
+    // Every move the reader makes is remembered on a short idle (see saveReading):
+    // a scroll fires these hundreds of times a second, and the settings store is not
+    // a place to write per frame.
+    onSelectedChanged: root.touchReading()
+    onChapterNumberChanged: root.touchReading()
+    onBookIndexChanged: root.touchReading()
+    Timer {
+        id: saveReadingTimer
+        interval: 350
+        onTriggered: root.saveReading()
+    }
+
+    // ---- "RELOADING", NOT "EMPTY" (user call: give the library panes a quiet
+    // reloading state, so a source that is absent for a moment reads as loading
+    // rather than as blank columns) --------------------------------------------
+    // `sources` reads empty in several honest situations: the engine has not booted
+    // yet, a library is being (re)read, or a service publishes its corpus in a second
+    // pass. None of them means "nothing is installed", but the empty wording said so
+    // — and next to blank columns that reads as lost data. A list that has JUST gone
+    // empty is therefore reported as reloading for a short grace window; one still
+    // empty after it is genuinely empty. A pane holding an open passage is ALWAYS
+    // reloading while its list is empty: it has a chapter on screen, so the library
+    // exists and is coming back (see syncSources, which keeps that passage).
+    property bool libraryReloading: false
+    function noteSources() {
+        if (root.sources.length > 0) {
+            root.libraryReloading = false
+            reloadGrace.stop()
+            return
+        }
+        if (!root.libraryReloading) {
+            root.libraryReloading = true
+            reloadGrace.restart()
+        }
+    }
+    readonly property bool showReloading: root.sources.length === 0
+        && (root.libraryReloading || !EngineBridge.booted || root.book !== null
+            || (root.adapter && root.adapter.loading && root.adapter.loading()))
+    // What the empty columns say. The tab's own loading wording is the quiet one: the
+    // empty wording ("No sermons yet — add one") is reserved for a library that is
+    // really empty, because that is the one that is news.
+    function libraryHint() {
+        if (root.sources.length > 0)
+            return ""
+        if (root.showReloading) {
+            // With a passage open this is a RELOAD — the library was read once and its
+            // list is coming back — so it says so. Without one it is the tab's first
+            // read, and the tab's own wording ("Opening the library…", "Reading the
+            // Bibles…") is the right quiet line for it.
+            if (root.book !== null)
+                return qsTr("Reloading the library…")
+            return (root.adapter && root.adapter.loadingText)
+                ? String(root.adapter.loadingText) : qsTr("Reloading the library…")
+        }
+        return (root.adapter && root.adapter.emptyText)
+            ? String(root.adapter.emptyText) : qsTr("Nothing here yet.")
+    }
+    onSourcesChanged: root.noteSources()
+    Timer {
+        id: reloadGrace
+        interval: 4000
+        // The grace is only for a list that was never seen non-empty; an open passage
+        // keeps the loading wording for as long as the library takes.
+        onTriggered: if (!root.book) root.libraryReloading = false
+    }
+
     // The adapter object is a plain QtObject with `changed` emitted by its
     // owner (the wrapper binds it to its service's signal) — no direct
     // service reference anywhere in this file.
@@ -469,6 +696,9 @@ Item {
         function onChanged() {
             root.engineRevision++
             root.syncSources()
+            // A template edit, a reload or an option written behind the pane leaves
+            // the list holding a cut the tab no longer asks for (see refillIfStale).
+            root.refillIfStale()
         }
         // A SYNC-fallback query's worker answer landed (a tab whose adapter has no
         // searchAsync). The published search answers [] for a query nobody has run
@@ -491,8 +721,103 @@ Item {
     // the adapter's own pre-boot changed) and again via whenReady the moment the
     // store is open — the one idiom for a pre-boot read.
     Component.onCompleted: {
+        root.noteSources()
+        root.loadReading()
         root.syncSources()
-        SettingsService.whenReady(root.syncSources)
+        SettingsService.whenReady(function () {
+            root.loadReading()
+            root.syncSources()
+        })
+    }
+
+    // ---- the reader's place (see readingKey) -------------------------------------
+
+    // The place as one JSON value, or null while nothing is open.
+    //
+    // The ROW saved is the one to come back to, not necessarily the top one: the
+    // picked paragraph when there is a pick (that is what the operator was reading),
+    // else the row at the top of the list. Saving the top row unconditionally made the
+    // place DRIFT — the restore centres what it saved, so the next save would record a
+    // row half a screen higher, and every launch would walk up the chapter.
+    function readingState() {
+        if (!root.book || root.sourceId === "")
+            return null
+        const picked = root.selected.slice()
+        const at = picked.length > 0
+            ? { number: Number(picked[0]), partIndex: 0 }
+            : root.topRowIdentity()
+        return {
+            source: String(root.sourceId),
+            book: String(root.book.id),
+            chapter: Number(root.chapterNumber),
+            picked: picked,
+            row: at
+        }
+    }
+    // The session's own copy. Cheap enough to take on every move (a scroll's idle, a
+    // pick, a chapter change) and independent of the engine, which is the point.
+    function captureReading() {
+        if (root.readingKey === "")
+            return
+        const state = root.readingState()
+        if (!state)
+            return
+        const stamp = JSON.stringify(state)
+        if (stamp === root.readingStamp)
+            return
+        root.readingStamp = stamp
+        root.readingPlace = state
+    }
+    function saveReading() {
+        root.captureReading()
+        if (root.readingKey === "" || !SettingsService.ready || root.readingPlace === null)
+            return
+        const text = JSON.stringify(root.readingPlace)
+        if (String(SettingsService.values[root.readingKey] ?? "") !== text)
+            SettingsService.setValue(root.readingKey, text)
+    }
+    function touchReading() {
+        if (root.readingKey === "")
+            return
+        root.captureReading()
+        saveReadingTimer.restart()
+    }
+    // Read once per pane, and again when the engine's store lands: a pre-boot read
+    // sees nothing, and acting on that is what sticks the wrong place.
+    function loadReading() {
+        if (root.readingKey === "" || root.readingRestore !== null)
+            return
+        // ONLY WHEN THERE IS NOTHING OPEN. A book on screen (or opening) is already
+        // where the reader left it — and a read in flight carries its own place in
+        // `restorePicked`/`restoreRow` — so a place loaded under one would just sit
+        // armed for the next repair open, possibly older than the reader's last move.
+        // The one case that needs it is a pane that has no book: a rebuild, or a source
+        // whose outline is (re)arriving.
+        if (root.book !== null)
+            return
+        // THE SESSION'S OWN PLACE FIRST: a reload inside this session restores from
+        // memory at once, even while the engine's store is still coming up. ONE line
+        // per restore, naming the book and chapter it came back to, so which copy was
+        // used (memory or store) is visible in the log alongside the open trace.
+        if (root.readingPlace !== null) {
+            root.readingRestore = root.readingPlace
+            EngineBridge.log("info", "OpenTrace", "reading place from MEMORY (this session): "
+                             + root.readingPlace.book + " " + root.readingPlace.chapter)
+            return
+        }
+        const raw = String(SettingsService.values[root.readingKey] ?? "")
+        if (raw === "")
+            return
+        try {
+            const state = JSON.parse(raw)
+            if (state && typeof state === "object" && state.book !== undefined) {
+                root.readingRestore = state
+                EngineBridge.log("info", "OpenTrace", "reading place from SETTINGS: "
+                                 + state.book + " " + state.chapter)
+            }
+        } catch (e) {
+            // A value this build cannot read is simply no remembered place.
+        }
     }
 
     // ---- opening things ----
@@ -502,14 +827,40 @@ Item {
         // Wait for the engine's store: before it is up the remembered key reads
         // as merely absent, and acting on that would stick the wrong source (see
         // the SettingsService connection above, which calls back once it loads).
-        if (!SettingsService.ready)
+        //
+        // EXCEPT WHEN THIS SESSION ALREADY KNOWS ITS PLACE: `readingPlace` is captured
+        // from what is on screen, not from the store, so a pane that has been reading
+        // can reopen that passage while the engine's store is still coming up — the
+        // store is not consulted at all on that path (see loadReading). This is the
+        // "restore instantly without waiting on the store" half.
+        if (!SettingsService.ready && root.readingPlace === null)
             return
+        // Every open this pane makes on its own (the first, the one after a corpus
+        // reload, the one after a source list that momentarily read empty) asks the
+        // store where the reader was first: without this the place is only restored
+        // while `readingRestore` happens to be held, and a rebuild — the reported "it
+        // goes back to number one and I was in para 35" — would open the first book
+        // again. loadReading() is a no-op while a place is already waiting to apply.
+        root.loadReading()
         const list = root.sources
         if (list.length === 0) {
-            root.sourceId = ""
-            root.books = []
-            root.chapterVerses = []
-            root.selected = []
+            // A SOURCE LIST THAT READS EMPTY IS NOT AN EMPTY LIBRARY (user report: "if
+            // i go to another page and come back it will go number one"). Both services
+            // PUBLISH their corpus reads and answer `sources()` with [] while a reload,
+            // an import, or a library rebuild is in flight — and this branch used to
+            // clear the book, the chapter, the rows and the pick for that instant. When
+            // the list came back the pane opened the FIRST chapter again, which is what
+            // read as "it forgot where I was".
+            //
+            // The open passage is therefore KEPT: the rows stay on screen through the
+            // gap (nothing blinks back to nothing), and when the list returns the
+            // `currentSource` branch below finds the same book and does nothing at all —
+            // no reopen, no reset. Only a pane with nothing open has nothing to keep, so
+            // that is the one case that still clears.
+            if (!root.book && root.chapterVerses.length === 0) {
+                root.sourceId = ""
+                root.books = []
+            }
             return
         }
         if (root.currentSource) {
@@ -550,10 +901,35 @@ Item {
         const previousBook = root.book ? root.book.id : ""
         root.sourceId = id
         root.books = root.adapter.books(id)
+        // WHERE THE READER WAS: the remembered book and chapter of THIS source, not
+        // the first book of it. Applied once — the state is taken as it is applied,
+        // so every later open (a click, a jump) goes exactly where it was told.
+        if (root.readingRestore !== null) {
+            // THE OUTLINE IS NOT IN YET (a service's corpus read is PUBLISHED and answers
+            // empty first — see this file's own header): the place is KEPT for the open
+            // that can use it, because the outline's arrival re-enters openSource. It
+            // used to be consumed against an empty book list, and the next open then fell
+            // back to the first chapter — the restored place was silently dropped.
+            if (root.books.length === 0)
+                return
+            const state = root.readingRestore
+            const saved = String(state.source ?? "") === String(id)
+                ? root.books.findIndex((b) => String(b.id) === String(state.book)) : -1
+            root.readingRestore = null
+            if (saved >= 0) {
+                root.restorePicked = Array.isArray(state.picked) ? state.picked.slice() : []
+                root.restoreRow = state.row || null
+                root.openBook(saved, Number(state.chapter) || 0)
+                return
+            }
+        }
         const same = root.books.findIndex((b) => b.id === previousBook)
         root.openBook(same >= 0 ? same : 0, same >= 0 ? root.chapterNumber : 0)
         const lastKey = (root.adapter && root.adapter.sessionSourceKey) ? String(root.adapter.sessionSourceKey) : ""
-        if (lastKey !== "" && String(SettingsService.values[lastKey] ?? "") !== id)
+        // Only once the store is up: a write before it loads is refused, and the
+        // remember-last-source value is not what an in-memory restore depends on.
+        if (lastKey !== "" && SettingsService.ready
+                && String(SettingsService.values[lastKey] ?? "") !== id)
             SettingsService.setValue(lastKey, id)
     }
 
@@ -600,6 +976,10 @@ Item {
         root.chapterNumber = number
         root.searching = false
         root.chapterSelectFirst = selectFirst
+        root.chapterSelectLast = false
+        // The options this read is cut with, held so the list can tell later whether
+        // the rows it shows still match what the tab says (see refillIfStale).
+        root.openFillSignature = root.fillSignature
         root.chapterVerses = []
         revealChapter(number)
         root.selected = []
@@ -658,13 +1038,40 @@ Item {
                 if (root.adapter && root.adapter.contentType === "table" && pending.matchText)
                     root.selectMatchingSubpart(picked[0], pending.matchText)
             }
+        } else if (opened && (root.restorePicked.length > 0 || root.restoreRow !== null)) {
+            // THE PLACE COMES BACK (see readingKey): the paragraphs that were picked in
+            // this chapter, and the row that was under the eye. Only numbers this
+            // chapter still has are taken — a replaced source is not the old place.
+            const numbers = rows.map((v) => v.number)
+            const picked = root.restorePicked.filter((n) => numbers.indexOf(Number(n)) >= 0)
+            root.restorePicked = []
+            if (picked.length > 0) {
+                root.selected = picked
+                root.anchorVerse = picked[0]
+                root.previewSlideIndex = 0
+            }
+            const at = root.restoreRow
+            root.restoreRow = null
+            root.revealRemembered(at, picked)
+        } else if (opened && root.chapterSelectLast && rows.length > 0) {
+            const v = rows[rows.length - 1]
+            root.selected = [v.number]
+            root.anchorVerse = v.number
+            root.centerRow(v.number, v.partIndex ?? 0)
         } else if (opened && root.chapterSelectFirst && rows.length > 0) {
             root.selected = [rows[0].number]
             root.anchorVerse = rows[0].number
+            // A chapter stepped INTO puts its pick at the top of a list whose own
+            // scroll was just reset — but the ‹ › may also have stepped INTO the
+            // last row while the list was showing something else, so say it.
+            root.centerRow(rows[0].number)
         }
-        if (opened)
+        if (opened) {
+            root.rowsFillSignature = root.openFillSignature
+            root.touchReading()
             EngineBridge.log("info", "OpenTrace", "openChapter n=" + number
                              + " async=" + (Date.now() - startedAt) + "ms rows=" + rows.length)
+        }
     }
 
     Connections {
@@ -699,6 +1106,13 @@ Item {
         root.selected = next.sort((a, b) => a - b)
     }
 
+    // Pick one PIECE of a divided paragraph (the row "4-2"). A CLICK only picks it —
+    // the pane's preview walks to that piece and the MONITOR PREVIEW is left alone
+    // (user call: "double click is what should push it to monitor preview, single
+    // click is preview pane"). The staging that used to live here made every plain
+    // click on a continuation row land on the tile, which is the only row shape
+    // where a single click did what a double click is for; the double click now
+    // stages it through stageSubpart below.
     function selectSubpart(number, partIndex) {
         root.selected = [number]
         root.anchorVerse = number
@@ -708,17 +1122,18 @@ Item {
             const parts = slides[i].parts || []
             if (parts.some((part) => part.number === number && part.partIndex === partIndex)) {
                 root.previewSlideIndex = i
-                // Keep the Main Output tile on the same continuation as the
-                // reference preview. goLiveRequested stages while idle and
-                // follows the existing live-pick behavior while on air.
-                const outputSlides = root.buildSlides()
-                const outputSlide = outputSlides.find((slide) =>
-                    (slide.parts || []).some((part) => part.number === number && part.partIndex === partIndex))
-                if (outputSlide)
-                    root.goLiveRequested(root.referenceText, [outputSlide])
                 return
             }
         }
+    }
+
+    // The double click's half for a continuation row: the pick is already made (the
+    // click ahead of the double click made it), so this stages exactly the piece the
+    // pane's preview is showing — the same "pane preview and tile agree" selectSubpart
+    // used to do on its own.
+    function stageSubpart(number, partIndex) {
+        root.selectSubpart(number, partIndex)
+        root.playSlideAt(root.previewSlideIndex)
     }
 
     // Search hits identify the stored paragraph, while The Table can split that
@@ -763,32 +1178,106 @@ Item {
         root.revealRow(rowIndex)
     }
 
-    // The previous / next verse (crossing into the next chapter or book).
-    function step(direction) {
-        if (!root.book || root.chapterVerses.length === 0)
-            return
-        const last = root.selected.length > 0 ? root.selected[root.selected.length - 1] : 0
-        const numbers = root.chapterVerses.map((v) => v.number)
-        const at = numbers.indexOf(direction > 0 ? last : root.selected[0])
-        const to = at + direction
-        if (to >= 0 && to < numbers.length) {
-            root.selected = [numbers[to]]
-            root.anchorVerse = numbers[to]
-            return
+    // The slide of the pick's preview that shows a paragraph's PIECE (the pair a
+    // continuation row carries), or -1 when the pick has no such slide.
+    function slideIndexForPart(number, partIndex) {
+        const slides = root.previewSlides
+        for (let i = 0; i < slides.length; ++i) {
+            const parts = slides[i].parts || []
+            if (parts.some((p) => Number(p.number) === Number(number)
+                                   && Number(p.partIndex ?? 0) === Number(partIndex)))
+                return i
         }
-        const chapters = root.book.chapters
+        return -1
+    }
+
+    // Where the pick sits in the ROW list: the piece its preview shows (a divided
+    // paragraph's continuation is a row of its own), else the head of the far end
+    // of a range pick. -1 when nothing usable is picked.
+    function currentRowIndex(direction) {
+        const parts = root.previewSlideParts
+        if (parts.length > 0) {
+            const at = root.rowIndexForPart(parts[0].number, parts[0].partIndex ?? 0)
+            if (at >= 0)
+                return at
+        }
+        if (root.selected.length === 0)
+            return -1
+        return root.rowIndexFor(direction > 0 ? root.selected[root.selected.length - 1]
+                                              : root.selected[0])
+    }
+
+    // Put the pick on one ROW, and the preview on that row's own piece.
+    function focusRow(row) {
+        root.selected = [row.number]
+        root.anchorVerse = row.number
+        root.previewSlideIndex = 0
+        root.centerRow(row.number, row.partIndex ?? 0)
+        // The pick's preview is rebuilt for the new selection, so the slide that
+        // shows THIS piece is resolved after that — a continuation row (20-1) must
+        // open on its own slide, not on the paragraph's first one.
+        Qt.callLater(function () {
+            const i = root.slideIndexForPart(row.number, row.partIndex ?? 0)
+            if (i >= 0)
+                root.previewSlideIndex = i
+        })
+    }
+
+    // The previous / next ROW (crossing into the next chapter or book when it runs
+    // out). The LIST is the operator's sequence, continuations included:
+    // 20 -> 20-1 -> 21. Stepping by paragraph NUMBER skipped every continuation
+    // row — 20-1 is a row of paragraph 20, not a number of its own (the reported
+    // "the down jump 20-1 to 21"). Returns true when it moved within this chapter.
+    function step(direction) {
+        if (!root.book || root.mainRows.length === 0)
+            return false
+        const at = root.currentRowIndex(direction)
+        const to = at + direction
+        if (at >= 0 && to >= 0 && to < root.mainRows.length) {
+            root.focusRow(root.mainRows[to])
+            return true
+        }
+        if (root.chapterVerses.length > 0 && at < 0 && direction > 0) {
+            // Nothing picked yet: forward starts at the top of the list.
+            root.focusRow(root.mainRows[0])
+            return true
+        }
+        root.stepChapter(direction)
+        return false
+    }
+
+    // The neighbouring SERMON (a chapter of The Table's year book, a chapter of a
+    // Bible): forward opens the next one on its first paragraph, back opens it on its
+    // LAST one. Both select when the reader's rows arrive — never off `chapterVerses`
+    // here, which is EMPTY the moment the chapter is asked for (that read was the
+    // reported "ReferencePane.qml: Cannot read property 'number' of undefined",
+    // thrown when a step crossed a chapter boundary with the async read still out).
+    function stepChapter(direction) {
+        if (!root.book)
+            return false
+        const chapters = root.book.chapters || []
         const ci = chapters.indexOf(root.chapterNumber) + direction
         if (ci >= 0 && ci < chapters.length) {
-            root.openChapter(chapters[ci], false)
-            root.selected = [root.chapterVerses[direction > 0 ? 0 : root.chapterVerses.length - 1].number]
-        } else if (root.bookIndex + direction >= 0 && root.bookIndex + direction < root.books.length) {
-            root.openBook(root.bookIndex + direction, 0)
-            if (direction < 0) {
-                const b = root.book
-                root.openChapter(b.chapters[b.chapters.length - 1], false)
-                root.selected = [root.chapterVerses[root.chapterVerses.length - 1].number]
-            }
+            root.openChapter(chapters[ci], direction > 0)
+            root.chapterSelectLast = direction < 0
+            return true
         }
+        const bi = root.bookIndex + direction
+        if (bi >= 0 && bi < root.books.length) {
+            const b = root.books[bi]
+            const chs = b && b.chapters ? b.chapters : []
+            if (chs.length === 0) {
+                root.openBook(bi, 0)
+                return true
+            }
+            // openBook opens the chapter it is given (and announces "select first"),
+            // so the step's own half is just which END of the new book to land on.
+            root.openBook(bi, direction > 0 ? chs[0] : chs[chs.length - 1])
+            root.chapterSelectFirst = direction > 0
+            root.chapterSelectLast = direction < 0
+            return true
+        }
+        return false
     }
 
     // Jumps to a passage the engine resolved from typed text: { bookId, chapter, verseStart, verseEnd }.
@@ -858,6 +1347,17 @@ Item {
         root.corpusRevision++
         if (root.peekIndex >= 0)
             root.peekSuggestion(root.peekIndex)
+        // The read the TYPED text was waiting on (see jumpToTyped): so a verse typed
+        // into the seeded box moves the pane as soon as its reference resolves, not
+        // only when the debounced filter happens to re-ask late enough.
+        if (root.pendingJump !== "" && root.adapter) {
+            const typed = root.pendingJump
+            const jumpRef = root.adapter.resolve(typed, root.sourceId)
+            if (jumpRef.bookId !== undefined) {
+                root.pendingJump = ""
+                root.goTo(jumpRef)
+            }
+        }
         if (root.filter.trim() !== "") {
             const ref = root.adapter ? root.adapter.resolve(root.filter, root.sourceId) : ({
                 bookId: undefined
@@ -1370,8 +1870,17 @@ Item {
         // the in-pane matches list (citationMatches); NO rows returned, so the
         // popup never opens here. Scripture keeps the popup path below.
         if (root.books.length > 0 && root.books[0].chapterTitles !== undefined) {
-            root.citationMatches = res.rows || []
-            root.lastSuggestRows = root.citationMatches
+            root.allMatches = res.rows || []
+            root.citationMatches = root.allMatches
+            root.lastSuggestRows = root.allMatches
+            // A NEW LIST STARTS ITS OWN WALK: the old cursor indexes rows that are
+            // gone, and the SEARCH owns the selector now (the arrows are the search's
+            // while results are up — see TabSearchBox.listMode).
+            root.matchCursor = -1
+            root.bookCursor = -1
+            root.chapterCursor = -1
+            if (root.citationMatches.length > 0)
+                root.column = 2
             return { rows: [], complete: res.complete || "" }
         }
         root.lastSuggestRows = res.rows || []
@@ -1386,6 +1895,86 @@ Item {
                                                         payload: row.cite !== undefined ? { ref: row.ref, cite: row.cite } : { ref: row.ref } })),
                  complete: res.complete || "" }
     }
+    // WHAT THE SEARCH BOX STARTS WITH (paneSearchSeed, below): the passage the pane is
+    // ON, written the way this tab's own resolve reads it, with the part still to name
+    // left open — so the operator types the paragraph/verse instead of the whole line.
+    //
+    //   The Table: "55-0117 - How The Angel Came To Me And His Commission " — the
+    //   citation line plus a trailing space, so digits typed next become the PARAGRAPH
+    //   ("…Commission 5" is ¶5; resolveCitation's trailing-number rule reads it).
+    //   Seeding it WITH a paragraph would make the typed digits append to the old one
+    //   ("… 2" + "3" = ¶23), which is why the number is deliberately not in the seed.
+    //
+    //   Scripture: "Genesis 1: " — the open book and chapter with the VERSE slot left
+    //   open, so the next digits are the verse ("Genesis 1:" + "16" = "Genesis 1: 16",
+    //   which the reference resolver reads as verse 16 of that chapter; its ParseBody
+    //   explicitly allows the space after the colon). The book name is the loaded
+    //   Bible's own ("1 Samuel", not an abbreviation), because that is what the
+    //   resolver and the suggestion rows speak.
+    //
+    // THE TWO SEARCHABLE REFERENCE TABS (user calls: "it is for only the table not
+    // all the tabs", then "scripture too needs that feature"). Shows / Media /
+    // Templates / Overlays keep their plain "Search <tab>" hint and an empty box — a
+    // filter over cards has no passage to name.
+    //
+    // "" when the pane has nothing open yet (or the adapter cannot build one): the
+    // box then shows its plain hint instead.
+    readonly property bool isTablePane: root.books.length > 0 && root.books[0].chapterTitles !== undefined
+    function paneSearchSeed() {
+        if (!root.book || !root.adapter)
+            return ""
+        const chapter = root.chapterNumber
+        if (!(chapter > 0))
+            return ""
+        if (!root.isTablePane) {
+            // Scripture (the only other tab that registers a suggestion provider and
+            // opens one passage at a time): book + chapter, verse still to be typed.
+            const name = String(root.book.name || "")
+            return name === "" ? "" : name + " " + chapter + ": "
+        }
+        const text = String(root.adapter.reference(root.book.name, chapter, []) || "")
+        if (text === "")
+            return ""
+        // The citation line is the sermon's whole name; the trailing space opens the
+        // paragraph slot, so digits typed next name a paragraph ("…Commission 56").
+        return text + " "
+    }
+
+    // The typed text, resolved and jumped — the SAME two calls the pane's own
+    // onFilterChanged makes (resolve, then goTo). The tab bar calls this per keystroke
+    // for The Table, so a seeded citation line plus a paragraph number
+    // ("…Commission 56") moves the pane to ¶56 as it is typed, instead of waiting on
+    // the filter's reading beat. Anything that does not resolve is simply ignored —
+    // a half-typed citation changes nothing.
+    function jumpToTyped(text) {
+        if (!root.adapter)
+            return
+        const typed = String(text)
+        if (typed.trim() === "") {
+            root.pendingJump = ""
+            return
+        }
+        const ref = root.adapter.resolve(typed, root.sourceId)
+        if (ref && ref.bookId !== undefined) {
+            root.pendingJump = ""
+            root.goTo(ref)
+            return
+        }
+        // NOT RESOLVED *YET*: Scripture answers a reference from its published cache
+        // and starts the read on a miss, so the first time a verse is typed the
+        // answer is "nothing" and arrives a beat later. Remembering the text here is
+        // what makes that landing land: corpusCacheLanded re-asks THIS text once the
+        // read is in (the pane's own filter-based re-ask is the debounced one, and it
+        // can fire before the read is back — the reported "scripture is not moving to
+        // verse 8": the line was in the box, the pane stayed on verse 1).
+        root.pendingJump = typed
+    }
+    // The typed text still waiting on a reference read ("" = nothing pending).
+    property string pendingJump: ""
+    // A walked result was OPENED (Enter, or a double-click on its row): the search is
+    // finished, and the host clears its query so the tab is back to plain browsing.
+    signal matchTaken()
+
     // A picked row jumps to its passage: book only = open the book; chapter = open that
     // chapter (vessels through goTo, so selection/scroll behave exactly like a resolve).
     function applySuggestion(ref) {
@@ -1403,11 +1992,111 @@ Item {
     property var citationMatches: []    // [{ label, trailing, cite, ref }] (citeRow shape)
     property var lastSuggestRows: []    // (the popup's rows — Scripture only now)
     property int peekIndex: -1
+    // THE KEYBOARD'S PLACE IN THE RESULT LIST (user call: "if press the down or up
+    // button it should search result list and show their paragraph preview"). The
+    // tab search box's Up/Down walk this: each row highlights exactly like a hover
+    // and the SAME peek panel shows that sermon's paragraphs, so the list is
+    // navigable without the pointer. -1 = nothing walked to yet.
+    property int matchCursor: -1
+    function stepMatch(delta) {
+        const rows = root.citationMatches
+        if (rows.length === 0)
+            return false
+        const next = root.matchCursor < 0
+                   ? (delta < 0 ? rows.length - 1 : 0)
+                   : Math.max(0, Math.min(rows.length - 1, root.matchCursor + delta))
+        if (next === root.matchCursor)
+            return true            // at an end: the key is still ours, the caret stays put
+        root.matchCursor = next
+        root.peekRow = 0           // a new result opens on its first paragraph
+        root.hoveredMatch = -2     // the arrows own the preview (a stray hover-exit must not clear it)
+        peekClear.stop()
+        root.peekSuggestion(next)
+        if (matchesList && matchesList.visible)
+            matchesList.positionViewAtIndex(next, ListView.Contain)
+        return true
+    }
+    // ENTER on a walked-to row: that row IS the answer. Returns the row's citation
+    // line ("56-0101 - Why Are People So Tossed About") so the host can leave it in
+    // the box — the same full line a picked suggestion leaves, which is what the
+    // user asked to be consistent with ("the return search should be 56-0101 - Why
+    // are people ... so it consistent with others").
+    // ---- ESC: the search is abandoned, not just emptied --------------------------
+    // The first keystroke of a search jots down the place the reader was in (the
+    // passage, the paragraphs picked, the preview slide and the row under the eye), and
+    // Esc puts all of it back — user call: "when i press esc i expect to take back where
+    // i was before entering search mode". Only the FIRST keystroke captures: the jump
+    // the typing itself causes must not become the place to return to.
+    property var searchReturn: null
+    function beginSearch() {
+        if (root.searchReturn !== null || !root.book)
+            return
+        root.bookCursor = -1
+        root.chapterCursor = -1
+        root.searchReturn = { bookId: root.book.id, chapter: root.chapterNumber,
+                              picked: root.selected.slice(),
+                              slide: root.previewSlideIndex,
+                              row: root.topRowIdentity() }
+    }
+    function endSearch() {
+        const back = root.searchReturn
+        root.searchReturn = null
+        root.allMatches = []
+        root.clearCitationMatches()
+        root.matchCursor = -1
+        root.bookCursor = -1
+        root.chapterCursor = -1
+        root.pendingJump = ""
+        root.column = 2
+        if (!back || !root.book || root.books.length === 0)
+            return false
+        if (root.book.id === back.bookId && root.chapterNumber === back.chapter) {
+            root.selected = back.picked.slice()
+            root.previewSlideIndex = back.slide
+            if (back.row)
+                root.revealRemembered(back.row, back.picked)
+            return true
+        }
+        const index = root.books.findIndex((b) => b.id === back.bookId)
+        if (index < 0)
+            return false
+        root.restorePicked = back.picked.slice()
+        root.restoreRow = back.row
+        root.openBook(index, back.chapter)
+        return true
+    }
+
+    function takeMatch() {
+        const row = root.matchCursor >= 0 ? root.citationMatches[root.matchCursor] : null
+        if (!row || !row.ref)
+            return ""
+        const cite = String(row.cite !== undefined ? row.cite : row.label)
+        root.applySuggestion(row.ref)
+        root.allMatches = []
+        root.clearCitationMatches()
+        root.bookCursor = -1
+        root.chapterCursor = -1
+        root.column = 2
+        // TAKEN IS TAKEN: the search is committed, so there is nothing left for Esc to
+        // take the reader back from.
+        root.searchReturn = null
+        // THE SEARCH IS OVER: the host empties its box back to the opened sermon's own
+        // seed (user call: "when press enter or double click it should open it up and
+        // leave the search mode").
+        root.matchTaken()
+        return cite
+    }
     property var peekVerses: []          // [{ number, text }] while hovering a match
+    // THE KEYBOARD'S PLACE IN THOSE VERSES: which paragraph the selector is reading
+    // while it is on the preview pane (search mode, column 3 — see stepPeek). Reset
+    // whenever the highlighted result changes.
+    property int peekRow: 0
     function peekSuggestion(index) {
         if (index < 0 || !root.adapter) {
             root.peekIndex = -1
+            root.matchCursor = -1
             root.peekVerses = []
+            root.peekRow = 0
             return
         }
         const row = root.citationMatches[index]
@@ -1420,18 +2109,34 @@ Item {
         }
         root.peekVerses = root.adapter.chapter(root.sourceId, ref.bookId, ch)
         root.peekIndex = index
+        root.peekRow = 0
     }
     function clearCitationMatches() {
         root.citationMatches = []
         root.lastSuggestRows = []
         root.peekIndex = -1
+        root.matchCursor = -1
         root.peekVerses = []
+        root.peekRow = 0
+        root.hoveredMatch = -1
     }
-    // The debounced clear behind the row-to-row hover hand-off (see matchHover).
+    // WHICH ROW THE POINTER IS ON, as ONE value on the pane — the hand-off between
+    // rows could not be read from a per-row hover flag: moving down the list delivers
+    // enter(B) and exit(A) in either order, and when the exit arrived last its clear
+    // wiped the preview that the same move had just opened (the reported "I hover down
+    // and the results stop showing their verses").
+    //
+    //   >= 0  the pointer is on that row
+    //     -1  nobody owns the preview; a deferred clear may close it
+    //     -2  the CLICK or the keyboard owns it (a pointer leaving a row must not
+    //         throw away what the operator just chose)
+    property int hoveredMatch: -1
+    // The deferred clear behind the row-to-row hover hand-off (see matchHover).
+    // Non-zero so it runs AFTER both halves of a move have been delivered.
     Timer {
         id: peekClear
-        interval: 0
-        onTriggered: root.peekSuggestion(-1)
+        interval: 16
+        onTriggered: if (root.hoveredMatch === -1) root.peekSuggestion(-1)
     }
 
     // What a dragged verse carries into a project: the passage (the selected verses when this one is among them, else just this one).
@@ -1479,43 +2184,55 @@ Item {
 
     // Floating pill buttons: previous / next picked passage (FreeShow's
     // _moveSelection), play what's picked. Wired by the wrappers to the live
-    // service when their content is on air; plain navigation otherwise.
-    // OWNERSHIP IS CHECKED BEFORE THE STEP: after root.step() the reference
-    // text is already the NEW passage while the on-air title is still the
-    // old one — a post-step liveIsOurs(newRef) can never match, so the
-    // replay never fired and the output stayed frozen on the previous verse
-    // while the pane's selection walked on (the toolbar ‹ › and the pane's
-    // own pills both died this way).
+    // service (`goLive`, which STAGES the Main Output tile) — the step follows
+    // through to that tile on every press; the wall's own ‹ › relays here too.
+    // NOTE for anyone reintroducing an ownership test: it has to be taken
+    // BEFORE root.step(), because after it the reference text is already the NEW
+    // passage while the tile's title is still the old one, so a post-step
+    // liveIsOurs(newRef) never matches.
     function stepAndPlay(direction) {
-        // OURS means on air OR STAGED on the Main Output tile: a double-click
-        // STAGES (GO LIVE is the only thing that commits), so counting only a
-        // live pick left the step walking the pane's selection while the tile —
-        // and the wall toolbar's own ‹ ›, which relays here — stayed on the
-        // previous passage. That is the reported "the ‹ › don't change the
-        // slide": the pick was staged, which is the normal state before GO LIVE.
-        const wasOurs = root.adapter && ((root.adapter.liveIsOurs
-                                          && root.adapter.liveIsOurs(root.referenceText))
-                                         || (root.adapter.stagedIsOurs
-                                             && root.adapter.stagedIsOurs(root.referenceText)))
+        // THE MONITOR PREVIEW FOLLOWS THE ARROWS (user call: "the ‹ › should
+        // move the slide in the monitor preview — the ones there do"). A step is
+        // a presentation action, so it STAGES the slide it lands on whether or
+        // not this pick was already what the tile showed: before this, a pick
+        // that was neither on air nor staged left the tile frozen on whatever
+        // was there, which read as dead arrows. Staging is still only the tile
+        // preview — GO LIVE remains the one thing that puts it on air.
+        // A RESULT THE ARROWS WALKED TO IS THE PICK (user call: "the <> should move
+        // to their paragraph preview"): the highlighted search row is opened before
+        // the step, so the ‹ › walk THAT sermon's paragraph preview instead of
+        // stepping whatever happened to be open before the search.
+        if (root.matchCursor >= 0 && root.matchCursor < root.citationMatches.length) {
+            const row = root.citationMatches[root.matchCursor]
+            if (row && row.ref) {
+                root.applySuggestion(row.ref)
+                root.clearCitationMatches()
+            }
+        }
         // THE PICK'S OWN SLIDES FIRST: a paragraph the engine split into several
         // slides (4, 4-2, 4-3 — the same continuations the verse list shows as
         // its own rows) is walked part by part, and only the step past its last
         // part moves on to the neighbouring passage.
-        if (root.stepSlide(direction, wasOurs))
+        if (root.stepSlide(direction, true))
             return
         const before = root.referenceText
-        root.step(direction)
-        if (root.referenceText === before)
+        const moved = root.step(direction)
+        if (!moved && root.referenceText === before)
             return          // nothing that way (the first/last passage of them all)
-        // INTO THE NEIGHBOURING PASSAGE at the end the step came FROM: forward
-        // lands on its first slide, back on its last (walking out of 4-3 goes to
-        // 5; walking back out of 4 goes to 3's final part). The cursor is set
-        // rather than left wherever the previous passage left it, which used to
-        // show a part of the new passage that neither arrow had walked to.
-        if (root.previewSlides.length > 0)
-            root.previewSlideIndex = direction < 0 ? root.previewSlides.length - 1 : 0
-        if (wasOurs)
-            root.playSlideAt(root.previewSlideIndex)
+        if (!moved) {
+            // INTO THE NEIGHBOURING PASSAGE at the end the step came FROM: forward
+            // lands on its first slide, back on its last (walking out of 4-3 goes
+            // to 5; walking back out of 4 goes to 3's final part). The cursor is
+            // set rather than left wherever the previous passage left it, which
+            // used to show a part of the new passage that neither arrow had
+            // walked to.
+            if (root.previewSlides.length > 0)
+                root.previewSlideIndex = direction < 0 ? root.previewSlides.length - 1 : 0
+        }
+        // Deferred so a same-chapter step publishes the piece focusRow pointed
+        // the preview at (a continuation row's own slide), not the paragraph's
+        // first one.
+        Qt.callLater(function () { root.playSlideAt(root.previewSlideIndex) })
     }
 
     // ‹ › INSIDE the current pick: move the pane's preview to the neighbouring
@@ -1534,6 +2251,12 @@ Item {
         if (next < 0 || next >= slides.length)
             return false                          // at this end of the pick
         root.previewSlideIndex = next             // the pane's preview follows at once
+        // The highlight walks the CONTINUATION rows now (4 -> 4-2 -> 4-3), so the
+        // list has to follow it — the row of the piece the preview landed on, not
+        // of the paragraph's head (see rowIndexForPart).
+        const piece = (slides[next].parts || [])[0]
+        if (piece)
+            root.centerRow(piece.number, piece.partIndex ?? 0)
         if (publish)
             root.playSlideAt(next)
         return true
@@ -1667,17 +2390,37 @@ Item {
                         // a HoverHandler's hovered suffers this build's
                         // broken hover delivery, same as MouseArea.
                         PositionHoverArea { id: sourceHoverPA; anchors.fill: parent; checkAncestors: false; showCursor: false }
-                        TapHandler { onTapped: root.openSource(sourceRow.modelData.id) }
+                        TapHandler { onTapped: { root.column = 0; root.openSource(sourceRow.modelData.id) } }
                     }
                 }
 
-                Text {
+                // The empty/reloading hint. While the library is really being read a
+                // small spinner turns beside the words (the app's BusySpinner — it only
+                // animates while visible), so a long read looks alive instead of
+                // stalled. Laid out by hand rather than in a Row: a positioner would
+                // not let the spinner take the text's line height for its centre.
+                Item {
                     visible: root.sources.length === 0
                     x: 4; width: parent.width - 8
-                    text: root.adapter.loading() ? (root.adapter ? root.adapter.loadingText : qsTr("Loading…")) : (root.adapter ? root.adapter.emptyText : qsTr("Nothing here yet."))
-                    color: Theme.textMuted
-                    wrapMode: Text.Wrap
-                    font.family: Theme.fontFamily; font.pixelSize: 13
+                    height: hintText.implicitHeight
+
+                    BusySpinner {
+                        id: sidebarSpinner
+                        visible: root.showReloading
+                        width: 13; height: 13
+                        thickness: 2
+                        color: Theme.textMuted
+                        y: Math.max(0, (hintText.implicitHeight - height) / 2)
+                    }
+                    Text {
+                        id: hintText
+                        x: sidebarSpinner.visible ? 19 : 0
+                        width: parent.width - x
+                        text: root.libraryHint()
+                        color: Theme.textMuted
+                        wrapMode: Text.Wrap
+                        font.family: Theme.fontFamily; font.pixelSize: 13
+                    }
                 }
             }
         }
@@ -1788,7 +2531,11 @@ Item {
                     delegate: Item {
                         id: bookRow
                         required property var modelData
-                        readonly property bool active: root.book !== null && modelData.id === root.book.id
+                        // The SEARCH's own cursor wins while one is up (see bookCursor): the
+                        // selector sits on a year without opening it.
+                        readonly property bool active: root.bookCursor >= 0 && root.books[root.bookCursor]
+                                                       ? modelData.id === root.books[root.bookCursor].id
+                                                       : (root.book !== null && modelData.id === root.book.id)
                         width: booksList.width; height: 28
                         Rectangle {
                             anchors.fill: parent; anchors.margins: 2; radius: 4
@@ -1799,7 +2546,12 @@ Item {
                                 hovered: bookHoverPA.hovered
                                 glowColor: "#0dffffff"
                             }
-                            Rectangle { visible: bookRow.active; x: 0; y: 4; width: 2; height: parent.height - 8; color: Theme.accent }
+                            // WHICH COLUMN OWNS THE SELECTOR: the accent bar is red on the
+                            // column the ‹ › are on and dim elsewhere, so moving the selector
+                            // with ‹ › is something you can SEE (user call: "when i <> it did
+                            // not move across the panes").
+                            Rectangle { visible: bookRow.active; x: 0; y: 4; width: 2; height: parent.height - 8
+                                        color: root.column === 0 ? Theme.accent : Theme.border }
                         }
                         Text {
                             x: 12; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 20
@@ -1813,7 +2565,24 @@ Item {
                             anchors.fill: parent
                             checkAncestors: false
                             showCursor: false
-                            onClicked: root.openBook(root.books.findIndex((b) => b.id === bookRow.modelData.id), 0)
+                            onClicked: {
+                                const bi = root.books.findIndex((b) => b.id === bookRow.modelData.id)
+                                // IN A SEARCH the click updates EVERY pane that follows the
+                                // year: the sermons column opens on this year (as it always
+                                // did) AND the answer beside it is narrowed to it. Before
+                                // this, only the sermons moved — the results pane kept the
+                                // previous year's rows (the reported "it updated the next
+                                // pane but the 3rd pane did not update").
+                                if (root.searchMode) {
+                                    root.openBook(bi, 0)
+                                    root.bookCursor = bi
+                                    root.chapterCursor = 0
+                                    root.narrowMatches()
+                                    return
+                                }
+                                root.column = 0
+                                root.openBook(bi, 0)
+                            }
                         }
                     }
                 }
@@ -1869,7 +2638,9 @@ Item {
                         required property int modelData
                         required property int index
                         readonly property string title: chaptersCol.hasTitles ? root.book.chapterTitles[chapterRow.index] : ""
-                        readonly property bool active: modelData === root.chapterNumber
+                        readonly property bool active: root.chapterCursor >= 0
+                                                       ? modelData === root.chapterCursor
+                                                       : modelData === root.chapterNumber
                         width: chapterList.width; height: 28
                         Rectangle {
                             anchors.fill: parent; anchors.margins: 2; radius: 4
@@ -1880,7 +2651,8 @@ Item {
                                 hovered: chapterHoverPA.hovered
                                 glowColor: "#0dffffff"
                             }
-                            Rectangle { visible: chapterRow.active; x: 0; y: 4; width: 2; height: parent.height - 8; color: Theme.accent }
+                            Rectangle { visible: chapterRow.active; x: 0; y: 4; width: 2; height: parent.height - 8
+                                        color: root.column === 1 ? Theme.accent : Theme.border }
                         }
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
@@ -1898,7 +2670,19 @@ Item {
                             anchors.fill: parent
                             checkAncestors: false
                             showCursor: false
-                            onClicked: root.openChapter(chapterRow.modelData, true)
+                            onClicked: {
+                                // IN A SEARCH: the same cascade one level down — the
+                                // sermon opens and the answer narrows to it.
+                                if (root.searchMode) {
+                                    root.bookCursor = root.bookCursor >= 0 ? root.bookCursor : root.bookIndex
+                                    root.chapterCursor = chapterRow.modelData
+                                    root.openChapter(chapterRow.modelData, true)
+                                    root.narrowMatches()
+                                    return
+                                }
+                                root.column = 1
+                                root.openChapter(chapterRow.modelData, true)
+                            }
                         }
                     }
                 }
@@ -1969,6 +2753,8 @@ Item {
             reuseItems: true
             model: root.mainRows
             boundsBehavior: Flickable.StopAtBounds
+            // The row at the top of the list is part of the remembered place.
+            onMovementEnded: root.touchReading()
             header: Item { height: 4 }
             footer: Item { height: 60 }
             delegate: Item {
@@ -2098,6 +2884,7 @@ Item {
                         const pane = verseSource.owner
                         if (!pane)
                             return
+                        pane.column = 2      // (the paragraph column)
                         if (verseRow.isSplit) {
                             pane.selectSubpart(verseRow.verseNumber, verseRow.partIndex)
                         } else {
@@ -2110,10 +2897,17 @@ Item {
                         const pane = verseSource.owner
                         if (!pane)
                             return
-                        if (verseRow.isSplit)
-                            pane.selectSubpart(verseRow.verseNumber, verseRow.partIndex)
-                        else
-                            pane.selectVerse(verseRow.verseNumber, false, false)
+                        // DOUBLE CLICK IS THE STAGING GESTURE (user call: "double click
+                        // is what should push it to monitor preview, single click is
+                        // preview pane"): the pane's preview followed the click, and
+                        // this puts what it is showing on the MONITOR PREVIEW. A
+                        // continuation row stages its own piece, not the whole
+                        // paragraph.
+                        if (verseRow.isSplit) {
+                            pane.stageSubpart(verseRow.verseNumber, verseRow.partIndex)
+                            return
+                        }
+                        pane.selectVerse(verseRow.verseNumber, false, false)
                         // RE-RESOLVED, deliberately not the `pane` above: the
                         // selection just made can rebuild the pane
                         // synchronously, and the second fresh read of
@@ -2381,22 +3175,24 @@ Item {
                             hovered: matchHover.hovered
                             glowColor: "#0dffffff"
                         }
-                        Rectangle { visible: matchRow.active; x: 0; y: 4; width: 2; height: parent.height - 8; color: Theme.accent }
+                        Rectangle { visible: matchRow.active; x: 0; y: 4; width: 2; height: parent.height - 8
+                                    color: root.column === 2 ? Theme.accent : Theme.border }
                     }
+                    // THE ROW IS THE CITATION LINE, WHOLE (user call: "instead of
+                    // making 56-0101 a subscript it should be part of the name
+                    // 56-0101 - Why are ... remove the subscript"). The code used to
+                    // ride the row's right edge as a small trailing label; it now
+                    // reads as the head of the same line the box and the seed speak
+                    // ("56-0101 - Why Are People So Tossed About"), so a result and
+                    // the citation a user types are one and the same string.
                     Text {
                         x: 10; anchors.verticalCenter: parent.verticalCenter
-                        width: parent.width - 86
-                        text: matchRow.modelData.label
+                        width: parent.width - 20
+                        text: String(matchRow.modelData.cite !== undefined
+                                     ? matchRow.modelData.cite : matchRow.modelData.label)
                         color: Theme.textPrimary
                         elide: Text.ElideRight
                         font.family: Theme.fontFamily; font.pixelSize: 15
-                    }
-                    Text {
-                        anchors.right: parent.right; anchors.rightMargin: 10
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: matchRow.modelData.trailing
-                        color: Theme.textSecondary
-                        font.family: Theme.fontFamily; font.pixelSize: 11
                     }
                     // Position truth (PositionHoverArea), the codebase convention —
                     // also what the self-test can drive deterministically.
@@ -2407,14 +3203,38 @@ Item {
                         onHoveredChanged: {
                             if (hovered) {
                                 peekClear.stop()
+                                root.hoveredMatch = matchRow.index
+                                // HOVER SELECTS, like the arrows: the row the eye is on is
+                                // the row the keys continue from (before this the hovered
+                                // row lit up while the cursor stayed behind, so the next
+                                // Down re-took a row that already looked chosen).
+                                root.matchCursor = matchRow.index
                                 root.peekSuggestion(matchRow.index)
                             } else {
-                                peekClear.restart()   // row-to-row moves deliver exit(A)/enter(B) unordered — the 0-timer lets a following enter cancel the clear
+                                // Only this row losing the pointer clears the ownership —
+                                // a later exit from the row the move already left must
+                                // not unseat the one it landed on.
+                                if (root.hoveredMatch === matchRow.index)
+                                    root.hoveredMatch = -1
+                                peekClear.restart()
                             }
                         }
+                        // SINGLE CLICK selects (its verses show on the right); OPENING it
+                        // is the double-click — the same rule the verse rows and the
+                        // media cards follow (user call: "when press enter or double
+                        // click it should open it up and leave the search mode").
                         onClicked: {
-                            root.applySuggestion(matchRow.modelData.ref)
-                            root.clearCitationMatches()
+                            root.column = 2
+                            root.hoveredMatch = -2   // the click owns the preview now
+                            root.matchCursor = matchRow.index
+                            root.peekSuggestion(matchRow.index)
+                        }
+                        onDoubleClicked: {
+                            root.column = 2
+                            root.hoveredMatch = -2
+                            root.matchCursor = matchRow.index
+                            root.peekSuggestion(matchRow.index)
+                            root.takeMatch()
                         }
                     }
                 }
@@ -2431,7 +3251,14 @@ Item {
                 width: parent.width * 0.48 - 16
                 height: parent.height - 8
                 clip: true
-                Rectangle { anchors.fill: parent; radius: 6; color: "#101118"; border.color: Theme.border; border.width: 1 }
+                // THE SELECTOR'S SECOND SEARCH STOP: while the arrows are on these
+                // verses the panel wears the accent edge, so the pane the keys are
+                // walking is something the eye can confirm (the same accent a row's own
+                // selector bar uses). The template column on the far right is NOT a
+                // stop and carries no such edge (user call).
+                Rectangle { anchors.fill: parent; radius: 6; color: "#101118"
+                            border.color: root.column === 3 ? Theme.accent : Theme.border
+                            border.width: root.column === 3 ? 2 : 1 }
                 Text {
                     id: peekHeader
                     x: 12; y: 8
@@ -2466,10 +3293,16 @@ Item {
                         required property var modelData
                         required property int index
                         objectName: "selfTestPeekRow_" + index
+                        readonly property bool active: root.column === 3 && root.peekRow === index
                         width: peekFlick.width - 8; height: peekText.implicitHeight + 10
                         // LAYOUT PROBE (VGR_LAYOUT_TEST).
                         Component.onCompleted: root.peekRowBuilds++
                         Component.onDestruction: root.peekRowDrops++
+                        // The paragraph the arrows are reading (see stepPeek).
+                        Rectangle {
+                            anchors.fill: parent; radius: 4
+                            color: parent.active ? "#2a2b35" : "transparent"
+                        }
                         Text {
                             id: peekNum
                             x: 6; y: 5
@@ -2499,13 +3332,30 @@ Item {
             }
         }
 
-        // Nothing installed / nothing loaded yet.
-        Text {
-            visible: root.sources.length === 0
+        // Nothing installed / nothing loaded yet. Only over an EMPTY verse column: a
+        // reload keeps its rows on screen (see syncSources), and a hint drawn over a
+        // list that is still there would be the noise this state exists to remove.
+        // A spinner above the words while the library is really being read — the same
+        // shape MediaLibraryPane uses for a folder that is still coming in.
+        Column {
+            visible: root.sources.length === 0 && root.chapterVerses.length === 0
             anchors.centerIn: parent
-            text: root.adapter.loading() ? (root.adapter ? root.adapter.loadingText : qsTr("Loading…")) : (root.adapter ? root.adapter.emptyText : qsTr("Nothing here yet."))
-            color: Theme.textMuted
-            font.family: Theme.fontFamily; font.pixelSize: 15
+            spacing: centreSpinner.visible ? 10 : 0
+
+            BusySpinner {
+                id: centreSpinner
+                visible: root.showReloading
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: 26; height: 26
+                thickness: 2.5
+                color: Theme.textMuted
+            }
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: root.libraryHint()
+                color: Theme.textMuted
+                font.family: Theme.fontFamily; font.pixelSize: 15
+            }
         }
 
         // The verses (or search results / matches) column's scrollbar — the
@@ -2732,6 +3582,12 @@ Item {
                             id: stepHover
                             anchors.fill: parent
                             checkAncestors: false
+                            // THE MONITOR PREVIEW FOLLOWS THESE ARROWS (FreeShow's own toolbar;
+                            // user call: "in scripture <> is not update monitor preview fix it").
+                            // They step the PICK — its slides first, then the neighbouring
+                            // passage — and stage what they land on (stepAndPlay). The KEYBOARD
+                            // Left/Right are the selector's (see stepColumn); this pair is the
+                            // pick's, exactly as the wall's ‹ › are.
                             onClicked: root.stepAndPlay(stepBtn.modelData.dir)
                         }
                     }
@@ -2991,6 +3847,9 @@ Item {
                         height: StageGrid.heightForWidth(width)
                         color: "#000000"
                         clip: true
+                        // NOT A SELECTOR STOP (user call: "just 3 panes"): the preview
+                        // follows the pick, and the arrows never park on it — no
+                        // active edge to paint.
                         DesignPreview {
                             anchors.fill: parent
                             blocks: root.currentPreviewSlide ? root.currentPreviewSlide.blocks : root.preview.blocks
@@ -3278,8 +4137,215 @@ Item {
         }
         onCancelled: templatePicker.open = false
     }
+    // ---- the arrow keys (from the Hotkeys map, never a local chord) ---------
+    // Up/Down walk the PICK and stop there: the pane's own preview follows, the
+    // output does not move until something explicitly stages or goes live.
+    // Left/Right are the pill's ‹ ›: they walk and stage the pick (see stepAndPlay),
+    // so the MONITOR PREVIEW follows the keys. While a search answer is up they
+    // become the SELECTOR instead (results <-> verses — see stepColumn).
+    //
+    // GATED, both ways: only the pane on screen answers (`visible`), only when it
+    // is not in its search mode, and NEVER while a text field holds the
+    // keyboard — a window shortcut is delivered before the focus item, so an
+    // ungated Up would swallow a caret move in the tab's search box.
+    readonly property bool typingInField: {
+        const w = Window.window
+        const f = w ? w.activeFocusItem : null
+        if (!f)
+            return false
+        // TextInput / TextEdit (and their Controls wrappers) expose both; a
+        // ListView or a pane does not.
+        return f.text !== undefined && f.cursorPosition !== undefined
+    }
+    readonly property bool keysMine: root.visible && !root.searching && !root.typingInField
+
+    // ---- the selector across the panes ------------------------------------------
+    // BROWSE (no search): 0 = years, 1 = sermons (chapters), 2 = the paragraphs.
+    // THREE panes, and the design preview on the right is NOT one of them (user
+    // call: "the selector should not go to ... just 3 panes") — the preview follows
+    // the pick, the arrows never park on it.
+    //
+    // SEARCH (an answer is up): exactly TWO stops — 2 = the result list and 3 = the
+    // verses of the highlighted result (the preview panel on the right of it). The
+    // years and sermons are narrowed by CLICKING one of their rows, never by parking
+    // the selector there (user call: "the <> should not move the selection to years
+    // again in search mode, just the search result and the verses"). Up/Down on the
+    // verses read them paragraph by paragraph — the walk it used to lack ("...not
+    // even show selector at all").
+    //
+    // Left/Right move it; Up/Down walk inside whichever pane holds it.
+    property int column: 2
+    // A SEARCH IS UP while its answer is held — not while the narrowed view happens to
+    // have rows (walking to a year with no hits must not silently end the search and
+    // start opening chapters under the arrows).
+    readonly property bool searchMode: root.allMatches.length > 0 || root.citationMatches.length > 0
+    // The search's own cursors over the first two columns: while a search is up, walking
+    // the years/sermons NARROWS the result list instead of opening anything — nothing
+    // may move behind the operator's back (the preview is frozen until a commit).
+    property int bookCursor: -1
+    property int chapterCursor: -1
+    // The whole search answer, kept apart from what the results column shows: narrowing
+    // by year/sermon is a view over it, so walking back widens it again.
+    property var allMatches: []
+    function narrowMatches() {
+        const bookId = (root.bookCursor >= 0 && root.bookCursor < root.books.length)
+                       ? root.books[root.bookCursor].id
+                       : (root.book ? root.book.id : "")
+        // A sermon picked in the citations column narrows to that sermon; 0 = the
+        // whole year (clicking a year resets it).
+        const ch = root.chapterCursor > 0 ? root.chapterCursor : 0
+        let rows = root.allMatches
+        if (bookId !== "")
+            rows = rows.filter((r) => !r.ref || r.ref.bookId === bookId)
+        if (ch > 0)
+            rows = rows.filter((r) => !r.ref || Number(r.ref.chapter) === Number(ch))
+        root.citationMatches = rows
+        // THE RESULT CURSOR FOLLOWS THE NARROWING: the list keeps a walkable row and
+        // the preview beside it shows that row. Before this, clicking a year while the
+        // selector was on the results (or on the year row) left the previous answer in
+        // the pane while the list beside it had changed — the reported "it updated the
+        // next pane but the 3rd pane did not update" (user call).
+        root.matchCursor = rows.length > 0 ? 0 : -1
+        root.peekRow = 0
+        if (rows.length > 0)
+            root.peekSuggestion(0)
+        else {
+            root.peekIndex = -1
+            root.peekVerses = []
+        }
+        if (matchesList)
+            matchesList.positionViewAtBeginning()
+    }
+    function stepColumn(delta) {
+        if (root.searchMode) {
+            // TWO STOPS ONLY while a search is up (see the property's own note): the
+            // result list and the verses of the row it is on. A selector left on a
+            // year/sermon row by an earlier browse lands back on the results, never on
+            // those panes again.
+            if (root.column !== 2 && root.column !== 3)
+                root.column = 2
+            if (delta < 0 && root.column === 3) {
+                root.column = 2
+                return true
+            }
+            if (delta > 0 && root.column === 2) {
+                // ARRIVING ON THE VERSES takes the row the list is showing, so the pane
+                // opens on something instead of an empty panel.
+                if (root.matchCursor < 0 && root.citationMatches.length > 0)
+                    root.stepMatch(1)
+                root.column = 3
+                return true
+            }
+            return false
+        }
+        const next = Math.max(0, Math.min(2, root.column + delta))
+        if (next === root.column)
+            return false
+        root.column = next
+        return true
+    }
+    // The verses of the highlighted result: one paragraph per press, the same walk the
+    // paragraph list has. The result list keeps its own cursor, so stepping back
+    // (Left) lands on the entry these verses belong to.
+    function stepPeek(direction) {
+        if (root.peekVerses.length === 0)
+            return false
+        const next = Math.max(0, Math.min(root.peekVerses.length - 1, root.peekRow + direction))
+        if (next === root.peekRow)
+            return false
+        root.peekRow = next
+        if (peekFlick)
+            peekFlick.positionViewAtIndex(next, ListView.Contain)
+        return true
+    }
+    // Up/Down: inside the CURRENT pane, in either mode — the search changes what the
+    // panes hold, not which pane the selector is on (user call: "the selector move
+    // but when now pressed up and down it did not move").
+    function stepInColumn(direction) {
+        if (root.searchMode) {
+            // The search's two stops only. On the verses, Up/Down read that result's
+            // paragraphs one by one (they never re-open a sermon — that only happens
+            // on Enter / a double-click); on the list they walk the results, and each
+            // one's verses follow on the right.
+            if (root.column === 3)
+                return root.stepPeek(direction)
+            root.column = 2
+            return root.stepMatch(direction)
+        }
+        if (root.column === 0) {
+            const bi = root.bookIndex + direction
+            if (bi < 0 || bi >= root.books.length)
+                return false
+            root.openBook(bi, 0)
+            return true
+        }
+        if (root.column === 1)
+            return root.stepChapter(direction)
+        return root.step(direction)
+    }
+
+    // THE TWO MODES, SEPARATED (user call: "the moment we are in search mode the
+    // controls have change so separate is in order not to cause confusion").
+    //
+    //   BROWSE — Up/Down walk the row list (paragraphs, or the chapter list when the
+    //   selector is on it), Left/Right move the SELECTOR across the three panes
+    //   (years / sermons / paragraphs). Nothing is staged by moving (Enter or a
+    //   double-click is the commit).
+    //
+    //   SEARCH — the in-pane result list is up: Up/Down walk the RESULTS (each one's
+    //   paragraphs preview on the right), Left/Right still move the selector, and
+    //   nothing goes anywhere near the monitor until Enter takes a result.
+    //
+    // The reported mistake this ends: a chapter row highlighted, Up pressed, and the
+    // monitor preview started showing a passage — a step read as a commit.
+    Shortcut { action: "previousPassage"; enabled: root.keysMine; onActivated: root.stepInColumn(-1) }
+    Shortcut { action: "nextPassage"; enabled: root.keysMine; onActivated: root.stepInColumn(1) }
+    // ESC RETURNS THE PANE TO WHERE THE SEARCH STARTED (see beginSearch/endSearch),
+    // from anywhere in the pane — not only while the tab's search field still holds
+    // the keyboard. Once a row has been clicked the field no longer has focus, and
+    // before this the pane owned no Esc at all, so the restore only worked while the
+    // caret happened to still be in the box (the reported "I press esc and it does
+    // not take me back"). Gated off while a dialog owns Esc (Hotkeys' scope stack),
+    // so the two never fire ambiguously.
+    Shortcut {
+        action: "cancel"
+        enabled: root.keysMine && root.searchReturn !== null && !Hotkeys.canCancel
+        onActivated: root.endSearch()
+    }
+    // THE SAME ‹ › AS THE PILL, ON THE KEYBOARD (user call: "also hotkeys <>"): in
+    // BROWSE they step the pick and STAGE it — the monitor preview moves exactly as
+    // it does for the pill's arrows and the wall's (stepAndPlay). While a search
+    // answer is up they are the SELECTOR's instead (results <-> verses), because
+    // that is the only navigation a search has.
+    Shortcut { action: "previousSlide"; enabled: root.keysMine
+               onActivated: root.searchMode ? root.stepColumn(-1) : root.stepAndPlay(-1) }
+    Shortcut { action: "nextSlide"; enabled: root.keysMine
+               onActivated: root.searchMode ? root.stepColumn(1) : root.stepAndPlay(1) }
+    // ENTER takes the pick the arrows walked to. Up/Down deliberately only move the
+    // pick (nothing is staged while browsing), so this is the one key that puts it
+    // on the MONITOR PREVIEW — `playPicked` -> goLiveRequested -> stageSlides, the
+    // same staging a double-click does; GO LIVE still decides what goes to air.
+    // `!Hotkeys.canAccept` keeps it from colliding with a dialog's own Enter.
+    Shortcut {
+        action: "accept"
+        enabled: root.keysMine && !Hotkeys.canAccept
+        // WHILE A SEARCH IS UP Enter takes the walked result (and leaves the search);
+        // otherwise it stages the pick as it always has.
+        onActivated: root.searchMode ? root.takeMatch() : root.playPicked()
+    }
+
     // This pane stays instantiated when its tab isn't the one showing (so it keeps its column widths for the session) - so a picker
     // left open has to close itself when the pane is hidden, or it is still open, invisibly wrong-z-ordered against whatever the user
     // navigates to next, when the pane (and so the picker) shows again.
-    onVisibleChanged: if (!root.visible) templatePicker.open = false
+    onVisibleChanged: {
+        if (!root.visible) {
+            templatePicker.open = false
+            // Leaving the tab is the moment to have the place in the store.
+            root.saveReading()
+            return
+        }
+        // Coming back is when the split is most likely to be stale (the template was
+        // edited while this pane was hidden — see refillIfStale).
+        root.refillIfStale()
+    }
 }

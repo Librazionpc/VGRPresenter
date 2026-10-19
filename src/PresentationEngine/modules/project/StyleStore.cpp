@@ -2,6 +2,7 @@
 
 #include "core/database/DatabaseManager.hpp"
 #include "core/logging/Logger.hpp"
+#include "modules/project/ShippedConfig.hpp"
 #include "platform/PlatformAccessor.hpp"
 
 namespace bps::project {
@@ -50,6 +51,12 @@ StyleStore& StyleStore::Instance() {
 }
 
 std::vector<StoredStyle> StyleStore::Get() const {
+    // First read of the roster: let this BUILD's configuration in, once per
+    // shipped fingerprint (see ShippedConfig.hpp). Without it an install that had
+    // already run kept its styles forever, because the installer only seeds files
+    // that do not exist yet.
+    (void)ApplyShippedConfiguration();
+
     std::vector<StoredStyle> out;
     auto doc = DatabaseManager::Instance().Get(kCollection, kKey);
     if (!doc.ok())

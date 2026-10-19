@@ -17,6 +17,7 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QPointer>
 #include <QFileInfo>
 #include <QJSEngine>
 #include <QRegularExpression>
@@ -215,28 +216,85 @@ TheTableService *TheTableService::create(QQmlEngine *engine, QJSEngine *jsEngine
 
 void TheTableService::loadLibrary()
 {
-    if (library_)
+    // Once, whether it is the boot call or the first touch of the tab that gets here.
+    if (library_ || loadStarted_)
         return;
+    loadStarted_ = true;
+    loading_ = true;
+    // The pane reads `loading()` (and the still-empty `sources`); the notify is what
+    // makes a pane built before the read finished say "Opening the library…" rather
+    // than an empty library.
+    emit changed();
+
     auto &platform = bps::platform::PlatformAccessor::Get();
     const std::string file = platform.Filesystem().Join(platform.Paths().UserDataDir(),
                                                         "the_table.json");
-    // The Open'd shared_ptr is deliberately released into the service's
-    // lifetime: the singleton lives for the whole process (CppOwnership), so
-    // the raw pointer is safe and keeps the engine header out of this one.
-    static std::shared_ptr<bl::TheTableLibrary> keepAlive = bl::TheTableLibrary::Open(file);
-    library_ = keepAlive.get();
-    // The sermons join the platform Search Engine's index (the Bible/Song
-    // precedent): once here, the app-wide search (Ctrl+K) finds them. One
-    // document per sermon — ~1,200 upserts, done in the background so the
-    // first paint never waits on the index — on the ONE joinable worker, so
-    // quitting can always stop + join it before the engine tears down.
-    startIndexing();
-    libraryMoved();   // the library was opened: the held cut is text that may have moved
+    // OPEN + PARSE OFF THE INTERFACE THREAD (user call: "make The Table's library load
+    // happen off the interface thread so opening the tab never blocks on reading the
+    // sermon JSON"). The library is ~1,200 sermons, and Open() reads and parses the
+    // whole the_table.json — that parse IS the cost, and it used to be paid inline on
+    // the interface thread (in the boot path, and again when the singleton was first
+    // touched, which is what made opening the tab wait).
+    //
+    // The PARSE is the worker's; the PUBLISH is not. Every other method of this
+    // service reads `library_` on the interface thread, so the pointer is assigned in
+    // the queued callback below — the worker only builds the object.
+    // The receiver is guarded: the read can outlive the service at quit (the singleton
+    // is destroyed at exit), and a queued call to a destroyed object is undefined. The
+    // EngineBridge's own worker uses this same QPointer idiom.
+    auto *worker = QThread::create([this, file, guard = QPointer<TheTableService>(this)] {
+        QElapsedTimer clock;
+        clock.start();
+        std::shared_ptr<bl::TheTableLibrary> opened = bl::TheTableLibrary::Open(file);
+        // ONE line per open: what the parse cost, and that it cost it HERE rather than
+        // on the interface thread. Paired with the pane's own "Opening the library…"
+        // state, it is what says the tab was ready before the library was.
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("TheTableLoad"),
+                            QStringLiteral("library opened off the interface thread in %1 ms")
+                                .arg(clock.elapsed()));
+        if (!guard)
+            return;   // shutting down: nothing to publish to
+        QMetaObject::invokeMethod(guard.data(), [this, opened] {
+            libraryOwner_ = opened;   // owns the engine object for the process
+            library_ = opened.get();
+            loadStarted_ = false;
+            loadFailed_ = library_ == nullptr;
+            loading_ = false;
+            if (library_ == nullptr) {
+                report(tr("The sermon library could not be opened."), QStringLiteral("error"));
+                emit changed();
+                return;
+            }
+            // The sermons join the platform Search Engine's index (the Bible/Song
+            // precedent): once here, the app-wide search (Ctrl+K) finds them. One
+            // document per sermon — ~1,200 upserts, done in the background so the
+            // first paint never waits on the index — on the ONE joinable worker, so
+            // quitting can always stop + join it before the engine tears down.
+            startIndexing();
+            libraryMoved();   // opened: the held cut is text that may have moved (notifies)
+        }, Qt::QueuedConnection);
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    // Quitting while the read runs must not destroy a running thread, and must not
+    // freeze the UI waiting for it — the same bounded contract as the import paths.
+    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, worker,
+            [worker] { (void)worker->wait(2000); });
+    worker->start();
 }
 
 bool TheTableService::loading() const
 {
-    return loading_;
+    // THE TAB IS LOADING UNTIL THE ENGINE HAS BOOTED AND ITS LIBRARY IS OPEN (user
+    // call: a source that is absent for a moment must read as loading, not as an
+    // empty library). `sources()` answers [] in exactly that window — the library is
+    // opened on `bootedChanged`, so a pane built before the engine came up would
+    // otherwise say "No sermons yet — add one with New sermon" about a library it
+    // simply had not read yet. `library_` is set once and held for the process
+    // (see loadLibrary), so this is false forever after the one open — and false
+    // after a read that FAILED (`loadFailed_`), so a library that could not be
+    // opened shows its empty wording instead of a spinner that never stops.
+    return loading_ || !EngineBridge::instance().booted()
+           || (library_ == nullptr && !loadFailed_);
 }
 
 qlonglong TheTableService::verseCount() const

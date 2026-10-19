@@ -4,6 +4,7 @@
 // these POD types describe geometry/color in engine space; the IGraphicsBackend
 // decides how they become pixels.
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 
@@ -40,6 +41,30 @@ struct Rect {
         return px >= x && px < Right() && py >= y && py < Bottom();
     }
 };
+
+// SNAP A RECT'S EDGES, NEVER ITS SIZE. A design's blocks are authored in stage
+// units, so a shared edge (a table's code chip sitting exactly on its paragraph
+// band: both say y = 303.6428572) lands on a FRACTIONAL frame coordinate once
+// the block is mapped to 1080p. Rounding x and width independently — the
+// backends' old `static_cast<int>(rect.x)` / `static_cast<int>(rect.width)` — let
+// two abutting boxes each give up a fraction of that edge in opposite
+// directions, leaving a ONE-PIXEL hole of live video between them. Over a bright
+// camera feed that reads as a light seam around the item, exactly like an
+// unfilled border; the canvas (Qt, which snaps a Rectangle's four edges) has no
+// such seam, so it only ever showed on the outputs.
+//
+// Both edges are rounded here, and the size is derived from them: two rects that
+// share an edge in stage units therefore share the same pixel boundary, whatever
+// the fractional offset. Callers must use this for FILLED boxes (a shape, or a
+// text block's own background), not for blits whose size is also their source
+// sampling (a glyph cell, a 1:1 image) — those keep their exact geometry.
+inline Rect SnapRectToPixelEdges(const Rect& r) {
+    const float x0 = std::round(r.x);
+    const float y0 = std::round(r.y);
+    const float x1 = std::round(r.Right());
+    const float y1 = std::round(r.Bottom());
+    return Rect(x0, y0, x1 > x0 ? x1 - x0 : 0.0f, y1 > y0 ? y1 - y0 : 0.0f);
+}
 
 // 2D transform: translate + rotate (radians) + scale. Applied as
 // position → rotate → scale when composing object/local transforms.

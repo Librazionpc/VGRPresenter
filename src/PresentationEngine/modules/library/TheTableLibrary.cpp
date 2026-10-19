@@ -112,6 +112,36 @@ using textmatch::ContainsPhrase;
 using textmatch::ContainsNearPhrase;
 using textmatch::StartsWord;
 
+// "50", "¶50", "p50", "p.50", "para 50", "paragraph 50" -> 50; anything else -> 0.
+//
+// A PARAGRAPH DESIGNATOR is the WHOLE query, never part of one — "50 words" is a
+// word search, not paragraph 50 — and it only means anything inside a LOCKED
+// search, which is what names the book/sermon the number belongs to.
+int ParagraphDesignator(std::string_view query) {
+    std::string s = Trim(std::string(query));
+    if (s.empty()) return 0;
+    const std::string lower = Lower(s);
+    // Longest marker first, so "paragraph" is not eaten by "para" or "p".
+    static const char* const kMarkers[] = { "paragraph", "para.", "para", "¶", "p.", "p", "#" };
+    for (const char* marker : kMarkers) {
+        const size_t len = std::char_traits<char>::length(marker);
+        if (lower.rfind(marker, 0) != 0) continue;
+        s = Trim(s.substr(len));
+        break;
+    }
+    // A separator a writer may put between the marker and the number ("p.50",
+    // "¶ 50", "p:50").
+    while (!s.empty() && (s.front() == '.' || s.front() == ':' || s.front() == '#'))
+        s = Trim(s.substr(1));
+    // Up to three digits: a paragraph is numbered in the hundreds at most, while a
+    // YEAR ("1959") must keep searching the text even inside a locked search.
+    if (s.empty() || s.size() > 3) return 0;
+    if (!std::all_of(s.begin(), s.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); }))
+        return 0;
+    const int n = std::atoi(s.c_str());
+    return n > 0 ? n : 0;
+}
+
 std::string Collapse(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -243,13 +273,22 @@ std::string SermonCitation(const std::string& year, const std::string& code,
         }
     }
     // The stored title opens with the code when there is one ("0217 Only
-    // Believe"); the code stands on its own in the citation, so the leading
-    // numeric run comes out of the title (kept when the title is ONLY a code).
+    // Believe", "0109E Beginning And Ending …"); the code stands on its own in
+    // the citation, so that opening token comes out of the title (kept when the
+    // title is ONLY a code). Compared against `code` as a WHOLE token, not as a
+    // numeric run: a code with a letter suffix ("0109E") is not digits-then-space,
+    // and the old digits-only scan left it in place — the duplicated
+    // "55-0109E - 0109E Beginning And Ending …" this rule exists to remove.
     std::string display = clean;
-    if (!code.empty()) {
-        size_t d = 0;
-        while (d < display.size() && std::isdigit(static_cast<unsigned char>(display[d]))) ++d;
-        if (d > 0 && d < display.size() && display[d] == ' ') display = display.substr(d + 1);
+    if (!code.empty() && !display.empty()) {
+        const size_t sp = display.find(' ');
+        if (sp != std::string::npos && sp == code.size()) {
+            bool same = true;
+            for (size_t i = 0; i < sp && same; ++i)
+                same = std::tolower(static_cast<unsigned char>(display[i]))
+                       == std::tolower(static_cast<unsigned char>(code[i]));
+            if (same) display = display.substr(sp + 1);
+        }
     }
     if (display.empty()) display = clean;
     std::string out = yy;
@@ -1963,6 +2002,13 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
                                                           bool exactWords,
                                                           std::string_view scopeBookId,
                                                           int scopeChapter) const {
+    // A bare paragraph number inside a LOCKED search is a LOCATION, not a word (see
+    // the block further down). It is recognised HERE because the word requirement
+    // below rejects a one-character query ("5"), which is a perfectly good
+    // paragraph number when the pane's lock names the sermon it belongs to.
+    const int wantedParagraph = ParagraphDesignator(query);
+    const bool numberedLookup = wantedParagraph > 0 && !scopeBookId.empty();
+
     // Term extraction: lowercase words >= 2 chars (user call: "my" must find the
     // sermons that have it — the old 3-char floor silently dropped half of English).
     std::vector<std::string> terms;
@@ -1976,7 +2022,7 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         }
     }
     if (!cur.empty() && cur.size() >= 2) terms.push_back(cur);
-    if (terms.empty())
+    if (terms.empty() && !numberedLookup)
         return Error::Make(Err::InvalidArgument, kModule, "search needs a word");
     if (limit == 0) limit = 1;
     // THE CHAPTER LOCK (the reference panes' pill): set, the query is answered by
@@ -2202,6 +2248,50 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
             }
             return out;
         }
+    }
+
+    // ---- a BARE PARAGRAPH NUMBER inside a LOCKED search -------------------------
+    // (user call: "current book for paragraph search so if i turn it on and 50 it
+    // should bring it up"). With the pane's chapter lock on, the scope IS the book
+    // and sermon being read, so "50" is not a word to hunt: it is the fiftieth
+    // paragraph of what is open. The hit is shaped like a typed citation paragraph
+    // ("47-0412 - … 50"), so both the pane's list and the app-wide quick search
+    // open straight there.
+    //
+    // Only a LOCKED search reads it this way, and only a query that is nothing but
+    // the number: unlocked, "50" stays an ordinary word — the app-wide search must
+    // never turn a quantity into a location. A paragraph the scope does NOT have
+    // falls through to the word scan below, which is what someone typing "50" into
+    // a two-paragraph sermon (or naming a year) expects.
+    if (numberedLookup) {
+        std::vector<TheTableSearchHit> numbered;
+        for (const TheTableBook& book : books_) {
+            for (const TheTableChapter& ch : book.chapters) {
+                if (!inScope(book, ch)) continue;
+                if (wantedParagraph > static_cast<int>(ch.verses.size())) continue;
+                const TheTableVerse& verse = ch.verses[static_cast<size_t>(wantedParagraph) - 1];
+                TheTableSearchHit hit;
+                hit.reference = SermonCitation(book.name,
+                    ch.code.empty() ? CodeFromTitle(ch.title) : ch.code, ch.title, wantedParagraph);
+                hit.bookId = book.id;
+                hit.chapter = ch.number;
+                hit.verse = wantedParagraph;
+                hit.snippet = verse.text.substr(0, 220);
+                hit.fullText = verse.text;
+                // A direct reference is not a relevance guess: it leads anything the
+                // word scan could find (the exact citation tier scores 2000).
+                hit.score = 2500.0;
+                numbered.push_back(std::move(hit));
+                if (numbered.size() >= limit) break;
+            }
+            if (numbered.size() >= limit) break;
+        }
+        if (!numbered.empty()) return numbered;
+        // The scope has no such paragraph: fall through to the word scan, which is
+        // what a quantity or a year typed there expects — but a ONE-CHARACTER query
+        // ("9") has no word to scan, so it is refused rather than scanned empty.
+        if (terms.empty())
+            return Error::Make(Err::InvalidArgument, kModule, "search needs a word");
     }
 
     // One pass over EVERY sermon (reading order = the sermonRank tiebreak below).

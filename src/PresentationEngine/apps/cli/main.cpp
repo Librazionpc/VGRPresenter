@@ -13,11 +13,13 @@
 #include "core/services/ServiceManager.hpp"
 #include "core/task_scheduler/TaskScheduler.hpp"
 #include "core/threading/ThreadPool.hpp"
+#include "platform/PlatformAccessor.hpp"
 #include "modules/automation/FlowEngine.hpp"
 #include "modules/production/ProductionEngine.hpp"
 #include "modules/recording/RecordingEngine.hpp"
 #include "modules/broadcast/BroadcastEngine.hpp"
 #include "modules/bible/BibleEngine.hpp"
+#include "modules/library/DesignCatalogs.hpp"
 #include "modules/media/MediaModule.hpp"
 #include "modules/presentation/PresentationModule.hpp"
 #include "modules/songs/SongEngine.hpp"
@@ -68,6 +70,7 @@ int main(int argc, char** argv) {
     BootOptions opts;
     opts.logLevel = LogLevel::Info;
     int holdSeconds = 0;
+    std::string catalogsDir;   // --dump-catalogs: package step, not a demo run
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--trace") opts.logLevel = LogLevel::Trace;
@@ -81,12 +84,40 @@ int main(int argc, char** argv) {
             opts.dataDir = argv[++i];   // persistent DB (kernel.json) under this dir
         else if (a == "--hold" && i + 1 < argc)
             holdSeconds = std::atoi(argv[++i]);
+        else if (a == "--dump-catalogs" && i + 1 < argc)
+            catalogsDir = argv[++i];    // write the shipped design catalogs here (templates.json + overlays.json)
     }
 
     auto boot = Kernel::Instance().Boot(opts);
     if (!boot.ok()) {
         std::println(stderr, "Boot failed: {}", boot.error().message);
         return 1;
+    }
+
+    // PACKAGING: the design libraries the installer ships, written from the CATALOGS rather than
+    // copied out of an operator's appdata. tools/make_installer.sh runs this before compiling, so what a
+    // fresh install starts with is exactly the shipped designs this build defines — including their
+    // font-free blocks and the catalog revision that lets an existing store migrate itself.
+    if (!catalogsDir.empty()) {
+        auto& fs = platform::PlatformAccessor::Get().Filesystem();
+        struct Dump { const char* file; std::string json; };
+        const Dump dumps[] = {
+            { "templates.json", library::SeedStoreJson(library::TemplateLibraryConfig()) },
+            { "overlays.json", library::SeedStoreJson(library::OverlayLibraryConfig()) },
+        };
+        for (const Dump& dump : dumps) {
+            const std::string path = fs.Join(catalogsDir, dump.file);
+            auto written = fs.WriteAtomic(path, dump.json);
+            if (!written.ok()) {
+                std::println(stderr, "catalogs: cannot write {}: {}", path, written.error().message);
+                return 1;
+            }
+            std::println("catalogs: wrote {} ({} bytes)", path, dump.json.size());
+        }
+        // Booted just for the PAL: leave the way every other exit does (a return
+        // with the kernel running kills its threads).
+        auto shutdown = Kernel::Instance().Shutdown();
+        return shutdown.ok() ? 0 : 2;
     }
 
     // With --ipc, expose a presentation command for remote clients (bps_remote).

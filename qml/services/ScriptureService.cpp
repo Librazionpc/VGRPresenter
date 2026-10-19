@@ -205,7 +205,15 @@ ScriptureService::ScriptureService(QObject *parent) : QObject(parent)
     });
 }
 
-bool ScriptureService::loading() const { return SearchService::instance().bibleLoading(); }
+bool ScriptureService::loading() const
+{
+    // A PRE-BOOT (OR NOT-YET-READ) BIBLE LIST IS LOADING, NOT AN EMPTY INSTALL (user
+    // call: a source that is absent for a moment must read as loading, not as blank
+    // columns — see ReferencePane's libraryHint). `bibles` is empty until the engine
+    // has booted and published its corpus; reporting only the import flag made a pane
+    // built before the engine came up say "No Bible is installed yet."
+    return SearchService::instance().bibleLoading() || !EngineBridge::instance().booted();
+}
 
 // THE PUBLISHED READS (see the header): each entry point answers from what a
 // worker has already published and queues the read when it has nothing yet. The

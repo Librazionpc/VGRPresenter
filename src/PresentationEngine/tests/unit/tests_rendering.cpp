@@ -6,8 +6,10 @@
 #include "modules/presentation/SceneBuilder.hpp"
 #include "modules/rendering/ImageScale.hpp"
 #include "modules/rendering/PngCodec.hpp"
+#include "modules/rendering/RenderOutputs.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -336,6 +338,52 @@ void TestRenderText() {
     auto f = fm.GetFont("builtin");
     CHECK(f.ok());
     CHECK(fm.Resolve("missing-font").id == "builtin");   // falls back
+
+    // FONT AGNOSTIC: a block that names a font this machine does not have has to
+    // resolve to an INSTALLED face, never to the builtin 5x7 bitmap — the draw
+    // path pixel-doubles that bitmap to the requested size, which is the giant
+    // blocky verse an install without the design's font painted on air (the
+    // "HDMI fine, NDI wrong, fine on my laptop" report: the design named a
+    // trial font only the authoring machine had). ""/"builtin" still mean "the
+    // bitmap font, deliberately".
+    CHECK(fm.SubstituteFamily("").empty());
+    CHECK(fm.SubstituteFamily("builtin").empty());
+    CHECK(!fm.DefaultFamily().empty());
+    const std::string absent = fm.SubstituteFamily("VGR Definitely Not An Installed Font 42");
+    CHECK(absent.empty() || fm.HasSystemFont(absent));
+    CHECK(absent != "VGR Definitely Not An Installed Font 42" ||
+          fm.HasSystemFont("VGR Definitely Not An Installed Font 42"));
+    // ...and the substitute is the HOST'S OWN UI face — the engine compiles in no
+    // font name at all, so the same build renders the same on any Windows box.
+    const std::string uiFace = fm.SystemUiFamily();
+    if (!uiFace.empty()) {
+        CHECK(fm.SubstituteFamily("VGR Definitely Not An Installed Font 42") == uiFace);
+        CHECK(fm.DefaultFamily() == uiFace);
+    }
+    // Stable across calls (the answer is cached, so painting and measuring
+    // cannot disagree between two frames).
+    CHECK(fm.SubstituteFamily("VGR Definitely Not An Installed Font 42") == absent);
+#ifdef _WIN32
+    // ...and the LAYOUT must use that same face: a style naming a font this
+    // machine lacks measures exactly like the substitute it is painted with, not
+    // like the builtin bitmap's uniform estimate. Measure/paint agreement is
+    // what keeps the auto-fit solver honest for such a design.
+    if (!absent.empty() && absent != "builtin") {
+        r::TextStyle missingStyle;
+        missingStyle.fontId = "VGR Definitely Not An Installed Font 42";
+        missingStyle.size = 48.0f;
+        r::TextStyle resolvedStyle = missingStyle;
+        resolvedStyle.fontId = absent;
+        r::TextStyle bitmapStyle;
+        bitmapStyle.size = 48.0f;
+        const auto missingLayout = r::TextLayout::Measure("The quick brown fox", missingStyle, fm);
+        const auto resolvedLayout = r::TextLayout::Measure("The quick brown fox", resolvedStyle, fm);
+        const auto bitmapLayout = r::TextLayout::Measure("The quick brown fox", bitmapStyle, fm);
+        CHECK(std::abs(missingLayout.totalWidth - resolvedLayout.totalWidth) < 0.5f);
+        CHECK(std::abs(missingLayout.totalHeight - resolvedLayout.totalHeight) < 0.5f);
+        CHECK(std::abs(missingLayout.totalWidth - bitmapLayout.totalWidth) > 1.0f);
+    }
+#endif
     CHECK(!fm.FontIds().empty());
     auto g = fm.Glyph('A', 24);
     CHECK(g.width > 0 && g.advance > 0);
@@ -877,6 +925,85 @@ void TestRenderOutputs() {
     // No frame → clear error.
     auto empty = std::make_shared<r::ScreenshotOutput>("e", r::Size(4, 4));
     CHECK(!empty->SavePpm("/tmp/nope.ppm").ok());
+}
+// TWO BANDS THAT TOUCH ON THE STAGE MUST TOUCH ON THE FRAME — no seam.
+//
+// A template authors its blocks in stage units (754x428) and the frame maps them
+// onto the output axis by axis. Every shipped stacked layout has neighbours that
+// share an edge exactly (The Table's code chip ends at y = 303.6428572 and its
+// paragraph band starts at the same number), and at 1920x1080 that edge is
+// fractional (766.2). The backends used to round x/y and w/h SEPARATELY, so the
+// lower box started on 766 while the upper one's rounded height stopped on 765:
+// one row of the camera feed showed through between two translucent bands. On the
+// Edit canvas (Qt snaps a Rectangle's own four edges) they are flush, which is
+// why the light seam only ever appeared on the outputs — the reported "the top
+// one is not sitting flush as it is in the edit canvas".
+void TestShapeEdgeSeams() {
+    auto& engine = r::RenderEngine::Instance();
+    CHECK(engine.Initialize().ok());
+    CHECK(engine.Start().ok());
+
+    const std::string sceneId = "seam_probe";
+    (void)engine.DestroyScene(sceneId);
+    CHECK(engine.CreateScene(sceneId, "Seam probe", r::Size(1920, 1080)).ok());
+    CHECK(engine.AddLayer(sceneId, r::Layer("bg", "Background", r::LayerKind::Background, 0)).ok());
+    CHECK(engine.AddLayer(sceneId, r::Layer("boxes", "Boxes", r::LayerKind::Image, 1)).ok());
+
+    // The backdrop the frame would be showing if a seam opened: a bright green
+    // (the canonical "live picture behind a translucent band").
+    auto bg = std::make_shared<r::BackgroundObject>("seam_bg", "Background", r::Color::Green());
+    bg->SetBounds(r::Rect(0, 0, 1920, 1080));
+    CHECK(engine.AddObject(sceneId, bg, "bg").ok());
+
+    // THE TABLE'S OWN GEOMETRY, verbatim from the applied template: the code
+    // chip, then the paragraph band that starts exactly where the chip ends.
+    constexpr double kStageW = 754.0, kStageH = 428.0;
+    const auto stageRect = [](double x, double y, double w, double h) {
+        return r::Rect(static_cast<float>(x / kStageW * 1920.0),
+                       static_cast<float>(y / kStageH * 1080.0),
+                       static_cast<float>(w / kStageW * 1920.0),
+                       static_cast<float>(h / kStageH * 1080.0));
+    };
+    auto chip = std::make_shared<r::ShapeObject>("seam_chip", "Chip");
+    chip->SetRectangle(r::Color::Red());
+    chip->SetBounds(stageRect(0.0, 262.0535715, 150.0892857, 41.58928571));
+    CHECK(engine.AddObject(sceneId, chip, "boxes").ok());
+    auto band = std::make_shared<r::ShapeObject>("seam_band", "Band");
+    band->SetRectangle(r::Color::Red());
+    band->SetBounds(stageRect(0.0, 303.6428572, 754.0, 124.3571428));
+    CHECK(engine.AddObject(sceneId, band, "boxes").ok());
+
+    // Every row from the chip's top to the band's bottom, down the chip's column,
+    // must be the boxes' own red — one green row is the seam.
+    const auto seamFree = [](const r::RgbaImage& frame) {
+        const int y0 = static_cast<int>(std::lround(262.0535715 / kStageH * 1080.0));
+        const int y1 = static_cast<int>(std::lround((303.6428572 + 124.3571428) / kStageH * 1080.0));
+        for (int y = y0; y < y1; ++y) {
+            const r::Color c = r::Color::Unpack(frame.pixels[static_cast<size_t>(y) * 1920 + 100]);
+            if (c.g > 0.5f && c.r < 0.5f) return false;
+        }
+        return true;
+    };
+
+    r::RenderOptions opts;
+    opts.distribute = false;
+    opts.capture = true;
+
+    CHECK(engine.SetBackend("software").ok());
+    auto soft = engine.Render(sceneId, opts);
+    CHECK(soft.ok());
+    if (soft.ok()) CHECK(seamFree(soft.value()));
+
+    // The same rule on the hardware path, when this machine has a device (a
+    // machine without one keeps the software answer, as everywhere else).
+    CHECK(engine.SetBackend("directx11").ok());
+    if (engine.BackendCaps().gpuAccelerated) {
+        auto gpu = engine.Render(sceneId, opts);
+        CHECK(gpu.ok());
+        if (gpu.ok()) CHECK(seamFree(gpu.value()));
+    }
+    CHECK(engine.SetBackend("software").ok());
+    CHECK(engine.DestroyScene(sceneId).ok());
 }
 void TestRenderEngine() {
     auto& engine = r::RenderEngine::Instance();
@@ -1959,4 +2086,134 @@ void TestD3D11StageFrame() {
     CHECK(engine.SetBackend("software").ok());
     std::error_code ec;
     (void)std::filesystem::remove(img, ec);
+}
+
+// ---------------------------------------------------------------------------
+// FEED HEALTH — the two engine questions behind the automatic stall blackout
+// ---------------------------------------------------------------------------
+// The live loop decides a stalled feed from OutputFeedAges() and then hands the
+// stalled outputs a black frame (BlackoutOutputs). Both are exercised here with
+// a probe output that keeps its own present stamp, so the arithmetic and the
+// pixels are checked without a live session or a display device.
+namespace {
+
+int64_t SteadyNowMsForTest()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+class FeedProbeOutput final : public r::IRenderOutput {
+public:
+    explicit FeedProbeOutput(std::string name, r::Size size)
+        : name_(std::move(name)), size_(size) {}
+    r::OutputKind Kind() const noexcept override { return r::OutputKind::Stream; }
+    const char* Name() const noexcept override { return name_.c_str(); }
+    r::Size TargetSize() const override { return size_; }
+    void SetTargetSize(r::Size s) override { size_ = s; }
+    bool Enabled() const noexcept override { return enabled_; }
+    void SetEnabled(bool on) override { enabled_ = on; }
+    Result<void> Present(const r::Frame& frame) override {
+        last_ = frame;
+        ++presented_;
+        stamp_ = SteadyNowMsForTest();
+        return Ok();
+    }
+    r::Frame LastFrame() const override { return last_; }
+    uint64_t FramesReceived() const override { return presented_; }
+    int64_t LastPresentSteadyMs() const override { return stamp_; }
+
+private:
+    std::string name_;
+    r::Size size_;
+    bool enabled_ = true;
+    r::Frame last_;
+    uint64_t presented_ = 0;
+    int64_t stamp_ = 0;   // 0 = never presented, which the engine reports as -1
+};
+
+} // namespace
+
+void TestFeedHealth() {
+    auto& engine = r::RenderEngine::Instance();
+    CHECK(engine.Initialize().ok());
+
+    auto fed = std::make_shared<FeedProbeOutput>("feed-probe-fed", r::Size(8, 6));
+    auto cold = std::make_shared<FeedProbeOutput>("feed-probe-cold", r::Size(8, 6));
+    auto off = std::make_shared<FeedProbeOutput>("feed-probe-off", r::Size(8, 6));
+    off->SetEnabled(false);
+    CHECK(engine.AddOutput(fed).ok());
+    CHECK(engine.AddOutput(cold).ok());
+    CHECK(engine.AddOutput(off).ok());
+
+    // NEVER PRESENTED is not a stall: the age is -1, which the service reads as
+    // "warming" (a fresh session's buffers are empty for a moment). Treating it
+    // as stalled would black every output on the first second of every service.
+    const auto findAge = [](const std::vector<r::RenderEngine::OutputFeedAge>& ages,
+                            const std::string& name) -> int64_t {
+        for (const auto& row : ages)
+            if (row.name == name) return row.ageMs;
+        return -2;
+    };
+    {
+        const auto ages = engine.OutputFeedAges();
+        CHECK(findAge(ages, "feed-probe-cold") == -1);
+        CHECK(findAge(ages, "feed-probe-fed") == -1);   // nothing presented yet
+        CHECK(findAge(ages, "feed-probe-nobody") == -2);
+    }
+
+    // A present stamps the output, so its age becomes a small, real number and
+    // keeps advancing with the clock — that advance IS the heartbeat.
+    {
+        r::Frame f;
+        f.sceneId = "live";
+        f.width = 8; f.height = 6;
+        f.pixels.assign(8u * 6u, 0xFF3366CCu);
+        CHECK(fed->Present(f).ok());
+        const auto ages = engine.OutputFeedAges();
+        const int64_t age = findAge(ages, "feed-probe-fed");
+        CHECK(age >= 0);
+        CHECK(age < 1000);
+        CHECK(findAge(ages, "feed-probe-cold") == -1);
+    }
+
+    // BLACKOUT: an opaque black frame at the output's own target size. Opaque,
+    // not transparent — a keyer behind a transparent hole would fill it with
+    // something, and the point is that nothing reaches the audience.
+    {
+        const int blacked = engine.BlackoutOutputs({"feed-probe-fed", "feed-probe-off"});
+        CHECK(blacked == 1);   // the disabled one is refused
+        const r::Frame last = fed->LastFrame();
+        CHECK(last.width == 8 && last.height == 6);
+        CHECK(last.pixels.size() == 48);
+        bool allBlack = true;
+        for (const uint32_t px : last.pixels)
+            if (px != 0xFF000000u) allBlack = false;
+        CHECK(allBlack);
+        // A disabled output keeps whatever it had: it cannot be sent anything.
+        CHECK(off->FramesReceived() == 0);
+    }
+
+    // AND THE RECOVERY IS AUTOMATIC: nothing is latched, so the next real frame
+    // simply overwrites the black. No un-blackout call exists to forget.
+    {
+        r::Frame f;
+        f.sceneId = "live";
+        f.width = 8; f.height = 6;
+        f.pixels.assign(8u * 6u, 0xFF00AA55u);
+        CHECK(fed->Present(f).ok());
+        const r::Frame last = fed->LastFrame();
+        CHECK(last.pixels.size() == 48);
+        CHECK(last.pixels[0] == 0xFF00AA55u);
+    }
+
+    // A blackout with nothing to black (an empty list, or names the engine does
+    // not know) is a no-op, not a failure.
+    CHECK(engine.BlackoutOutputs({}) == 0);
+    CHECK(engine.BlackoutOutputs({"feed-probe-nobody"}) == 0);
+
+    CHECK(engine.RemoveOutput("feed-probe-fed").ok());
+    CHECK(engine.RemoveOutput("feed-probe-cold").ok());
+    CHECK(engine.RemoveOutput("feed-probe-off").ok());
 }

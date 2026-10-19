@@ -7,6 +7,7 @@
 #include "services/MediaLibraryService.h"
 
 #include <QSet>
+#include <QStringList>
 #include "modules/presentation/CompositorState.hpp"
 #include "modules/presentation/LiveOutputController.hpp"
 #include "modules/presentation/PresentationEngine.hpp"
@@ -43,6 +44,7 @@
 #include <QVideoFrame>
 #include <QVideoSink>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <format>
 #include <map>
@@ -742,6 +744,7 @@ LiveOutputService *LiveOutputService::create(QQmlEngine *engine, QJSEngine *jsEn
 // ---------------------------------------------------------------------------
 void LiveOutputService::goLive()
 {
+
     // Breadcrumb: GO LIVE is the heaviest QML-facing call in the app (compile +
     // prepare + output bring-up), so a stall or exception here names itself in
     // engine.log instead of leaving a heartbeat line as the last word.
@@ -835,6 +838,16 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
     // This live session's NDI sender opens under the FIRST enabled NDI
     // output's own name (see armNdiSenderForSession).
     armNdiSenderForSession();
+    // ANY OTHER CONTENT ENDS A BLACKOUT. The carrier is its own marker (a
+    // clearStage slide is the blackout, not content), so a pick that goes on
+    // air while blacked out drops what the blackout was hiding — otherwise a
+    // later stop() would stage the OLD pick, or endBlackout would put it back
+    // over the newer one.
+    if (!content.slides.front().clearStage) {
+        blackoutActive_ = false;
+        blackoutRestoreTitle_.clear();
+        blackoutRestoreSlides_.clear();
+    }
 
     if (!live_) {
         live_ = true;
@@ -939,7 +952,9 @@ void LiveOutputService::clearAll()
     if (!activeOverlays_.isEmpty())
         clearAllOverlays();
     // The on-air slide only means something while live (off air it already
-    // sits in the preview slot, cleared as content above).
+    // sits in the preview slot, cleared as content above). It is re-sent as the
+    // style's own blank carrier, so the branded backdrop survives the clear
+    // (see clearOnAirSlide).
     if (live_ && !onAirSlide_.value(QStringLiteral("blocks")).toList().isEmpty())
         clearOnAirSlide();
     if (!stagedSlidesRaw_.isEmpty())
@@ -1067,7 +1082,10 @@ void LiveOutputService::takeInput(const QString &label, const QString &kind, con
 
     if (!inputPump_) {
         inputPump_ = new QTimer(this);
-        inputPump_->setInterval(66);   // ~15 fps, matching the tap's production rate
+        // THE MONITOR'S RATE, not 15 Hz — see the note on the first creation
+        // site (takeInput) for why 66 ms was wrong.
+        inputPump_->setTimerType(Qt::PreciseTimer);
+        inputPump_->setInterval(16);
         connect(inputPump_, &QTimer::timeout, this, &LiveOutputService::pumpTick);
     }
     inputPump_->start();
@@ -1198,40 +1216,79 @@ void LiveOutputService::pumpTick()
                   qUtf8Printable(inputLabel_), takenFrame.width(), takenFrame.height());
         }
     }
+    bool cardMoved = false;
     // Per-label production (card previews' thumbnails light off this —
     // inputLive only tracks the OUTPUT take). Freshly-taken labels enter
     // producing_ on their first frame; released labels are pruned in
     // clearInput/endPreviewInput.
-    for (const QString &held : cardPreviews_.keys()) {
-        if (producing_.contains(held))
+    //
+    // A card is read through the JPEG decode-once cache (previewFrameFor), not
+    // through the pixel pull: that cache is EXACTLY what the card's own Image
+    // displays, so its identity is the honest "did this card's picture change?"
+    // answer. The same comparison is what bumps inputRev for a card-only hold —
+    // the card Images use that counter as their URL nonce, and the rev bump used
+    // to be unconditional, so dropping it here would freeze every thumbnail.
+    for (auto it = cardPreviews_.cbegin(); it != cardPreviews_.cend(); ++it) {
+        const QString &held = it.key();
+        const QImage frame = EngineBridge::instance().previewFrameFor(held);
+        if (frame.isNull() || frame.width() <= 1)
             continue;
-        const QImage frame = inputFrame(held, cardPreviews_.value(held).toMap()
-                                                .value(QStringLiteral("kind")).toString());
-        if (!frame.isNull() && frame.width() > 1)
+        if (!producing_.contains(held))
             producing_.insert(held);
+        const qint64 key = frame.cacheKey();
+        if (cardFrameKeys_.value(held, 0) != key) {
+            cardFrameKeys_.insert(held, key);
+            cardMoved = true;
+        }
     }
     if (!inputLabel_.isEmpty() && !producing_.contains(inputLabel_)
         && !takenFrame.isNull() && takenFrame.width() > 1)
         producing_.insert(inputLabel_);
-    // Unconditional rev bump while ANY tap is held — tiles and cards share
-    // the nonce, so both re-fetch.
-    inputRev_++;
+    // ---- only MOVED frames cost anything ------------------------------------
+    // The pump used to run at 15 Hz and push on every tick. A 30/60 fps camera
+    // therefore reached the compositor — and so BOTH outputs, HDMI and NDI — at
+    // 15 fps: the reported "the video bus is lagging on hdmi and ndi". It now
+    // runs at the monitor's own rate (see the timer's interval below), so the
+    // rate cap is gone; what makes that cheap is this pair of checks: a frame is
+    // pushed only when its cacheKey moved, so a stationary source costs a cache
+    // lookup, and the rev bump (every tile/card re-fetching) fires only when
+    // something actually changed instead of 60x/s.
+    bool moved = false;
+    // A card that produced its FIRST frame has an answer to give (its slash/
+    // waiting state clears), even when no picture body moved this tick.
+    const int producedBefore = producing_.size();
     // NDI taken as the OUTPUT input feeds the engine's compositor layer
     // (the same one the media decoder fills) with the frame pulled above.
-    if (!takenFrame.isNull())
-        pushNdiInputFrame(takenFrame);
+    if (!takenFrame.isNull()) {
+        const qint64 key = takenFrame.cacheKey();
+        if (key != inputFrameKey_) {
+            inputFrameKey_ = key;
+            pushNdiInputFrame(takenFrame);
+            moved = true;
+        }
+    }
     // BUS WINDOWS: every frame the on-air composition's buses are watching goes
     // to the compositor, which paints each one at its block's rect (SceneBuilder's
     // bus pass) — so NDI and HDMI show what the canvas shows. Pulled through the
     // SAME kind switch the taken input uses: a camera/screen bus reads the PAL
     // tap, an NDI bus the engine receiver, and neither path knows about the other.
-    for (auto it = busFeeds_.cbegin(); it != busFeeds_.cend(); ++it) {
+    for (auto it = busFeeds_.begin(); it != busFeeds_.end(); ++it) {
         const QImage frame = inputFrame(it->label, it->kind);
         if (frame.isNull() || frame.width() <= 1)
             continue;   // warming up or not delivering: keep the last honest picture
+        const qint64 key = frame.cacheKey();
+        if (key == it->lastFrameKey)
+            continue;   // the tap has not produced since the last tick: no copy
+        it->lastFrameKey = key;
         pl::CompositorState::Instance().SetBusFrame(it.key(), rgbaFrameOf(frame));
+        moved = true;
     }
-    emit inputChanged();
+    if (cardMoved || producing_.size() != producedBefore)
+        moved = true;
+    if (moved) {
+        inputRev_++;
+        emit inputChanged();
+    }
     if (inputLabel_.isEmpty() && cardPreviews_.isEmpty() && busFeeds_.isEmpty())
         inputPump_->stop();
 }
@@ -1241,16 +1298,20 @@ bool LiveOutputService::inputProducing(const QString &label) const
     return producing_.contains(label);
 }
 
-// The newest frame of a held tap, kind-aware: camera/screen pulls through
-// the PAL's decode-once cache (previewFrameFor), NDI through the engine
-// receiver's convert-on-demand (previewNdiFrameFor). The pump's first-frame
-// detection reads through this one switch, so a kind can never watch the
-// wrong tap family.
+// The newest frame of a held tap, kind-aware: camera/screen pulls the tap's
+// PIXELS (previewPixelsFor — native size, the device's own rate, no JPEG decode
+// on this thread), NDI the engine receiver's convert-on-demand. The pump's
+// first-frame detection reads through this one switch, so a kind can never
+// watch the wrong tap family.
+//
+// The pixel pull is what the outputs show. previewFrameFor would have served the
+// same tap through its JPEG — a pane contract, published at ~15 fps and decoded
+// here — which is the ceiling the bus used to inherit on BOTH outputs.
 QImage LiveOutputService::inputFrame(const QString &label, const QString &kind) const
 {
     if (kind == QLatin1String("ndi"))
         return EngineBridge::instance().previewNdiFrameFor(label);
-    return EngineBridge::instance().previewFrameFor(label);
+    return EngineBridge::instance().previewPixelsFor(label);
 }
 
 // Release ONLY an NDI take — the "ndi" feature switch's teardown path
@@ -1304,7 +1365,10 @@ void LiveOutputService::previewInput(const QString &label, const QString &kind, 
     };
     if (!inputPump_) {
         inputPump_ = new QTimer(this);
-        inputPump_->setInterval(66);
+        // THE MONITOR'S RATE, not 15 Hz — see the note on the first creation
+        // site (takeInput) for why 66 ms was wrong.
+        inputPump_->setTimerType(Qt::PreciseTimer);
+        inputPump_->setInterval(16);
         connect(inputPump_, &QTimer::timeout, this, &LiveOutputService::pumpTick);
     }
     if (!inputPump_->isActive())
@@ -1325,6 +1389,7 @@ void LiveOutputService::endPreviewInput(const QString &label)
     else
         EngineBridge::instance().stopVideoPreview(label, QStringLiteral("card"));
     producing_.remove(label);
+    cardFrameKeys_.remove(label);   // the next hold starts from "no picture yet"
     emit inputChanged();
 }
 
@@ -1446,7 +1511,10 @@ void LiveOutputService::refreshBusFeeds()
         return;   // the pump stops itself on its next tick (see pumpTick)
     if (!inputPump_) {
         inputPump_ = new QTimer(this);
-        inputPump_->setInterval(66);
+        // THE MONITOR'S RATE, not 15 Hz — see the note on the first creation
+        // site (takeInput) for why 66 ms was wrong.
+        inputPump_->setTimerType(Qt::PreciseTimer);
+        inputPump_->setInterval(16);
         connect(inputPump_, &QTimer::timeout, this, &LiveOutputService::pumpTick);
     }
     if (!inputPump_->isActive())
@@ -1886,7 +1954,21 @@ void LiveOutputService::stop()
     //   * and a new pick staged afterwards simply replaces it, as always.
     // stagedSlide_ takes onAirSlide_ (both are the slide run through the
     // active style, so the swap changes no pixels).
-    if (!onAirSlideRaw_.isEmpty()) {
+    // A BLACKOUT IS NOT THE PICK. If the carrier had been folded into the staged
+    // slot like any other on-air slide, the next GO LIVE would put the black
+    // frame straight back on the screens. What the operator was SHOWING when
+    // they blacked out is what STOP should leave on the monitor, so the hidden
+    // set is staged instead (styled through the same template path stageSlides
+    // uses, so the tile shows what GO LIVE will commit).
+    if (!blackoutRestoreSlides_.isEmpty()) {
+        stagedName_ = blackoutRestoreTitle_;
+        stagedSlidesRaw_ = blackoutRestoreSlides_;
+        stagedSlide_ = previewWithActiveStyle(blackoutRestoreSlides_.first().toMap());
+        emit stagedChanged();
+        blackoutActive_ = false;
+        blackoutRestoreTitle_.clear();
+        blackoutRestoreSlides_.clear();
+    } else if (!onAirSlideRaw_.isEmpty()) {
         stagedName_ = onAirTitle_;
         stagedSlidesRaw_ = QVariantList{ onAirSlideRaw_ };
         stagedSlide_ = onAirSlide_;
@@ -1940,28 +2022,70 @@ void LiveOutputService::clearOnAirSlide()
 {
     if (!live_)
         return;
-    goLiveCleared();
+    // CLEAR ALL KEEPS THE OUTPUT'S OWN LOOK. It takes the CONTENT down — the
+    // slide's blocks, a taken camera, the media file, the overlays — and leaves
+    // the active style painting: the branded background (colour AND image) stays
+    // on the screens, which is what an operator clearing a media take expects to
+    // see underneath it ("when I'm showing media and I clear, it clears
+    // everything including the bg image from styles, which is wrong").
+    //
+    // This used to send a `clearStage` carrier that told the engine to paint
+    // NOTHING at all — written for the earlier report "the clear brings the
+    // background image back and clears the slide". That report was about the
+    // SLIDE's content coming back; dropping the blocks fixes it on its own, and
+    // the backdrop going black was the part nobody asked for. The engine still
+    // understands `clearStage` (a saved show can carry it — see ShowConverter),
+    // Clear all just no longer sends it.
+    goLiveBlank();
 }
 
-// A CLEAR — NOT the blank carrier above.
-//
-// goLiveBlank() is the GO-LIVE-with-nothing fallback: an empty slide that the
-// active style still paints, because going live with nothing staged is meant to
-// show the output's own look (the branded backdrop, not a black screen). Clear
-// all is the opposite gesture — it is the operator asking for NOTHING on the
-// screens — and sending the blank carrier for it is why the report was "the
-// clear brings the background image back and clears the slide": the outputs
-// went from the slide straight to the style's poster. This carrier says so
-// itself (Slide::clearStage), and the engine composes an empty frame for it.
-void LiveOutputService::goLiveCleared()
+void LiveOutputService::blackout()
 {
-    VGR_CALL_TRACE("LiveOutputService.goLiveCleared");
-    QVariantMap cleared;
-    cleared.insert(QStringLiteral("blocks"), QVariantList{});
-    cleared.insert(QStringLiteral("background"), QStringLiteral("transparent"));
-    cleared.insert(QStringLiteral("title"), QString());
-    cleared.insert(QStringLiteral("clearStage"), true);
-    goLiveWithSlides(QString(), { cleared });
+    if (!live_ || blackedOut())
+        return;
+    // WHAT THE BLACKOUT IS HIDING, saved BEFORE the carrier replaces it in the
+    // engine: the session keeps running (live_, the NDI sender and every output
+    // are untouched), only the picture changes. The whole raw set travels, not
+    // just the slide showing, so coming out of a blackout leaves a passage that
+    // can still be stepped.
+    blackoutActive_ = true;
+    blackoutRestoreTitle_ = onAirTitle_;
+    blackoutRestoreSlides_ = onAirSlidesRaw();
+
+    QVariantMap clear;
+    clear.insert(QStringLiteral("blocks"), QVariantList{});
+    clear.insert(QStringLiteral("background"), QStringLiteral("transparent"));
+    clear.insert(QStringLiteral("title"), QString());
+    // THE FLAG THAT MAKES THIS A BLACKOUT AND NOT A BLANK. Without it the same
+    // empty slide is the blank GO LIVE carrier, which deliberately wears the
+    // output's own look (style colour AND background image); with it the engine
+    // composes an explicitly empty frame (SceneBuilder's Cleared) — nothing of
+    // the style, nothing of the slide — which is what "nothing at all on
+    // screen" means on HDMI and on the NDI feed alike.
+    clear.insert(QStringLiteral("clearStage"), true);
+    goLiveWithSlides(QString(), { clear });
+}
+
+void LiveOutputService::endBlackout()
+{
+
+    if (!blackedOut())
+        return;
+    blackoutActive_ = false;
+    // Taken out of the slots first: goLiveWithSlides() clears them for any
+    // non-carrier content, and these ARE that content.
+    const QString title = blackoutRestoreTitle_;
+    const QVariantList slides = blackoutRestoreSlides_;
+    blackoutRestoreTitle_.clear();
+    blackoutRestoreSlides_.clear();
+    if (slides.isEmpty()) {
+        // Nothing remembered — the carrier came from a saved show, or the
+        // session was already blacked out before this control existed. The
+        // output's own look is the one answer that is never a lie.
+        goLiveBlank();
+        return;
+    }
+    goLiveWithSlides(title, slides);
 }
 
 // ---------------------------------------------------------------------------
@@ -2472,6 +2596,12 @@ bool LiveOutputService::jumpTo(int index)
 // ---------------------------------------------------------------------------
 // The on-air slide as design blocks (the QML preview feed)
 // ---------------------------------------------------------------------------
+bool LiveOutputService::blackedOut() const
+{
+    return live_ && (blackoutActive_
+                     || onAirSlide_.value(QStringLiteral("clearStage")).toBool());
+}
+
 QVariantList LiveOutputService::onAirSlidesRaw() const
 {
     QVariantList out;
@@ -2557,6 +2687,187 @@ qulonglong LiveOutputService::framesSentNow() const
 
 // See the header: armed once, at construction, and never stopped — pollTick is
 // what publishes the monitor preview OFF AIR, not only while live.
+// ---------------------------------------------------------------------------
+// FEED HEALTH — is the program feed still reaching each output?
+// ---------------------------------------------------------------------------
+// THE HEARTBEAT IS THE CLOCK, NOT THE PICTURE. The live loop deliberately
+// skips re-rasterising a scene that has not changed, so "no new frame" on its
+// own would call a static verse a stall — which is exactly what it is not. What
+// a healthy session DOES do is re-present the composed frame to every output
+// once a second (LiveOutputController::kHeartbeatMs), so each output's own
+// "last presented" stamp advances ~1/s whatever the slides are doing. The age
+// of that stamp is therefore a feed heartbeat: a few seconds with no movement
+// is a real stall (a dead render loop, a dropped display buffer, a per-output
+// pass that stopped landing) and a verse sitting still is not.
+//
+// WHAT A STALL DOES: that output is handed an opaque BLACK frame, immediately
+// and outside the render loop (which is the thing that may have died), so it
+// stops showing a frozen picture that reads as a live feed. Nothing has to be
+// undone — the loop's next present overwrites the black the moment frames flow
+// again, and the header's pill says so.
+namespace {
+constexpr qint64 kFeedProbeMs = 1000;      // how often the stamps are read
+constexpr qint64 kFeedGraceMs = 4000;      // GO LIVE warm-up: buffers start empty
+constexpr qint64 kFeedStallMs = 3500;      // three missed heartbeats is a stall
+constexpr qint64 kFeedRestoredMs = 6000;   // how long "Feed restored" stays up
+
+qint64 SteadyMsNow()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+} // namespace
+
+void LiveOutputService::setFeedNotice(const QString &text, const QString &kind)
+{
+    if (feedNoticeText_ == text && feedNoticeKind_ == kind)
+        return;
+    feedNoticeText_ = text;
+    feedNoticeKind_ = kind;
+    emit feedHealthChanged();
+}
+
+bool LiveOutputService::outputFeedStalled(const QString &outputName) const
+{
+    return stalledOutputs_.contains(outputName);
+}
+
+void LiveOutputService::sampleFeedHealth()
+{
+    if (!live_) {
+        liveSinceMs_ = 0;
+        lastFeedProbeMs_ = 0;
+        if (!stalledOutputs_.isEmpty() || !feedNoticeText_.isEmpty()
+            || !stalledLabels_.isEmpty()) {
+            stalledOutputs_.clear();
+            stalledLabels_.clear();
+            feedNoticeText_.clear();
+            feedNoticeKind_.clear();
+            ++feedHealthRev_;
+            emit feedHealthChanged();
+        }
+        return;
+    }
+
+    const qint64 now = SteadyMsNow();
+    if (liveSinceMs_ == 0)
+        liveSinceMs_ = now;
+    if (now - lastFeedProbeMs_ < kFeedProbeMs)
+        return;
+    lastFeedProbeMs_ = now;
+    // A fresh session's buffers are empty until the first passes land; calling
+    // that a stall would black every output for the first second of every
+    // service. One grace window, from this session's own go-live.
+    if (now - liveSinceMs_ < kFeedGraceMs)
+        return;
+
+    const auto *model = OutputListModel::instance();
+    if (!model)
+        return;
+
+    // ONE ENGINE READ: the per-output "last presented" ages, keyed by buffer
+    // name. Names and atomic stamps under the manager's lock — no frame copy.
+    const auto ages = bps::rendering::RenderEngine::Instance().OutputFeedAges();
+    QHash<QString, int64_t> ageByBuffer;
+    ageByBuffer.reserve(static_cast<int>(ages.size()));
+    for (const auto &row : ages)
+        ageByBuffer.insert(QString::fromStdString(row.name), row.ageMs);
+
+    QSet<QString> stalled;
+    QStringList labels;
+    std::vector<std::string> toBlack;
+    for (int i = 0; i < model->rowCount(); ++i) {
+        const QVariantMap row = model->getOutput(i);
+        // A DISABLED output is not on air, so it cannot be missing a feed: skip
+        // it — but keep the NUMBER. M<n> is the n-th row in the roster (the wall's
+        // own tile order), not the n-th enabled one, so a roster of three with the
+        // middle one switched off still names the last output M3, exactly as the
+        // operator counts it on the wall.
+        if (!row.value(QStringLiteral("isEnabled")).toBool())
+            continue;
+        const int monitor = i + 1;
+        const QString name = row.value(QStringLiteral("name")).toString();
+        // The buffer this output's picture actually lands in, keyed exactly as
+        // OutputListModel::FrameBufferRole and the live loop key it: a styled
+        // output has its own gated buffer, an unstyled one mirrors the shared
+        // preview feed.
+        const QString styleId = row.value(QStringLiteral("styleId")).toString();
+        const QString buffer = styleId.isEmpty()
+            ? QString::fromLatin1(bps::live::LiveOutputController::kPreviewName)
+            : QStringLiteral("__out_%1__").arg(qHash(name));
+        const auto age = ageByBuffer.constFind(buffer);
+        if (age == ageByBuffer.constEnd() || age.value() < 0)
+            continue;   // never presented to yet: warming, not stalled
+        if (age.value() > kFeedStallMs) {
+            stalled.insert(name);
+            labels << QStringLiteral("M%1").arg(monitor);
+            if (!stalledOutputs_.contains(name))
+                toBlack.push_back(buffer.toStdString());
+        }
+    }
+
+    const QString labelLine = labels.join(QStringLiteral(", "));
+    const bool wasStalled = !stalledOutputs_.isEmpty();
+    const QString wasLabelLine = stalledLabels_;
+    const bool changed = stalled != stalledOutputs_ || labelLine != stalledLabels_;
+    stalledOutputs_ = stalled;
+    stalledLabels_ = labelLine;
+    if (changed) {
+        ++feedHealthRev_;
+        emit feedHealthChanged();
+    }
+
+    if (!stalled.isEmpty()) {
+        if (!toBlack.empty()) {
+            // BLACK NOW, OFF THE INTERFACE THREAD. Presenting a full black frame
+            // is a lock + an 8 MB fill per output, and the render loop this is
+            // covering for may be the very thing that is stuck — so it runs on
+            // the engine worker rather than in the operator's click path.
+            qInfo("LiveOutputService: feed stalled — %s: no frames for over %lld ms, blacked out",
+                  qUtf8Printable(labelLine), static_cast<long long>(kFeedStallMs));
+            vgr::EngineWorker::instance().runOffThread([buffers = toBlack]() {
+                (void)bps::rendering::RenderEngine::Instance().BlackoutOutputs(buffers);
+            });
+        }
+        // A TOAST AS WELL AS THE PILL. The header pill is the standing state,
+        // but it sits in the corner and the operator's eyes are on the stage —
+        // the moment a feed dies is worth one interruption, exactly once per
+        // stall (this branch is the transition, not the 1 Hz re-check). The
+        // crux makes the output names bold, the same way a device failure names
+        // its device.
+        EventBus::instance().notify(
+            QStringLiteral("%1 · No live feed — blacked out until frames return").arg(labelLine),
+            QStringLiteral("error"), QStringLiteral("Live output"),
+            QStringLiteral("live.feed.stalled"), labels);
+        if (feedNoticeTimer_)
+            feedNoticeTimer_->stop();   // a fresh stall owns the pill again
+        setFeedNotice(QStringLiteral("%1 · No live feed").arg(labelLine),
+                      QStringLiteral("stalled"));
+        return;
+    }
+
+    if (wasStalled) {
+        qInfo("LiveOutputService: feed restored — %s: frames flowing again",
+              qUtf8Printable(wasLabelLine));
+        setFeedNotice(QStringLiteral("%1 · Feed restored").arg(wasLabelLine),
+                      QStringLiteral("restored"));
+        EventBus::instance().notify(
+            QStringLiteral("%1 · Feed restored").arg(wasLabelLine),
+            QStringLiteral("success"), QStringLiteral("Live output"),
+            QStringLiteral("live.feed.restored"));
+        if (!feedNoticeTimer_) {
+            feedNoticeTimer_ = new QTimer(this);
+            feedNoticeTimer_->setSingleShot(true);
+            connect(feedNoticeTimer_, &QTimer::timeout, this, [this]() {
+                if (!feedStalled())
+                    setFeedNotice(QString(), QString());
+            });
+        }
+        feedNoticeTimer_->start(static_cast<int>(kFeedRestoredMs));
+    }
+}
+
 void LiveOutputService::ensurePollTimer()
 {
     if (poll_) {
@@ -2594,6 +2905,10 @@ void LiveOutputService::pollTick()
 
     if (ctrl.IsLiveContentReplacementPending())
         return;
+
+    // Is the program feed still reaching every output? (The probe throttles
+    // itself to 1 Hz; the poll above stays 10 Hz for the preview.)
+    sampleFeedHealth();
 
     // NDI monitor-connection telemetry rides the live poll (the bridge
     // caps itself at ~1 Hz internally and emits only on change).

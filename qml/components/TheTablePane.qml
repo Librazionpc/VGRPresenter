@@ -29,6 +29,10 @@ ReferencePane {
         // GO-LIVE identity (same contract as ScripturePane's adapter).
         readonly property string contentType: "table"
         readonly property string tabLabel: qsTr("The Table")
+        // WHERE THE READER WAS: the open sermon, the paragraphs picked in it, and the
+        // paragraph row at the top of the list, as one JSON value (ReferencePane's
+        // readingKey). One source, so the source id in it is just the tab's own.
+        readonly property string readingKey: "session.tableReading"
 
         readonly property var sources: () => TheTableService.sources()
         readonly property var loading: () => TheTableService.loading

@@ -13,6 +13,7 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -121,6 +122,34 @@ public:
     // this rather than trying BuildSystemAtlas and inspecting for empty,
     // since an empty atlas can also legitimately mean "no glyphs fit".
     bool HasSystemFont(const std::string& family) const;
+
+    // The family a style should ACTUALLY draw with: `family` when the host
+    // resolves it, otherwise the first installed substitute (the app's UI
+    // default, then the faces every Windows install carries). Empty when no
+    // substitute resolves — the caller then keeps the builtin bitmap font.
+    //
+    // This is the difference between "the design names a font this machine does
+    // not have" and "the output paints giant pixel blocks": the builtin 5x7
+    // font is pixel-doubled to the requested size, so at a lower third's 1080p
+    // text size it drew ~13x blocks instead of type, with monospace advances
+    // that wrapped the verse off the frame. QML surfaces never showed it (Qt
+    // substitutes silently), and the machine that AUTHORED the design has the
+    // font — which is how one install renders correctly and another does not.
+    // Every consumer (layout measure, atlas build, atlas texture identity) must
+    // resolve through THIS so what is measured is what is painted.
+    std::string SubstituteFamily(std::string_view family) const;
+
+    // The face the OPERATING SYSTEM itself uses for UI text (Windows: the shell's
+    // message font from NONCLIENTMETRICS), or "" when no system-font backend can
+    // answer. This is the one substitute that is not a literal name: the point of
+    // a font-agnostic renderer is that nothing in it decides "Segoe UI" on the
+    // app's behalf — the host already has a UI face, and the engine borrows it.
+    // Cached (it is asked per text object through the substitution path).
+    std::string SystemUiFamily() const;
+
+    // The face to draw with when a design names NONE — SystemUiFamily(), and
+    // "builtin" only when no system font backend resolves at all.
+    std::string DefaultFamily() const;
     // Real measured advance width (px) for ONE character in the named
     // system font — what TextLayout::Measure/MeasureLine call per
     // character when the style names a real font, instead of the builtin
@@ -155,6 +184,14 @@ public:
 private:
     std::map<std::string, Font, std::less<>> fonts_;
     bool builtinRegistered_ = false;
+    // Substitution answers, keyed by the REQUESTED family (it is asked on every
+    // measured and painted text object, and resolving costs a GDI+ FontFamily).
+    // Cached because the set of installed fonts does not change under a running
+    // process; a family that was missing stays missing for the session.
+    mutable std::mutex substituteMutex_;
+    mutable std::map<std::string, std::string, std::less<>> substitutes_;
+    mutable std::string systemUiFamily_;
+    mutable bool systemUiFamilyResolved_ = false;
 };
 
 // ---------------------------------------------------------------------------

@@ -5685,6 +5685,356 @@ ApplicationWindow {
         onTriggered: SelfTest.quit()
     }
 
+    // ---- The tab search's SEED: does the open sermon fill the box, and do the
+    // digits typed after it move the pane? (VGR_SEED_TEST=1 only.) ---------------
+    // The operator's flow, driven end to end: The Table opens a sermon, the dock's
+    // search box holds that sermon's citation line ("55-0117 - How The Angel… "),
+    // they focus it and type 56 — the pane must be on ¶56. Every step is printed
+    // with the box's own state (text / hint / seed) so a step that does not happen
+    // is visible as its own line, not inferred from the final position.
+    function seedState(tag, paneName) {
+        const box = SelfTest.findItem("selfTestSearchBox")
+        const field = SelfTest.findItem("selfTestSearchInput")
+        const p = SelfTest.findItem(paneName !== undefined ? paneName : "selfTestTablePane")
+        console.log("[SELFTEST-SEED] " + tag
+                    + " boxText='" + (box ? box.text : "-missing-") + "'"
+                    + " hint='" + (box ? box.emptyHint : "-") + "'"
+                    + " seed='" + (box ? box.seedText : "-") + "'"
+                    + " follows=" + (box ? box.seedFollows : "-")
+                    + " focused=" + (field ? field.activeFocus : "-")
+                    + " paneBook='" + (p && p.book ? p.book.id : "") + "'"
+                    + " chapter=" + (p ? p.chapterNumber : -1)
+                    + " rows=" + (p ? p.mainRows.length : -1)
+                    + " selected=[" + (p ? p.selected.join(",") : "") + "]"
+                    + " ref='" + (p ? p.referenceText : "") + "'")
+    }
+    Timer {
+        id: selfTestSeed
+        running: typeof SelfTestSeed !== "undefined" && SelfTestSeed
+        interval: 25000   // boot (the pane opens a sermon well before the indexing ends)
+        onTriggered: {
+            window.currentView = "show"
+            showScreen.showInLibrary("table", "")
+            selfTestSeedOpen.restart()
+        }
+    }
+    Timer {
+        id: selfTestSeedOpen
+        interval: 6000
+        onTriggered: {
+            const p = SelfTest.findItem("selfTestTablePane")
+            if (!p || !p.books || p.books.length === 0) {
+                console.log("[SELFTEST-SEED] pane/books missing")
+                SelfTest.quit()
+                return
+            }
+            // A NAMED sermon (the user's own 55-0117 when the library has it), so the
+            // seed line a failure prints is one a person can compare to their screen.
+            let target = null
+            for (const b of p.books) {
+                if (String(b.id || "").indexOf("0117") >= 0) { target = b; break }
+            }
+            if (!target)
+                target = p.books[0]
+            const chapter = target.chapters && target.chapters.length > 0 ? target.chapters[0] : 0
+            console.log("[SELFTEST-SEED] opening book='" + target.id + "' chapter=" + chapter)
+            p.goTo({ bookId: target.id, chapter: chapter, verseStart: 0, verseEnd: 0 })
+            selfTestSeedWait.restart()
+        }
+    }
+    Timer {
+        id: selfTestSeedWait
+        interval: 5000    // the chapter read comes back off the worker
+        onTriggered: {
+            window.seedState("seeded")
+            SelfTest.grab("selfTestLibraryTabBar", "seed_before.png")
+            selfTestSeedFocus.restart()
+        }
+    }
+    Timer {
+        id: selfTestSeedFocus
+        interval: 1200
+        onTriggered: {
+            // Focus FILLS the box (TabSearchBox.applySeed) — the real focus path,
+            // through the item, not by setting `text` from outside.
+            const ok = SelfTest.focusItem("selfTestSearchInput")
+            window.seedState("focused=" + ok)
+            selfTestSeedType.restart()
+        }
+    }
+    Timer {
+        id: selfTestSeedType
+        interval: 1500
+        onTriggered: {
+            SelfTest.type("56")
+            window.seedState("typed")
+            selfTestSeedRead.restart()
+        }
+    }
+    Timer {
+        id: selfTestSeedRead
+        interval: 5000    // the pane's resolve + the reading beat
+        onTriggered: {
+            const box = SelfTest.findItem("selfTestSearchBox")
+            const p = SelfTest.findItem("selfTestTablePane")
+            const picked = p ? p.selected.map((n) => Number(n)) : []
+            const atNumber = picked.length > 0 ? picked[0] : -1
+            window.seedState("result")
+            console.log("[SELFTEST-SEED] result boxText='" + (box ? box.text : "-")
+                        + " atParagraph=" + atNumber
+                        + " verdict=" + (atNumber === 56 ? "moved" : "stayed"))
+            SelfTest.grab("selfTestTablePane", "seed_after.png")
+            SelfTest.grab("selfTestLibraryTabBar", "seed_box.png")
+            selfTestSeedClick.restart()
+        }
+    }
+    // THE TWO CLICKS, one row shape apart (user call: "double click is what should
+    // push it to monitor preview, single click is preview pane"). A continuation row
+    // is the case that broke it — its single click used to stage — so the row picked
+    // here is the first divided piece on screen. What a click and a double click DO is
+    // called directly (selectSubpart / stageSubpart), because synthesizing a real
+    // double click on an unnamed row delegate is a coordinate guess; the wiring between
+    // them and the pointer is DragSource's activated/opened, the same pair every other
+    // list in the app uses.
+    function seedStagedTitle() {
+        const staged = LiveOutputService.stagedSlide
+        return staged && staged.title !== undefined ? String(staged.title) : ""
+    }
+    Timer {
+        id: selfTestSeedClick
+        interval: 1200
+        onTriggered: {
+            const p = SelfTest.findItem("selfTestTablePane")
+            if (!p) {
+                SelfTest.quit()
+                return
+            }
+            let row = null
+            for (const r of p.mainRows)
+                if (r.continuation === true) { row = r; break }
+            if (!row)
+                for (const r of p.mainRows)
+                    if (Number(r.number) > 0) { row = { number: r.number, partIndex: 0 }; break }
+            if (!row) {
+                console.log("[SELFTEST-SEED] click no row to click")
+                SelfTest.quit()
+                return
+            }
+            window.seedClickRow = { number: Number(row.number), part: Number(row.partIndex ?? 0) }
+            window.seedClickBefore = window.seedStagedTitle()
+            p.selectSubpart(window.seedClickRow.number, window.seedClickRow.part)
+            selfTestSeedClickSingle.restart()
+        }
+    }
+    property var seedClickRow: null
+    property string seedClickBefore: ""
+    property string seedClickAfterSingle: ""
+    Timer {
+        id: selfTestSeedClickSingle
+        interval: 1500
+        onTriggered: {
+            const p = SelfTest.findItem("selfTestTablePane")
+            window.seedClickAfterSingle = window.seedStagedTitle()
+            console.log("[SELFTEST-SEED] click single row=" + window.seedClickRow.number
+                        + "-" + window.seedClickRow.part
+                        + " before='" + window.seedClickBefore + "'"
+                        + " after='" + window.seedClickAfterSingle + "'"
+                        + " staged=" + (window.seedClickAfterSingle !== window.seedClickBefore))
+            p.stageSubpart(window.seedClickRow.number, window.seedClickRow.part)
+            selfTestSeedClickDouble.restart()
+        }
+    }
+    Timer {
+        id: selfTestSeedClickDouble
+        interval: 1500
+        onTriggered: {
+            const double = window.seedStagedTitle()
+            console.log("[SELFTEST-SEED] click double='" + double + "'"
+                        + " verdict=" + ((window.seedClickAfterSingle === window.seedClickBefore
+                                           && double !== "" && double !== window.seedClickBefore)
+                                          ? "ok" : "wrong"))
+            selfTestSeedScripture.restart()
+        }
+    }
+    // THE SAME FEATURE ON SCRIPTURE (user call: "scripture too needs that feature"):
+    // its box holds "Genesis 1: " and the digits typed after it are the VERSE.
+    Timer {
+        id: selfTestSeedScripture
+        interval: 1200
+        onTriggered: {
+            showScreen.showInLibrary("scripture", "")
+            selfTestSeedScriptureOpen.restart()
+        }
+    }
+    Timer {
+        id: selfTestSeedScriptureOpen
+        interval: 4000
+        onTriggered: {
+            const p = SelfTest.findItem("selfTestScripturePane")
+            if (!p || !p.books || p.books.length === 0) {
+                console.log("[SELFTEST-SEED] scripture pane/books missing")
+                SelfTest.quit()
+                return
+            }
+            let target = null
+            for (const b of p.books) {
+                if (String(b.name || "").toLowerCase() === "genesis") { target = b; break }
+            }
+            if (!target)
+                target = p.books[0]
+            console.log("[SELFTEST-SEED] scripture book='" + target.name + "'")
+            p.goTo({ bookId: target.id, chapter: 1, verseStart: 0, verseEnd: 0, matchText: "" })
+            selfTestSeedScriptureWait.restart()
+        }
+    }
+    Timer {
+        id: selfTestSeedScriptureWait
+        interval: 4000
+        onTriggered: {
+            window.seedState("scripture seeded", "selfTestScripturePane")
+            const ok = SelfTest.focusItem("selfTestSearchInput")
+            window.seedState("scripture focused=" + ok, "selfTestScripturePane")
+            selfTestSeedScriptureType.restart()
+        }
+    }
+    // What the pane's own resolve says for what the box holds — the half a position
+    // check cannot see ("the line is in the box but the pane stayed on verse 1").
+    function seedResolveProbe(paneName) {
+        const p = SelfTest.findItem(paneName)
+        if (!p)
+            return "pane missing"
+        const box = SelfTest.findItem("selfTestSearchBox")
+        const text = box ? box.text : ""
+        const resolved = p.adapter ? p.adapter.resolve(text, p.sourceId) : ({ error: "no adapter" })
+        return "filter='" + p.filter + "' pending='" + p.pendingJump + "'"
+               + " resolve=" + JSON.stringify(resolved)
+    }
+    Timer {
+        id: selfTestSeedScriptureType
+        interval: 1200
+        onTriggered: {
+            // The user's own case: verse 8 in the open chapter.
+            SelfTest.type("8")
+            window.seedState("scripture typed", "selfTestScripturePane")
+            console.log("[SELFTEST-SEED] scripture typed " + window.seedResolveProbe("selfTestScripturePane"))
+            selfTestSeedScriptureRead.restart()
+        }
+    }
+    Timer {
+        id: selfTestSeedScriptureRead
+        interval: 5000    // the reference read is cached off-thread: it lands a beat later
+        onTriggered: {
+            const box = SelfTest.findItem("selfTestSearchBox")
+            const p = SelfTest.findItem("selfTestScripturePane")
+            const picked = p ? p.selected.map((n) => Number(n)) : []
+            window.seedState("scripture result", "selfTestScripturePane")
+            console.log("[SELFTEST-SEED] scripture result boxText='" + (box ? box.text : "-")
+                        + " atVerse=" + (picked.length > 0 ? picked[0] : -1)
+                        + " ref='" + (p ? p.referenceText : "") + "'")
+            console.log("[SELFTEST-SEED] scripture result " + window.seedResolveProbe("selfTestScripturePane"))
+            SelfTest.grab("selfTestLibraryTabBar", "seed_scripture_box.png")
+            selfTestSeedWalk.restart()
+        }
+    }
+    // THE SEARCH LIST FROM THE KEYBOARD (user call: "if press the down or up button it
+    // should search result list and show their paragraph preview the the <> should
+    // move to their paragraph preview", + "the return search should be 56-0101 - Why
+    // are people ... so it consistent with others"). Back on The Table: "56-" typed,
+    // one Down (the pane's walk), then Return (the result as the box's line).
+    Timer {
+        id: selfTestSeedWalk
+        interval: 1200
+        onTriggered: {
+            showScreen.showInLibrary("table", "")
+            selfTestSeedWalkSetup.restart()
+        }
+    }
+    Timer {
+        id: selfTestSeedWalkSetup
+        interval: 2500
+        onTriggered: {
+            const p = SelfTest.findItem("selfTestTablePane")
+            const box = SelfTest.findItem("selfTestSearchBox")
+            if (!p || !box) {
+                SelfTest.quit()
+                return
+            }
+            // The way a keystroke reaches the pane's own list: the box asks the
+            // provider, which fills citationMatches (The Table renders those IN the
+            // pane). Then the box's own Up/Down signal is emitted — the same signal
+            // the keys carry.
+            box.resetText("56-")
+            p.paneSuggestions("56-")
+            box.stepMatch(1)
+            selfTestSeedWalkRead.restart()
+        }
+    }
+    Timer {
+        id: selfTestSeedWalkRead
+        interval: 1200
+        onTriggered: {
+            const p = SelfTest.findItem("selfTestTablePane")
+            const row = p && p.citationMatches.length > 0 ? p.citationMatches[Math.max(0, p.matchCursor)] : null
+            const peek = p && p.peekVerses.length > 0 ? String(p.peekVerses[0].text).substring(0, 48) : ""
+            console.log("[SELFTEST-SEED] walk rows=" + (p ? p.citationMatches.length : -1)
+                        + " cursor=" + (p ? p.matchCursor : -1)
+                        + " row='" + (row ? (row.cite || row.label) : "") + "'"
+                        + " peekIndex=" + (p ? p.peekIndex : -1)
+                        + " peek='" + peek + "'")
+            const box = SelfTest.findItem("selfTestSearchBox")
+            // The selector across the columns (the ‹ › in search mode): the box hands
+            // Left/Right to the pane while the result list is up.
+            console.log("[SELFTEST-SEED] column listMode=" + box.listMode
+                        + " before=" + (p ? p.column : -1))
+            box.stepColumn(-1)
+            console.log("[SELFTEST-SEED] column after=" + (p ? p.column : -1))
+            // NARROW, DON'T OPEN: on the sermons column Up/Down must move the selector
+            // and narrow the results, leaving the preview (the pick) alone.
+            const selBefore = JSON.stringify(p.selected)
+            const chBefore = p.chapterNumber
+            box.stepMatch(-1)
+            console.log("[SELFTEST-SEED] narrow column=" + p.column
+                        + " chapterCursor=" + p.chapterCursor
+                        + " matches=" + p.citationMatches.length + "/" + p.allMatches.length
+                        + " chapters=" + (p.book ? p.book.chapters.length : -1)
+                        + " selectionFrozen=" + (JSON.stringify(p.selected) === selBefore
+                                                   && p.chapterNumber === chBefore))
+            box.accepted(box.text)      // the Return the field delivers
+            selfTestSeedWalkReturn.restart()
+        }
+    }
+    Timer {
+        id: selfTestSeedWalkReturn
+        interval: 1500
+        onTriggered: {
+            const box = SelfTest.findItem("selfTestSearchBox")
+            const p = SelfTest.findItem("selfTestTablePane")
+            console.log("[SELFTEST-SEED] return boxText='" + (box ? box.text : "-") + "'"
+                        + " matches=" + (p ? p.citationMatches.length : -1)
+                        + " ref='" + (p ? p.referenceText : "") + "'")
+            // ESC puts the search back where it started (the place captured on the first
+            // keystroke), so this run ends by leaving search mode.
+            box.dismissed()
+            selfTestSeedEsc.restart()
+        }
+    }
+    Timer {
+        id: selfTestSeedEsc
+        interval: 1500
+        onTriggered: {
+            const p = SelfTest.findItem("selfTestTablePane")
+            console.log("[SELFTEST-SEED] esc matches=" + (p ? p.citationMatches.length : -1)
+                        + " searchMode=" + (p ? p.searchMode : "-")
+                        + " ref='" + (p ? p.referenceText : "") + "'")
+            selfTestSeedDone.restart()
+        }
+    }
+    Timer {
+        id: selfTestSeedDone
+        interval: 2000
+        onTriggered: SelfTest.quit()
+    }
+
     // ---- Do the pane's result lists build a VIEWPORT, not the whole model? ----
     // (VGR_PANEROWS_TEST=1 only.) The user's ask, right after the paragraph list
     // was virtualized: "Make the reference pane's search-results list virtualized
@@ -7255,6 +7605,214 @@ ApplicationWindow {
             SelfTest.quit()
         }
     }
+    // ---- Blackout, through the wall's own control (VGR_BLACKOUT_TEST=1) ------
+    // "Nothing at all on screen" has to be a DELIBERATE gesture: Clear all now
+    // keeps the output's own look, so the ONLY thing that paints an empty frame
+    // is the wall toolbar's Blackout control (LiveOutputService::blackout — the
+    // clearStage carrier). This scenario puts one real slide on air, presses
+    // that control with a REAL click, presses it again to come back, and leaves
+    // the engine's frame-sanity lines (black or not) as the evidence — the same
+    // pixels the HDMI window and the NDI feed receive. Nothing is staged or
+    // saved, so a failure here is about the control, not about a fixture.
+    property bool boVisible: false
+    property bool boPressed: false
+    property bool boEnded: false
+    property string boLabel: ""
+    Timer {
+        id: selfTestBlackoutStart
+        running: typeof SelfTestBlackout !== "undefined" && SelfTestBlackout
+        interval: 9000           // boot + first frame, like the other scenarios
+        onTriggered: {
+            // A REAL FEED UNDER THE BLACKOUT. "Nothing at all on screen" has to
+            // include the compositor's own layers: a taken camera rides the
+            // engine scene's video layer, and before this the clear carrier
+            // still composited it, so the screens showed the camera through a
+            // blackout. The first camera in the roster is held for the whole
+            // run (cleared before quitting) so the runner can prove the layer
+            // is GONE while blacked and BACK after it ends.
+            for (let i = 0; i < VideoSourceListModel.rowCount(); ++i) {
+                const row = VideoSourceListModel.getSource(i)
+                const label = String(row && row.sublabel ? row.sublabel : "").trim()
+                if (String(row.kind || "") !== "camera" || label === "")
+                    continue
+                window.boLabel = label
+                break
+            }
+            if (window.boLabel !== "")
+                LiveOutputService.takeInput(window.boLabel, "camera", "")
+            console.log("[SELFTEST-BLACKOUT] take label=" + JSON.stringify(window.boLabel)
+                        + " taken=" + JSON.stringify(String(LiveOutputService.inputLabel)))
+            const slide = {
+                valid: true,
+                title: "Blackout Probe",
+                text: "blackout probe",
+                background: "",
+                blocks: [ { kind: "text", text: "blackout probe", x: 60, y: 60,
+                            width: 630, height: 300, meta: { fontSize: 48 } } ]
+            }
+            LiveOutputService.goLiveWithSlides("Blackout Probe", [ slide ])
+            console.log("[SELFTEST-BLACKOUT] live live=" + LiveOutputService.live)
+            selfTestBlackoutPress.restart()
+        }
+    }
+    // A click and the state it produces are NOT the same tick: clickItem posts a
+    // real mouse event, so the button's handler (and the engine's replacement,
+    // which is what blackedOut reads) only runs after this timer returns. Every
+    // press therefore reports from its OWN timer a couple of seconds later —
+    // reading blackedOut right after the click read the state from BEFORE it and
+    // made a working control look broken.
+    Timer {
+        id: selfTestBlackoutPress
+        interval: 6000
+        onTriggered: {
+            // A REAL click on the toolbar control — the same path the operator's
+            // hand takes, so a control that is missing, disabled or off screen
+            // fails here rather than passing on a direct service call.
+            window.boVisible = SelfTest.itemVisible("selfTestWallBlackout")
+            SelfTest.clickItem("selfTestWallBlackout")
+            selfTestBlackoutPressed.restart()
+        }
+    }
+    Timer {
+        id: selfTestBlackoutPressed
+        interval: 2500
+        onTriggered: {
+            window.boPressed = LiveOutputService.blackedOut
+            console.log("[SELFTEST-BLACKOUT] pressed visible=" + window.boVisible
+                        + " blackedOut=" + window.boPressed
+                        + " live=" + LiveOutputService.live)
+            // The wall AS RENDERED with the blackout up — the control's lit row
+            // and caption next to the tiles it just emptied (CWD is build/).
+            SelfTest.grab("selfTestMonitorWall", "shot_blackout_wall.png")
+            selfTestBlackoutEnd.restart()
+        }
+    }
+    Timer {
+        id: selfTestBlackoutEnd
+        interval: 4000
+        onTriggered: {
+            // The same control, once lit: this press is the way OUT of a blackout
+            // and must put the content back without restarting the session.
+            SelfTest.clickItem("selfTestWallBlackout")
+            selfTestBlackoutEnded.restart()
+        }
+    }
+    Timer {
+        id: selfTestBlackoutEnded
+        interval: 2500
+        onTriggered: {
+            window.boEnded = !LiveOutputService.blackedOut
+            console.log("[SELFTEST-BLACKOUT] ended blackedOut=" + LiveOutputService.blackedOut
+                        + " live=" + LiveOutputService.live
+                        + " blocks=" + (LiveOutputService.onAirSlide.blocks
+                                         ? LiveOutputService.onAirSlide.blocks.length : -1))
+            selfTestBlackoutQuit.restart()
+        }
+    }
+    Timer {
+        id: selfTestBlackoutQuit
+        interval: 3500           // let the restored frames land before the last phase
+        onTriggered: selfTestBlackoutStopPhase.restart()
+    }
+    // PHASE 3 — STOP WHILE BLACKED OUT. The carrier must not become the staged
+    // pick: a blackout is a gesture over content, so STOP has to leave what the
+    // blackout was HIDING on the monitor, or the next GO LIVE would put the
+    // black frame straight back on the screens.
+    Timer {
+        id: selfTestBlackoutStopPhase
+        interval: 100
+        onTriggered: {
+            SelfTest.clickItem("selfTestWallBlackout")
+            selfTestBlackoutStop.restart()
+        }
+    }
+    Timer {
+        id: selfTestBlackoutStop
+        interval: 2500
+        onTriggered: {
+            console.log("[SELFTEST-BLACKOUT] reblacked blackedOut="
+                        + LiveOutputService.blackedOut)
+            LiveOutputService.stop()
+            selfTestBlackoutStopped.restart()
+        }
+    }
+    Timer {
+        id: selfTestBlackoutStopped
+        interval: 2500
+        onTriggered: {
+            const s = LiveOutputService.stagedSlide
+            console.log("[SELFTEST-BLACKOUT] stopped live=" + LiveOutputService.live
+                        + " stagedBlocks=" + (s.blocks ? s.blocks.length : -1)
+                        + " stagedClearStage=" + (s.clearStage === true)
+                        + " blackedOut=" + LiveOutputService.blackedOut)
+            // The take this run held (see the start timer) is released here, as
+            // the other capture scenarios do — a selftest must not keep a
+            // camera open after it quits.
+            if (LiveOutputService.inputLabel !== "")
+                LiveOutputService.clearInput()
+            console.log("[SELFTEST-BLACKOUT] done")
+            SelfTest.quit()
+        }
+    }
+    // ---- Program-feed rate for a held camera (VGR_INPUTRATE_TEST=1) ----------
+    // "The video bus is lagging both hdmi and ndi". Both outputs render ONE
+    // compositor, and a camera bus fills it from the service's pump — so the
+    // number that decides whether any output can look smooth is how often that
+    // pump sees a NEW frame. It used to be capped twice (the PAL tap published
+    // one JPEG per 66 ms, and the pump itself ticked at 66 ms), which no
+    // measurement anywhere would have told you.
+    //
+    // This scenario takes the first camera and reports inputRev over a fixed
+    // window: the pump bumps it once per frame that actually moved, so the rate
+    // is the feed's own. A 30 fps camera reads ~30 here now; the old ceiling was
+    // ~15 and the number did not exist.
+    property string irLabel: ""
+    property real irFirst: 0
+    Timer {
+        id: selfTestInputRateStart
+        running: typeof SelfTestInputRate !== "undefined" && SelfTestInputRate
+        interval: 9000           // boot + the roster, like the other scenarios
+        onTriggered: {
+            for (let i = 0; i < VideoSourceListModel.rowCount(); ++i) {
+                const row = VideoSourceListModel.getSource(i)
+                const label = String(row && row.sublabel ? row.sublabel : "").trim()
+                if (String(row.kind || "") !== "camera" || label === "")
+                    continue
+                window.irLabel = label
+                break
+            }
+            if (window.irLabel === "") {
+                console.log("[SELFTEST-INPUTRATE] nomedia no camera in the roster")
+                SelfTest.quit()
+                return
+            }
+            LiveOutputService.takeInput(window.irLabel, "camera", "")
+            console.log("[SELFTEST-INPUTRATE] take label=" + JSON.stringify(window.irLabel)
+                        + " taken=" + JSON.stringify(String(LiveOutputService.inputLabel)))
+            selfTestInputRateWarm.restart()
+        }
+    }
+    Timer {
+        id: selfTestInputRateWarm
+        interval: 4000           // the tap opens off-thread; give it frames first
+        onTriggered: {
+            window.irFirst = LiveOutputService.inputRev
+            selfTestInputRateWindow.restart()
+        }
+    }
+    Timer {
+        id: selfTestInputRateWindow
+        interval: 5000
+        onTriggered: {
+            const revs = LiveOutputService.inputRev - window.irFirst
+            console.log("[SELFTEST-INPUTRATE] measured label=" + JSON.stringify(window.irLabel)
+                        + " revs=" + revs + " fps=" + (revs / 5).toFixed(1)
+                        + " live=" + LiveOutputService.inputLive)
+            LiveOutputService.clearInput()
+            console.log("[SELFTEST-INPUTRATE] done")
+            SelfTest.quit()
+        }
+    }
     Timer {
         id: selfTestStyleBgStart
         running: typeof SelfTestStyleBg !== "undefined" && SelfTestStyleBg
@@ -8018,40 +8576,158 @@ ApplicationWindow {
     // ---- item colour/opacity reaches the canvas (VGR_ITEMCOLOR_TEST=1) -------
     // The report: "the opacity in the colour picker shows well but it never
     // applies to the shape in the edit canvas — the text item does apply it".
-    // Both kinds go through the SAME picker, so if one works and the other does
-    // not, the difference is either in the apply or in what the canvas reads
-    // back — and no amount of reading the code settles which. This drives the
-    // real path (add the item, open the picker the row's Change chip opens, set
-    // the opacity, press Save) and prints what the ITEM holds beside what its
-    // DELEGATE is drawing, since the delegate is what the operator sees. The
-    // text item's colour is applied in the SAME run, so the two answers sit side
-    // by side in one log instead of one run each.
-    property var itemColorShape: null
-    property var itemColorText: null
-    property string itemColorShapeKey: ""
+    // Both kinds go through the SAME BackgroundColorModal, so if one works and
+    // the other does not, the difference is either in the apply or in what the
+    // canvas reads back — and reading the code cannot tell the two apart.
+    //
+    // THREE WITNESSES PER ITEM, because the first two can agree while the screen
+    // still shows nothing:
+    //   * the ITEM's own value (style.backgroundColor / meta.color),
+    //   * its DELEGATE's own read (DraggableCanvasText.styleBackgroundColor),
+    //   * the PIXELS that delegate actually paints — grabbed to a PNG and
+    //     sampled by the runner (run_item_color_test.sh).
+    //
+    // Items are resolved by KEY on every read (editScreen.canvasObjectByKey),
+    // never from the object addCanvasItem handed back: the engine owns item
+    // identity and a document round-trip can replace the object, after which a
+    // captured reference reads as null — a read that an earlier version of this
+    // scenario turned into a PASS (alpha -1 < 0.9 counted as "faded").
+    //
+    // A RECTANGLE takes the delegate's own fill box; a CIRCLE takes the OTHER
+    // branch (drawsOwnBody — EditScreen's shapeContent paints the body from the
+    // same style), so both render paths are measured. The text item's colour is
+    // applied in the same run as the known-good comparison.
+    //
+    // Every apply is WHITE at 100% first (a colour no style in this app carries,
+    // so a white pixel in the grab is unambiguous), then WHITE at 30% (alpha).
+    property string itemColorRectKey: ""
+    property string itemColorCircleKey: ""
     property string itemColorTextKey: ""
-    property string itemColorShapeBefore: ""
-    property string itemColorShapeAfter: ""
-    property string itemColorShapeDelegate: ""
+    property string itemColorRectBefore: ""
+    property string itemColorRectSolidItem: ""
+    property string itemColorRectSolidDelegate: ""
+    property string itemColorRectFadedItem: ""
+    property string itemColorRectFadedDelegate: ""
+    property string itemColorCircleBefore: ""
+    property string itemColorCircleSolidItem: ""
+    property string itemColorCircleSolidDelegate: ""
+    property string itemColorCircleFadedItem: ""
+    property string itemColorCircleFadedDelegate: ""
     property string itemColorTextBefore: ""
     property string itemColorTextAfter: ""
+    property int itemColorStep: 0
+    property string itemColorCycleFirst: ""
+    property string itemColorCycleSecond: ""
 
-    // -1 for anything that is not a colour at all, so a missing value is a
-    // NUMBER in the report instead of an exception that ends the run (Qt.color()
-    // throws on an empty string, and that is exactly the kind of hole this
-    // scenario has to survive to report).
+    // The colour every apply uses.
+    readonly property string itemColorPaint: "#ffffff"
+
+    // -1 for anything that is not a colour at all, so a MISSING value is a
+    // number in the report instead of an exception that ends the run — and the
+    // runner treats -1 as "missing", never as "faded".
     function itemColorAlpha(hex) {
         const s = String(hex)
         if (s.length === 0 || s.charAt(0) !== "#")
             return -1
         return Qt.color(s).a
     }
-    // The item's own meta colour, or "" when it has none yet (a fresh text item
-    // has no meta.color at all, and "undefined" in the log reads as a value).
-    function itemColorMetaOf(item) {
-        if (!item || !item.meta || item.meta.color === undefined || item.meta.color === null)
+    function itemColorHex(v) {
+        if (v === undefined || v === null)
             return ""
-        return String(item.meta.color)
+        return String(v)
+    }
+    function itemColorItemOf(key) {
+        return editScreen.canvasObjectByKey(key)
+    }
+    // The LIVE item's fill, or "" when the item is gone (the runner reports that
+    // as FAIL item, not as a pass).
+    function itemColorItemHex(key) {
+        const it = window.itemColorItemOf(key)
+        return it && it.style ? window.itemColorHex(it.style.backgroundColor) : ""
+    }
+    // What the delegate the operator looks at is drawing right now.
+    function itemColorDelegateHex(key) {
+        const d = SelfTest.findItem("canvasItem_" + key)
+        if (!d)
+            return "(no delegate)"
+        return window.itemColorHex(d.styleBackgroundColor)
+    }
+    // Selects the item, then opens the picker through the ROW'S OWN expression
+    // (EditScreen's Background row: "itemBackground" when something is
+    // selected, the slide background otherwise) rather than a target this
+    // scenario hardcodes. A hardcoded target would keep passing while the row
+    // itself decided otherwise for a selected shape — which is exactly the
+    // reported "the shape's colour goes somewhere else".
+    function itemColorOpenFor(key, target) {
+        editScreen.handleCanvasSelect(key, 0)
+        const rowTarget = editScreen.primarySelectedItemStyle ? "itemBackground" : "background"
+        console.log("[SELFTEST-ITEMCOLOR] row key=" + key
+                    + " selected=" + JSON.stringify(editScreen.selectedCanvasObjects)
+                    + " styleNull=" + (editScreen.primarySelectedItemStyle === null)
+                    + " primaryKind=" + (editScreen.primarySelectedItem ? editScreen.primarySelectedItem.kind : "(none)")
+                    + " rowTarget=" + rowTarget
+                    + " hint=" + target)
+        editScreen.openBackgroundPicker(rowTarget)
+        editScreen.selectedCanvasObjects = []
+    }
+    // The picker driven the way the operator drives it: a typed CUSTOM colour
+    // (liveKind "color" is what typing sets) plus the Opacity slider, then the
+    // SAME accept() the Save button calls.
+    function itemColorApply(opacityPct) {
+        const picker = SelfTest.findItem("selfTestBgPicker")
+        if (!picker || !picker.open) {
+            console.log("[SELFTEST-ITEMCOLOR] no open picker to apply with (open="
+                        + (picker ? picker.open : "no instance") + ")")
+            return false
+        }
+        console.log("[SELFTEST-ITEMCOLOR] apply title=" + picker.title + " target=" + editScreen.bgModalTarget)
+        picker.customHex = window.itemColorPaint
+        picker.liveKind = "color"
+        picker.opacityPct = opacityPct
+        try {
+            picker.accept()
+        } catch (e) {
+            console.log("[SELFTEST-ITEMCOLOR] save threw: " + e)
+            return false
+        }
+        return true
+    }
+    function itemColorRead(key) {
+        return { item: window.itemColorItemHex(key),
+                 delegate: window.itemColorDelegateHex(key) }
+    }
+    // WHICH ITEM ANSWERS A CLICK AT A POINT TWO ITEMS COVER — the reported
+    // "you pick the text item instead of the shape". clickItem delivers a real
+    // OS click at the named delegate's own centre, so this is the operator's
+    // gesture, not a selection the scenario made up from the model.
+    // The CLICK-THROUGH probe: two taps on ONE point that two items cover.
+    // `key` is what Qt hands the topmost item's handler, which is what the
+    // operator's click reports; the second tap must reach the item UNDER it.
+    function itemColorCycleClick(label, key) {
+        editScreen.handleCanvasSelect(key, 0, Qt.point(100, 90))
+        const sel = editScreen.selectedCanvasObjects.slice()
+        console.log("[SELFTEST-ITEMCOLOR] cycle " + label + " key=" + key
+                    + " selected=" + JSON.stringify(sel))
+        return sel.length > 0 ? sel[0] : ""
+    }
+    function itemColorClickProbe(label, objectName) {
+        SelfTest.clickItem(objectName)
+        const sel = editScreen.selectedCanvasObjects.slice()
+        const kinds = sel.map((k) => {
+            const it = window.itemColorItemOf(k)
+            return it ? (it.kind + (it.meta && it.meta.shapeType ? "/" + it.meta.shapeType : "")) : "?"
+        })
+        console.log("[SELFTEST-ITEMCOLOR] click " + label + " -> selected=" + JSON.stringify(sel)
+                    + " kinds=" + JSON.stringify(kinds))
+        return sel
+    }
+    // Opens the picker with an EXPLICIT target — the Text panel's own colour
+    // row (TextItemPanel -> openBackgroundPicker("textColor")), a different door
+    // from the Items tab's Background row.
+    function itemColorOpenWith(key, target) {
+        editScreen.handleCanvasSelect(key, 0)
+        editScreen.openBackgroundPicker(target)
+        editScreen.selectedCanvasObjects = []
     }
 
     Timer {
@@ -8062,112 +8738,164 @@ ApplicationWindow {
             SelfTest.activate()
             window.currentView = "edit"
             editScreen.newShow()
-            selfTestItemColorAdd.restart()
+            window.itemColorStep = 0
+            selfTestItemColorTick.restart()
         }
     }
+    // One step per tick: a picker apply and the read that judges it must not
+    // share a tick (the dialog's own signals and the delegate's relayout land
+    // between them, the way they do for a human).
     Timer {
-        id: selfTestItemColorAdd
-        interval: 2500              // the edit screen and its canvas
-        onTriggered: {
-            const shape = editScreen.addCanvasItem("shape")
-            if (!shape) {
-                console.log("[SELFTEST-ITEMCOLOR] no shape item — the scenario cannot run")
-                SelfTest.quit()
-                return
-            }
-            // The shape modal's own starting fill, written the way that modal
-            // writes it, so the run starts where the report starts.
-            shape.style.backgroundColor = "#3a3f55"
-            window.itemColorShape = shape
-            window.itemColorShapeKey = shape.key
-            window.itemColorShapeBefore = shape.style.backgroundColor.toString()
-            // addCanvasItem selects what it adds, so the picker latches it.
-            editScreen.openBackgroundPicker("itemBackground")
-            selfTestItemColorApply.restart()
-        }
-    }
-    Timer {
-        id: selfTestItemColorApply
-        interval: 700               // the dialog's own open + seed
-        onTriggered: {
-            const picker = SelfTest.findItem("selfTestBgPicker")
-            if (!picker) {
-                console.log("[SELFTEST-ITEMCOLOR] no picker instance found")
-                SelfTest.quit()
-                return
-            }
-            console.log("[SELFTEST-ITEMCOLOR] picker open=" + picker.open
-                        + " seeded=" + String(picker.selection && picker.selection.color)
-                        + " customHex=" + String(picker.customHex)
-                        + " liveKind=" + String(picker.liveKind)
-                        + " selectedColorIndex=" + picker.selectedColorIndex
-                        + " selection=" + JSON.stringify(picker.selection)
-                        + " opacity=" + picker.opacityPct
-                        + " targetItemSelected=" + (editScreen.selectedCanvasObjects.length > 0))
-            picker.opacityPct = 30
-            // The Save path itself, guarded: a throw inside it used to end this
-            // scenario at this line with nothing reported, which is a worse
-            // failure than the one being diagnosed.
-            try { picker.accept() } catch (e) { console.log("[SELFTEST-ITEMCOLOR] save threw: " + e) }
-            selfTestItemColorReport.restart()
-        }
-    }
-    Timer {
-        id: selfTestItemColorReport
-        interval: 600
-        onTriggered: {
-            const shape = window.itemColorShape
-            const del = SelfTest.findItem("canvasItem_" + window.itemColorShapeKey)
-            window.itemColorShapeAfter = shape ? shape.style.backgroundColor.toString() : ""
-            window.itemColorShapeDelegate = del ? del.styleBackgroundColor.toString() : "(no delegate)"
-            console.log("[SELFTEST-ITEMCOLOR] shape key=" + window.itemColorShapeKey
-                        + " before=" + window.itemColorShapeBefore
-                        + " after=" + window.itemColorShapeAfter
-                        + " a=" + window.itemColorAlpha(window.itemColorShapeAfter).toFixed(3)
-                        + " delegate=" + window.itemColorShapeDelegate
-                        + " delegateA=" + window.itemColorAlpha(window.itemColorShapeDelegate).toFixed(3)
-                        + " dialogOpenAfter=" + editScreen.bgModalOpen
-                        + " styleIsNull=" + (window.itemColorShape ? (window.itemColorShape.style === null) : "no-item"))
-            // THE SAME RUN, THE KNOWN-GOOD PATH — a text item's own colour.
-            const text = editScreen.addCanvasItem("text")
-            window.itemColorText = text
-            window.itemColorTextKey = text ? text.key : ""
-            window.itemColorTextBefore = window.itemColorMetaOf(text)
-            editScreen.openBackgroundPicker("textColor")
-            selfTestItemColorTextApply.restart()
-        }
-    }
-    Timer {
-        id: selfTestItemColorTextApply
+        id: selfTestItemColorTick
         interval: 700
+        repeat: true
         onTriggered: {
-            const picker = SelfTest.findItem("selfTestBgPicker")
-            if (picker) {
-                picker.opacityPct = 30
-                picker.accept()
+            const step = window.itemColorStep++
+            if (step === 0) {
+                // RECTANGLE — the delegate's own fill box.
+                const shape = editScreen.addCanvasItem("shape")
+                if (!shape) {
+                    console.log("[SELFTEST-ITEMCOLOR] no shape item — the scenario cannot run")
+                    SelfTest.quit()
+                    return
+                }
+                shape.meta = Object.assign({}, shape.meta, { shapeType: "rectangle" })
+                shape.style.backgroundColor = "#3a3f55"
+                window.itemColorRectKey = shape.key
+                window.itemColorRectBefore = window.itemColorItemHex(shape.key)
+                SelfTest.grab("canvasItem_" + shape.key, "itemcolor_rect_before.png")
+                window.itemColorOpenFor(shape.key, "itemBackground")
+            } else if (step === 1) {
+                window.itemColorApply(100)
+            } else if (step === 2) {
+                const r = window.itemColorRead(window.itemColorRectKey)
+                window.itemColorRectSolidItem = r.item
+                window.itemColorRectSolidDelegate = r.delegate
+                console.log("[SELFTEST-ITEMCOLOR] rect solid key=" + window.itemColorRectKey
+                            + " before=" + window.itemColorRectBefore
+                            + " item=" + window.itemColorRectSolidItem
+                            + " itemA=" + window.itemColorAlpha(window.itemColorRectSolidItem).toFixed(3)
+                            + " delegate=" + window.itemColorRectSolidDelegate
+                            + " delegateA=" + window.itemColorAlpha(window.itemColorRectSolidDelegate).toFixed(3))
+                SelfTest.grab("canvasItem_" + window.itemColorRectKey, "itemcolor_rect_solid.png")
+                window.itemColorOpenFor(window.itemColorRectKey, "itemBackground")
+            } else if (step === 3) {
+                window.itemColorApply(30)
+            } else if (step === 4) {
+                const r = window.itemColorRead(window.itemColorRectKey)
+                window.itemColorRectFadedItem = r.item
+                window.itemColorRectFadedDelegate = r.delegate
+                console.log("[SELFTEST-ITEMCOLOR] rect faded item=" + window.itemColorRectFadedItem
+                            + " itemA=" + window.itemColorAlpha(window.itemColorRectFadedItem).toFixed(3)
+                            + " delegate=" + window.itemColorRectFadedDelegate
+                            + " delegateA=" + window.itemColorAlpha(window.itemColorRectFadedDelegate).toFixed(3))
+                // CIRCLE — the drawsOwnBody branch (shapeContent paints it).
+                const circle = editScreen.addCanvasItem("shape")
+                if (circle) {
+                    circle.meta = Object.assign({}, circle.meta, { shapeType: "circle" })
+                    circle.style.backgroundColor = "#3a3f55"
+                    window.itemColorCircleKey = circle.key
+                    window.itemColorCircleBefore = window.itemColorItemHex(circle.key)
+                    SelfTest.grab("canvasItem_" + circle.key, "itemcolor_circle_before.png")
+                    window.itemColorOpenFor(circle.key, "itemBackground")
+                } else {
+                    console.log("[SELFTEST-ITEMCOLOR] no circle item — the body branch is unmeasured")
+                    window.itemColorCircleKey = ""
+                }
+            } else if (step === 5) {
+                if (window.itemColorCircleKey !== "")
+                    window.itemColorApply(100)
+            } else if (step === 6) {
+                const r = window.itemColorRead(window.itemColorCircleKey)
+                window.itemColorCircleSolidItem = r.item
+                window.itemColorCircleSolidDelegate = r.delegate
+                console.log("[SELFTEST-ITEMCOLOR] circle solid key=" + window.itemColorCircleKey
+                            + " before=" + window.itemColorCircleBefore
+                            + " item=" + window.itemColorCircleSolidItem
+                            + " itemA=" + window.itemColorAlpha(window.itemColorCircleSolidItem).toFixed(3)
+                            + " delegate=" + window.itemColorCircleSolidDelegate
+                            + " delegateA=" + window.itemColorAlpha(window.itemColorCircleSolidDelegate).toFixed(3))
+                if (window.itemColorCircleKey !== "") {
+                    SelfTest.grab("canvasItem_" + window.itemColorCircleKey, "itemcolor_circle_solid.png")
+                    window.itemColorOpenFor(window.itemColorCircleKey, "itemBackground")
+                }
+            } else if (step === 7) {
+                if (window.itemColorCircleKey !== "")
+                    window.itemColorApply(30)
+            } else if (step === 8) {
+                const r = window.itemColorRead(window.itemColorCircleKey)
+                window.itemColorCircleFadedItem = r.item
+                window.itemColorCircleFadedDelegate = r.delegate
+                console.log("[SELFTEST-ITEMCOLOR] circle faded item=" + window.itemColorCircleFadedItem
+                            + " itemA=" + window.itemColorAlpha(window.itemColorCircleFadedItem).toFixed(3)
+                            + " delegate=" + window.itemColorCircleFadedDelegate
+                            + " delegateA=" + window.itemColorAlpha(window.itemColorCircleFadedDelegate).toFixed(3))
+                // THE KNOWN-GOOD PATH, in the same run: a text item's own colour.
+                const text = editScreen.addCanvasItem("text")
+                if (text) {
+                    window.itemColorTextKey = text.key
+                    window.itemColorTextBefore = window.itemColorHex(text.meta ? text.meta.color : "")
+                    window.itemColorOpenWith(text.key, "textColor")
+                } else {
+                    window.itemColorTextKey = ""
+                    window.itemColorTextBefore = "(no text item)"
+                }
+            } else if (step === 9) {
+                window.itemColorApply(100)
+            } else if (step === 10) {
+                // Read back by KEY, like every other item in this scenario.
+                const text = window.itemColorTextKey !== ""
+                    ? window.itemColorItemOf(window.itemColorTextKey) : null
+                window.itemColorTextAfter = text && text.meta
+                    ? window.itemColorHex(text.meta.color) : ""
+                console.log("[SELFTEST-ITEMCOLOR] text before=" + window.itemColorTextBefore
+                            + " after=" + window.itemColorTextAfter
+                            + " a=" + window.itemColorAlpha(window.itemColorTextAfter).toFixed(3))
+            } else if (step === 11) {
+                window.itemColorClickProbe("circle-under-text", "canvasItem_" + window.itemColorCircleKey)
+            } else if (step === 12) {
+                window.itemColorClickProbe("text", "canvasItem_" + window.itemColorTextKey)
+            } else if (step === 13) {
+                // THE CLICK-THROUGH. (100,90) lies inside the CIRCLE's box AND
+                // inside the text item's box above it, so Qt delivers the tap to
+                // the text item — the reported "you pick the text item instead of
+                // the shape". One tick = 700 ms, inside the 350-900 ms window
+                // that separates a deliberate second click from a double-click.
+                window.itemColorCycleFirst = window.itemColorCycleClick("click1", window.itemColorTextKey)
+            } else if (step === 14) {
+                window.itemColorCycleSecond = window.itemColorCycleClick("click2", window.itemColorTextKey)
+            } else if (step === 15) {
+                console.log("[SELFTEST-ITEMCOLOR] cycle summary first=" + window.itemColorCycleFirst
+                            + " second=" + window.itemColorCycleSecond)
+                selfTestItemColorTick.stop()
+                selfTestItemColorDone.start()
             }
-            selfTestItemColorTextReport.restart()
         }
     }
     Timer {
-        id: selfTestItemColorTextReport
-        interval: 600
+        id: selfTestItemColorDone
+        interval: 1500              // the grabs save asynchronously
         onTriggered: {
-            window.itemColorTextAfter = window.itemColorMetaOf(window.itemColorText)
-            console.log("[SELFTEST-ITEMCOLOR] text before=" + window.itemColorTextBefore
-                        + " after=" + window.itemColorTextAfter
-                        + " a=" + window.itemColorAlpha(window.itemColorTextAfter).toFixed(3))
-            // The verdict is about the SHAPE: the item holds a faded colour AND
-            // the delegate the operator looks at draws it. A pass on the item
-            // alone would not have caught "the model changed, the canvas did not".
-            const held = window.itemColorAlpha(window.itemColorShapeAfter) < 0.9
-            const drawn = window.itemColorAlpha(window.itemColorShapeDelegate) < 0.9
-            console.log("[SELFTEST-ITEMCOLOR] summary shapeItemFaded=" + held
-                        + " shapeCanvasFaded=" + drawn)
-            console.log("[SELFTEST-ITEMCOLOR] verdict=" + (held && drawn ? "APPLIED" : "NOT-APPLIED"))
+            // The property half of the verdict; the runner adds the pixel half.
+            const ok = (v) => window.itemColorAlpha(v) >= 0.9
+            const faded = (v) => window.itemColorAlpha(v) > 0 && window.itemColorAlpha(v) < 0.4
+            const rectOk = ok(window.itemColorRectSolidItem) && ok(window.itemColorRectSolidDelegate)
+                && faded(window.itemColorRectFadedItem) && faded(window.itemColorRectFadedDelegate)
+            const circleOk = window.itemColorCircleKey !== ""
+                && ok(window.itemColorCircleSolidItem) && ok(window.itemColorCircleSolidDelegate)
+                && faded(window.itemColorCircleFadedItem) && faded(window.itemColorCircleFadedDelegate)
+            // The click-through: the second tap at the shared point must land
+            // on the SHAPE, not on the text item that answered the first one.
+            const cycleOk = window.itemColorCycleSecond === window.itemColorCircleKey
+            console.log("[SELFTEST-ITEMCOLOR] summary rectPropsOk=" + rectOk
+                        + " circlePropsOk=" + circleOk
+                        + " cycleOk=" + cycleOk)
+            console.log("[SELFTEST-ITEMCOLOR] verdict=" + (rectOk && circleOk && cycleOk
+                        ? "PROPS-OK" : "NOT-APPLIED"))
             SelfTest.quit()
         }
     }
+
 
     // ---- The sermon-folder sweep's OWN notice, read off the screen ----
     // "Add sermons folder" reports what it imported and, for every file it would

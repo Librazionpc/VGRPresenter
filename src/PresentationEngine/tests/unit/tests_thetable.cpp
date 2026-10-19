@@ -352,6 +352,47 @@ void TestTheTableLibrary() {
         CHECK(codeIn.ok() && !codeIn.value().empty());
         auto codeOut = lib->Search("47-0513", 60, false, "Y1953", 0);
         CHECK(codeOut.ok() && codeOut.value().empty());
+
+        // ---- a BARE PARAGRAPH NUMBER inside the lock is a LOCATION -----------
+        // (user call: "current book for paragraph search so if i turn it on and 50
+        // it should bring it up"). The scope names the sermon being read, so "2"
+        // is its second paragraph — the row opens straight there, exactly like a
+        // typed citation paragraph.
+        auto paraInScope = lib->Search("2", 60, false, "Y1953", 1);
+        CHECK(paraInScope.ok() && paraInScope.value().size() == 1);
+        CHECK(paraInScope.value()[0].bookId == "Y1953");
+        CHECK(paraInScope.value()[0].chapter == 1);
+        CHECK(paraInScope.value()[0].verse == 2);
+        CHECK(paraInScope.value()[0].reference == "53-0217 - Only Believe 2");
+        CHECK(paraInScope.value()[0].snippet.find("second paragraph") != std::string::npos);
+        // The written forms mean the same thing, and a one-digit number is a
+        // paragraph too (the word rule would have rejected it).
+        auto marked = lib->Search("¶2", 60, false, "Y1953", 1);
+        CHECK(marked.ok() && marked.value().size() == 1 && marked.value()[0].verse == 2);
+        auto written = lib->Search("paragraph 2", 60, false, "Y1953", 1);
+        CHECK(written.ok() && written.value().size() == 1 && written.value()[0].verse == 2);
+        auto singleDigit = lib->Search("1", 60, false, "Y1953", 1);
+        CHECK(singleDigit.ok() && singleDigit.value().size() == 1 && singleDigit.value()[0].verse == 1);
+        // A paragraph the sermon does NOT have is not a location: the query falls
+        // through to the word scan (nothing here says "54") rather than inventing
+        // a row past the sermon's end.
+        auto tooHigh = lib->Search("54", 60, false, "Y1953", 1);
+        CHECK(tooHigh.ok() && tooHigh.value().empty());
+        // A YEAR keeps its word meaning inside the lock (three digits is the most a
+        // paragraph number takes), so searching for "1959" is still a text search.
+        auto yearInLock = lib->Search("1959", 60, false, "Y1953", 1);
+        CHECK(yearInLock.ok() && yearInLock.value().empty());
+        // Locked only to the YEAR: every sermon in it that has the paragraph
+        // answers, which is the "current book" reading of the same number.
+        auto bookWide = lib->Search("1", 60, false, "Y1953", 0);
+        CHECK(bookWide.ok() && bookWide.value().size() == 3);
+        for (const auto& h : bookWide.value())
+            CHECK(h.bookId == "Y1953" && h.verse == 1);
+        // UNLOCKED, the same text stays an ordinary word search: no numbered row
+        // appears, because nothing has said which book the number belongs to.
+        auto unlockedNumber = lib->Search("50");
+        CHECK(unlockedNumber.ok() && unlockedNumber.value().empty());
+        CHECK(!lib->Search("2").ok());   // one character is not a word, and nothing scopes it
     }
     // This test indexed its sermons into the SHARED Search Engine; the next
     // suite owns "table:*" documents and asserts a clean slate — drop ours
@@ -964,4 +1005,47 @@ void TestTheTableTypingTail() {
     //    half-typed query finds nothing — completion is exactly what it refuses.
     auto locked = lib->Search("compelling that you rec", 20, /*exactWords=*/true);
     CHECK(locked.ok() && locked.value().empty());
+}
+
+// THE CITATION NAMES ITS CODE ONCE. A sermon's stored title opens with its own
+// date-code ("0217 Only Believe"), and The Table's codes are not always all
+// digits ("0109E"). The citation's leading code slot used to strip only a
+// digits-before-a-space run, so a suffixed code stayed in the title too and every
+// surface built from it — the reference chip, the pill's search box, each search
+// row, the pane's own reference — read "55-0109E - 0109E Beginning And Ending …".
+// The title keeps the code that IS its identity in the chapter list; the
+// citation line, which prints the code in its own slot, does not repeat it.
+void TestTheTableCitationSuffixCode() {
+    const std::string path = PathOf("suffix/library.json");
+    std::filesystem::remove_all(kRoot + "/suffix");
+    auto lib = lib::TheTableLibrary::Open(path);
+    CHECK(lib->Books().empty());
+    // The corpus' own naming: a leading year, then the date-code and the title
+    // ("1955 0109E Beginning And Ending …"). The shipped library holds titles in
+    // exactly this shape, which is what puts a suffixed code in front of the text.
+    CHECK(lib->ImportSermon(
+        "downloads/1955/1955 0109E Beginning And Ending Of The Gentile Dispensation.txt",
+        "And Daniel was the prophet to the Gentiles, and Daniel saw all the Gentile ages rise and "
+        "fall before the God of heaven set up His kingdom upon the earth in these last days, and "
+        "the prophet spoke of every age that would follow it, one after another, until the end.").ok());
+
+    auto books = lib->Books();
+    CHECK(books.size() == 1);
+    CHECK(books[0].chapters.size() == 1);
+    // The list still names the sermon by its code ("0109E Beginning …").
+    CHECK(books[0].chapters[0].title == "0109E Beginning And Ending Of The Gentile Dispensation");
+
+    // ...and the citation prints it once: year, code, the title WITHOUT the code.
+    CHECK(lib->Citation("Y1955", 1, 0)
+          == "55-0109E - Beginning And Ending Of The Gentile Dispensation");
+    CHECK(lib->Citation("Y1955", 1, 1)
+          == "55-0109E - Beginning And Ending Of The Gentile Dispensation 1");
+    CHECK(lib->CitationCode("Y1955", 1) == "55-0109E");
+
+    // A title that only IS its code keeps it (nothing is left to print otherwise).
+    CHECK(lib->ImportSermon("downloads/1955/1955 0200.txt",
+                            "A sermon whose file name carries no title words at all, only its own "
+                            "date code, still has to read as something in the library list today.")
+              .ok());
+    CHECK(lib->Citation("Y1955", 2, 0) == "55-0200 - 0200");
 }

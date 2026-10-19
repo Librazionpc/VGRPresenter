@@ -161,7 +161,15 @@ Rectangle {
     // The service owns the PAL tap; this tile composites the feed as one
     // more IMAGE layer (the same way the style's PNG/JPG background rides
     // above the base colour), UNDER the on-air content — camera-behind-lyrics.
-    readonly property bool inputTaken: LiveOutputService.inputLabel !== ""
+    // A BLACKOUT SHOWS NOTHING ON THE WALL EITHER. The engine's clear carrier
+    // composes an empty frame (no slide, no style backdrop, and no compositor
+    // layers — see SceneBuilder::ComposeSlide), but this tile ALSO draws its own
+    // QML layers over that frame: the taken input, the style's colour/image, the
+    // block preview and the overlay stack. Without this gate the wall would keep
+    // showing the camera and the overlays while every real output had gone
+    // empty — the one surface the operator checks would lie about the screens.
+    readonly property bool blacked: LiveOutputService.blackedOut
+    readonly property bool inputTaken: !root.blacked && LiveOutputService.inputLabel !== ""
     // Pointed at the provider THE WHOLE TIME the input is taken — NOT only
     // once frames are live: inputLive flips on the Image's own Ready status,
     // so gating the source on it deadlocked the warm-up (empty URL → no
@@ -187,7 +195,7 @@ Rectangle {
     // rule, and the pane's own badges. The two holds are mutually exclusive
     // (taking media clears a taken input and vice versa, service-side), so a
     // taken input still outranks it here.
-    readonly property bool mediaOnAir: LiveOutputService.mediaOnAir
+    readonly property bool mediaOnAir: !root.blacked && LiveOutputService.mediaOnAir
                                        && !root.inputTaken
 
     // A style that gains an image on disk WITHOUT a model mutation (a pick in
@@ -345,8 +353,8 @@ Rectangle {
         // zeroes styleColor, so the pane paints exactly what the frame painted.
         // (`videoLayerUp` used to force transparent here — a second decision on
         // top of the composed one.)
-        color: root.onAirSlide.styleColor === "" ? "transparent"
-                                                  : root.onAirSlide.styleColor
+        color: root.blacked || root.onAirSlide.styleColor === "" ? "transparent"
+                                                                : root.onAirSlide.styleColor
 
         // TRANSPARENCY CONVENTION: the checkerboard lives at the BOTTOM of this
         // pane's stack — under the style image, the taken input/media layer, the
@@ -376,7 +384,10 @@ Rectangle {
         Checkerboard {
             objectName: "selfTestTileCheckers"
             anchors.fill: parent
-            visible: root.onAirSlide.frameTransparent === true
+            // A blackout is the transparency convention's own case: nothing is
+            // painting, so the tile shows the same "no picture" texture it shows
+            // for an empty frame, instead of the style backdrop.
+            visible: root.blacked || root.onAirSlide.frameTransparent === true
             tileSize: 9
             shadeA: "#3a3c48"
             shadeB: "#25262f"
@@ -392,7 +403,7 @@ Rectangle {
             // on disk AND the engine paints it for this slide (clear-on-text
             // step-aside and a take's clear included). A second take gate here
             // could only disagree with the frame.
-            visible: root.onAirSlide.styleImagePainted === true
+            visible: !root.blacked && root.onAirSlide.styleImagePainted === true
             source: root.onAirSlide.styleImagePainted === true
                     ? "file:///" + root.onAirSlide.styleImage : ""
             fillMode: Image.PreserveAspectCrop
@@ -415,7 +426,7 @@ Rectangle {
         DesignPreview {
             objectName: "selfTestTileBackdropPreview"
             anchors.fill: parent
-            visible: root.hasSlidePreview && !root.framePriority
+            visible: !root.blacked && root.hasSlidePreview && !root.framePriority
             showCheckerboard: false
             background: "transparent"
             backgroundImage: ""
@@ -495,7 +506,7 @@ Rectangle {
         // (multiple can be live, stacked in take order) and the OVER-SLIDE
         // group further down for the (more common) above-text placement.
         Repeater {
-            model: LiveOutputService.activeOverlays
+            model: root.blacked ? [] : LiveOutputService.activeOverlays
             delegate: DesignPreview {
                 required property var modelData
                 readonly property var design: OverlayLibraryService.design(modelData.id)
@@ -514,7 +525,7 @@ Rectangle {
         DesignPreview {
             objectName: "selfTestTileDesignPreview"
             anchors.fill: parent
-            visible: root.hasSlidePreview && !root.framePriority
+            visible: !root.blacked && root.hasSlidePreview && !root.framePriority
             // This IS on-air content, never a template/library card — a
             // bound field with nothing to show renders blank, not the raw
             // "{bind}" placeholder syntax (go-live-with-nothing bakes in
@@ -577,7 +588,7 @@ Rectangle {
             // file's own image is exactly what a two-tile disagreement turns on.
             objectName: "selfTestTileFrame"
             anchors.fill: parent
-            visible: root.hasFrame
+            visible: !root.blacked && root.hasFrame
                      && (root.framePriority || !root.hasSlidePreview)
                      && !root.inputTaken
                      // OFF AIR a taken file is drawn by the mediaplay layer above
@@ -605,7 +616,7 @@ Rectangle {
         // matches the MonitorWall toolbar's clear-button z-order comment).
         // Same model/lookup as the UNDER-SLIDE group above.
         Repeater {
-            model: LiveOutputService.activeOverlays
+            model: root.blacked ? [] : LiveOutputService.activeOverlays
             delegate: DesignPreview {
                 required property var modelData
                 readonly property var design: OverlayLibraryService.design(modelData.id)
@@ -893,8 +904,66 @@ Rectangle {
                 anchors.verticalCenter: parent.verticalCenter
                 text: qsTr("Style blocks %1").arg(root.familyLabel(root.onAirSlide.contentType))
                 color: "#9aa0b5"
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 10
+            }
+        }
+    }
+
+    // STALLED FEED marker — THIS output has stopped receiving frames, so the
+    // preview below is not what the audience is seeing: it was blacked out at
+    // the device (LiveOutputService hands the output a black frame the moment
+    // it stalls, so a frozen picture never reads as a live feed). This chip
+    // exists because the tile would otherwise be the one place left showing a
+    // picture — the operator needs the tile to say "this one is dead" rather
+    // than quietly painting its last good frame. Top-LEFT: the taken-input
+    // marker owns the top-right.
+    //
+    // It reads through feedHealthRev — an invokable alone is opaque to QML's
+    // dependency tracking, so the void of the revision is what makes the
+    // binding re-run when the service's stall set changes.
+    readonly property bool feedStalled: {
+        void LiveOutputService.feedHealthRev
+        return LiveOutputService.live && root.isEnabled
+            && LiveOutputService.outputFeedStalled(root.name)
+    }
+
+    Rectangle {
+        objectName: "selfTestTileStallChip"
+        anchors.top: previewPane.top
+        anchors.topMargin: 4
+        anchors.left: previewPane.left
+        anchors.leftMargin: 4
+        width: stallRow.width + 12
+        height: stallRow.height + 6
+        radius: 9
+        visible: root.feedStalled
+        color: "#cc2b0d0d"
+
+        Row {
+            id: stallRow
+            anchors.centerIn: parent
+            spacing: 5
+
+            Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                width: 6; height: 6; radius: 3
+                color: Theme.dangerLight
+                SequentialAnimation on opacity {
+                    running: root.feedStalled
+                    loops: Animation.Infinite
+                    NumberAnimation { to: 0.25; duration: 700 }
+                    NumberAnimation { to: 1.0; duration: 700 }
+                }
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: qsTr("No live feed")
+                color: Theme.dangerLight
+                font.family: Theme.fontFamily
+                font.pixelSize: 10
+                font.weight: Font.DemiBold
+                textFormat: Text.PlainText
             }
         }
     }
@@ -950,7 +1019,7 @@ Rectangle {
                 width: Math.min(implicitWidth, 110)
                 elide: Text.ElideRight
                 color: "#9aa0b5"
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 10
                 text: root.mediaOnAir ? LiveOutputService.mediaName : LiveOutputService.inputLabel
             }

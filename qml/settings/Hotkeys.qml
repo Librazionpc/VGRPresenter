@@ -75,7 +75,17 @@ QtObject {
         copy: "Ctrl+C",
         paste: "Ctrl+V",
         duplicateSelected: "Ctrl+D",
-        addText: "T"
+        addText: "T",
+        // Reference pane (Scripture / The Table) — the arrow keys over the
+        // passage list. Up/Down walk the PICK: the pane's own preview follows,
+        // and nothing is staged, so what is going out cannot change. Left/Right
+        // walk the pick's slides and STAGE the one they land on — the Main
+        // Output tile's preview moves exactly as it does for the wall's ‹ ›
+        // (GO LIVE is still the only thing that commits it to air).
+        previousPassage: "Up",
+        nextPassage: "Down",
+        previousSlide: "Left",
+        nextSlide: "Right"
     })
 
     // The sequences for an action name (one entry for most, two for `accept`),

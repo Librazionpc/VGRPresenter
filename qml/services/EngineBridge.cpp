@@ -40,6 +40,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <mutex>
 
 #include "services/EngineWorker.h"
@@ -1937,6 +1938,46 @@ QImage EngineBridge::previewFrameFor(const QString &label)
     return devId.isEmpty() ? QImage{} : latestPreviewFrame(devId);
 }
 
+QImage EngineBridge::previewPixelsFor(const QString &label)
+{
+    const QString devId = previewIds_.value(label.trimmed());
+    if (devId.isEmpty() || !bps::platform::PlatformAccessor::Installed())
+        return {};
+    auto &video = bps::platform::PlatformAccessor::Get().Video();
+    const std::string id = devId.toStdString();
+    // THE CHEAP QUESTION FIRST: has the tap stored anything since the last pull?
+    // The pump asks this every 16 ms per held feed; copying a 1080p frame (or
+    // worse, decoding a JPEG) to be told "nothing new" is exactly what made the
+    // old shape expensive at any rate above 15 Hz.
+    const uint64_t seq = video.PreviewFrameSeq(id);
+    if (seq == 0) {
+        // No PIXELS yet. That is a warming-up live tap — or a PANE tap, which
+        // never stores pixels at all (a thumbnail publishes JPEG and nothing
+        // else). The JPEG path answers both, and it is what this puller served
+        // before: a card's "is it producing?" question rides on it.
+        return latestPreviewFrame(devId);
+    }
+    if (seq == previewPixelsSeq_.value(devId, 0))
+        return previewPixelsLast_.value(devId);
+    auto pixels = video.PreviewFramePixels(id);
+    if (pixels.empty())
+        return previewPixelsLast_.value(devId);   // hold-last, like every pull here
+    // The PAL hands over tightly packed RGBA8 (its contract), which is ALSO the
+    // compositor's layout — so this is one copy and no format conversion at all
+    // (previewFrameFor's JPEG would have cost a decode here plus a swizzle later).
+    QImage frame(static_cast<int>(pixels.width), static_cast<int>(pixels.height),
+                 QImage::Format_RGBA8888);
+    if (frame.isNull())
+        return {};
+    const qsizetype rowBytes = static_cast<qsizetype>(pixels.width) * 4;
+    for (uint32_t y = 0; y < pixels.height; ++y)
+        std::memcpy(frame.scanLine(static_cast<int>(y)),
+                    pixels.rgba.data() + static_cast<size_t>(y) * rowBytes, rowBytes);
+    previewPixelsSeq_[devId] = pixels.seq;
+    previewPixelsLast_[devId] = frame;
+    return frame;
+}
+
 // The status light's probe (see the header): the cached answer when there is
 // one, otherwise a RATE-LIMITED ping that NAMES the source, so the sweep that
 // answers it is asked for that device instead of hoping it is in the used set.
@@ -2241,6 +2282,26 @@ QImage EngineBridge::VideoPreviewProvider::requestImage(const QString &id, QSize
     return frame;
 }
 
+void EngineBridge::markTapLiveOffThread(const QString &label, const QString &kind,
+                                        const QString &owner)
+{
+    if (owner == QLatin1String("card"))
+        return;   // a thumbnail keeps the pane contract
+    if (kind == QLatin1String("ndi"))
+        return;   // a receiver is not a PAL tap — its frames are already raw
+    const QString id = previewIds_.value(label.trimmed());
+    if (id.isEmpty())
+        return;
+    // QUEUED, not called: SetPreviewLive takes the preview table's mutex (the
+    // same one a capture worker holds while it opens or publishes), and this is
+    // reached from the take/bus reconcile path on the interface thread.
+    vgr::EngineWorker::instance().runOffThread([id] {
+        if (!bps::platform::PlatformAccessor::Installed())
+            return;
+        bps::platform::PlatformAccessor::Get().Video().SetPreviewLive(id.toStdString(), true);
+    });
+}
+
 bool EngineBridge::startVideoPreview(const QString &deviceLabel, const QString &mode,
                                      const QString &owner)
 {
@@ -2294,8 +2355,18 @@ bool EngineBridge::startVideoPreview(const QString &deviceLabel, const QString &
                              || previewModes_.value(want) != effectiveMode;
     previewIds_[want] = id;
     previewModes_[want] = effectiveMode;
-    if (!needRestart)
+    if (!needRestart) {
+        // Already running (usually because a card opened it first): the tap is
+        // the same one, but a PROGRAM owner still has to be able to promote it.
+        markTapLiveOffThread(want, QStringLiteral("camera"), owner);
         return true;
+    }
+    // A REPLACED tap starts its frame counter at 1 again, and a counter is only
+    // comparable within one tap: an old cached sequence could otherwise match the
+    // new tap's first frame and leave the pixel puller holding the PREVIOUS
+    // device's picture. Cleared where the replacement is decided.
+    previewPixelsSeq_.remove(id);
+    previewPixelsLast_.remove(id);
     // The DEVICE half goes to the worker, as one job: close the old tap (a
     // re-point / camera switch) and open the new one. Both are PAL calls that
     // take the preview table's mutex, and the interface thread must not queue
@@ -2319,6 +2390,8 @@ void EngineBridge::stopVideoPreview(const QString &deviceLabel, const QString &o
     const QString id = previewIds_.take(want);
     previewModes_.remove(want);
     previewLastFrame_.remove(id);   // tap gone — the held frame must not resurrect
+    previewPixelsLast_.remove(id);  // ...and neither may the pixel puller's copy
+    previewPixelsSeq_.remove(id);
     previewDeliveredAt_.remove(id); // ...and neither may its delivery stamp
     previewPulledAt_.remove(id);    // ...nor its "something was watching" clock
     if (id.isEmpty() || !bps::platform::PlatformAccessor::Installed())
@@ -2477,12 +2550,17 @@ bool EngineBridge::startScreenPreview(const QString &monitorLabel, const QString
         if (diag)
             qInfo("EngineBridge[diag] startScreenPreview: existing tap id='%s'",
                   qUtf8Printable(previewIds_.value(want)));
+        // Same promotion as the camera path: an existing tap may have been opened
+        // for a thumbnail and must become the program feed for this owner.
+        markTapLiveOffThread(want, QStringLiteral("screen"), owner);
         return true;
     }
     // The id is decided HERE (this thread's own table, which the stop path and
     // the frame provider read), and the tap's start is queued: what the
     // interface thread must not wait for is the PAL's preview-table mutex.
     previewIds_[want] = id;
+    previewPixelsSeq_.remove(id);   // a fresh tap counts from its own 1 (see the camera path)
+    previewPixelsLast_.remove(id);
     openTapOffThread(want, QStringLiteral("screen"), owner, id, QString());
     // The thumbnail may have been built BEFORE this label existed in the
     // roster (its provider request would have warned "no tap") — the nonce
@@ -2502,6 +2580,8 @@ void EngineBridge::stopScreenPreview(const QString &monitorLabel, const QString 
     previewOwners_.erase(it);
     const QString id = previewIds_.take(want);
     previewLastFrame_.remove(id);   // tap gone — the held frame must not resurrect
+    previewPixelsLast_.remove(id);  // ...and neither may the pixel puller's copy
+    previewPixelsSeq_.remove(id);
     previewDeliveredAt_.remove(id); // ...and neither may its delivery stamp
     previewPulledAt_.remove(id);    // ...nor its "something was watching" clock
     if (id.isEmpty() || !bps::platform::PlatformAccessor::Installed())
@@ -2628,6 +2708,11 @@ void EngineBridge::openTapOffThread(const QString &label, const QString &kind,
                                                 label.toStdString()); !r.ok())
                     reason = QString::fromStdString(r.error().message);
             }
+            // A program owner gets the tap's LIVE feed (pixels, device rate) in
+            // the same job that opened it — see markTapLiveOffThread for why a
+            // card's tap must stay a pane.
+            if (reason.isEmpty() && owner != QLatin1String("card"))
+                video.SetPreviewLive(deviceId.toStdString(), true);
         }
         // Never touch the bridge's tables from here — this is the worker thread.
         vgr::EngineWorker::onInterfaceThread(this, [this, label, kind, owner, deviceId, recvId, reason] {

@@ -475,7 +475,69 @@ Rectangle {
     function isCanvasObjectSelected(key) {
         return root.selectedCanvasObjects.indexOf(key) >= 0
     }
-    function handleCanvasSelect(key, modifiers) {
+    // ---- CLICKING THROUGH A STACK OF ITEMS --------------------------------
+    // A click lands on the TOPMOST item whose box covers the point, and every
+    // kind's box is a rectangle — so a shape that sits BEHIND a text item (a
+    // band under a caption, the commonest design there is) could not be picked
+    // at all: the click took the text item, and the colour picked next went to
+    // the text item as well (reported: "you pick text item instead of the
+    // shape"). Clicking the same point again now steps DOWN to the next item
+    // under the pointer, and comes to rest on the bottom one.
+    //
+    // A RAPID second click is refused: that is the text item's EDIT gesture,
+    // and stealing it for whatever lies behind the text would make
+    // double-click-to-edit depend on the design underneath.
+    property string canvasCycleKey: ""
+    property point canvasCycleAt: Qt.point(-1, -1)
+    property real canvasCycleAtMs: 0
+    readonly property real canvasCycleSlop: 4
+    readonly property real canvasCycleMinGapMs: 350
+    readonly property real canvasCycleMaxGapMs: 900
+
+    // Every item whose box covers `p`, TOPMOST FIRST (a later item is declared
+    // later, so it paints and hits above an earlier one).
+    function canvasKeysAt(p) {
+        const out = []
+        const items = slideStore.current.items
+        for (let i = items.length - 1; i >= 0; --i) {
+            const it = items[i]
+            if (p.x >= it.x && p.x <= it.x + it.width
+                    && p.y >= it.y && p.y <= it.y + it.height)
+                out.push(it.key)
+        }
+        return out
+    }
+
+    function handleCanvasSelect(key, modifiers, at) {
+        // `at` (canvas coordinates) comes from every tap handler that has one;
+        // it is what makes the click-through below possible. A caller with no
+        // point (the app selecting what it just added) selects as before.
+        if (at !== undefined && (modifiers & (Qt.ShiftModifier | Qt.ControlModifier)) === 0) {
+            const now = Date.now()
+            const samePoint = Math.abs(at.x - root.canvasCycleAt.x) <= root.canvasCycleSlop
+                           && Math.abs(at.y - root.canvasCycleAt.y) <= root.canvasCycleSlop
+            const gap = now - root.canvasCycleAtMs
+            if (samePoint && gap >= root.canvasCycleMinGapMs && gap <= root.canvasCycleMaxGapMs) {
+                const stack = root.canvasKeysAt(at)     // topmost first
+                const from = stack.indexOf(root.canvasCycleKey)
+                if (from >= 0) {
+                    root.canvasCycleAtMs = now
+                    // The bottom item is the end of the stack: further clicks
+                    // keep it rather than wrapping to the top, so the gesture
+                    // has a stable resting place.
+                    if (from + 1 < stack.length) {
+                        const next = stack[from + 1]
+                        root.canvasCycleKey = next
+                        root.selectedCanvasObjects = [next]
+                        mCanvas.forceActiveFocus()
+                    }
+                    return
+                }
+            }
+            root.canvasCycleKey = key
+            root.canvasCycleAt = at
+            root.canvasCycleAtMs = now
+        }
         if (modifiers & Qt.ShiftModifier) {
             const idx = root.selectedCanvasObjects.indexOf(key)
             if (idx >= 0) {
@@ -887,7 +949,7 @@ Rectangle {
         item.bind = String(field && field.bind ? field.bind : "")
         item.meta = Object.assign({}, item.meta, {
             color: "#ffffff",
-            fontFamily: "Segoe UI",
+            fontFamily: FontService.defaultFamily,
             fontSize: fontSize,
             bold: false,
             italic: false,
@@ -978,7 +1040,7 @@ Rectangle {
                 anchors.centerIn: parent
                 anchors.verticalCenterOffset: -2
                 color: Theme.textPrimary
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 15
                 text: "‹"
             }
@@ -997,7 +1059,7 @@ Rectangle {
             x: 50
             y: 14
             color: Theme.textPrimary
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 15
             font.weight: Font.Medium
             // (the design's name follows the library: DesignBackend re-reads it whenever it changes)
@@ -1016,7 +1078,7 @@ Rectangle {
             Text {
                 anchors.centerIn: parent
                 color: Theme.accent
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 10
                 font.weight: Font.Medium
                 text: root.designMode ? (showSession.designKind === "template" ? qsTr("Template") : qsTr("Overlay"))
@@ -1033,7 +1095,7 @@ Rectangle {
             x: parent.width - 204   // right-aligned cluster: stays put at the bar's right end
             y: 17
             color: Theme.textMuted
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 10
             // A design (overlay / template) has no Save: every settled edit is written to its library.
             visible: !root.designMode
@@ -1053,7 +1115,7 @@ Rectangle {
             x: parent.width - 204
             y: 17
             color: Theme.textMuted
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 10
             text: qsTr("Saves as you edit")
         }
@@ -1068,7 +1130,7 @@ Rectangle {
             x: parent.width - 122
             y: 17
             color: fitArea.containsMouse ? Theme.textSecondary : Theme.textMuted
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 10
             text: qsTr("Fit")
             Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
@@ -1135,7 +1197,7 @@ Rectangle {
                 Text {
                     anchors.centerIn: parent
                     color: Theme.textSecondary
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 12
                     text: Math.round(root.canvasZoom * 100) + "%"
                 }
@@ -1539,7 +1601,7 @@ Rectangle {
                         visible: false
                         width: itemTextLabel.width
                         text: itemTextLabel.shownText          // what is on screen, list markers included
-                        font.family: itemTextLabel.tmeta.fontFamily ?? "Segoe UI"
+                        font.family: FontService.resolve(itemTextLabel.tmeta.fontFamily)
                         font.pixelSize: itemTextLabel.measureSize
                         font.weight: itemTextLabel.tmeta.bold ? Font.Bold
                             : itemTextLabel.tmeta.fontWeight === "Regular" ? Font.Normal
@@ -1562,7 +1624,7 @@ Rectangle {
 
                     visible: canvasItemObject.modelData.kind === "text"
                     color: itemTextLabel.tmeta.color ?? "#f2f4fa"
-                    font.family: itemTextLabel.tmeta.fontFamily ?? "Segoe UI"
+                    font.family: FontService.resolve(itemTextLabel.tmeta.fontFamily)
 
                     font.pixelSize: fittedSize
                     fontSizeMode: Text.FixedSize
@@ -1646,7 +1708,8 @@ Rectangle {
                         if (!itemTextLabel.editing)
                             root.endTextEdit()
                     }
-                    onSelectRequested: (mods) => root.handleCanvasSelect(canvasItemObject.modelData.key, mods)
+                    onSelectRequested: (mods, x, y) => root.handleCanvasSelect(canvasItemObject.modelData.key, mods,
+                                                              itemTextLabel.mapToItem(mCanvas, x, y))
                     onMoveRequested: (dx, dy, snapDisabled) => {
                         if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
                             root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
@@ -1698,7 +1761,7 @@ Rectangle {
                     Text {
                         x: 18; y: 7
                         color: Theme.textPrimary
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 8
                         font.weight: Font.Medium
                         text: qsTr("LIVE")
@@ -1709,7 +1772,7 @@ Rectangle {
                     Text {
                         x: 10; y: 68
                         color: Theme.textPrimary
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 9
                         font.weight: Font.Medium
                         // The source picked in cameraSourceModal (see
@@ -1721,7 +1784,7 @@ Rectangle {
                     Text {
                         x: 68; y: 68
                         color: Theme.textMuted
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 9
                         text: qsTr("10:24:07")
                     }
@@ -1738,7 +1801,8 @@ Rectangle {
                             root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
                         }
                         onDragFinished: root.endCanvasDrag()
-                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers)
+                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
+                                                     canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
                     }
                 }
 
@@ -1788,7 +1852,7 @@ Rectangle {
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
                             color: clockContent.tinted ? clockContent.cfg.color : Theme.accentLight
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.weight: Font.DemiBold
                             font.pixelSize: Math.max(10, Math.min(clockContent.width, clockContent.height) * 0.22)
                             text: clockTicker.formatClock(clockTicker.now, clockContent.hour12, clockContent.showSeconds)
@@ -1797,7 +1861,7 @@ Rectangle {
                             visible: clockContent.showDate
                             anchors.horizontalCenter: parent.horizontalCenter
                             color: clockContent.tinted ? Qt.alpha(clockContent.cfg.color, 0.7) : Theme.textMuted
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 10
                             text: Qt.formatDate(clockTicker.now, "dddd, MMMM d")
                         }
@@ -1868,7 +1932,8 @@ Rectangle {
                             root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
                         }
                         onDragFinished: root.endCanvasDrag()
-                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers)
+                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
+                                                     canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
                     }
                 }
 
@@ -1908,7 +1973,7 @@ Rectangle {
                     Text {
                         anchors.centerIn: parent
                         color: Theme.accentLight
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.weight: Font.DemiBold
                         font.pixelSize: Math.max(10, Math.min(timerContent.width, timerContent.height) * 0.28)
                         text: timerTicker.formatDuration(
@@ -1924,7 +1989,8 @@ Rectangle {
                             root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
                         }
                         onDragFinished: root.endCanvasDrag()
-                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers)
+                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
+                                                     canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
                     }
                 }
 
@@ -2023,7 +2089,8 @@ Rectangle {
                             root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
                         }
                         onDragFinished: root.endCanvasDrag()
-                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers)
+                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
+                                                     canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
                     }
                 }
 
@@ -2051,7 +2118,8 @@ Rectangle {
                             root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
                         }
                         onDragFinished: root.endCanvasDrag()
-                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers)
+                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
+                                                     canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
                     }
                 }
 
@@ -2141,7 +2209,8 @@ Rectangle {
                             root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
                         }
                         onDragFinished: root.endCanvasDrag()
-                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers)
+                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
+                                                     canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
                     }
                 }
 
@@ -2200,7 +2269,7 @@ Rectangle {
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
                             color: Theme.textSecondary
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 13
                             font.weight: Font.Medium
                             text: genericPlaceholder.typeInfo.label.toUpperCase()
@@ -2213,7 +2282,7 @@ Rectangle {
                             anchors.horizontalCenter: parent.horizontalCenter
                             visible: canvasItemObject.modelData.text.length > 0
                             color: Theme.textMuted
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 10
                             text: canvasItemObject.modelData.text
                         }
@@ -2231,7 +2300,8 @@ Rectangle {
                             root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
                         }
                         onDragFinished: root.endCanvasDrag()
-                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers)
+                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
+                                                     canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
                     }
                 }
             }
@@ -2269,7 +2339,7 @@ Rectangle {
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
                 color: Theme.textSecondary
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 15
                 text: qsTr("No slides yet")
             }
@@ -2278,7 +2348,7 @@ Rectangle {
                 anchors.horizontalCenter: parent.horizontalCenter
                 horizontalAlignment: Text.AlignHCenter
                 color: Theme.textMuted
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 12
                 wrapMode: Text.Wrap
                 text: qsTr("Add a slide to start building — then place text, cameras and more on the canvas")
@@ -2295,7 +2365,7 @@ Rectangle {
                 Text {
                     anchors.centerIn: parent
                     color: "#ffffff"
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                     font.weight: Font.Medium
                     text: qsTr("+ Add slide")
@@ -2343,7 +2413,7 @@ Rectangle {
                 width: 42; height: parent.height
                 horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                 color: zoomLabelArea.containsMouse ? Theme.textSecondary : Theme.textSecondary
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 12
                 text: Math.round(root.canvasZoom * 100) + "%"
                 Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
@@ -2471,7 +2541,7 @@ Rectangle {
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
                         color: typeChip.active ? Theme.accentLight : Theme.textSecondary
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                         // "text" keeps its Aa letters; every other kind
                         // renders its real IconGlyph (see contentTypes above).
@@ -2509,7 +2579,7 @@ Rectangle {
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
                         color: typeChip.active ? Theme.textPrimary : Theme.textMuted
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 9
                         text: typeChip.modelData.label
                     }
@@ -2842,7 +2912,7 @@ Rectangle {
                                         anchors.centerIn: parent
                                         text: metaChip.token
                                         color: Theme.textMuted
-                                        font.family: "Consolas"
+                                        font.family: FontService.monoFamily
                                         font.pixelSize: 9
                                     }
                                 }
@@ -2966,7 +3036,7 @@ Rectangle {
             x: 12
             y: 12
             color: Theme.textMuted
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 12
             text: qsTr("SLIDES · %1").arg(slideListRepeater.count)
         }
@@ -3032,8 +3102,8 @@ Rectangle {
                 Row {
                     anchors.centerIn: parent
                     spacing: 6
-                    Text { color: Theme.accent; font.family: "Segoe UI"; font.pixelSize: 14; font.weight: Font.Medium; text: "+" }
-                    Text { color: Theme.textSecondary; font.family: "Segoe UI"; font.pixelSize: 13; text: qsTr("Add slide") }
+                    Text { color: Theme.accent; font.family: Theme.fontFamily; font.pixelSize: 14; font.weight: Font.Medium; text: "+" }
+                    Text { color: Theme.textSecondary; font.family: Theme.fontFamily; font.pixelSize: 13; text: qsTr("Add slide") }
                 }
 
                 MouseArea {
@@ -3103,7 +3173,7 @@ Rectangle {
                 width: parent.width / 3
                 horizontalAlignment: Text.AlignHCenter
                 color: root.rightPanelTab === "items" ? Theme.accent : Theme.textSecondary
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 13
                 // Constant weight in every state — a weight that changes
                 // with the active tab changes the label's advance width,
@@ -3126,7 +3196,7 @@ Rectangle {
                 width: parent.width / 3
                 horizontalAlignment: Text.AlignHCenter
                 color: root.rightPanelTab === "text" ? Theme.accent : Theme.textSecondary
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 13
                 font.weight: Font.Medium // constant — see tabItemsLabel above
                 text: qsTr("TEXT")
@@ -3144,7 +3214,7 @@ Rectangle {
                 width: parent.width / 3
                 horizontalAlignment: Text.AlignHCenter
                 color: root.rightPanelTab === "slide" ? Theme.accent : Theme.textSecondary
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 13
                 font.weight: Font.Medium // constant — see tabItemsLabel above
                 text: qsTr("SLIDE")
@@ -3251,7 +3321,7 @@ Rectangle {
             // what put this label on top of the per-layer tile row.
             y: itemsMonitorWall.y + itemsMonitorWall.height + 18
             color: Theme.textSecondary
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 12
             font.weight: Font.Bold
             text: qsTr("SLIDE")
@@ -3278,7 +3348,7 @@ Rectangle {
                 x: 14
                 anchors.verticalCenter: parent.verticalCenter
                 color: Theme.textPrimary
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 14
                 // Same row, two targets: the selected item's background when
                 // something's selected, the slide's own background
@@ -3320,7 +3390,7 @@ Rectangle {
                 Text {
                     anchors.centerIn: parent
                     color: Theme.textSecondary
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 12
                     font.weight: Font.Medium
                     text: qsTr("Change")
@@ -3339,7 +3409,7 @@ Rectangle {
                 anchors.rightMargin: 8
                 anchors.verticalCenter: parent.verticalCenter
                 color: Theme.textMuted
-                font.family: "Segoe UI"
+                font.family: Theme.fontFamily
                 font.pixelSize: 16
                 text: "›"
             }
@@ -3439,7 +3509,7 @@ Rectangle {
             wrapMode: Text.Wrap
             visible: root.rightPanelTab === "text" && !(root.primarySelectedItem !== null && root.primarySelectedItem.kind === "text")
             color: Theme.textMuted
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 13
             text: qsTr("Select a text item on the canvas to edit its formatting.")
         }
@@ -3454,7 +3524,7 @@ Rectangle {
             horizontalAlignment: Text.AlignHCenter
             visible: root.rightPanelTab === "slide"
             color: Theme.textMuted
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 13
             text: qsTr("Coming soon")
         }
@@ -3568,7 +3638,7 @@ Rectangle {
         visible: false
         maxHeight: 320
         model: {
-            const current = root.primarySelectedItem ? (root.primarySelectedItem.meta.fontFamily ?? "Segoe UI") : ""
+            const current = root.primarySelectedItem ? (root.primarySelectedItem.meta.fontFamily ?? FontService.defaultFamily) : ""
             return Qt.fontFamilies().slice().sort().map((f) => ({ label: f, trailing: f === current ? "✓" : "" }))
         }
         onItemActivated: (label) => {

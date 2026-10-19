@@ -258,7 +258,7 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Choose template")
                         color: "#f1f3f8"
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 21
                         font.weight: Font.DemiBold
                     }
@@ -305,7 +305,7 @@ Item {
                             anchors.centerIn: parent
                             text: root.contentTypeLabel.toUpperCase() + " · " + root.templates.length
                             color: Theme.accent
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 10
                             font.weight: Font.Bold
                         }
@@ -314,7 +314,7 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Templates for ") + root.contentTypeLabel.toLowerCase()
                         color: "#8a94a6"
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                     }
                 }
@@ -334,7 +334,7 @@ Item {
                     Text {
                         text: qsTr("Preview")
                         color: "#5c6475"
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 10
                         font.weight: Font.Bold
                     }
@@ -368,7 +368,7 @@ Item {
                             anchors.centerIn: parent
                             text: root.previewTemplate.name
                             color: root.previewTemplate.color || "#9b8ff5"
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 21
                             font.weight: Font.DemiBold
                         }
@@ -377,7 +377,7 @@ Item {
                     Text {
                         text: root.previewTemplate.name
                         color: "#eef1f8"
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 16
                         font.weight: Font.DemiBold
                     }
@@ -389,7 +389,7 @@ Item {
                         color: "#1a1c26"
                         border.color: "#2a2f3a"
                         border.width: 1
-                        Text { id: aspectLabel; anchors.centerIn: parent; text: "16:9"; color: "#8a94a6"; font.family: "Segoe UI"; font.pixelSize: 10 }
+                        Text { id: aspectLabel; anchors.centerIn: parent; text: "16:9"; color: "#8a94a6"; font.family: Theme.fontFamily; font.pixelSize: 10 }
                     }
                 }
 
@@ -403,7 +403,7 @@ Item {
                         visible: root.hasCategoryFilter
                         text: qsTr("Category")
                         color: "#5c6475"
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 10
                         font.weight: Font.Bold
                     }
@@ -427,7 +427,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             text: root.categoryFilterName
                             color: "#c9cedd"
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 14
                         }
                         Text {
@@ -454,7 +454,7 @@ Item {
                     Text {
                         text: qsTr("Templates")
                         color: "#5c6475"
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 10
                         font.weight: Font.Bold
                     }
@@ -481,7 +481,7 @@ Item {
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: parent.width - 24
                                 color: "#c9cedd"
-                                font.family: "Segoe UI"
+                                font.family: Theme.fontFamily
                                 font.pixelSize: 14
                                 selectByMouse: true
                                 onTextChanged: root.searchQuery = text
@@ -490,7 +490,7 @@ Item {
                                     visible: parent.text.length === 0
                                     text: qsTr("Search templates")
                                     color: "#5c6475"
-                                    font.family: "Segoe UI"
+                                    font.family: Theme.fontFamily
                                     font.pixelSize: 14
                                 }
                             }
@@ -505,7 +505,7 @@ Item {
                               : qsTr("Type to search for a template.")
                         color: "#5c6475"
                         wrapMode: Text.Wrap
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                     }
 
@@ -583,7 +583,7 @@ Item {
                                         width: parent.width - 58 - 36
                                         text: tplRow.modelData.name
                                         color: "#eef1f8"
-                                        font.family: "Segoe UI"
+                                        font.family: Theme.fontFamily
                                         font.pixelSize: 15
                                         font.weight: Font.Medium
                                         elide: Text.ElideRight
@@ -645,7 +645,7 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Cancel")
                         color: "#c8cdd9"
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: Font.Medium
                     }
@@ -670,7 +670,7 @@ Item {
                         anchors.centerIn: parent
                         text: qsTr("Use template")
                         color: "#ffffff"
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: Font.DemiBold
                     }

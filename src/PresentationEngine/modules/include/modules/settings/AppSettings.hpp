@@ -53,7 +53,10 @@ class AppSettings {
 public:
     using Listener = std::function<void(const std::string& key)>;
 
-    explicit AppSettings(std::string storageFile);
+    // `baselineFile` (optional): the SHIPPED settings the installer packages — the operator's configured
+    // values. A baseline value is adopted only for a setting this store has NO value for, so an update
+    // fills in what the build ships without resetting what the install already chose. "" = none.
+    explicit AppSettings(std::string storageFile, std::string baselineFile = {});
 
     // Reads the file (a missing file is just the defaults; a damaged one is reported and the defaults are used).
     Result<void> Load();
@@ -110,6 +113,7 @@ private:
     Result<void> Validate(const SettingDef& def, const json::Value& value) const;
 
     std::string storageFile_;
+    std::string baselineFile_;   // shipped settings this store adopts values FROM (never writes to)
     mutable std::mutex mutex_;
     std::map<std::string, json::Value, std::less<>> values_;   // only what differs from the default
     std::map<size_t, Listener> listeners_;

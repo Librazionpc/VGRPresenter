@@ -179,6 +179,25 @@ std::atomic<int> gSplashProgress{0};
 std::atomic<int> gSplashStage{0}; // 0 = engine boot, 1 = interface load, 2 = ready
 std::atomic<qint64> gSplashStageStartMs{0};
 
+// The shell's UI face (NONCLIENTMETRICS' message font), for the splash's GDI
+// text. nullptr when the query fails or the font is blank — CreateFont's own
+// default, which is still not a name this app picked.
+const wchar_t *SystemUiFace()
+{
+    static wchar_t face[LF_FACESIZE] = {};
+    static bool resolved = false;
+    if (!resolved) {
+        resolved = true;
+        NONCLIENTMETRICSW ncm{};
+        ncm.cbSize = sizeof(ncm);
+        if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0) &&
+            ncm.lfMessageFont.lfFaceName[0] != L'\0') {
+            lstrcpynW(face, ncm.lfMessageFont.lfFaceName, LF_FACESIZE);
+        }
+    }
+    return face[0] ? face : nullptr;
+}
+
 qint64 splashClockMs()
 {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -217,7 +236,10 @@ LRESULT CALLBACK splashWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         DeleteObject(background);
         SetBkMode(dc, TRANSPARENT);
 
-        const wchar_t *fontFamily = L"Segoe UI"; // Theme.fontFamily
+        // THE SHELL'S OWN UI FACE, not a name compiled into the splash: the same
+        // rule the renderer follows (FontManager::SystemUiFamily), so the boot
+        // screen, the app chrome and the outputs all follow the platform.
+        const wchar_t *fontFamily = SystemUiFace();
         HFONT bold = CreateFontW(52, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                  DEFAULT_PITCH, fontFamily);
@@ -264,7 +286,7 @@ LRESULT CALLBACK splashWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         TextOutW(dc, textX + vgrSize.cx + 3, logoY - 32, L"Presenter", 9);
         HFONT statusFont = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                                        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                       DEFAULT_PITCH, L"Segoe UI");
+                                       DEFAULT_PITCH, SystemUiFace());
         SelectObject(dc, statusFont);
         SetTextColor(dc, RGB(160, 164, 176));
         RECT status{0, 328, kSplashWidth, 350};
@@ -472,7 +494,10 @@ int main(int argc, char *argv[])
     Q_UNUSED(sourceSerifItalicFontId)
     if (sourceSerifFontId < 0)
         qWarning() << "Bundled Source Serif 4 font could not be loaded";
-    app.setFont(QFont(QStringLiteral("Segoe UI")));
+    // The platform's own UI font for everything Qt draws — asked of Qt, never a
+    // family name written here (see FontService/Theme.fontFamily: the app chrome,
+    // the previews and the rendered outputs all follow the same host face).
+    app.setFont(QFontDatabase::systemFont(QFontDatabase::GeneralFont));
 #ifdef Q_OS_WIN
     // Qt's font database serves QML. Add the same bundled faces to this
     // process's GDI font collection too, which the presentation renderer uses.
@@ -1006,6 +1031,15 @@ int main(int argc, char *argv[])
         QStringLiteral("SelfTestPaneRows"),
         QVariant(qEnvironmentVariableIsSet("VGR_PANEROWS_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The tab-search seed scenario: it opens The Table, fills the dock's search box
+    // from the open sermon's citation line, TYPES a paragraph number at the end of
+    // it and prints whether the pane followed — the exact operator flow the seed
+    // exists for ("so I add 56 at the back"). Its own env var like the rest, so a
+    // plain VGR_SELFTEST=1 run never focuses or types into the search box.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestSeed"),
+        QVariant(qEnvironmentVariableIsSet("VGR_SEED_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     // The edit-canvas scenario: it opens a show, frames a text item to the
     // canvas edge, walks the real cursor onto every adjustment point and resizes
     // the window — so it gets its own env var like the rest (a plain
@@ -1072,6 +1106,24 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty(
         QStringLiteral("SelfTestBlankLive"),
         QVariant(qEnvironmentVariableIsSet("VGR_BLANKLIVE_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The program-feed rate scenario: takes the first camera, counts the service's
+    // frame revisions over a fixed window and reports the rate — the measured
+    // half of "the video bus is lagging on HDMI and NDI" (both outputs render the
+    // compositor this feed fills, so a low rate here IS lag on both). Its own env
+    // var like the rest, so a plain VGR_SELFTEST=1 run never opens a camera.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestInputRate"),
+        QVariant(qEnvironmentVariableIsSet("VGR_INPUTRATE_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The blackout scenario: goes live with one real slide, presses the wall
+    // toolbar's Blackout control, checks the engine painted an empty frame, then
+    // presses it again and checks the content came back — a real click on the
+    // control, not a direct service call. Its own env var like the rest, so a
+    // plain VGR_SELFTEST=1 run never blanks a screen.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestBlackout"),
+        QVariant(qEnvironmentVariableIsSet("VGR_BLACKOUT_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     // The cursor-scaling scenario: it parks the pointer on a plain-cursorShape
     // button at uiScale 1 and again with the window 20% over the design size,

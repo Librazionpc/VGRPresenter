@@ -174,7 +174,7 @@ Item {
             color: !tabRoot.available ? Theme.textMuted
                  : tabRoot.isActive ? Theme.textPrimary
                  : (tabRoot.isHover ? Theme.navLabelMuted : Theme.textSecondary)
-            font.family: "Segoe UI"
+            font.family: Theme.fontFamily
             font.pixelSize: 15
             // One weight for every tab: mixing Bold and DemiBold shifts the glyphs by a pixel.
             font.weight: Font.Bold

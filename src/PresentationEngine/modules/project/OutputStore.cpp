@@ -2,6 +2,7 @@
 
 #include "core/database/DatabaseManager.hpp"
 #include "core/logging/Logger.hpp"
+#include "modules/project/ShippedConfig.hpp"
 
 namespace bps::project {
 
@@ -21,6 +22,10 @@ OutputStore& OutputStore::Instance() {
 }
 
 std::vector<StoredOutput> OutputStore::Get() const {
+    // Same gate as the styles roster: this build's shipped outputs are merged in
+    // once per fingerprint, before anything reads the list (see ShippedConfig.hpp).
+    (void)ApplyShippedConfiguration();
+
     std::vector<StoredOutput> out;
     auto doc = DatabaseManager::Instance().Get(kCollection, kKey);
     if (!doc.ok())

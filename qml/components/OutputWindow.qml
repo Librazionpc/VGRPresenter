@@ -276,12 +276,21 @@ Window {
                                             && onAirSlide.blocks
                                             && onAirSlide.blocks.length > 0
 
-    readonly property bool inputTaken: LiveOutputService.inputLabel !== ""
+    // A BLACKOUT PAINTS NOTHING IN THIS WINDOW EITHER. The engine's clear
+    // carrier composes an empty frame (no slide, no style backdrop, no
+    // compositor layers), but this window draws its own QML layers too — the
+    // style colour/image, the taken input, the media file and the overlay
+    // stack. They all stand down while the blackout is up, so the audience
+    // window goes empty (its own colour is transparent, see the window setup)
+    // rather than keeping the camera behind a cleared engine frame.
+    readonly property bool blacked: LiveOutputService.blackedOut
+    readonly property bool inputTaken: !root.blacked && LiveOutputService.inputLabel !== ""
     readonly property url inputSource: inputTaken
         ? "image://videopreview/" + encodeURIComponent(LiveOutputService.inputLabel)
           + "?n=" + LiveOutputService.inputRev : ""
 
-    readonly property bool mediaOnAir: LiveOutputService.mediaOnAir && !root.inputTaken
+    readonly property bool mediaOnAir: !root.blacked && LiveOutputService.mediaOnAir
+                                       && !root.inputTaken
     readonly property url mediaSource: mediaOnAir && !LiveOutputService.mediaIsAudio
         ? "image://mediaplay?v=" + LiveOutputService.mediaRev : ""
 
@@ -344,12 +353,13 @@ Window {
     // so there is nothing left for a local "is a take up" test to add.
     Rectangle {
         anchors.fill: parent
-        visible: root.onAirSlide.styleColor !== "" && root.onAirSlide.styleColor !== "transparent"
+        visible: !root.blacked && root.onAirSlide.styleColor !== ""
+                 && root.onAirSlide.styleColor !== "transparent"
         color: root.onAirSlide.styleColor
     }
     Image {
         anchors.fill: parent
-        visible: root.onAirSlide.styleImagePainted === true
+        visible: !root.blacked && root.onAirSlide.styleImagePainted === true
         source: root.onAirSlide.styleImagePainted === true
                 ? "file:///" + root.onAirSlide.styleImage : ""
         fillMode: Image.PreserveAspectCrop
@@ -380,7 +390,7 @@ Window {
     // Overlays, UNDER-SLIDE group — same model/lookup as
     // OutputMonitorTile.qml.
     Repeater {
-        model: LiveOutputService.activeOverlays
+        model: root.blacked ? [] : LiveOutputService.activeOverlays
         delegate: DesignPreview {
             required property var modelData
             readonly property var design: OverlayLibraryService.design(modelData.id)
@@ -397,7 +407,7 @@ Window {
     // engine's own separate distributed render for text.
     DesignPreview {
         anchors.fill: parent
-        visible: root.hasSlidePreview && !root.framePriority
+        visible: !root.blacked && root.hasSlidePreview && !root.framePriority
         showBindPlaceholders: false
         showCheckerboard: false
         backgroundImage: root.onAirSlide.styleImagePainted === true
@@ -419,7 +429,7 @@ Window {
     // input/media layer, which already IS the real picture.
     Image {
         anchors.fill: parent
-        visible: root.hasFrame
+        visible: !root.blacked && root.hasFrame
                  && (root.framePriority && !root.mediaOnAir && !root.inputTaken
                      || (!root.hasSlidePreview && !root.mediaOnAir && !root.inputTaken))
         source: root.frameSource
@@ -431,7 +441,7 @@ Window {
     // Overlays, OVER-SLIDE group — above everything, including the slide's
     // own text (FreeShow's own overlays-above-text order).
     Repeater {
-        model: LiveOutputService.activeOverlays
+        model: root.blacked ? [] : LiveOutputService.activeOverlays
         delegate: DesignPreview {
             required property var modelData
             readonly property var design: OverlayLibraryService.design(modelData.id)

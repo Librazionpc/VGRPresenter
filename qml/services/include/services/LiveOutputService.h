@@ -68,6 +68,35 @@ class LiveOutputService : public QObject {
     // to restore — and to keep the toolbar on screen after a Clear all, since
     // the one control that undoes it lives in that toolbar.
     Q_PROPERTY(bool canRestoreCleared READ canRestoreCleared NOTIFY clearedChanged)
+    // IS THE OUTPUT DELIBERATELY SHOWING NOTHING? A blackout is the one action
+    // that puts a clearStage carrier on air (SceneBuilder paints NOTHING for
+    // it — no slide, no style colour, no background image), so the state is
+    // read straight off the on-air slide instead of kept as a second flag that
+    // could disagree with what the engine is drawing. The wall toolbar's
+    // Blackout control is lit while this is true, and pressing it again brings
+    // the hidden content back (endBlackout) — which is why a blackout is a
+    // LATCH and not a fire-and-forget clear: a live service needs a way out.
+    Q_PROPERTY(bool blackedOut READ blackedOut NOTIFY onAirChanged)
+    // ---- Feed health (the header's stall pill + the automatic blackout) ----
+    // Is at least one live output's PROGRAM FEED stalled right now? The live
+    // loop re-presents the composed frame to every output once a second even
+    // while the picture is static (LiveOutputController's kHeartbeatMs), so a
+    // stall is measured against that HEARTBEAT, never against "did the slide
+    // change": a verse that sits for a minute is healthy, an output whose
+    // stamp stops moving for a few seconds is not. See sampleFeedHealth().
+    Q_PROPERTY(bool feedStalled READ feedStalled NOTIFY feedHealthChanged)
+    // Which outputs, in the operator's terms: "M1, M2" (M<n> = the n-th ENABLED
+    // output in roster order). Empty when nothing is stalled.
+    Q_PROPERTY(QString feedStallLabels READ feedStallLabels NOTIFY feedHealthChanged)
+    // The header pill's own line: "M1, M2 · No live feed" while stalled,
+    // "M1 · Feed restored" for a few seconds after it comes back, "" otherwise.
+    Q_PROPERTY(QString feedNoticeText READ feedNoticeText NOTIFY feedHealthChanged)
+    // "stalled" | "restored" | "" — picks the pill's colour.
+    Q_PROPERTY(QString feedNoticeKind READ feedNoticeKind NOTIFY feedHealthChanged)
+    // Bumped with every change above: a monitor tile reads its own stall state
+    // through a binding that has to depend on something notifiable, and an
+    // invokable alone is opaque to the QML engine's dependency tracking.
+    Q_PROPERTY(int feedHealthRev READ feedHealthRev NOTIFY feedHealthChanged)
     // Bumped on every new preview frame; QML Image source appends it.
     Q_PROPERTY(qulonglong frameRev READ frameRev NOTIFY frameRevChanged)
     // Frames the loop has rendered this run (diagnostics).
@@ -408,6 +437,38 @@ public:
     // goLive() falls back to when nothing's queued at all. A no-op when
     // not live.
     Q_INVOKABLE void clearOnAirSlide();
+    // ---- BLACKOUT (the wall toolbar's own control) ------------------------
+    // "Nothing at all on screen", as a deliberate gesture AGAIN. Clear all used
+    // to send a clearStage carrier and painted the screens empty; it now keeps
+    // the output's own look (see clearOnAirSlide), which left the app with no
+    // way to ask for a truly empty screen at all. This is that control, and it
+    // is separate on purpose: clearing CONTENT and hiding the picture from an
+    // audience are different actions, and only one of them should be able to
+    // put a blank screen up in the middle of a service.
+    //
+    // It remembers what was on air first (the whole raw set, so ‹ › still works
+    // after the content comes back) and switches the output to the clearStage
+    // carrier. The engine composes that as an explicitly empty frame, so the
+    // HDMI window, the NDI feed and the monitor camera all go to nothing — the
+    // same carrier a saved show can already carry (ShowConverter).
+    Q_INVOKABLE void blackout();
+    // The way OUT of a blackout: puts back exactly what blackout() hid, through
+    // the same goLiveWithSlides path the content arrived by (a live replacement,
+    // so the session, its NDI sender and the outputs never restart). With
+    // nothing remembered — the carrier came from a saved show, or the session
+    // predates the control — the honest restoration is the output's own look,
+    // the same carrier GO LIVE with nothing staged sends.
+    Q_INVOKABLE void endBlackout();
+    // Is THIS output's program feed stalled? The monitor tile asks by roster
+    // name (its own row) so only the tile whose feed died goes dark — the pill
+    // above names every output that is in the same state.
+    Q_INVOKABLE bool outputFeedStalled(const QString &outputName) const;
+    // The getters behind the feed-health properties (see sampleFeedHealth).
+    bool feedStalled() const { return !stalledOutputs_.isEmpty(); }
+    QString feedStallLabels() const { return stalledLabels_; }
+    QString feedNoticeText() const { return feedNoticeText_; }
+    QString feedNoticeKind() const { return feedNoticeKind_; }
+    int feedHealthRev() const { return feedHealthRev_; }
     // ---- CLEAR ALL / SHOW ALL (the wall toolbar's pair) -------------------
     // ONE entry point for the toolbar's Clear all, so the action and its undo
     // cannot drift apart: it snapshots every layer it is about to take down
@@ -495,6 +556,9 @@ signals:
     void liveChanged();
     void frameRevChanged();
     void onAirChanged();
+    // Any of the feed-health properties above changed (a stall started or
+    // cleared, or the recovery notice expired).
+    void feedHealthChanged();
     void stagedChanged();
     void inputChanged();
     void overlaysChanged();
@@ -588,15 +652,16 @@ private:
     // The blank slide GO LIVE's fallback sends when there is no open show: EMPTY
     // blocks on a transparent background, which the active style still paints —
     // deliberately, because going live with nothing staged is meant to show the
-    // output's own look rather than a black screen. Not a clear: see
-    // goLiveCleared below for the one that is.
+    // output's own look rather than a black screen. Clear all sends this same
+    // carrier (see clearOnAirSlide): the clear is about the CONTENT.
     void goLiveBlank();
-    // The CLEAR carrier clearOnAirSlide() sends: an empty slide that says so
-    // (Slide::clearStage), so the engine paints NOTHING for it — not the style's
-    // colour, not its background image. Clear all is the operator asking for an
-    // empty screen; sending goLiveBlank() instead put the style's poster back on
-    // the outputs, which is the report this exists to answer.
-    void goLiveCleared();
+    // Clear all's content carrier: `goLiveBlank()` — empty blocks (nothing to
+    // show) on a transparent background, which the active style still paints.
+    // The operator's clear takes the CONTENT down and keeps the output's own
+    // look, background image included, so a cleared screen is never a black
+    // hole where the branded backdrop used to be. (The `clearStage` carrier that
+    // paints nothing at all is now its OWN gesture — see blackout() — so
+    // clearing content and hiding the picture never share a control again.)
 
     bool live_ = false;
     // Tab id -> "this tab owns the tile's content and can step it" (see
@@ -646,6 +711,51 @@ private:
     };
     ClearedSnapshot cleared_;
     bool canRestoreCleared() const { return cleared_.valid; }
+
+    // ---- Feed health (see sampleFeedHealth) --------------------------------
+    // The 1 Hz probe behind the automatic feed blackout and the header pill.
+    // Called from pollTick (the 10 Hz timer) and self-throttled to ~1 Hz. A
+    // plain engine read: buffer names and atomic stamps, no frame copy and no
+    // device, so the interface thread spends microseconds on it.
+    void sampleFeedHealth();
+    void setFeedNotice(const QString &text, const QString &kind);
+    // Roster names (not labels) of the outputs whose feed is stalled, the "M1,
+    // M2" line built from the SAME rows, and the pill's own text/kind.
+    QSet<QString> stalledOutputs_;
+    QString stalledLabels_;
+    QString feedNoticeText_;
+    QString feedNoticeKind_;
+    int feedHealthRev_ = 0;
+    // Milestones on steady time: when this session went live (the warm-up grace
+    // that keeps go-live itself from reading as a stall) and the last probe.
+    qint64 liveSinceMs_ = 0;
+    qint64 lastFeedProbeMs_ = 0;
+    // Holds "Feed restored" for a few seconds after a stall clears.
+    QTimer *feedNoticeTimer_ = nullptr;
+
+    // ---- The blackout's own undo (see blackout/endBlackout) ----------------
+    // What the clearStage carrier is HIDING: the on-air set as raw (unstyled)
+    // maps, exactly the shape onAirSlidesRaw() carries, so endBlackout can send
+    // it back through goLiveWithSlides without restyling it twice. Empty while
+    // no blackout of this session's own is up (a carrier from a saved show has
+    // nothing to restore, and endBlackout falls back to goLiveBlank).
+    //
+    // Cleared whenever OTHER content goes on air (goLiveWithSlides), so a stale
+    // set can never be staged by a later stop() or put back over a newer pick.
+    QString blackoutRestoreTitle_;
+    QVariantList blackoutRestoreSlides_;
+    // Is THIS session's blackout up? Set the moment the carrier is sent and
+    // cleared when content (or STOP) takes over. `blackedOut()` also reads the
+    // on-air slide's own flag — the engine's answer, and the only one an older
+    // session or a saved show has — but that answer arrives one poll tick later
+    // (a live replacement is applied by the render worker), and a second press
+    // inside that window must not mistake the blackout for content and save the
+    // CARRIER as what to restore.
+    bool blackoutActive_ = false;
+    // Read straight off the on-air slide's own clearStage flag — the engine's
+    // answer, not a local guess — and only while live (off air nothing is on a
+    // screen to be blacked out).
+    bool blackedOut() const;
 
     QTimer *poll_ = nullptr;   // while live: onAir/frames refresh at 10Hz
     // Off air: asks the engine to keep previewing the open show (see
@@ -699,6 +809,12 @@ private:
         QString kind;       // "camera" | "screen" | "ndi"
         QString mode;       // a camera's capture-mode pick ("" for the others)
         QString deviceId;   // the resolved PAL id / NDI source name, for the log
+        // The cacheKey of the last frame this feed put in the compositor. The
+        // pump runs at the monitor refresh now (it used to run at 15 Hz, which
+        // is what made a 30/60 fps camera stutter on EVERY output — the
+        // compositor only saw one frame in four), so it must not copy a 1080p
+        // picture per tick when the tap has nothing new: same key, no work.
+        qint64 lastFrameKey = 0;
     };
     // Bus number (a block's meta busId) → the feed held for it. GUI thread only,
     // like every other tap table here: written by refreshBusFeeds() (the 10Hz
@@ -734,7 +850,15 @@ private:
     // frame side of the take — the PAL-side taken-input identity is
     // ClearTakenInput, this is the pixels side).
     bool ndiInputLive_ = false;
-    QTimer *inputPump_ = nullptr;   // while taken: inputRev bump at ~15Hz
+    QTimer *inputPump_ = nullptr;   // while taken: bus/input frames into the compositor
+    // The taken input's last pushed frame (cacheKey), for the same reason
+    // BusFeed::lastFrameKey exists — a stationary source costs nothing.
+    qint64 inputFrameKey_ = 0;
+    // Per-label card thumbnail identity (see pumpTick): the cacheKey of the
+    // decode-once frame a held card is showing. A card's Image binds its URL
+    // nonce to inputRev, so the rev must bump when a CARD's picture changes —
+    // including a card-only hold, where no bus or take exists to move.
+    QHash<QString, qint64> cardFrameKeys_;
     // The internal card previews (one-click): label → {kind, mode}. Their
     // taps ride the SAME previewIds_ table under owner "card"; releasing is
     // per-label (endPreviewInput).

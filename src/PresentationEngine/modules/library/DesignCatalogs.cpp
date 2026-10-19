@@ -38,9 +38,20 @@ pres::ContentBlock Outline(pres::ContentBlock b, double width, std::string color
     return b;
 }
 
+// A text block. `fontFamily` stays in the signature for a design that genuinely
+// needs a face, but NO SHIPPED DESIGN PASSES ONE — the catalogs below all pass
+// nullptr, so a shipped template names no font at all.
+//
+// That is the font-agnostic rule, at the data level: "no fontFamily" is not a
+// missing value, it is the request for the HOST's own UI face
+// (FontManager::DefaultFamily) — the same face QML previews resolve through
+// FontService. A catalog that named "Segoe UI"/"Arial" made the shipped look a
+// property of the authoring machine: on a host without it the engine fell back
+// (correctly, but to a different face), and any compare of stored-vs-shipped
+// content differed per install.
 pres::ContentBlock Text(double x, double y, double w, double h, std::string text, double fontSize,
                         std::string background = "transparent", bool bold = false, const char* align = "left",
-                        const char* fontFamily = "Segoe UI", std::string bind = {}, std::string color = "#ffffff",
+                        const char* fontFamily = nullptr, std::string bind = {}, std::string color = "#ffffff",
                         bool italic = false, const char* textCase = "none", const char* verticalAlign = "center") {
     pres::ContentBlock b = At("text", x, y, w, h);
     b.text = std::move(text);
@@ -51,9 +62,15 @@ pres::ContentBlock Text(double x, double y, double w, double h, std::string text
     // the font (down to a 3px floor) when the box is too small for it, never growing past what's set here. Was
     // hardcoded "none" (fixed size + elide), which silently truncated any bound text longer than the block was
     // sized for - a sermon paragraph or a long verse would just cut off mid-sentence with "…" instead of fitting.
+    // The family key is written ONLY when one was named: an empty "fontFamily":""
+    // would read back as a family called "" (and be fingerprinted as a content
+    // difference), while the absent key is the honest "let the host decide".
+    const std::string fontField = (fontFamily && *fontFamily)
+        ? std::format(R"("fontFamily":"{}",)", fontFamily)
+        : std::string();
     b.metaJson = std::format(
-        R"({{"color":"{}","fontFamily":"{}","fontSize":{:.1f},"bold":{},"italic":{},"align":"{}","autoSize":"shrink","textCase":"{}","verticalAlign":"{}"}})",
-        color, fontFamily, fontSize * kSy, bold ? "true" : "false", italic ? "true" : "false", align, textCase, verticalAlign);
+        R"({{"color":"{}",{} "fontSize":{:.1f},"bold":{},"italic":{},"align":"{}","autoSize":"shrink","textCase":"{}","verticalAlign":"{}"}})",
+        color, fontField, fontSize * kSy, bold ? "true" : "false", italic ? "true" : "false", align, textCase, verticalAlign);
     return b;
 }
 
@@ -129,8 +146,8 @@ std::vector<Design> ShippedOverlays() {
         Design name = Overlay("name", "Name", "#0b57a2",
                               { Shape("rectangle", 80, 875, 750, 135, "#0b57a2"),
                                 Shape("rectangle", 80, 875, 50, 135, "#74cbfb"),
-                                Text(130, 935, 700, 75, "Name Surname", 70, "#0b57a2", false, "left", "Arial"),
-                                Text(130, 875, 700, 60, "Title", 40, "#006fcf", true, "left", "Arial", "", "#ffffff", false, "upper") });
+                                Text(130, 935, 700, 75, "Name Surname", 70, "#0b57a2", false, "left", nullptr),
+                                Text(130, 875, 700, 60, "Title", 40, "#006fcf", true, "left", nullptr, "", "#ffffff", false, "upper") });
         name.displayDuration = 4;
         out.push_back(std::move(name));
     }
@@ -207,8 +224,8 @@ std::vector<Design> ShippedTemplates() {
     out.push_back(Template("default_bold", "Default Bold", "song", kTextAccent, { Text(50, 88, 1820, 904, "Default Bold", 100, "transparent", true, "center") }));
     out.push_back(Template("small_bold", "Small Bold", "song", kTextAccent, { Text(50, 88, 1820, 904, "Small Bold", 80, "transparent", true, "center") }));
     out.push_back(Template("double", "Double", "song", kTextAccent,
-                           { Text(30, 550, 1860, 500, "2", 80, "transparent", false, "center", "Segoe UI", "line2", "#dddddd"),
-                             Text(30, 30, 1860, 500, "1", 80, "transparent", false, "left", "Segoe UI", "line1") }));
+                           { Text(30, 550, 1860, 500, "2", 80, "transparent", false, "center", nullptr, "line2", "#dddddd"),
+                             Text(30, 30, 1860, 500, "1", 80, "transparent", false, "left", nullptr, "line1") }));
 
     // A dark translucent band with numbered lines (FreeShow's "Blur box" without the backdrop blur).
     {
@@ -253,7 +270,7 @@ std::vector<Design> ShippedTemplates() {
                            { Text(50, 820, 1820, 220, "1", 70, "transparent", true, "left") }));
     out.push_back(Template("lower_third_white", "Lower Third White", "song", "#800080",
                            { Box(50, 820, 1820, 220, "#ffffff", 20, 5),
-                             Text(75, 830, 1770, 200, "1", 70, "transparent", true, "left", "Segoe UI", "", "#000000") }));
+                             Text(75, 830, 1770, 200, "1", 70, "transparent", true, "left", nullptr, "", "#000000") }));
     out.push_back(Template("lower_third_blue", "Lower Third Blue", "song", "#800080",
                            { Box(50, 820, 1820, 220, "#1c41a8", 0, 5),
                              Text(75, 830, 1770, 200, "1", 80, "transparent", true, "left") }));
@@ -262,90 +279,90 @@ std::vector<Design> ShippedTemplates() {
                              Text(75, 830, 1770, 200, "1", 80, "transparent", true, "left") }));
     out.push_back(Template("lower_third_pastel", "Lower Third Pastel", "song", "#800080",
                            { Box(50, 820, 1820, 220, "#c7d5ff", 0, 5),
-                             Text(75, 830, 1770, 200, "1", 80, "transparent", true, "left", "Segoe UI", "", "#000000") }));
+                             Text(75, 830, 1770, 200, "1", 80, "transparent", true, "left", nullptr, "", "#000000") }));
 
     // ---- presentation ----
     out.push_back(Template("header", "Header", "presentation", kTextAccent,
-                           { Text(208.5, 428.5, 1500, 220, "Header", 180, "transparent", true, "center", "Segoe UI", "title") }));
+                           { Text(208.5, 428.5, 1500, 220, "Header", 180, "transparent", true, "center", nullptr, "title") }));
     out.push_back(Template("text", "Text", "presentation", kTextAccent,
-                           { Text(50.5, 35, 1820, 220, "Header", 120, "transparent", true, "left", "Segoe UI", "title"),
-                             Text(50.5, 290, 1820, 750, "Text", 80, "transparent", false, "left", "Segoe UI", "text") }));
+                           { Text(50.5, 35, 1820, 220, "Header", 120, "transparent", true, "left", nullptr, "title"),
+                             Text(50.5, 290, 1820, 750, "Text", 80, "transparent", false, "left", nullptr, "text") }));
     out.push_back(Template("metadata", "Metadata", "presentation", kTextAccent,
-                           { Text(30, 910, 1860, 150, "Metadata", 30, "transparent", false, "left", "Segoe UI", "notes", "#cccccc") }));
+                           { Text(30, 910, 1860, 150, "Metadata", 30, "transparent", false, "left", nullptr, "notes", "#cccccc") }));
     out.push_back(Template("blue_header", "Panel Header", "presentation", "#747680",
                            { Box(-850, -600, 1600, 1600, "#141519"),
-                             Text(720, 640, 1130, 210, "1", 120, "transparent", true, "left", "Arial", "title"),
-                             Text(720, 850, 1130, 60, "2", 50, "transparent", false, "left", "Arial", "text") }));
+                             Text(720, 640, 1130, 210, "1", 120, "transparent", true, "left", nullptr, "title"),
+                             Text(720, 850, 1130, 60, "2", 50, "transparent", false, "left", nullptr, "text") }));
     out.push_back(Template("blue_main", "Panel Content", "presentation", "#747680",
                            { Box(0, 0, 500, 1080, "#141519"),
-                             Text(550, 50, 1320, 980, "1", 80, "transparent", true, "left", "Arial") }));
+                             Text(550, 50, 1320, 980, "1", 80, "transparent", true, "left", nullptr) }));
     out.push_back(Template("bullets", "Bullets", "presentation", "#747680",
                            { Text(50, 88, 1820, 904, "• Bullet 1\n• Bullet 2\n• Bullet 3", 100, "transparent", true, "left") }));
 
     // ---- scripture: verse boxes over the screen, reference below ----
     {
         std::vector<pres::ContentBlock> s = { Box(30, 30, 1860, 865, "#66000000", 20),
-                                              Text(55, 45, 1810, 835, "{scripture_number} {scripture_text}", 80, "transparent", false, "left", "Segoe UI", "text"),
+                                              Text(55, 45, 1810, 835, "{scripture_number} {scripture_text}", 80, "transparent", false, "left", nullptr, "text"),
                                               Box(30, 900, 1860, 150, "transparent"),
-                                              Text(30, 905, 1860, 80, "{scripture_reference}", 55, "transparent", false, "left", "Segoe UI", "ref", "#cccccc"),
-                                              Text(30, 970, 1860, 70, "{scripture_name}", 40, "transparent", false, "left", "Segoe UI", "", "#b3b3b3") };
+                                              Text(30, 905, 1860, 80, "{scripture_reference}", 55, "transparent", false, "left", nullptr, "ref", "#cccccc"),
+                                              Text(30, 970, 1860, 70, "{scripture_name}", 40, "transparent", false, "left", nullptr, "", "#b3b3b3") };
         out.push_back(Template("scripture", "Scripture", "scripture", kScriptureAccent, std::move(s)));
     }
     {
         std::vector<pres::ContentBlock> s = { Box(30, 40, 1860, 400, "#66000000", 20),
-                                              Text(55, 50, 1810, 380, "{scripture1_number} {scripture1_text}", 70, "transparent", false, "left", "Segoe UI", "text"),
+                                              Text(55, 50, 1810, 380, "{scripture1_number} {scripture1_text}", 70, "transparent", false, "left", nullptr, "text"),
                                               Box(30, 475, 1860, 400, "#66000000", 20),
-                                              Text(55, 485, 1810, 380, "{scripture2_number} {scripture2_text}", 70, "transparent", false, "left", "Segoe UI", "text"),
-                                              Text(30, 905, 1860, 80, "{scripture_reference}", 55, "transparent", false, "left", "Segoe UI", "ref", "#cccccc"),
-                                              Text(30, 970, 1860, 70, "{scripture_name}", 40, "transparent", false, "left", "Segoe UI", "", "#b3b3b3") };
+                                              Text(55, 485, 1810, 380, "{scripture2_number} {scripture2_text}", 70, "transparent", false, "left", nullptr, "text"),
+                                              Text(30, 905, 1860, 80, "{scripture_reference}", 55, "transparent", false, "left", nullptr, "ref", "#cccccc"),
+                                              Text(30, 970, 1860, 70, "{scripture_name}", 40, "transparent", false, "left", nullptr, "", "#b3b3b3") };
         out.push_back(Template("scripture_2", "Scripture 2", "scripture", kScriptureAccent, std::move(s)));
     }
     {
         std::vector<pres::ContentBlock> s;
         for (int i = 0; i < 3; ++i) {
             s.push_back(Box(30, 40 + i * 280, 1860, 250, "#66000000", 20));
-            s.push_back(Text(55, 50 + i * 280, 1810, 230, "{scripture" + std::to_string(i + 1) + "_number} {scripture" + std::to_string(i + 1) + "_text}", 60, "transparent", false, "left", "Segoe UI", "text"));
+            s.push_back(Text(55, 50 + i * 280, 1810, 230, "{scripture" + std::to_string(i + 1) + "_number} {scripture" + std::to_string(i + 1) + "_text}", 60, "transparent", false, "left", nullptr, "text"));
         }
-        s.push_back(Text(30, 905, 1860, 80, "{scripture_reference}", 55, "transparent", false, "left", "Segoe UI", "ref", "#cccccc"));
-        s.push_back(Text(30, 970, 1860, 70, "{scripture_name}", 40, "transparent", false, "left", "Segoe UI", "", "#b3b3b3"));
+        s.push_back(Text(30, 905, 1860, 80, "{scripture_reference}", 55, "transparent", false, "left", nullptr, "ref", "#cccccc"));
+        s.push_back(Text(30, 970, 1860, 70, "{scripture_name}", 40, "transparent", false, "left", nullptr, "", "#b3b3b3"));
         out.push_back(Template("scripture_3", "Scripture 3", "scripture", kScriptureAccent, std::move(s)));
     }
     {
         std::vector<pres::ContentBlock> s;
         for (int i = 0; i < 4; ++i) {
             s.push_back(Box(30, 40 + i * 210, 1860, 200, "#66000000", 20));
-            s.push_back(Text(55, 48 + i * 210, 1810, 184, "{scripture" + std::to_string(i + 1) + "_number} {scripture" + std::to_string(i + 1) + "_text}", 60, "transparent", false, "left", "Segoe UI", "text"));
+            s.push_back(Text(55, 48 + i * 210, 1810, 184, "{scripture" + std::to_string(i + 1) + "_number} {scripture" + std::to_string(i + 1) + "_text}", 60, "transparent", false, "left", nullptr, "text"));
         }
-        s.push_back(Text(30, 905, 1860, 80, "{scripture_reference}", 55, "transparent", false, "left", "Segoe UI", "ref", "#cccccc"));
-        s.push_back(Text(30, 970, 1860, 70, "{scripture_name}", 40, "transparent", false, "left", "Segoe UI", "", "#b3b3b3"));
+        s.push_back(Text(30, 905, 1860, 80, "{scripture_reference}", 55, "transparent", false, "left", nullptr, "ref", "#cccccc"));
+        s.push_back(Text(30, 970, 1860, 70, "{scripture_name}", 40, "transparent", false, "left", nullptr, "", "#b3b3b3"));
         out.push_back(Template("scripture_4", "Scripture 4", "scripture", kScriptureAccent, std::move(s)));
     }
 
     // ---- scripture lower thirds: white bars with an orange reference chip ----
     {
         std::vector<pres::ContentBlock> s = { Box(30, 765, 1860, 238, "#ffffff", 20),
-                                              Text(55, 775, 1810, 218, "{scripture_number} {scripture_text}", 80, "transparent", false, "left", "Segoe UI", "text", "#000000"),
+                                              Text(55, 775, 1810, 218, "{scripture_number} {scripture_text}", 80, "transparent", false, "left", nullptr, "text", "#000000"),
                                               Box(1442, 960, 448, 88, "#ff851b", 10),
-                                              Text(1445, 962, 442, 50, "{scripture_reference}", 40, "transparent", false, "left", "Segoe UI", "ref", "#000000"),
-                                              Text(1445, 1005, 442, 40, "{scripture_name}", 30, "transparent", false, "left", "Segoe UI", "", "#000000") };
+                                              Text(1445, 962, 442, 50, "{scripture_reference}", 40, "transparent", false, "left", nullptr, "ref", "#000000"),
+                                              Text(1445, 1005, 442, 40, "{scripture_name}", 30, "transparent", false, "left", nullptr, "", "#000000") };
         out.push_back(Template("scripture_lt", "Scripture Lower Third", "scripture", kScriptureAccent, std::move(s)));
     }
     {
         std::vector<pres::ContentBlock> s = { Box(30, 765, 1860, 120, "#ffffff", 20),
-                                              Text(55, 768, 1810, 114, "{scripture1_number} {scripture1_text}", 80, "transparent", false, "left", "Segoe UI", "text", "#000000"),
+                                              Text(55, 768, 1810, 114, "{scripture1_number} {scripture1_text}", 80, "transparent", false, "left", nullptr, "text", "#000000"),
                                               Box(30, 885, 1860, 120, "#dddddd", 20),
-                                              Text(55, 888, 1810, 114, "{scripture2_number} {scripture2_text}", 80, "transparent", false, "left", "Segoe UI", "text", "#000000"),
+                                              Text(55, 888, 1810, 114, "{scripture2_number} {scripture2_text}", 80, "transparent", false, "left", nullptr, "text", "#000000"),
                                               Box(1442, 960, 448, 88, "#ff851b", 10),
-                                              Text(1445, 962, 442, 50, "{scripture_reference}", 40, "transparent", false, "left", "Segoe UI", "ref", "#000000"),
-                                              Text(1445, 1005, 442, 40, "{scripture_name}", 30, "transparent", false, "left", "Segoe UI", "", "#000000") };
+                                              Text(1445, 962, 442, 50, "{scripture_reference}", 40, "transparent", false, "left", nullptr, "ref", "#000000"),
+                                              Text(1445, 1005, 442, 40, "{scripture_name}", 30, "transparent", false, "left", nullptr, "", "#000000") };
         out.push_back(Template("scripture_lt_2", "Scripture Lower Third 2", "scripture", kScriptureAccent, std::move(s)));
     }
 
     // FreeShow's scripture formatting helpers: a bracketed or parenthesised aside in a dim italic.
     out.push_back(Template("brackets", "Brackets", "scripture", "#515151",
-                           { Text(50, 88, 1820, 904, "[Brackets]", 60, "transparent", false, "center", "Segoe UI", "", "#999999", true) }));
+                           { Text(50, 88, 1820, 904, "[Brackets]", 60, "transparent", false, "center", nullptr, "", "#999999", true) }));
     out.push_back(Template("parentheses", "Parentheses", "scripture", "#515151",
-                           { Text(50, 88, 1820, 904, "(Parentheses)", 60, "transparent", false, "center", "Segoe UI", "", "#cccccc") }));
+                           { Text(50, 88, 1820, 904, "(Parentheses)", 60, "transparent", false, "center", nullptr, "", "#cccccc") }));
 
     // ---- table: the sermon layouts (The Table tab) — its own content type so
     // each tab lists only its own layouts, and now its OWN placeholders too
@@ -355,10 +372,10 @@ std::vector<Design> ShippedTemplates() {
     // The year takes that slot, and the body is paragraphs, not verses.
     {
         std::vector<pres::ContentBlock> s = { Box(30, 30, 1860, 865, "#66000000", 20),
-                                              Text(55, 45, 1810, 835, "{table_number} {table_text}", 64, "transparent", false, "left", "Segoe UI", "text"),
+                                              Text(55, 45, 1810, 835, "{table_number} {table_text}", 64, "transparent", false, "left", nullptr, "text"),
                                               Box(30, 900, 1860, 150, "transparent"),
-                                              Text(30, 905, 1860, 80, "{table_reference}", 55, "transparent", false, "left", "Segoe UI", "ref", "#cccccc"),
-                                              Text(30, 970, 1860, 70, "{table_year}", 40, "transparent", false, "left", "Segoe UI", "", "#b3b3b3") };
+                                              Text(30, 905, 1860, 80, "{table_reference}", 55, "transparent", false, "left", nullptr, "ref", "#cccccc"),
+                                              Text(30, 970, 1860, 70, "{table_year}", 40, "transparent", false, "left", nullptr, "", "#b3b3b3") };
         out.push_back(Template("table", "Table", "table", kTableAccent, std::move(s)));
     }
     {
@@ -383,10 +400,10 @@ std::vector<Design> ShippedTemplates() {
         for (int i = 0; i < 3; ++i) {
             s.push_back(Box(30, 40 + i * 280, 1860, 250, "#66000000", 20));
             s.push_back(Text(55, 50 + i * 280, 1810, 230, slots[i], i == 0 ? 72.0 : 54.0,
-                             "transparent", false, "left", "Segoe UI", i == 1 ? "text" : ""));
+                             "transparent", false, "left", nullptr, i == 1 ? "text" : ""));
         }
-        s.push_back(Text(30, 905, 1860, 80, "{table_reference}", 55, "transparent", false, "left", "Segoe UI", "ref", "#cccccc"));
-        s.push_back(Text(30, 970, 1860, 70, "{table_year} · {table_code}", 40, "transparent", false, "left", "Segoe UI", "", "#b3b3b3"));
+        s.push_back(Text(30, 905, 1860, 80, "{table_reference}", 55, "transparent", false, "left", nullptr, "ref", "#cccccc"));
+        s.push_back(Text(30, 970, 1860, 70, "{table_year} · {table_code}", 40, "transparent", false, "left", nullptr, "", "#b3b3b3"));
         out.push_back(Template("table_3", "Table 3", "table", kTableAccent, std::move(s)));
     }
     return out;
@@ -394,8 +411,8 @@ std::vector<Design> ShippedTemplates() {
 
 // A new template starts as a title and a body that show the slide's own fields.
 std::vector<pres::ContentBlock> TemplateStarter() {
-    return { Text(100, 90, 1720, 170, "Title", 90, "transparent", true, "center", "Segoe UI", "title"),
-             Text(100, 300, 1720, 680, "Text", 70, "transparent", false, "center", "Segoe UI", "text") };
+    return { Text(100, 90, 1720, 170, "Title", 90, "transparent", true, "center", nullptr, "title"),
+             Text(100, 300, 1720, 680, "Text", 70, "transparent", false, "center", nullptr, "text") };
 }
 
 } // namespace
@@ -434,6 +451,15 @@ std::unique_ptr<DesignLibrary> MakeOverlayLibrary(std::string storageFile) {
 
 std::unique_ptr<DesignLibrary> MakeTemplateLibrary(std::string storageFile) {
     return std::make_unique<DesignLibrary>(std::move(storageFile), TemplateLibraryConfig());
+}
+
+std::string SeedStoreJson(const DesignLibraryConfig& config) {
+    // NO store path: Load() takes the same "nothing on disk" path a fresh install takes — it seeds
+    // exactly what ships — and its save is a no-op (DesignLibrary::CommitSave returns early for an
+    // empty path), so this only ever produces text.
+    DesignLibrary library(std::string(), config);
+    (void)library.Load();
+    return library.StoreJson();
 }
 
 } // namespace bps::library

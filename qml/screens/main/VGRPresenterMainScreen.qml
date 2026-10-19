@@ -2,6 +2,9 @@ import QtQuick
 import QtQuick.Shapes
 import VGRPresenterUI
 import "../../components"
+// The app's action-named keyboard binding (imported AFTER QtQuick so `Shortcut`
+// is the shortcuts/ wrapper; the chords live in qml/settings/Hotkeys.qml).
+import "../../shortcuts"
 
 Rectangle {
     id: vGRPresenter_Main_Screen
@@ -105,6 +108,34 @@ Rectangle {
     signal designEditRequested(string kind, string id)
     // What the centre page shows (FreeShow's activeShow): a project item, or a show clicked in the Shows table. null = the splash.
     property var centerItem: null
+    // ---- the Shows table's arrow keys (from the Hotkeys map) ---------------
+    // Up/Down walk the table one show at a time and put the one they land on in
+    // the centre page — the keyboard's version of clicking a row, with the row
+    // held in the MIDDLE of the list so the walk stays readable (the table is a
+    // virtualized ListView of up to 680 shows; without a positioning call the
+    // cursor is wherever row 400 is, i.e. off screen).
+    //
+    // Gated exactly like the reference pane's arrows: only while this screen and
+    // its Shows pane are the ones on screen, and never while a text field holds
+    // the keyboard (a window shortcut is delivered before the focus item).
+    readonly property bool typingInField: {
+        const w = Window.window
+        const f = w ? w.activeFocusItem : null
+        return !!f && f.text !== undefined && f.cursorPosition !== undefined
+    }
+    readonly property bool showsKeysMine: vGRPresenter_Main_Screen.visible
+        && media_tab_bar.currentPane === "shows" && !vGRPresenter_Main_Screen.typingInField
+    Shortcut { action: "previousPassage"; enabled: vGRPresenter_Main_Screen.showsKeysMine; onActivated: table_body.moveShowCursor(-1) }
+    Shortcut { action: "nextPassage"; enabled: vGRPresenter_Main_Screen.showsKeysMine; onActivated: table_body.moveShowCursor(1) }
+    // Enter opens the row the arrows are on. `!Hotkeys.canAccept` keeps it out of
+    // the way of a dialog's own Enter (the window's accept binding), or the two
+    // would activate ambiguously and neither would run.
+    Shortcut {
+        action: "accept"
+        enabled: vGRPresenter_Main_Screen.showsKeysMine && !Hotkeys.canAccept
+        onActivated: table_body.openCursorShow()
+    }
+
     // Opening a project puts its first item there; clicking another item in the panel puts that one.
     Connections {
         target: ProjectService
@@ -282,7 +313,7 @@ Rectangle {
                         Text {
                             height: 60
                             color: Theme.textPrimary
-                            font.family: "Outfit"
+                            font.family: Theme.fontFamily
                             font.letterSpacing: 0.48
                             font.pixelSize: 55
                             font.weight: Font.Black
@@ -293,7 +324,7 @@ Rectangle {
                         Text {
                             height: 60
                             color: Theme.textSecondary
-                            font.family: "Outfit"
+                            font.family: Theme.fontFamily
                             font.letterSpacing: 0.48
                             font.pixelSize: 55
                             font.weight: Font.Black
@@ -312,7 +343,7 @@ Rectangle {
                         width: 83
 
                         color: Theme.textMuted
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 15
                         font.weight: Font.Medium
                         horizontalAlignment: Text.AlignHCenter
@@ -339,7 +370,7 @@ Rectangle {
                         width: parent.width
 
                         color: Theme.textSecondary
-                        font.family: "Segoe UI"
+                        font.family: Theme.fontFamily
                         font.pixelSize: 15
                         font.weight: Font.Normal
                         horizontalAlignment: Text.AlignHCenter
@@ -420,7 +451,7 @@ Rectangle {
                             width: 159
 
                             color: Theme.textPrimary
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 15
                             font.weight: Font.Medium
                             horizontalAlignment: Text.AlignLeft
@@ -513,7 +544,7 @@ Rectangle {
                             width: 159
 
                             color: Theme.textPrimary
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 15
                             font.weight: Font.Medium
                             horizontalAlignment: Text.AlignLeft
@@ -614,7 +645,7 @@ Rectangle {
                             width: 159
 
                             color: Theme.textPrimary
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 15
                             font.weight: Font.Medium
                             horizontalAlignment: Text.AlignLeft
@@ -862,6 +893,7 @@ Rectangle {
                         visible: media_tab_bar.currentPane === "overlays"
                         service: OverlayLibraryService
                         noun: "overlay"
+                        stateKey: "session.overlaysReading"
                         onDesignActivated: (id, name) => vGRPresenter_Main_Screen.centerItem = { type: "overlay", ref: id, name: name }
                         // Double-click: drop it on the project (unchanged)
                         // AND toggle it on the Main Output — multiple
@@ -886,6 +918,7 @@ Rectangle {
                         visible: media_tab_bar.currentPane === "templates"
                         service: TemplateLibraryService
                         noun: "template"
+                        stateKey: "session.templatesReading"
                         onDesignOpenRequested: (id) => vGRPresenter_Main_Screen.designEditRequested("template", id)
                         filter: media_tab_bar.searches.templates !== undefined ? media_tab_bar.searches.templates : ""
                         width: parent.width - shows_template_sidebar.width; height: parent.height
@@ -919,6 +952,63 @@ Rectangle {
                     // call goes straight to the engine, which validates and
                     // republishes. Counts are the engine's shows-per-category.
                     property int currentCategory: 0   // 0 = All, -1 = Unlabeled, 1..n = category
+                    // WHERE THE SHOWS LIBRARY WAS LEFT (user call: "make the app remember
+                    // its state and position ... if i go to another page and come back
+                    // it will go number one"). ONE registered settings key holds the
+                    // category being browsed and the row at the top of the list, as
+                    // JSON. Written on a short idle as the operator moves and read back
+                    // when the library republishes, so a reload (or a restart) comes back
+                    // to the same category at the same row instead of "All" from the top.
+                    property bool placeRestored: false
+                    function saveShowsPlace() {
+                        if (!SettingsService.ready || table_scroll.count === 0)
+                            return
+                        const at = table_scroll.indexAt(4, table_scroll.contentY + 4)
+                        const rows = table_body.shownShows
+                        const top = (at >= 0 && at < rows.length) ? String(rows[at].path) : ""
+                        const text = JSON.stringify({ category: currentCategory, top: top })
+                        if (String(SettingsService.values["session.showsReading"] ?? "") !== text)
+                            SettingsService.setValue("session.showsReading", text)
+                    }
+                    function touchShowsPlace() {
+                        if (SettingsService.ready) showsPlaceTimer.restart()
+                    }
+                    function restoreShowsPlace() {
+                        if (media_table.placeRestored || !SettingsService.ready || table_scroll.count === 0)
+                            return
+                        // Read once for this build; a roster that loads later re-asks.
+                        media_table.placeRestored = true
+                        const raw = String(SettingsService.values["session.showsReading"] ?? "")
+                        let state = null
+                        if (raw !== "") {
+                            try { state = JSON.parse(raw) } catch (e) { state = null }
+                        }
+                        if (state && typeof state === "object") {
+                            const cat = Number(state.category)
+                            if (!isNaN(cat) && cat !== media_table.currentCategory
+                                    && (cat === 0 || cat === -1
+                                        || (cat >= 1 && cat <= media_table.showCategories.length)))
+                                media_table.currentCategory = cat
+                        }
+                        Qt.callLater(function () {
+                            const rows = table_body.shownShows
+                            const at = state
+                                ? rows.findIndex((s) => String(s.path) === String(state.top)) : -1
+                            if (at >= 0)
+                                table_scroll.positionViewAtIndex(at, ListView.Beginning)
+                            // A baseline for the next run: without it the first move
+                            // is what ever records a place, and a session that only
+                            // clicked into a show came back to a blank one.
+                            media_table.saveShowsPlace()
+                        })
+                    }
+                    onCurrentCategoryChanged: media_table.touchShowsPlace()
+                    Component.onCompleted: SettingsService.whenReady(media_table.restoreShowsPlace)
+                    Timer {
+                        id: showsPlaceTimer
+                        interval: 350
+                        onTriggered: media_table.saveShowsPlace()
+                    }
                     // The row being renamed inline (-1 = none). Opened from
                     // the right-click context menu; Enter/focus-loss commits,
                     // Escape cancels.
@@ -1045,7 +1135,12 @@ Rectangle {
                     property int libRev: 0
                     Connections {
                         target: ShowService
-                        function onLibraryChanged() { media_table.libRev++ }
+                        function onLibraryChanged() {
+                            media_table.libRev++
+                            // The roster can arrive (or be republished) after this pane
+                            // was built — the remembered category is applied then.
+                            Qt.callLater(media_table.restoreShowsPlace)
+                        }
                     }
 
                     // ---- Category CRUD — straight through to the engine.
@@ -1211,7 +1306,7 @@ Rectangle {
                                             text: modelData.name
                                             color: selected ? Theme.textPrimary : Theme.navLabelMuted
                                             elide: Text.ElideRight
-                                            font.family: "Segoe UI"; font.pixelSize: 15
+                                            font.family: Theme.fontFamily; font.pixelSize: 15
                                         }
                                         // Inline rename editor — opened from the
                                         // right-click menu's Rename entry.
@@ -1224,7 +1319,7 @@ Rectangle {
                                             enabled: visible
                                             text: visible ? modelData.name : ""
                                             color: Theme.textPrimary
-                                            font.family: "Segoe UI"; font.pixelSize: 15
+                                            font.family: Theme.fontFamily; font.pixelSize: 15
                                             clip: true
                                             onAccepted: media_table.renameCategory(index, text)
                                             onActiveFocusChanged: if (!activeFocus && visible)
@@ -1247,7 +1342,7 @@ Rectangle {
                                             visible: media_table.renamingIndex !== index
                                             text: String(modelData.count)
                                             color: Theme.textMuted
-                                            font.family: "Segoe UI"; font.pixelSize: 14
+                                            font.family: Theme.fontFamily; font.pixelSize: 14
                                         }
                                         PositionHoverArea {
                                             id: catHover
@@ -1472,7 +1567,7 @@ Rectangle {
                             width: 34
 
                             color: Theme.textMuted
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 13
                             font.weight: Font.DemiBold
                             horizontalAlignment: Text.AlignLeft
@@ -1491,7 +1586,7 @@ Rectangle {
                             width: 201
 
                             color: Theme.textMuted
-                            font.family: "Segoe UI"
+                            font.family: Theme.fontFamily
                             font.pixelSize: 13
                             font.weight: Font.DemiBold
                             horizontalAlignment: Text.AlignRight
@@ -1555,6 +1650,56 @@ Rectangle {
                             return wanted.filter((s) => inScope[s.path] === true)
                         }
 
+                        // The keyboard cursor over the table (Up/Down): the index the
+                        // arrows are on, -1 for "none yet". Kept here beside shownShows
+                        // because a filter or a category change is a different list — the
+                        // cursor is dropped on a count change (see table_scroll).
+                        property int showCursor: -1
+                        function moveShowCursor(direction) {
+                            const rows = table_body.shownShows
+                            if (!rows || rows.length === 0)
+                                return
+                            let at = table_body.showCursor
+                            if (at < 0 || at >= rows.length) {
+                                // Nothing picked yet: take over from whatever the centre
+                                // page is already showing, so the first arrow continues
+                                // the operator's place instead of jumping to the top.
+                                const cur = vGRPresenter_Main_Screen.centerItem
+                                at = cur && cur.ref
+                                   ? rows.findIndex((s) => s.path === cur.ref) : -1
+                                if (at < 0)
+                                    at = direction > 0 ? -1 : rows.length
+                            }
+                            const next = Math.max(0, Math.min(rows.length - 1, at + direction))
+                            table_body.showCursor = next
+                            // Scroll only when the cursor has reached an edge of the
+                            // viewport, and then put it back in the middle — centring on
+                            // every press slid the whole table under the eye (the same
+                            // "let it get to one end of the list first" rule the verse
+                            // list follows, see ReferencePane.centerRow).
+                            const row = table_scroll.itemAtIndex(next)
+                            const onScreen = row
+                                && row.y >= table_scroll.contentY - 1
+                                && row.y + row.height <= table_scroll.contentY + table_scroll.height + 1
+                            if (!onScreen)
+                                table_scroll.positionViewAtIndex(next, ListView.Center)
+                            // The arrows only WALK the table — nothing is loaded into
+                            // the centre preview while browsing (a show read per
+                            // arrow press was both slow and a hijack of the page).
+                            // Enter is what opens the highlighted row, exactly as a
+                            // click on it does.
+                        }
+                        function openCursorShow() {
+                            const rows = table_body.shownShows
+                            const at = table_body.showCursor
+                            if (!rows || at < 0 || at >= rows.length)
+                                return
+                            const show = rows[at]
+                            vGRPresenter_Main_Screen.centerItem = {
+                                type: "show", ref: show.path, name: show.name, layout: ""
+                            }
+                        }
+
                         // The rows live in a LISTVIEW, not a Flickable + Repeater. The
                         // library is 680 shows (the engine's own log line: "Show library
                         // scanned: 680 show(s)"), and a Repeater realizes EVERY one of them
@@ -1597,6 +1742,13 @@ Rectangle {
                             // content, one less binding re-entering this polish.)
                             reuseItems: true
                             model: table_body.shownShows
+                            // The row at the top of the list is part of the remembered
+                            // place, and the model landing is when it can be put back.
+                            onMovementEnded: media_table.touchShowsPlace()
+                            onCountChanged: {
+                                table_body.showCursor = -1   // a different list: no cursor
+                                media_table.restoreShowsPlace()
+                            }
                             delegate: Rectangle {
                                 required property var modelData
                                 required property int index
@@ -1617,7 +1769,8 @@ Rectangle {
                                 // PositionHoverArea reads pure geometry (AppCursor.hovered),
                                 // so it cannot see the pill on top of it — without the gate
                                 // the row beneath lit up while the pointer was on the pill.
-                                color: (rowHover.hovered && !newShowDockHover.hovered) ? Theme.activeBg : "transparent"
+                                color: ((rowHover.hovered || index === table_body.showCursor)
+                                        && !newShowDockHover.hovered) ? Theme.activeBg : "transparent"
                                 Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                                 PositionHoverArea {
                                     id: rowHover
@@ -1645,7 +1798,7 @@ Rectangle {
                                     width: parent.width - 263
                                     color: Theme.textPrimary
                                     elide: Text.ElideRight
-                                    font.family: "Segoe UI"; font.pixelSize: 14
+                                    font.family: Theme.fontFamily; font.pixelSize: 14
                                     text: { table_body.probeEvals.rows++; return modelData.name }   // (scroll-cost probe: the row's name binding)
                                     textFormat: Text.PlainText
                                 }
@@ -1655,7 +1808,7 @@ Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     width: 201
                                     color: Theme.textMuted
-                                    font.family: "Segoe UI"; font.pixelSize: 13
+                                    font.family: Theme.fontFamily; font.pixelSize: 13
                                     horizontalAlignment: Text.AlignRight
                                     text: {
                                         // Subscribe to the LOCALE so the day/month names
@@ -1765,7 +1918,7 @@ Rectangle {
                                 anchors.verticalCenter: parent.verticalCenter
 
                                 color: "#ffffff"
-                                font.family: "Segoe UI"
+                                font.family: Theme.fontFamily
                                 font.pixelSize: 14
                                 font.weight: Font.Bold
                                 text: qsTr("New show")
@@ -1972,7 +2125,7 @@ Rectangle {
                                               ? qsTr("No default template")
                                               : qsTr("No template for %1").arg(shows_template_sidebar.categoryName)
                                         color: Theme.textMuted
-                                        font.family: "Segoe UI"; font.pixelSize: 14
+                                        font.family: Theme.fontFamily; font.pixelSize: 14
                                     }
                                 }
                             }
@@ -1991,7 +2144,7 @@ Rectangle {
                                     Column {
                                         x: 12; anchors.verticalCenter: parent.verticalCenter
                                         spacing: 2
-                                        Text { text: qsTr("Template"); color: Theme.accent; font.family: "Segoe UI"; font.pixelSize: 13 }
+                                        Text { text: qsTr("Template"); color: Theme.accent; font.family: Theme.fontFamily; font.pixelSize: 13 }
                                         Text {
                                             width: 150
                                             text: shows_template_sidebar.templateId === ""
@@ -1999,7 +2152,7 @@ Rectangle {
                                                   : (shows_template_sidebar.templateName !== "" ? shows_template_sidebar.templateName : qsTr("Missing template"))
                                             color: shows_template_sidebar.templateId === "" ? Theme.textMuted : Theme.textPrimary
                                             elide: Text.ElideRight
-                                            font.family: "Segoe UI"; font.pixelSize: 16; font.weight: Font.DemiBold
+                                            font.family: Theme.fontFamily; font.pixelSize: 16; font.weight: Font.DemiBold
                                         }
                                     }
 
@@ -2050,7 +2203,7 @@ Rectangle {
                                              ? qsTr("Inherited from All — choose one to give \"%1\" its own.").arg(shows_template_sidebar.categoryName)
                                              : qsTr("\"%1\"'s own template.").arg(shows_template_sidebar.categoryName))
                                     color: Theme.textMuted
-                                    font.family: "Segoe UI"; font.pixelSize: 12
+                                    font.family: Theme.fontFamily; font.pixelSize: 12
                                     wrapMode: Text.Wrap
                                 }
                             }
@@ -2070,7 +2223,7 @@ Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     text: opt.def ? opt.def.label : ""
                                     color: Theme.textPrimary   // Theme.textPrimary
-                                    font.family: "Segoe UI"; font.pixelSize: 14
+                                    font.family: Theme.fontFamily; font.pixelSize: 14
                                 }
                                 SettingsToggle {
                                     anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
@@ -2094,7 +2247,7 @@ Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     text: num.def ? num.def.label : ""
                                     color: Theme.textPrimary
-                                    font.family: "Segoe UI"; font.pixelSize: 14
+                                    font.family: Theme.fontFamily; font.pixelSize: 14
                                 }
                                 Row {
                                     anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
@@ -2109,7 +2262,7 @@ Rectangle {
                                         width: 40; horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter
                                         text: SettingsService.values[num.settingKey] ?? ""
                                         color: Theme.textPrimary
-                                        font.family: "Segoe UI"; font.pixelSize: 14
+                                        font.family: Theme.fontFamily; font.pixelSize: 14
                                     }
                                     Rectangle {
                                         width: 24; height: 24; radius: 6; color: plusHover.hovered ? Theme.hoverBg : Theme.rowBg; border.color: Theme.border
@@ -2132,7 +2285,7 @@ Rectangle {
                                     x: 6; height: 26; verticalAlignment: Text.AlignVCenter
                                     text: qsTr("SLIDE OPTIONS")
                                     color: Theme.textMuted
-                                    font.family: "Segoe UI"; font.pixelSize: 12; font.weight: Font.DemiBold; font.letterSpacing: 1.2
+                                    font.family: Theme.fontFamily; font.pixelSize: 12; font.weight: Font.DemiBold; font.letterSpacing: 1.2
                                 }
                                 Rectangle {
                                     width: parent.width; height: showsOptionsColumn.height + 8

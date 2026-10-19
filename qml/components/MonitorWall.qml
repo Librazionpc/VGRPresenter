@@ -359,7 +359,7 @@ Item {
                 Text {
                     text: rowBtn.caption
                     color: rowBtn.enabled2 ? rowBtn.tint : Theme.textMuted
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 12
                     font.weight: Font.Medium
                     anchors.verticalCenter: parent.verticalCenter
@@ -477,6 +477,32 @@ Item {
                     enabled2: LiveOutputService.canRestoreCleared
                     tint: Theme.textPrimary
                     onPicked: LiveOutputService.restoreCleared()
+                }
+            }
+
+            // BLACKOUT — the deliberate "nothing at all on screen" (see
+            // LiveOutputService::blackout). It is separate from Clear all on
+            // purpose: Clear all takes the CONTENT down and leaves the output's
+            // own branded look up, while a blackout takes even that away, which
+            // is a thing you do to an audience mid-service and must never
+            // happen as a side effect of clearing a slide.
+            //
+            // LATCHING: while the carrier is on air the row says so and the
+            // same press puts back exactly what was showing (the engine keeps
+            // running; only the picture came down). Lit while blacked, dimmed
+            // and inert off air — there is no screen to blank when nothing is
+            // going out, and LIVE stays the user's own GO LIVE/STOP decision.
+            RowButton {
+                width: parent.width
+                icon: "ban"
+                caption: LiveOutputService.blackedOut ? qsTr("End blackout")
+                                                      : qsTr("Blackout")
+                tint: LiveOutputService.blackedOut ? Theme.textPrimary : Theme.dangerLight
+                enabled2: root.live
+                objectName: "selfTestWallBlackout"
+                onPicked: {
+                    if (LiveOutputService.blackedOut) LiveOutputService.endBlackout()
+                    else LiveOutputService.blackout()
                 }
             }
 

@@ -23,6 +23,7 @@ void TestDrivers();
 void TestDatabase();
 void TestDisplay();
 void TestRenderer();
+void TestFeedHealth();
 void TestIpc();
 void TestLifecycle();
 void TestModules();
@@ -83,6 +84,7 @@ void TestTransparentBackground();
 void TestFrameRule();
 void TestImageScale();
 void TestOutputStore();
+void TestShippedConfig();
 void TestProjectUndoRedo();
 void TestProjectWorkspace();
 void TestProjectSessionSnapshot();
@@ -109,6 +111,10 @@ void TestRenderPipeline();
 void TestRenderGpu();
 void TestRenderOutputs();
 void TestVideoLayerFrameRefresh();
+// Two template bands authored flush on the stage must be flush on the frame:
+// no one-pixel seam of the live video between them (a shared fractional edge
+// rounded independently for each box used to open one).
+void TestShapeEdgeSeams();
 void TestRenderEngine();
 // The D3D11 GPU backend behind the same IGraphicsBackend seam: the CPU frame and
 // the GPU frame of one scene compared, plus the software fallback's contract.
@@ -168,16 +174,19 @@ void TestEmptyPathSafety();
 void TestThumbnailCache();
 void TestThumbnailCacheConcurrency();
 void TestOverlayLibrary();
+void TestDesignCatalogRevision();
 void TestTemplateLibrary();
 void TestTheTableLibrary();
 void TestTheTableUserData();
 void TestTheTableSearchIndexing();
 void TestTheTableTypingTail();
+void TestTheTableCitationSuffixCode();
 void TestTextListFormat();
 void TestBlockValidator();
 void TestDropRules();
 void TestProjectLibrary();
 void TestAppSettings();
+void TestAppSettingsShippedBaseline();
 void TestBibleOutline();
 void TestBiblePersistence();
 void TestBibleUserDataPersist();

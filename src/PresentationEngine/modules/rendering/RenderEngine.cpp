@@ -9,6 +9,7 @@
 #include "modules/rendering/D3D11Backend.hpp"   // the GPU backend's factory (no D3D11 type in it)
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <format>
@@ -451,6 +452,53 @@ Result<void> RenderEngine::RemoveOutput(std::string_view name) {
 size_t RenderEngine::OutputCount() const { return outputs_.Count(); }
 
 // ---------------------------------------------------------------------------
+// Feed health — the automatic blackout's two questions
+// ---------------------------------------------------------------------------
+std::vector<RenderEngine::OutputFeedAge> RenderEngine::OutputFeedAges() const {
+    std::vector<OutputFeedAge> out;
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count();
+    for (const auto& output : outputs_.All()) {
+        if (!output) continue;
+        OutputFeedAge row;
+        row.name = output->Name();
+        row.enabled = output->Enabled();
+        const int64_t stamp = output->LastPresentSteadyMs();
+        row.ageMs = stamp > 0 ? now - stamp : -1;
+        out.push_back(std::move(row));
+    }
+    return out;
+}
+
+int RenderEngine::BlackoutOutputs(const std::vector<std::string>& names) {
+    if (names.empty()) return 0;
+    int blacked = 0;
+    for (const auto& name : names) {
+        auto found = outputs_.Get(name);
+        if (!found.ok() || !found.value()) continue;
+        const auto& output = found.value();
+        if (!output->Enabled()) continue;
+        const Size target = output->TargetSize();
+        if (target.width <= 0 || target.height <= 0) continue;
+        Frame black;
+        black.sceneId = "feed-stalled";
+        black.width = static_cast<int>(target.width);
+        black.height = static_cast<int>(target.height);
+        // Packed 0xAABBGGRR (Color::Pack): opaque black. A stalled feed must be
+        // black, not transparent — a keyer/compositor behind it would otherwise
+        // fill the hole with whatever it likes, and a frozen last picture must
+        // never be what an audience keeps looking at.
+        black.pixels.assign(static_cast<size_t>(black.width) * black.height, 0xFF000000u);
+        black.timestampMs = static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                    std::chrono::steady_clock::now().time_since_epoch())
+                                                    .count());
+        if (output->Present(black).ok()) ++blacked;
+    }
+    return blacked;
+}
+
+// ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
 
@@ -712,8 +760,14 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
     // tick beside them while early-column letters looked fine. The atlas
     // dimensions are folded in as well so a rebuilt atlas of different
     // geometry can never be read through a stale texture.
+    // The SUBSTITUTED family, matching the atlas the cache just handed back
+    // (FontManager::SubstituteFamily): two styles naming different missing fonts
+    // resolve to the same installed face, and naming the texture after the raw
+    // request would upload the same atlas twice under two names.
+    const std::string substitutedFamily = fonts_.SubstituteFamily(style.fontId);
     const std::string atlasName = std::format("__font_atlas_{}_{}_{}_{}_{}x{}",
-                                              style.fontId,
+                                              substitutedFamily.empty() ? style.fontId
+                                                                        : substitutedFamily,
                                               static_cast<int>(style.size + 0.5f),
                                               style.bold, style.italic,
                                               entry.atlas.width, entry.atlas.height);

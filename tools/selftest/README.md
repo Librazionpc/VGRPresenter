@@ -1015,6 +1015,56 @@ How it fits together:
   vacuously — the same trap the style-background scenario fell into when its
   tile and its model described two different outputs.
 
+## The blackout control: an EMPTY frame, on every output, on purpose
+
+`run_blackout_test.sh` guards the wall toolbar's Blackout control. "Nothing at
+all on screen" used to be a side effect of Clear all (it sent a `clearStage`
+carrier); Clear all now keeps the output's own branded look — the colour and the
+background image survive a clear, which is what an operator clearing content
+expects — so the app had no way left to ask for a genuinely empty screen. The
+Blackout row on the wall's toolbar (`MonitorWall.qml`) is that gesture, and it
+is deliberately separate: clearing CONTENT and hiding the picture from an
+audience are different actions.
+
+```bash
+bash tools/selftest/run_blackout_test.sh 60
+# ... [SELFTEST-BLACKOUT] pressed visible=true blackedOut=true live=true
+#     [SELFTEST-BLACKOUT] ended blackedOut=false live=true blocks=1
+#     BLACKOUT: PASS content=28 blackout=19 outputs=checked
+#     BLACKOUT: FAIL nocontrol | FAIL nolive | FAIL notpressed | FAIL noend
+#     BLACKOUT: FAIL noframes | FAIL lit | FAIL notblack | FAIL staged
+```
+
+How it fits together:
+
+- **The scenario** is the `selfTestBlackout*` Timer block in `qml/Main.qml`,
+  gated on `VGR_BLACKOUT_TEST` (+ `VGR_SELFTEST`), armed in `src/main.cpp`. It
+  puts ONE real slide on air, clicks the control with `SelfTest.clickItem` (a
+  real click at the rendered button — not a direct service call), clicks it
+  again, and quits.
+- **A click and its state are different ticks.** `clickItem` posts a real mouse
+  event, so every press is reported from its own timer a couple of seconds
+  later; reading `blackedOut` right after the click reads the state from BEFORE
+  it and makes a working control look broken (which is how the first run of this
+  harness failed).
+- **The verdict is the ENGINE's pixels.** `RenderOutputs` logs `output frame
+  sanity: '<buffer>' … allBlack= maxAlpha=` whenever a presented frame changes.
+  The runner cuts the log into the three phases the engine marks itself — live
+  content `'Blackout Probe'`, a live replacement with an EMPTY title (the
+  carrier), and the title again (the restoration) — and requires each output's
+  LATEST frame to be non-black, then black (`meanLuma=0 … allBlack=yes`,
+  `maxAlpha=0`), then non-black. That is the frame the HDMI window and the NDI
+  sender consume, so "the tile looks cleared" can never pass for the outputs
+  being cleared.
+- **The way out is part of the test.** The second press must come out of the
+  blackout (`blackedOut=false`, the slide's blocks back) through the same live
+  session — no STOP/GO LIVE in between — which is what `endBlackout()` restores
+  from the raw set it saved before the carrier went up.
+- **STOP while blacked out has its own answer.** The last phase blacks out a
+  second time and presses STOP: the staged slot must then hold the CONTENT the
+  blackout was hiding (`stagedClearStage=false`, its block back), never the
+  carrier, or the next GO LIVE would put the black frame on the screens again.
+
 ## The startup-forensics verdict: said out loud, and only when it matters
 
 `run_forensics_test.sh` guards the report "the app says a crash was captured when
@@ -1511,3 +1561,49 @@ first frame may not exceed 2000 ms (measured 998–1455, and the worst rung is a
 the FIRST: a cold first raster, which is also why it varies most), the slowest rung
 may not fall under 0.5 fps (measured 0.68–0.81), and no rung may sit more than 60%
 under the fastest (measured 44–47%, which the outputs rung spends by design).
+
+## A colour picked for a shape: does it reach the ITEM, the CANVAS and the PIXELS?
+
+`run_item_color_test.sh` covers "the opacity/colour in the picker shows well but it
+never applies to the shape — the text item does take it", and it reports three
+witnesses per item, because the first two can agree while the screen still shows
+nothing: the ITEM's own value, its DELEGATE's own read, and the PIXELS the delegate
+actually paints (each solid apply is grabbed to a PNG and sampled).
+
+Both shape render paths are measured — a RECTANGLE (the delegate's own fill box) and
+a CIRCLE (`drawsOwnBody`, where `shapeContent` paints the body from the same style) —
+and the text item's colour runs in the same launch as the known-good control.
+
+```bash
+bash tools/selftest/run_item_color_test.sh
+```
+
+```
+[SELFTEST-ITEMCOLOR] row key=item-1 selected=["item-1"] styleNull=false primaryKind=shape rowTarget=itemBackground hint=itemBackground
+[SELFTEST-ITEMCOLOR] apply title=Background Color target=itemBackground
+[SELFTEST-ITEMCOLOR] rect solid key=item-1 before=#3a3f55 item=#ffffff itemA=1.000 delegate=#ffffff delegateA=1.000
+[SELFTEST-ITEMCOLOR] rect faded item=#4dffffff itemA=0.302 delegate=#4dffffff delegateA=0.302
+...
+[SELFTEST-ITEMCOLOR] cycle click1 key=item-3 selected=["item-3"]
+[SELFTEST-ITEMCOLOR] cycle click2 key=item-3 selected=["item-2"]
+[SELFTEST-ITEMCOLOR] summary rectPropsOk=true circlePropsOk=true cycleOk=true
+ITEMCOLOR: APPLIED
+```
+
+The picker is opened through the **Background row's own expression**
+(`itemBackground` when something is selected), not a target the scenario hardcodes: a
+hardcoded target would keep passing while the row itself decided otherwise for a
+selected shape — which is the reported "the shape's colour goes somewhere else".
+
+The `cycle` pair covers the other half of that report, "you pick text item instead of
+the shape": `(100,90)` lies inside the circle's box AND inside the text item's box
+above it, so Qt hands the tap to the text item. A second tap on the same point
+(350–900 ms later, which is why one tick of the scenario's 700 ms timer separates
+them) must step down to the shape — EditScreen's click-through. A *rapid* second
+click is deliberately not a click-through: that is the text item's edit gesture.
+
+Verdict codes: `APPLIED`, `FAIL missing` (the scenario never reached its verdict),
+`FAIL select` (the click-through still lands on the text item), `FAIL item` (the item
+never received the colour — a missing value counts as missing, never as "faded"),
+`FAIL text` (the known-good control broke too, so it is not shape-specific), and
+`FAIL canvas` (the item and its delegate hold the colour, the pixels do not).

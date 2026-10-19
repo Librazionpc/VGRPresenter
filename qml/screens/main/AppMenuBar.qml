@@ -358,7 +358,7 @@ Item {
                 Text {
                     height: 23
                     color: Theme.textPrimary
-                    font.family: "Bahnschrift"
+                    font.family: Theme.fontFamily
                     font.letterSpacing: 0.09
                     font.pixelSize: 21
                     font.weight: Font.ExtraBold
@@ -370,7 +370,7 @@ Item {
                 Text {
                     height: 23
                     color: Theme.textSecondary
-                    font.family: "Bahnschrift"
+                    font.family: Theme.fontFamily
                     font.letterSpacing: 0.09
                     font.pixelSize: 21
                     font.weight: Font.ExtraBold
@@ -441,7 +441,7 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     // Reads Theme.textPrimary — see logoText above.
                     color: Theme.textPrimary
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 14
                     font.weight: Font.Normal
                     horizontalAlignment: Text.AlignLeft

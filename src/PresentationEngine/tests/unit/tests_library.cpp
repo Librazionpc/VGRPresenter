@@ -5,6 +5,7 @@
 #include <cmath>
 #include <limits>
 
+#include "core/config/Json.hpp"
 #include "modules/library/DesignCatalogs.hpp"
 #include "modules/presentation/BlockValidator.hpp"
 #include "modules/presentation/ShowEditor.hpp"
@@ -14,6 +15,7 @@ namespace {
 
 namespace lib = bps::library;
 namespace pres = bps::presentation;
+namespace j = bps::json;
 
 std::vector<std::string> Names(const std::vector<lib::Design>& list) {
     std::vector<std::string> out;
@@ -535,5 +537,166 @@ void TestBlockValidator() {
       CHECK(!pf::ShowEditor::AddTemplate(show, tmpl).ok()); tmpl.blocks = { good("a") }; CHECK(pf::ShowEditor::AddTemplate(show, tmpl).ok()); }
     { pf::Overlay overlay; overlay.name = "o"; auto bad = good("a"); bad.x = std::nan(""); overlay.blocks = { bad };
       CHECK(!pf::ShowEditor::AddOverlay(show, overlay).ok()); overlay.blocks = { good("a") }; CHECK(pf::ShowEditor::AddOverlay(show, overlay).ok()); }
+    (void)fs.RemoveAll(root);
+}
+
+// FRESH SHIPPED DESIGNS NAME NO FONT, AND AN OLD STORE IS MIGRATED ONCE.
+//
+// The catalogs are font-free: DesignCatalogs' Text() writes no fontFamily, so the
+// renderer resolves every shipped block to the HOST's UI face
+// (FontManager::DefaultFamily) instead of a family the authoring machine had.
+//
+// Two things have to hold. What ships — overlays AND templates — must name no
+// family at all, and a store written by an older catalog, whose seeded designs
+// carried "Segoe UI"/"Arial" and the authoring install's own picks ("TT Nooks
+// Trial" here), must be REFRESHED on load rather than only on a clean install.
+// The migration drops the family from every SHIPPED design, so the user's own
+// designs (and a copy they made of a shipped one) keep the font they chose, and
+// it runs once (the new revision is recorded).
+void TestDesignCatalogRevision() {
+    auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    const std::string root = "/tmp/bps_catalog_revision";
+    const std::string file = root + "/overlays.json";
+    (void)fs.RemoveAll(root);
+
+    // Every text block's declared family ("" when the block names none).
+    const auto families = [](const lib::Design& d) {
+        std::vector<std::string> out;
+        for (const auto& b : d.blocks) {
+            if (b.kind != "text") continue;
+            auto parsed = j::Parse(b.metaJson);
+            if (!parsed.ok()) { out.push_back("<malformed>"); continue; }
+            const j::Value* family = parsed.value().Find("fontFamily");
+            out.push_back(family && family->type() == j::Value::Type::String
+                              ? std::string(family->asString()) : std::string());
+        }
+        return out;
+    };
+    const auto stampFamily = [](lib::Design& d, const char* family) {
+        for (auto& b : d.blocks) {
+            if (b.kind != "text") continue;
+            auto parsed = j::Parse(b.metaJson);
+            if (!parsed.ok()) continue;
+            j::Value::Object meta;
+            if (const auto* object = parsed.value().asObject()) meta = *object;
+            meta["fontFamily"] = j::Value::String(family);
+            b.metaJson = j::Value(std::move(meta)).ToString();
+        }
+    };
+
+    // ---- (1) what SHIPS names no font: overlays AND templates ----
+    {
+        const std::string templateFile = root + "/templates.json";
+        for (const bool templates : { false, true }) {
+            auto library = templates ? lib::MakeTemplateLibrary(templateFile) : lib::MakeOverlayLibrary(file);
+            CHECK(library->Load().ok());
+            int textBlocks = 0;
+            for (const auto& d : library->Designs()) {
+                if (!d.isDefault) continue;
+                for (const auto& family : families(d)) {
+                    ++textBlocks;
+                    CHECK(family.empty());   // no family key at all
+                }
+            }
+            CHECK(textBlocks > 0);
+            CHECK(library->Designs().size() > 3);   // the shipped set is really there
+        }
+    }
+
+    // ---- (2) a pre-revision store: shipped designs naming faces from the machine
+    //          that authored them, and a USER copy that names one of its own ----
+    std::string retiredId;    // shipped: the catalogs used to write this one by name
+    std::string authoredId;   // shipped: a face only the authoring install had
+    std::string userCopyId;   // the user's own copy: keeps whatever it names
+    {
+        auto library = lib::MakeOverlayLibrary(file);
+        CHECK(library->Load().ok());
+        for (const auto& d : library->Designs()) {
+            if (!d.isDefault) continue;
+            for (const auto& b : d.blocks)
+                if (b.kind == "text") {
+                    if (retiredId.empty()) retiredId = d.id;
+                    else if (authoredId.empty() && d.id != retiredId) authoredId = d.id;
+                    break;
+                }
+            if (!retiredId.empty() && !authoredId.empty()) break;
+        }
+        CHECK(!retiredId.empty() && !authoredId.empty());
+        for (const auto& d : library->Designs()) {
+            if (d.id != retiredId && d.id != authoredId) continue;
+            lib::Design stamped = d;
+            stampFamily(stamped, d.id == retiredId ? "Segoe UI" : "TT Nooks Trial");
+            CHECK(library->SetContent(d.id, stamped.background, stamped.blocks).ok());
+        }
+        auto copy = library->Duplicate(retiredId);   // the user's own design (not shipped)
+        CHECK(copy.ok());
+        userCopyId = copy.value().id;
+        lib::Design stamped = copy.value();
+        stampFamily(stamped, "Arial");
+        CHECK(library->SetContent(userCopyId, stamped.background, stamped.blocks).ok());
+    }
+    // Downgrade the document to a pre-revisioning store (no catalogRevision), which
+    // is exactly the shape every install has today.
+    {
+        auto text = fs.ReadText(file);
+        CHECK(text.ok());
+        auto parsed = j::Parse(text.value());
+        CHECK(parsed.ok());
+        j::Value::Object document;
+        if (const auto* object = parsed.value().asObject()) document = *object;
+        document.erase("catalogRevision");
+        CHECK(fs.WriteAtomic(file, j::Value(std::move(document)).ToString()).ok());
+    }
+
+    // ---- (3) Load refreshes the shipped designs, once ----
+    {
+        auto library = lib::MakeOverlayLibrary(file);
+        CHECK(library->Load().ok());
+        std::string retired;
+        std::string authored;
+        std::string userCopy;
+        for (const auto& d : library->Designs()) {
+            const auto list = families(d);
+            const std::string family = list.empty() ? std::string() : list.front();
+            if (d.id == retiredId) retired = family;
+            if (d.id == authoredId) authored = family;
+            if (d.id == userCopyId) userCopy = family;
+        }
+        CHECK(retired.empty());                 // the catalog's own name, refreshed away
+        CHECK(authored.empty());                // the authoring machine's face, refreshed away too
+        CHECK(userCopy == "Arial");              // the user's own design, untouched
+        // The revision is recorded, so this is a one-time migration.
+        auto text = fs.ReadText(file);
+        CHECK(text.ok());
+        auto parsed = j::Parse(text.value());
+        CHECK(parsed.ok());
+        CHECK(parsed.value().Find("catalogRevision") != nullptr);
+    }
+
+    // ---- (4) ...and it stays one-time: a retired name chosen AFTER the migration
+    // is a user choice and survives the next load ----
+    {
+        auto library = lib::MakeOverlayLibrary(file);
+        CHECK(library->Load().ok());
+        for (const auto& d : library->Designs()) {
+            if (d.id != retiredId) continue;
+            lib::Design stamped = d;
+            stampFamily(stamped, "Segoe UI");
+            CHECK(library->SetContent(d.id, stamped.background, stamped.blocks).ok());
+            break;
+        }
+    }
+    {
+        auto library = lib::MakeOverlayLibrary(file);
+        CHECK(library->Load().ok());
+        std::string family;
+        for (const auto& d : library->Designs()) {
+            if (d.id != retiredId) continue;
+            const auto list = families(d);
+            if (!list.empty()) family = list.front();
+            break;
+        }
+        CHECK(family == "Segoe UI");
+    }
     (void)fs.RemoveAll(root);
 }

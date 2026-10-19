@@ -77,7 +77,14 @@ Rectangle {
         filterDebounce.restart()
     }
     function flushSearch() {
-        if (!filterDebounce.running)
+        // THE PENDING QUERY IS THE STATE, not the timer's `running`: Qt clears a
+        // single-shot Timer's running flag BEFORE it emits triggered, so the old
+        // guard returned here on every debounced search and the typed query was
+        // never pushed to its pane — the reported "Shows search is not working"
+        // (the reference tabs hid it, because their filtering runs from the
+        // suggestion provider on each keystroke; the filter tabs — Shows, Media,
+        // Overlays, Templates — had no other path).
+        if (!filterDebounce.running && root.pendingPane === "")
             return
         filterDebounce.stop()
         // Landed on the tab it was TYPED on even if the user switched tabs
@@ -118,6 +125,24 @@ Rectangle {
     // the rows (the pane previews the row's content while the hover lasts).
     signal suggestionHovered(string pane, int index, bool hovering)
 
+    // ---- What the box STARTS with --------------------------------------------
+    // "Let the search bar by default hold 55-0117 - How The Angel …, so I can just
+    // enter the paragraph" (user call; the same for Scripture's book and chapter).
+    // The pane the operator is LOOKING AT knows which passage that is, so it answers
+    // (ReferencePane::paneSearchSeed) and the box shows that line — not its generic
+    // hint — until something is typed or a search is stored for the tab.
+    //
+    // Clicking the empty box COMMITS the seed as the query (one click, then the
+    // digits) — see TabSearchBox::seedOnClick. Nothing is pushed into the pane on
+    // its own: seeding the query would run a resolve on every tab switch, which is
+    // exactly the engine work the typing beat above exists to avoid.
+    readonly property string searchSeed: {
+        const s = root.suggesters[root.currentPane]
+        if (!canSearch || !s || !s.paneSearchSeed)
+            return ""
+        return String(s.paneSearchSeed() || "")
+    }
+
     color: "transparent"
 
     // The far right of the bar, in the tabs' own row (the FreeShow sample:
@@ -134,11 +159,23 @@ Rectangle {
         // sit, and its own red underline - drawn at ITS bottom - lands right on the bar's border
         // instead of floating short of it.
         height: parent.height
-        // Hugs its own placeholder text (its implicitWidth) - clamped so a long "Search <tab>" hint still can't
-        // run into the tabs, and a very narrow window still leaves it usable.
+        // The box's own width, measured from its hint (see TabSearchBox.implicitWidth) -
+        // clamped so it still can't run into the tabs, and a very narrow window still
+        // leaves it usable.
         width: Math.max(100, Math.min(searchBox.implicitWidth, root.width - tabsRow.childrenRect.width - 16))
-        placeholder: qsTr("Search")
-        focusedPlaceholder: qsTr("Search %1").arg(root.tabs[root.currentTab].label.toLowerCase())
+        // NAMES THE ACTIVE TAB — "Search Shows", "Search Media", "Search The
+        // Table", "Search Scripture", "Search Templates", "Search Overlays" —
+        // using the tab's own label, so the hint can never drift from the tab it
+        // describes. It is shown whether or not the box has focus (it used to
+        // switch on focus, which widened the box on click), and the box is sized
+        // to the hint, so there is no dead length past the last word. "Calendar"
+        // is the one coming-soon tab, and it has no box at all.
+        placeholder: qsTr("Search %1").arg(root.tabs[root.currentTab].label)
+        // The passage the pane is on, ready to take a paragraph/verse number.
+        seedText: root.searchSeed
+        // It follows the pane (open another chapter, step a passage) until the
+        // operator makes it their own query by typing in it.
+        seedFollows: !root.searches[root.currentPane]
         // Per-tab queries are pushed in imperatively (TabSearchBox.resetText) instead of
         // bound — the autofill's programmatic writes would silently break a `text:` binding
         // and tab switches would stop restoring that tab's query. Every keystroke also
@@ -164,11 +201,125 @@ Rectangle {
                 // dropped with the timer.
                 root.flushSearch()
                 searchBox.pushStored()
+                // AN EMPTY BOX TAKES THE NEW TAB'S SEED HERE, not only from the seed's
+                // own change handler: the field is shared and keeps the keyboard across
+                // a tab switch, so moving The Table -> Scripture changes the line from a
+                // citation to "Genesis 1: " without any focus event — and a box left
+                // empty beside a pane naming a passage is exactly the "the verse digits
+                // replaced the seed" case. A tab with a stored query keeps it (pushStored
+                // just put it there, so the box is not empty).
+                // DEFERRED: the seed line and the stored-query reset both settle after
+                // this handler, so filling here can be undone by the push that follows.
+                Qt.callLater(function () {
+                    if (searchBox.text === "")
+                        searchBox.applySeed()
+                })
             }
         }
         // Debounced: see delayedSearch above (a per-keystroke push here is a
         // per-keystroke engine query in the active pane).
-        onEdited: (value) => root.delayedSearch(value)
+        //
+        // THE REFERENCE TABS ALSO JUMP NOW, through the pane's own existing
+        // resolve+goTo (jumpToTyped — the same pair onFilterChanged runs). The box
+        // holds the passage ("…Commission " / "Genesis 1: "), so the digits typed
+        // after it are the paragraph/verse: "…Commission 56" moves to ¶56 and
+        // "Genesis 1: 16" to verse 16 as it is typed rather than after the reading
+        // beat. Only tabs whose pane offers jumpToTyped do this (The Table and
+        // Scripture); a filter tab keeps the debounced filter and nothing else.
+        // (Scripture's resolve answers from its published cache, so a keystroke the
+        // cache has not seen yet no-ops here and lands when the read does — see
+        // ReferencePane::corpusCacheLanded.)
+        onEdited: (value) => {
+            const s = root.suggesters[root.currentPane]
+            // The place to come back to on Esc is taken BEFORE the typing jumps the
+            // pane (see ReferencePane::beginSearch).
+            if (s && s.beginSearch)
+                s.beginSearch()
+            if (s && s.jumpToTyped)
+                s.jumpToTyped(value)
+            root.delayedSearch(value)
+        }
+        // Esc leaves the search: the pane returns to the place the typing started
+        // from, and the tab's stored query is cleared with it.
+        onDismissed: {
+            const s = root.suggesters[root.currentPane]
+            root.flushSearch()
+            root.setSearchFor(root.currentPane, "")
+            if (s && s.endSearch)
+                s.endSearch()
+        }
+        // ENTER IN THE BOX TAKES THE PICK — the pane's own accept
+        // (ReferencePane::playPicked → goLiveRequested → LiveOutputService.stageSlides),
+        // so the paragraph the box just jumped to lands on the MONITOR PREVIEW. The
+        // pane's accept Shortcut can't do it while the field has focus (the pane stands
+        // its keys down while something is being typed into), which is why this relays
+        // it instead of relying on that shortcut.
+        onAccepted: (value) => {
+            root.flushSearch()
+            const s = root.suggesters[root.currentPane]
+            // A RESULT THE ARROWS WALKED TO IS THE RETURN'S ANSWER: Enter opens that
+            // sermon and ENDS the search — the pane emits matchTaken (see the
+            // Connections below), which forgets this tab's query so the box clears
+            // back to the new sermon's own seed. (It used to leave the citation in the
+            // box, which read as still searching — user call: "when press enter or
+            // double click it should open it up and leave the search mode".)
+            if (s && s.matchCursor >= 0 && s.takeMatch) {
+                const cite = String(s.takeMatch() || "")
+                if (cite !== "")
+                    return
+            }
+            if (s && s.playPicked) {
+                s.playPicked()
+                // ENTER ENDS THE SEARCH IN SCRIPTURE TOO (user call: share The Table's
+                // search controls with the Scripture tab): once the pane actually HOLDS a
+                // pick, the tab's query is spent — the box drops back to the new passage's
+                // own seed instead of standing there as a live query. A query that did not
+                // resolve leaves the box alone (nothing was taken).
+                const picked = s.selected !== undefined && s.selected !== null
+                               && s.selected.length > 0
+                if (picked && s.searchReturn !== undefined && s.searchReturn !== null) {
+                    root.setSearchFor(root.currentPane, "")
+                    searchBox.resetText("")
+                }
+            }
+        }
+        // A RESULT WAS OPENED FROM THE PANE (Enter there, or a double-click on a row):
+        // the search is over, so the tab's stored query goes too and the box returns to
+        // the seed of the sermon that was just opened (see ReferencePane's matchTaken).
+        Connections {
+            // null (not undefined) until the active tab registers one: a Connections
+            // target is QObject* and refuses to take undefined (the reported
+            // "Unable to assign [undefined] to QObject*" at load).
+            target: root.suggesters[root.currentPane] !== undefined ? root.suggesters[root.currentPane] : null
+            ignoreUnknownSignals: true
+            function onMatchTaken() {
+                root.flushSearch()
+                root.setSearchFor(root.currentPane, "")
+            }
+        }
+        // The search box's Up/Down over the in-pane result list (The Table).
+        onStepMatch: (delta) => {
+            const s = root.suggesters[root.currentPane]
+            // Through stepInColumn, not stepMatch: the key belongs to whichever column
+            // the selector is on (results while it is on the results, sermons while it
+            // is on the sermons) — see ReferencePane::stepInColumn.
+            if (s && s.stepInColumn)
+                s.stepInColumn(delta)
+            else if (s && s.stepMatch)
+                s.stepMatch(delta)
+        }
+        // ... and its Left/Right across the pane's columns while that list is up.
+        onStepColumn: (delta) => {
+            const s = root.suggesters[root.currentPane]
+            if (s && s.stepColumn)
+                s.stepColumn(delta)
+        }
+        // The pane says whether its result list is showing; the box hands the arrows
+        // over to the search the moment it is (and gives the caret back when it is not).
+        listMode: {
+            const s = root.suggesters[root.currentPane]
+            return !!(s && s.searchMode)
+        }
         // The active tab's live reference suggestions (null on plain-filter tabs).
         suggestions: root.suggestions
         // The Table's matches render IN THE PANE (matchesList) — the floating popup
@@ -176,8 +327,16 @@ Rectangle {
         popupSuppressed: root.currentPane === "table"
         onSuggestionPicked: (index, payload) => {
             const s = root.suggesters[root.currentPane]
-            if (s && payload && payload.ref)
+            if (s && payload && payload.ref) {
                 root.suggestionPicked(root.currentPane, payload.ref)
+                // A PICKED ROW ENDS THE SEARCH (the same rule as Enter): the book /
+                // chapter / sermon was taken, so the query is spent and the box returns
+                // to the seed of the passage it just opened.
+                if (s.searchReturn !== undefined && s.searchReturn !== null) {
+                    root.setSearchFor(root.currentPane, "")
+                    searchBox.resetText("")
+                }
+            }
         }
         onSuggestionHovered: (index, hovering) => {
             const s = root.suggesters[root.currentPane]
@@ -262,7 +421,7 @@ Rectangle {
 
                     // Heavier and lighter-on-dark than before: the tabs read as faint.
                     color: tabDelegate.selected ? Theme.textPrimary : Theme.iconChrome
-                    font.family: "Segoe UI"
+                    font.family: Theme.fontFamily
                     font.pixelSize: 15
                     font.weight: tabDelegate.selected ? Font.Bold : Font.DemiBold
                     horizontalAlignment: Text.AlignLeft

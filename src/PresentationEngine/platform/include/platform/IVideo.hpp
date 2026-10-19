@@ -93,7 +93,8 @@ public:
     // pick ("1920x1080p60" — width×height are honored; fps only breaks
     // ties between native types of the same size); an empty mode keeps the
     // device's default. Real MF Source Reader on Windows: native type at
-    // the requested frame size, ~15 fps drain, frames converted to JPEG.
+    // the requested frame size; a PANE tap drains at ~15 fps and publishes
+    // JPEG, a LIVE tap (SetPreviewLive) publishes every sample as pixels.
     // Idempotent: a second Start on a running tap is a no-op. The result
     // reports whether the preview request was accepted; device open errors
     // are reported asynchronously by the platform preview path.
@@ -114,9 +115,12 @@ public:
         return Error::Make(Err::Unsupported, "Video",
                            "video preview is not implemented on this platform");
     }
-    // The newest preview frame as JPEG bytes (already downscaled for a
-    // dialog pane, ~480px wide). Empty vector = no tap or no frame yet (the
-    // UI keeps showing the placeholder glyph).
+    // The newest preview frame as JPEG bytes. Empty vector = no tap or no frame
+    // yet (the UI keeps showing the placeholder glyph). PANE taps (the default)
+    // publish one encoded frame every ~66 ms: a thumbnail costs the CPU once and
+    // the QML side decodes it. A LIVE tap publishes a fresh JPEG at only
+    // kLiveJpegMs (5 Hz, for the small on-screen tiles) — its real output is
+    // PreviewFramePixels, which is what a program feed must read.
     virtual std::vector<uint8_t> PreviewFrame(const std::string &deviceId)
     {
         (void)deviceId;
@@ -148,10 +152,17 @@ public:
     // a plain PAL-local struct, not modules/rendering's RgbaImage or
     // modules/media's Picture — platform/ stays a leaf layer with no
     // dependency upward into modules/. Empty = no tap or no frame yet.
+    //
+    // On a LIVE tap this is the tap's PRIMARY output: the capture thread keeps
+    // the newest frame as unpacked pixels (no JPEG round trip, no 15 fps gate),
+    // so a program feed reads the device's own rate at full resolution. `seq`
+    // advances once per stored frame — compare it instead of copying a 1080p
+    // picture to discover that nothing arrived.
     struct DecodedFrame {
         uint32_t width = 0;
         uint32_t height = 0;
         std::vector<uint8_t> rgba;   // tightly packed RGBA8, row 0 at the top
+        uint64_t seq = 0;            // see PreviewFrameSeq
         bool empty() const { return width == 0 || height == 0 || rgba.empty(); }
     };
     virtual DecodedFrame PreviewFramePixels(const std::string &deviceId)
@@ -159,11 +170,39 @@ public:
         (void)deviceId;
         return {};
     }
+    // How many frames this tap has stored (camera: every sample; screen: every
+    // grab). 0 = no tap / no frame yet. A puller that only wants to copy when
+    // something NEW arrived reads this first — the cheap question — and calls
+    // PreviewFramePixels only when it moved.
+    virtual uint64_t PreviewFrameSeq(const std::string &deviceId)
+    {
+        (void)deviceId;
+        return 0;
+    }
+    // Make a RUNNING tap a program feed (live) or a thumbnail pane (not live).
+    //
+    // This is the difference between the two jobs a tap really has, and it is
+    // set per tap rather than per API because a camera can be held by a board
+    // row and a dialog at once:
+    //   * pane  — one JPEG every ~66 ms (15 fps). Cheap, and enough for a
+    //             thumbnail; this was the ONLY mode, which is why a live bus
+    //             fed to the outputs moved at 15 fps on both HDMI and NDI.
+    //   * live  — publish EVERY sample as unpacked pixels at the device's own
+    //             rate and resolution (PreviewFramePixels), plus a 5 Hz JPEG so
+    //             the small tiles that read PreviewFrame keep working.
+    // Idempotent and cheap; a no-op for an unknown tap or a platform without
+    // taps.
+    virtual void SetPreviewLive(const std::string &deviceId, bool live)
+    {
+        (void)deviceId;
+        (void)live;
+    }
 
     // ---- Screen-capture taps (monitor id = IMonitor's "\\\.\DISPLAY1") ----
-    // Same pane contract as the camera taps: Start → ~15 fps JPEG via
-    // PreviewFrame, Stop, idempotent. The Windows backend grabs the monitor
-    // named by id via GDI BitBlt (no MF involvement); Unsupported elsewhere.
+    // Same contract as the camera taps: Start → JPEG for a pane / unpacked
+    // pixels for a live tap (see SetPreviewLive), Stop, idempotent. The Windows
+    // backend grabs the monitor named by id via GDI BitBlt (no MF involvement);
+    // Unsupported elsewhere.
     virtual Result<void> StartScreenPreview(const std::string &monitorId)
     {
         (void)monitorId;

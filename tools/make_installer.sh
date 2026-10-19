@@ -11,6 +11,11 @@
 # Steps:
 #   1. tools/make_portable.sh --release   (Release build → deploy → smoke test
 #                                          on a clean PATH → zip as a bonus)
+#  1b. SEED: generate the shipped design catalogs from the engine itself
+#      (bps_cli --dump-catalogs) and bundle this machine's configuration
+#      (tools/make_seed_config.mjs → assets/settings.shipped.json + the seed
+#      data). A catalog is never hand-copied: that is how the shipped templates
+#      once carried the fonts of the PC they were copied from.
 #   2. clean transient state (logs/enginedata/crashes) out of dist/
 #   3. compile with Inno Setup (ISCC) → dist/VGRPresenter-Setup-<version>.exe
 #
@@ -29,6 +34,9 @@ set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || (cd "$(dirname "$0")/.." && pwd))"
 DIST="$ROOT/dist/VGRPresenter"
+# Same override as dev_cycle/make_portable: bps_cli needs the msys2 runtime on PATH.
+MINGW_BIN="${MINGW_BIN:-/c/msys64/ucrt64/bin}"
+NODE_BIN="${NODE_BIN:-node}"
 
 ISCC=""
 for candidate in \
@@ -52,6 +60,45 @@ fi
 VER="$(grep -oE 'kAppVersion = "[^"]+"' "$ROOT/qml/services/SettingsService.cpp" \
     | head -1 | sed -E 's/.*"([^"]+)"/\1/')"
 [ -n "$VER" ] || { echo "INSTALLER: FAIL version"; exit 1; }
+
+# ---- 1b. SEED: catalogs FROM THE CODE, configuration FROM THIS MACHINE ------
+# Two different jobs, both here so the installer can never ship a stale copy:
+#
+#   * the design catalogs are GENERATED (bps_cli --dump-catalogs): they are the
+#     engine's own shipped designs, with the font-free blocks and the catalog
+#     revision this build carries. Hand-copying them is what put one machine's
+#     fonts into every other machine's templates.
+#   * the CONFIGURATION is snapshotted from this machine (make_seed_config.mjs),
+#     with this PC's absolute paths stripped. The app adopts a shipped value only
+#     where an install has none of its own, so an update arrives configured and
+#     nobody has to set the app up again.
+SEED_DIR="$ROOT/installer/seed-data"
+CLI="$ROOT/build-release/bps_cli.exe"
+[ -f "$CLI" ] || CLI="$ROOT/build/bps_cli.exe"
+if [ ! -f "$CLI" ]; then
+    echo "bps_cli not found (build first) — cannot generate the shipped catalogs"
+    echo "INSTALLER: FAIL seed"
+    exit 1
+fi
+SEED_RUN="$ROOT/build/.seed-dump"
+rm -rf "$SEED_RUN"
+mkdir -p "$SEED_RUN"
+echo "== seeding catalogs from the engine (bps_cli --dump-catalogs) =="
+if ! ( cd "$SEED_RUN" && PATH="$MINGW_BIN:$PATH" "$CLI" \
+        --data "$(cygpath -m "$SEED_RUN")/data" \
+        --dump-catalogs "$(cygpath -m "$SEED_DIR/local")" ); then
+    echo "catalog dump FAILED"
+    rm -rf "$SEED_RUN"
+    echo "INSTALLER: FAIL seed"
+    exit 1
+fi
+rm -rf "$SEED_RUN"
+
+echo "== bundling this machine's configuration (settings + kernel) =="
+if ! "$NODE_BIN" "$ROOT/tools/make_seed_config.mjs"; then
+    echo "INSTALLER: FAIL seed"
+    exit 1
+fi
 
 # ---- 2. clean transient state the smoke test wrote into dist/ ----------------
 rm -rf "$DIST/logs" "$DIST/enginedata" "$DIST/crashes"
