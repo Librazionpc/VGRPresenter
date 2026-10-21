@@ -358,8 +358,11 @@ Item {
         objectName: "selfTestSearchInput"   // the harness focuses THIS (forceActiveFocus on the container Item doesn't reach here)
         anchors.left: glass.right
         anchors.leftMargin: 12
-        anchors.right: clearButton.left
-        anchors.rightMargin: 4
+        // The hidden clear control must not reserve width from the empty
+        // placeholder: that clipped the final character of labels like
+        // "Search Shows". Claim the space only while the clear button exists.
+        anchors.right: clearButton.visible ? clearButton.left : parent.right
+        anchors.rightMargin: clearButton.visible ? 4 : 8
         anchors.verticalCenter: parent.verticalCenter
         color: Theme.textPrimary
         font.family: Theme.fontFamily

@@ -235,12 +235,6 @@ Item {
                     font.pixelSize: Theme.textXxl
                     font.weight: Font.DemiBold
                 }
-                Text {
-                    text: qsTr("Application appearance, startup behavior and smart setup.")
-                    color: Theme.textSecondary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
-                }
             }
 
             // ---- Smart Config banner ----
@@ -283,14 +277,6 @@ Item {
                         font.pixelSize: 17
                         font.weight: Font.DemiBold
                     }
-                    Text {
-                        width: parent.width
-                        text: SettingsService.hardwareDetail
-                        color: Theme.textSecondary
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textSm
-                        wrapMode: Text.Wrap
-                    }
                 }
 
                 Rectangle {
@@ -306,7 +292,7 @@ Item {
                     Text {
                         anchors.centerIn: parent
                         text: qsTr("Review setup")
-                        color: "#ffffff"
+                        color: Theme.controlInk
                         font.family: Theme.fontFamily
                         font.pixelSize: Theme.textSm
                         font.weight: Font.Medium
@@ -355,17 +341,11 @@ Item {
                             bottomPadding: 10
                         }
 
-                        // A label on the left and the engine's list of choices on the right.
-                        // A label (and its engine description, when the row passes
-                        // one) on the left, the engine's list of choices on the right.
+                        // A setting label on the left and its choices on the right.
                         component ChoiceRow: Item {
                             id: choiceRow
                             property string settingKey: ""
-                            property string sub: ""
                             width: parent.width
-                            // As tall as the label + description need: a row that
-                            // guessed a fixed height clipped the longer
-                            // descriptions instead of showing them.
                             height: Math.max(36, choiceCol.height + 8)
 
                             Column {
@@ -380,15 +360,6 @@ Item {
                                     font.family: Theme.fontFamily
                                     font.pixelSize: Theme.textSm
                                 }
-                                Text {
-                                    visible: choiceRow.sub !== ""
-                                    text: choiceRow.sub
-                                    color: Theme.textMuted
-                                    font.family: Theme.fontFamily
-                                    font.pixelSize: Theme.textSub
-                                    width: parent.width
-                                    wrapMode: Text.WordWrap
-                                }
                             }
                             SettingsChoice {
                                 anchors.right: parent.right
@@ -399,39 +370,24 @@ Item {
 
                         ChoiceRow { settingKey: "appearance.theme" }
                         Rectangle { x: 2; width: parent.width - 2; height: 1; color: Theme.border }
-                        ChoiceRow { settingKey: "appearance.language"
-                                    sub: root.definitions["appearance.language"].description }
+                        ChoiceRow { settingKey: "appearance.language" }
                         Rectangle { x: 2; width: parent.width - 2; height: 1; color: Theme.border }
 
-                        // Lock In Mode — a toggle row. Its description is shown
-                        // because it carries the one thing this row cannot show:
-                        // that it outranks the Smart Config mode (see
-                        // SmartConfigScreen's locked-in note for the same fact
-                        // stated on that page).
+                        // Lock In Mode — a toggle row.
                         Item {
                             width: appearanceCol.width
-                            // As tall as the description needs (it is the long one
-                            // — it carries the precedence over Smart Config).
-                            height: lockCol.height
+                            height: 38
 
                             Column {
                                 id: lockCol
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: parent.width - 80
-                                spacing: 2
+                                spacing: 0
                                 Text {
                                     text: root.definitions["appearance.lockInMode"].label
                                     color: Theme.textPrimary
                                     font.family: Theme.fontFamily
                                     font.pixelSize: Theme.textSm
-                                }
-                                Text {
-                                    text: root.definitions["appearance.lockInMode"].description
-                                    color: Theme.textMuted
-                                    font.family: Theme.fontFamily
-                                    font.pixelSize: Theme.textSub
-                                    wrapMode: Text.WordWrap
-                                    width: parent.width
                                 }
                             }
                             SettingsToggle {
@@ -629,15 +585,7 @@ Item {
             }
 
             // ---- Resource profile strip ----
-            // LAID OUT AS ROWS, not as an absolutely positioned header with a
-            // description squeezed in beside it. The description comes from the
-            // engine (AppSettings) and is a full sentence, so the fixed y:38
-            // one-liner it used to be ran the whole card width and the profile
-            // picks and "Manage →" were painted straight over it. Here the
-            // header is one line whose right-hand controls own their space, the
-            // description gets the full width of the row under it (wrapped), and
-            // the card is as tall as its content — so a longer description from
-            // the engine grows the card instead of colliding with anything.
+            // Resource profile selector and live usage meters.
             Rectangle {
                 id: profileStrip
                 width: parent.width
@@ -762,17 +710,6 @@ Item {
                         }
                     }
 
-                    // What the profile does — the engine's own words.
-                    Text {
-                        width: parent.width
-                        topPadding: 10
-                        text: root.definitions["resources.profile"].description
-                        color: Theme.textSecondary
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textSm
-                        wrapMode: Text.WordWrap
-                    }
-
                     // The three LIVE usage meters — the engine's Telemetry module
                     // (real frame times, encoder load, output presents), not the
                     // profile's static budget. The allocation split stays visible
@@ -788,19 +725,6 @@ Item {
                         LabeledMeter { label: qsTr("Rendering"); pct: TelemetryService.utilization.rendering; width: (parent.width - 48) / 3 }
                         LabeledMeter { label: qsTr("Encoding"); pct: TelemetryService.utilization.encoding; width: (parent.width - 48) / 3 }
                         LabeledMeter { label: qsTr("Output"); pct: TelemetryService.utilization.output; width: (parent.width - 48) / 3 }
-                    }
-
-                    // The profile's budget split (was the meters' only source
-                    // before the live feed existed — kept as the stated targets).
-                    Text {
-                        topPadding: 8
-                        text: qsTr("Budget for this profile · Rendering %1% · Encoding %2% · Output %3%")
-                            .arg(SettingsService.allocation.rendering)
-                            .arg(SettingsService.allocation.encoding)
-                            .arg(SettingsService.allocation.output)
-                        color: Theme.textMuted
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textSub
                     }
 
                     // The live loop's OWN rate over the last minute (see
@@ -858,7 +782,7 @@ Item {
             // One row of a section: a label (and a line under it), with a toggle (`key`), a "pick one" (`choiceKey`) or a value on the right.
             component PrefRow: Column {
                 id: prefRow
-                // The engine's key of the setting this row is. The label and description come from its definition unless overridden.
+                // The engine's key supplies the setting label.
                 property string key: ""
                 property string choiceKey: ""
                 property string label: root.definitions[prefRow.key !== "" ? prefRow.key : prefRow.choiceKey]
@@ -893,10 +817,6 @@ Item {
                             font.pixelSize: Theme.textSm
                         }
                         Text {
-                            // Named per row, like the toggle: a self-test reads the
-                            // SECOND LINE THIS ROW DRAWS rather than composing the
-                            // sentence a second time (see GeneralScreen's
-                            // crashToolingLabel for the same rule).
                             objectName: prefRow.key !== "" ? "selfTestNote_" + prefRow.key : ""
                             visible: prefRow.sub !== ""
                             text: prefRow.sub
@@ -1087,8 +1007,8 @@ Item {
                             font.pixelSize: Theme.textSm
                         }
                         Text {
-                            text: backupRow.fileStem === "" ? qsTr("Open a show to see its backups.")
-                                : (backupRow.backups.length === 0 ? qsTr("None yet — a copy is taken while it is open.")
+                            text: backupRow.fileStem === "" ? qsTr("No show selected")
+                                : (backupRow.backups.length === 0 ? qsTr("None yet")
                                                                   : qsTr("%n saved copy(s).", "", backupRow.backups.length))
                             color: Theme.textMuted
                             font.family: Theme.fontFamily
@@ -1166,10 +1086,6 @@ Item {
                 PrefRow { key: "preferences.startMinimized" }
                 PrefRow { key: "preferences.restoreLastSession" }
                 PrefRow { key: "preferences.closeToTray" }
-                // The renderer switch. Its second line is what is DRAWING, not
-                // what the switch says (hardwareRenderingNote): on a machine with
-                // no usable GPU the two disagree, and this row is where that has
-                // to be visible instead of silent.
                 PrefRow { key: "preferences.hardwareAcceleration"
                           sub: root.hardwareRenderingNote(); last: true }
             }
@@ -1177,15 +1093,13 @@ Item {
             SettingsSection {
                 objectName: "selfTestCardBackups"   // inset self-test grab target
                 title: qsTr("Backups & recovery")
-                PrefRow { key: "backups.automatic"; sub: root.choiceText("backups.intervalMinutes") }
+                PrefRow { key: "backups.automatic" }
                 PrefRow { choiceKey: "backups.intervalMinutes" }
                 PrefRow { choiceKey: "backups.keepLast" }
-                PrefRow { key: "backups.crashRecovery"; sub: root.definitions["backups.crashRecovery"].description }
-                // What else a backup carries beyond the open show — each opt-in,
-                // so the user decides how much a backup takes.
-                PrefRow { key: "backups.includeSettings"; sub: root.definitions["backups.includeSettings"].description }
-                PrefRow { key: "backups.includeOverlays"; sub: root.definitions["backups.includeOverlays"].description }
-                PrefRow { key: "backups.includeTemplates"; sub: root.definitions["backups.includeTemplates"].description }
+                PrefRow { key: "backups.crashRecovery" }
+                PrefRow { key: "backups.includeSettings" }
+                PrefRow { key: "backups.includeOverlays" }
+                PrefRow { key: "backups.includeTemplates" }
                 BackupRow { last: true }
             }
 
@@ -1193,10 +1107,7 @@ Item {
                 objectName: "selfTestCardNotifications"   // inset self-test grab target
                 title: qsTr("Notifications & logs")
                 PrefRow { key: "notifications.show" }
-                // Its description says what the level does (the engine's log),
-                // which is not something the row's own value can show.
-                PrefRow { choiceKey: "notifications.logLevel"
-                          sub: root.definitions["notifications.logLevel"].description; last: true }
+                PrefRow { choiceKey: "notifications.logLevel"; last: true }
             }
 
             // Whether a crash or a hang on THIS machine can be written down and
@@ -1219,49 +1130,68 @@ Item {
                 }
             }
 
-            // A row with a label on the left and a small action button on the right.
-            component ActionRow: Item {
+            // A row with a label on the left and a small action button on the
+            // right. Column + a self-drawn divider (hidden with last: true),
+            // the same shape PrefRow uses — a row here can no longer be
+            // followed by a sibling with no divider between them just
+            // because whoever added the row forgot the manual Rectangle
+            // (user report: "Libraries" had none between its two rows,
+            // while "All backups" did — the SAME component, inconsistently
+            // wired at each call site instead of owning its own divider).
+            component ActionRow: Column {
                 id: actionRow
                 property string label: ""
                 property string buttonText: ""
+                property bool last: false
                 signal activated()
                 width: parent.width
-                height: 40
 
-                Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: actionRow.label
-                    color: Theme.textPrimary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
-                }
-                Rectangle {
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Math.max(64, actionText.width + 24)
-                    height: 26
-                    radius: Theme.radiusSm
-                    color: actionArea.containsMouse ? Theme.chip : Theme.inset
-                    border.color: Theme.border
-                    border.width: 1
-                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+                Item {
+                    width: actionRow.width
+                    height: 40
 
                     Text {
-                        id: actionText
-                        anchors.centerIn: parent
-                        text: actionRow.buttonText
-                        color: Theme.textSecondary
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: actionRow.label
+                        color: Theme.textPrimary
                         font.family: Theme.fontFamily
-                        font.pixelSize: 12
+                        font.pixelSize: Theme.textSm
                     }
+                    Rectangle {
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Math.max(64, actionText.width + 24)
+                        height: 26
+                        radius: Theme.radiusSm
+                        color: actionArea.containsMouse ? Theme.chip : Theme.inset
+                        border.color: Theme.border
+                        border.width: 1
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
-                    MouseArea {
-                        id: actionArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: actionRow.activated()
+                        Text {
+                            id: actionText
+                            anchors.centerIn: parent
+                            text: actionRow.buttonText
+                            color: Theme.textSecondary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 12
+                        }
+
+                        MouseArea {
+                            id: actionArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: actionRow.activated()
+                        }
                     }
+                }
+                Rectangle {
+                    visible: !actionRow.last
+                    x: 2
+                    width: actionRow.width - 2
+                    height: 1
+                    color: Theme.border
                 }
             }
 
@@ -1292,12 +1222,6 @@ Item {
                     buttonText: qsTr("Browse…")
                     onActivated: backupsBrowser.open()
                 }
-                Rectangle {
-                    x: 2
-                    width: parent.width - 2
-                    height: 1
-                    color: Theme.border
-                }
                 // The backups live outside the app's document folders, so the browser
                 // below is not the only way to reach them: hand the OS file manager
                 // the folder itself (SettingsService.backupDirectory()).
@@ -1314,18 +1238,13 @@ Item {
                             SettingsService.openBackupDirectory()
                     }
                 }
-                Rectangle {
-                    x: 2
-                    width: parent.width - 2
-                    height: 1
-                    color: Theme.border
-                }
                 // Takes the same copies the automatic timer would, on demand:
                 // the open show (if any) plus whichever categories are on.
                 ActionRow {
                     label: qsTr("Back up the open show and everything selected")
                     buttonText: qsTr("Back up now")
                     onActivated: root.backupNow()
+                    last: true
                 }
             }
 
@@ -1333,7 +1252,7 @@ Item {
                 objectName: "selfTestCardLibraries"   // inset self-test grab target
                 title: qsTr("Libraries")
                 RestoreRow { label: qsTr("Restore default overlays"); service: OverlayLibraryService }
-                RestoreRow { label: qsTr("Restore default templates"); service: TemplateLibraryService }
+                RestoreRow { label: qsTr("Restore default templates"); service: TemplateLibraryService; last: true }
             }
 
             SettingsSection {
@@ -1348,8 +1267,13 @@ Item {
                                               : qsTr("Every setting is already at its default."),
                                         "info", qsTr("Settings"), "settings.reset")
                     }
+                    last: true
                 }
             }
+
+            // Breathing room below the last card — without it, "Reset" sat
+            // flush against the window's own bottom edge.
+            Item { width: 1; height: Theme.space4 }
         }
     }
 
@@ -1371,7 +1295,6 @@ Item {
     ModalCard {
         id: backupsBrowser
         title: qsTr("Backups")
-        subtitle: qsTr("Every saved copy the engine has taken, newest first.")
         cardWidth: 620
         showSave: false
         cancelText: qsTr("Close")
@@ -1449,7 +1372,7 @@ Item {
             Text {
                 visible: backupsBrowser.rows.length === 0
                 width: parent.width
-                text: qsTr("No backups yet. A copy is taken while a show is open.")
+                text: qsTr("No backups yet.")
                 color: Theme.textMuted
                 font.family: Theme.fontFamily
                 font.pixelSize: Theme.textSm

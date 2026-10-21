@@ -255,6 +255,14 @@ Result<void> PresentationRuntime::JumpById(std::string_view slideId) {
     return Ok();
 }
 
+Result<void> PresentationRuntime::JumpByTag(std::string_view tag) {
+    const size_t prev = CurrentIndex();
+    auto r = nav_.JumpByTag(tag);
+    if (!r.ok()) return r;
+    if (const Slide* s = CurrentSlide()) PublishSlideChanged(prev, CurrentIndex(), *s);
+    return Ok();
+}
+
 Result<size_t> PresentationRuntime::Search(std::string_view query) const {
     return nav_.Search(query);
 }

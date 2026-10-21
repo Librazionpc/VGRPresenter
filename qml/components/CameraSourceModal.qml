@@ -227,7 +227,7 @@ Item {
                         width: (parent.width - 16) / 2
                         height: 160
                         radius: 10
-                        color: "#0d0f16"
+                        color: Theme.windowBg
                         border.width: sourceCard.selected ? 1.5 : 1
                         border.color: sourceCard.selected ? Theme.accent : Theme.borderSubtle
                         opacity: sourceCard.isOffline ? 0.6 : 1
@@ -350,7 +350,7 @@ Item {
                     Text {
                         anchors.centerIn: parent
                         text: qsTr("Add Camera")
-                        color: "#ffffff"
+                        color: Theme.controlInk
                         font.family: Theme.fontFamily
                         font.pixelSize: 15
                         font.weight: Font.DemiBold

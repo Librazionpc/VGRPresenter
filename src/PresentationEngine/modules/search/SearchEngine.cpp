@@ -490,7 +490,7 @@ Result<std::vector<SearchEngine::ResolvedQueryTerm>> SearchEngine::ResolveTerms(
     for (const std::string& t : terms) {
         if (t.empty()) continue;
         ResolvedTerm r = ResolveTermInVocabulary(Lower(t), storage_);
-        out.push_back({r.word.empty() ? Lower(t) : r.word, r.weight});
+        out.push_back({r.word.empty() ? Lower(t) : r.word, r.weight, {}});
     }
     return out;
 }
@@ -916,7 +916,6 @@ Result<std::vector<SearchResult>> SearchEngine::RawSearch(const SearchQuery& que
             // long documents are length-normalized) + structure bonuses on
             // top: title match, all-words-present, verbatim phrase.
             constexpr double kK1 = 1.2, kB = 0.75;
-            const double dlNorm = kB * (static_cast<double>(rec.tokenCount) / avgdl - 1.0);
             double s = 0.0;
             size_t wholeWords = 0;
             // THE TAIL'S TIER — the reading the doc carries for the half-typed

@@ -7,7 +7,7 @@ import QtQuick.Shapes
 Item {
     id: root
 
-    property color color: "#8a94a6"
+    property color color: Theme.textSecondary
     property real thickness: 2.5
     property bool running: visible
 

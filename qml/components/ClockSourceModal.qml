@@ -170,7 +170,7 @@ Item {
                 width: parent.width
                 height: 90
                 radius: 10
-                color: root.background === "none" ? "#15161d" : "#0d0f16"
+                color: root.background === "none" ? Theme.surface : Theme.windowBg
                 border.color: Theme.borderSubtle
                 border.width: 1
                 clip: true
@@ -185,7 +185,7 @@ Item {
                         delegate: Rectangle {
                             required property int index
                             width: 10; height: 10
-                            color: (Math.floor(index / 20) + (index % 20)) % 2 === 0 ? "#1c1e29" : "#12131a"
+                            color: (Math.floor(index / 20) + (index % 20)) % 2 === 0 ? "#1c1e29" : Theme.panelBg
                         }
                     }
                 }

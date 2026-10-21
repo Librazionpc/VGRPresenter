@@ -389,7 +389,7 @@ Item {
                                 anchors.centerIn: parent
                                 anchors.horizontalCenterOffset: 1
                                 text: "▶"
-                                color: "#ffffff"
+                                color: Theme.controlInk
                                 font.pixelSize: 11
                             }
                         }
@@ -498,7 +498,7 @@ Item {
                     Text {
                         anchors.centerIn: parent
                         text: qsTr("Insert")
-                        color: "#ffffff"
+                        color: Theme.controlInk
                         font.family: Theme.fontFamily
                         font.pixelSize: 15
                         font.weight: Font.DemiBold

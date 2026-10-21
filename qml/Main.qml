@@ -427,6 +427,10 @@ ApplicationWindow {
     // of that contract. Rotation in ConsumePendingCrashSummary makes it
     // exactly-once per crash.)
     Component.onCompleted: {
+        // Set the saved Outputs-page media-fit default before any take can
+        // fall back to the service's startup default.
+        LiveOutputService.setDefaultMediaFit(
+            String(SettingsService.value("outputs.defaultMediaFit") ?? "contain"))
         // THE STYLE ROSTER HAND-OVER, first thing: QML constructs its own
         // StyleListModel (the engine does not call that class's static create()
         // factory — see OutputListModel::adoptStyleRoster), so the object the
@@ -522,6 +526,8 @@ ApplicationWindow {
         transformOrigin: Item.Top
         scale: window.uiScale
         visible: window.currentView === "show"
+        // Esc on this screen: the “…” menu first (put it away), then the centre
+        // page's Close — see the window's cancel binding above.
         onNewShowRequested: newShowDialog.open()
         // Row click in the shows library: open that .vgr (unsaved-changes
         // guarded) and go to the Edit screen.
@@ -542,6 +548,8 @@ ApplicationWindow {
                 EventBus.notify(qsTr("That %1 no longer exists.").arg(kind), "warning", qsTr("Edit"))
         }
         // The Scripture tab's "Convert to show": a new show with the slides the engine built for the passage, opened on the Edit screen.
+        // A Functions-pane action row's Run mark.
+        onActionRunRequested: (actionId) => window.runActionById(actionId)
         onScriptureShowRequested: (name, slides) => {
             editScreen.session.closeDesign()
             editScreen.session.guardUnsaved(function () {
@@ -732,13 +740,43 @@ ApplicationWindow {
     // is the Hotkeys scope stack (qml/settings/Hotkeys.qml) — a dialog pushes
     // what cancel/accept mean while it is up, so the one the operator is
     // looking at is the one that answers, and an open confirm beats the dialog
-    // it sits on. Disabled when no scope asks for them, so with nothing open
-    // Esc and Enter reach whatever has focus exactly as before (a canvas item,
-    // a rename field, a search box).
+    // it sits on. With nothing open, Esc and Enter reach whatever has focus
+    // exactly as they always did (a canvas item, a rename field, a search box).
+    //
+    // ESC ALSO CLOSES, the way the “…” menu's Close row does. Below every
+    // dialog, Esc backs out one level and the last level is the home splash:
+    //   * Preview with a show (or project item) open → that page closes
+    //     (ShowCenter's own Close: `centerItem = null`, the splash returns);
+    //   * the Edit screen, with nothing selected and nothing being typed →
+    //     back to Preview, home splash, without closing the show it holds (the
+    //     same landing as the tabs, so Edit returns to the document).
+    // Still ahead of it, deliberately: an open dialog/picker/panel (a Hotkeys
+    // scope — the two never both fire), a text field or a canvas label being
+    // typed into (Esc ends the typing, it does not leave the screen), and the
+    // canvas' own selection (mCanvas clears that first — see escapeAvailable,
+    // which is off while something is selected, so the key reaches the canvas).
+    readonly property bool escapeAvailable: !showScreen.typingInField
+        && !editScreen.anyTextEditing
+        && (window.currentView === "edit"
+                ? editScreen.selectedCanvasObjects.length === 0
+                : showScreen.centerItem !== null)
+    // The keyboard's version of the centre page's Close row.
+    function closeToHome() {
+        EngineBridge.log("info", "Navigation", "Esc → home (closed the open show)")
+        showScreen.centerItem = null
+        window.currentView = "show"
+    }
     Shortcut {
         action: "cancel"
-        enabled: Hotkeys.canCancel
-        onActivated: Hotkeys.cancel()
+        enabled: Hotkeys.canCancel || window.escapeAvailable
+        onActivated: {
+            if (Hotkeys.canCancel)
+                Hotkeys.cancel()
+            else if (window.currentView === "edit")
+                window.closeToHome()
+            else
+                showScreen.escapeBack()
+        }
     }
     Shortcut {
         action: "accept"
@@ -828,6 +866,100 @@ ApplicationWindow {
         onActivated: editScreen.saveShowAs()
     }
 
+    // The live GROUP shortcuts (Settings · Look & Feel's "Manage groups"):
+    // one dynamic binding per group that has a letter assigned — press it to
+    // jump to the NEXT slide carrying that group (cycling), the same
+    // FreeShow behavior "press V to walk verse 1, 2, 3...". Dynamic (not
+    // named in Hotkeys.bindings): these chords are DATA, picked per group by
+    // whoever is running the show, not a fixed action this app ships with.
+    //
+    // Gated to live AND to no text field owning focus — a bare letter chord
+    // competing with normal typing (a rename field, the search box, a canvas
+    // text edit) is exactly the kind of collision this app's own `addText`
+    // shortcut avoids by requiring the canvas's own activeFocus; group
+    // shortcuts have no one owning Item to ask instead, so they ask the
+    // window's focus item directly.
+    readonly property bool textFieldFocused: window.activeFocusItem !== null
+        && (window.activeFocusItem instanceof TextInput || window.activeFocusItem instanceof TextEdit)
+    Repeater {
+        model: {
+            void GroupListModel.rosterChanged
+            const map = GroupListModel.shortcutMap()
+            return Object.keys(map).map((key) => ({ key: key, name: map[key] }))
+        }
+        delegate: Shortcut {
+            required property var modelData
+            sequence: modelData.key
+            context: Qt.ApplicationShortcut
+            enabled: LiveOutputService.live && !window.textFieldFocused
+            onActivated: LiveOutputService.jumpToGroup(modelData.name)
+        }
+    }
+
+    // Settings · Appearance & Actions' own registry — one real
+    // LiveOutputService capability per action (ActionListModel.catalogEntries),
+    // bound the same way a group's letter is. ONE dispatcher (runEffect)
+    // instead of a switch at every call site, so a catalog addition is a
+    // single line in ActionListModel.cpp and nothing here changes.
+    function runEffect(effectId, effectValue) {
+        switch (effectId) {
+        case "go_live": LiveOutputService.goLive(); return
+        case "stop": LiveOutputService.stop(); return
+        case "blackout": LiveOutputService.blackout(); return
+        case "end_blackout": LiveOutputService.endBlackout(); return
+        case "clear_on_air_slide": LiveOutputService.clearOnAirSlide(); return
+        case "clear_slide": LiveOutputService.clearOnAirSlide(); return
+        case "clear_all": LiveOutputService.clearAll(); return
+        case "clear_media": LiveOutputService.clearMedia(); return
+        case "clear_overlays": LiveOutputService.clearAllOverlays(); return
+        case "restore_cleared": LiveOutputService.restoreCleared(); return
+        case "restore_output": LiveOutputService.restoreCleared(); return
+        case "next_slide": LiveOutputService.next(); return
+        case "previous_slide": LiveOutputService.previous(); return
+        case "jump_to_group": LiveOutputService.jumpToGroup(effectValue); return
+        case "media_toggle_play": LiveOutputService.mediaTogglePlay(); return
+        case "toggle_playing_media": LiveOutputService.mediaTogglePlay(); return
+        case "media_toggle_muted": LiveOutputService.mediaToggleMuted(); return
+        }
+    }
+    // One action, one runner: the shortcut below and the Functions pane's Run
+    // mark both land here, so a click and a keypress can never diverge.
+    function runActionById(actionId) {
+        const row = ActionListModel.rowForId(actionId)
+        if (row < 0) return
+        const action = ActionListModel.getAction(row)
+        const steps = action.steps && action.steps.length
+            ? action.steps : [{ effectId: action.effectId, effectValue: action.effectValue }]
+        for (let i = 0; i < steps.length; ++i)
+            window.runEffect(steps[i].effectId, steps[i].effectValue)
+    }
+    Repeater {
+        model: {
+            void ActionListModel.rosterChanged
+            const map = ActionListModel.shortcutMap()   // shortcut -> action id
+            return Object.keys(map).map((key) => ({ key: key, actionId: map[key] }))
+        }
+        delegate: Shortcut {
+            required property var modelData
+            sequence: modelData.key
+            context: Qt.ApplicationShortcut
+            // "go_live"/"stop" are legal off-air too (that IS the action);
+            // every other effect needs a live session to act on, same as
+            // the group jump above.
+            readonly property var action: {
+                void ActionListModel.rosterChanged
+                const row = ActionListModel.rowForId(modelData.actionId)
+                return row >= 0 ? ActionListModel.getAction(row) : null
+            }
+            readonly property var steps: action && action.steps && action.steps.length
+                ? action.steps : (action ? [{ effectId: action.effectId, effectValue: action.effectValue }] : [])
+            readonly property bool canRunOffAir: steps.some((step) => step.effectId === "go_live" || step.effectId === "stop")
+            enabled: action !== null && !window.textFieldFocused
+                     && (LiveOutputService.live || canRunOffAir)
+            onActivated: window.runActionById(modelData.actionId)
+        }
+    }
+
     // "Save changes?" over any screen; the show session asks through it.
     UnsavedChangesDialog {
         id: unsavedDialog
@@ -890,12 +1022,19 @@ ApplicationWindow {
 
 
     // ---- Settings overlay ----
-    // Shared ModalScrim: click-dismisses, and consumes wheel events so a
-    // modal's scroll never leaks into the Flickables on the page behind.
+    // Shared ModalScrim: traps outside clicks and consumes wheel events so a
+    // modal stays open and scrolling never leaks into the page behind.
     ModalScrim {
         id: settingsScrim
         z: 30000
         visible: false
+        // The page layer, from ModalStack's one shared definition (see its
+        // own comment) — Settings is the base of the whole dialog stack, so
+        // it always blurs the real page, never something nested above it.
+        blurSource: ModalStack.pageLayer ? ModalStack.pageLayer() : null
+        Component.onCompleted: ModalStack.pageLayer = function() {
+            return window.currentView === "edit" ? editScreen : showScreen
+        }
         // NOT scaled (see uiScale): this rectangle IS the modal's black box — the
         // full-window dim that makes the dialog read as modal. Scaling the overlay
         // shrank the backdrop away from the window's own edges, so the card floated
@@ -928,6 +1067,10 @@ ApplicationWindow {
             // The hook this card's fit scenario grabs (ModalShell has no
             // objectName of its own — the shell is the app's only one).
             objectName: "selfTestSettingsShell"
+            // Published once so a dialog opened FROM WITHIN Settings
+            // (Manage groups/actions) can blur THIS instead of Show/Edit —
+            // see ModalStack.settingsShell's own comment.
+            Component.onCompleted: ModalStack.settingsShell = settingsShell
             // The app scale (see uiScale), on the CARD rather than on the scrim
             // above it. Centred, so scaling about the centre leaves it where it
             // was, in proportion with the screens behind it.
@@ -938,7 +1081,7 @@ ApplicationWindow {
             onSectionSelected: (key) => window.settingsSection = key
             onCloseRequested: settingsScrim.visible = false
             // No Cancel / Save Changes footer: the settings sections apply as you go, and
-            // the popup closes with the X (or by clicking outside it).
+            // the popup closes with the X or Escape.
             showFooter: false
 
             Loader {
@@ -951,6 +1094,7 @@ ApplicationWindow {
                         case "plugins": return pluginsScreenComponent
                         case "outputs": return outputsScreenComponent
                         case "styles": return stylesScreenComponent
+                        case "lookfeel": return lookFeelScreenComponent
                         case "av": return audioVideoScreenComponent
                         default: return placeholderComponent
                         }
@@ -989,6 +1133,11 @@ ApplicationWindow {
     Component {
         id: stylesScreenComponent
         StylesScreen {}
+    }
+
+    Component {
+        id: lookFeelScreenComponent
+        AppearanceActionsScreen {}
     }
 
     Component {
@@ -5506,7 +5655,7 @@ ApplicationWindow {
     readonly property string paneTypoQuery: "complling that"
     function paneMark(rendered) {
         return String(rendered ?? "")
-            .replace(/<b><font color="#ffd54a">/g, "«")
+            .replace(/<b><font color=Theme.highlightInk>/g, "«")
             .replace(/<\/font><\/b>/g, "»")
             .replace(/&amp;/g, "&")
     }
@@ -8760,7 +8909,7 @@ ApplicationWindow {
                     return
                 }
                 shape.meta = Object.assign({}, shape.meta, { shapeType: "rectangle" })
-                shape.style.backgroundColor = "#3a3f55"
+                shape.style.backgroundColor = Theme.controlBg
                 window.itemColorRectKey = shape.key
                 window.itemColorRectBefore = window.itemColorItemHex(shape.key)
                 SelfTest.grab("canvasItem_" + shape.key, "itemcolor_rect_before.png")
@@ -8793,7 +8942,7 @@ ApplicationWindow {
                 const circle = editScreen.addCanvasItem("shape")
                 if (circle) {
                     circle.meta = Object.assign({}, circle.meta, { shapeType: "circle" })
-                    circle.style.backgroundColor = "#3a3f55"
+                    circle.style.backgroundColor = Theme.controlBg
                     window.itemColorCircleKey = circle.key
                     window.itemColorCircleBefore = window.itemColorItemHex(circle.key)
                     SelfTest.grab("canvasItem_" + circle.key, "itemcolor_circle_before.png")

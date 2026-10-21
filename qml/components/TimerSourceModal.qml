@@ -198,7 +198,7 @@ Item {
                             Text {
                                 anchors.centerIn: parent
                                 text: modeBtn.modelData.label
-                                color: modeBtn.active ? "#ffffff" : Theme.textPrimary
+                                color: modeBtn.active ? Theme.controlInk : Theme.textPrimary
                                 font.family: Theme.fontFamily
                                 font.pixelSize: 14
                                 font.weight: modeBtn.active ? Font.DemiBold : Font.Medium
@@ -325,7 +325,7 @@ Item {
                             width: 20
                             height: 20
                             radius: 10
-                            color: "#ffffff"
+                            color: Theme.controlInk
                             Behavior on x { NumberAnimation { duration: 100 } }
                         }
 
@@ -386,7 +386,7 @@ Item {
                     Text {
                         anchors.centerIn: parent
                         text: qsTr("Add Timer")
-                        color: "#ffffff"
+                        color: Theme.controlInk
                         font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: Font.DemiBold

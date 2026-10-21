@@ -564,7 +564,7 @@ void TestTheTableLibrary() {
         //    job (the gate is about FORMAT, never about content), and a sermon is
         //    still a sermon with an "MZ" or "BM" opening a paragraph.
         CHECK(accepted("x/1958/58_0211_Plain.txt", sermon));
-        const std::string messy = std::string("BMW\x0Cthe car\x01 in the story\r\n\r\n\x93Come\x94 to Me, \xADnow.\r\n");
+        const std::string messy = std::string("BMW\x0Cthe car\x01 in the story\r\n\r\n\x93" "Come\x94 to Me, \xADnow.\r\n");
         CHECK(accepted("x/1958/58_0212_Odd.txt", messy));
         CHECK(lib::TheTableLibrary::ConvertToCleanText("x/1958/58_0212_Odd.txt", messy).ok());
         // A string that begins with a signature's letters but is not the signature.

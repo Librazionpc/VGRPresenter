@@ -144,12 +144,6 @@ Item {
                     font.pixelSize: Theme.textXxl
                     font.weight: Font.DemiBold
                 }
-                Text {
-                    text: qsTr("Extend VGR with providers, devices and integrations.")
-                    color: Theme.textSecondary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
-                }
             }
 
             // ---- Installed plugins card ----
@@ -191,9 +185,6 @@ Item {
                             readonly property string ndiState: EngineBridge.ndiState
                             readonly property bool runtimeOk: !isNdi || ndiState === "ready"
                             readonly property bool live: modelData.enabled && runtimeOk
-                            readonly property string subtitle: isNdi
-                                ? (EngineBridge.ndiVersion !== "" ? EngineBridge.ndiVersion : qsTr("runtime not detected")) + " · " + modelData.tag
-                                : modelData.version + " · " + modelData.tag
 
                             Item {
                                 width: pluginRow.width
@@ -208,12 +199,6 @@ Item {
                                         color: Theme.textPrimary
                                         font.family: Theme.fontFamily
                                         font.pixelSize: Theme.textSm
-                                    }
-                                    Text {
-                                        text: pluginRow.subtitle
-                                        color: Theme.textMuted
-                                        font.family: Theme.fontFamily
-                                        font.pixelSize: Theme.textXs
                                     }
                                 }
 

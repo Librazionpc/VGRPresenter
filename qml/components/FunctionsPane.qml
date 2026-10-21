@@ -17,6 +17,44 @@ Item {
     readonly property bool running: FlowService.running
     readonly property string execState: String(execution.state ?? "")
 
+    // Emitted by an action row's Run mark; the window owns the dispatcher.
+    signal runActionRequested(string actionId)
+
+    // ---- The action roster, with its CUSTOM ACTIVATIONS -------------------
+    // Settings · Appearance & Actions keeps the actions; this pane is where an
+    // operator stands while running the show, so it shows what will fire and
+    // when. A trigger two actions share is a genuine trap (both run on the
+    // same event), so those rows carry a warning badge naming the other one.
+    readonly property var actionRows: {
+        void ActionListModel.rosterChanged
+        const out = []
+        for (let i = 0; i < ActionListModel.rowCount(); ++i) {
+            const a = ActionListModel.getAction(i)
+            out.push({ id: a.id, name: a.name, icon: a.icon, shortcut: a.shortcut,
+                       trigger: a.trigger })
+        }
+        return out
+    }
+    function triggerLabel(id) {
+        if (id === "")
+            return ""
+        const entries = ActionListModel.triggerEntries()
+        for (let i = 0; i < entries.length; ++i)
+            if (entries[i].id === id) return entries[i].name
+        return id
+    }
+    // Names of the OTHER actions bound to the same trigger ("" when none).
+    function sharedNames(row) {
+        if (!row || !row.trigger) return ""
+        const names = []
+        for (let i = 0; i < root.actionRows.length; ++i) {
+            const other = root.actionRows[i]
+            if (other.id !== row.id && other.trigger === row.trigger)
+                names.push(other.name !== "" ? other.name : qsTr("Untitled"))
+        }
+        return names.join(", ")
+    }
+
     Component.onCompleted: FlowService.refreshFlows()
     Connections {
         target: FlowService
@@ -71,7 +109,7 @@ Item {
                         width: quickRow.width + 18
                         height: 30
                         radius: Theme.radiusMd
-                        color: quickArea.containsMouse ? "#232530" : Theme.inset
+                        color: quickArea.containsMouse ? Theme.hoverBg : Theme.inset
                         border.width: 1
                         border.color: Theme.border
                         Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
@@ -129,7 +167,7 @@ Item {
                         width: flowsCol.width
                         height: flowRow.height + 20
                         radius: Theme.radiusLg
-                        color: "#16171e"
+                        color: Theme.rowBg
                         border.width: root.hasExecution
                                       && String(root.execution.flowId ?? "") === flowCard.modelData.id ? 1 : 0
                         border.color: Theme.accent
@@ -236,6 +274,176 @@ Item {
                         onClicked: FlowService.loadStarterFlow()
                     }
                 }
+
+                // ---- Actions & their custom activations --------------------
+                Rectangle {
+                    width: parent.width
+                    height: 1
+                    color: Theme.border
+                    opacity: 0.7
+                }
+                Row {
+                    width: parent.width
+                    spacing: 8
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: qsTr("Actions")
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 14
+                        font.weight: Font.Medium
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: qsTr("what runs on a keypress, and on an event")
+                        color: Theme.textMuted
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.textXs
+                    }
+                }
+
+                Repeater {
+                    model: root.actionRows
+                    delegate: Rectangle {
+                        id: actionRow
+                        required property var modelData
+                        width: flowsCol.width
+                        // A shared trigger makes the row taller: the badge and
+                        // the trigger line both need their own space.
+                        readonly property string shared: root.sharedNames(modelData)
+                        height: 52
+                        radius: Theme.radiusMd
+                        color: Theme.rowBg
+                        border.width: actionRow.shared !== "" ? 1 : 0
+                        border.color: Qt.alpha(Theme.warning, 0.5)
+                        clip: true
+
+                        // Right-hand cluster: shared badge, keypress, run.
+                        Row {
+                            id: actionTrailing
+                            anchors.right: parent.right
+                            anchors.rightMargin: 10
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 6
+
+                            Rectangle {
+                                visible: actionRow.shared !== ""
+                                width: sharedRow.width + 16
+                                height: 22
+                                radius: 11
+                                color: Qt.alpha(Theme.warning, 0.14)
+                                border.width: 1
+                                border.color: Qt.alpha(Theme.warning, 0.45)
+                                Row {
+                                    id: sharedRow
+                                    anchors.centerIn: parent
+                                    spacing: 5
+                                    IconGlyph {
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        name: "info"
+                                        color: Theme.warningLight
+                                        width: 10; height: 10; fit: true
+                                    }
+                                    Text {
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: qsTr("Shared trigger")
+                                        color: Theme.warningLight
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: 10
+                                        font.weight: Font.Bold
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                visible: actionRow.modelData.shortcut !== ""
+                                width: keyLabel.width + 14
+                                height: 22
+                                radius: 6
+                                color: Theme.inset
+                                border.width: 1
+                                border.color: Theme.border
+                                Text {
+                                    id: keyLabel
+                                    anchors.centerIn: parent
+                                    text: actionRow.modelData.shortcut
+                                    color: Theme.textSecondary
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.textXs
+                                }
+                            }
+
+                            Rectangle {
+                                width: 26; height: 26; radius: 6
+                                color: runHover.hovered ? Theme.hoverBg : "transparent"
+                                IconGlyph {
+                                    anchors.centerIn: parent
+                                    name: "play"
+                                    color: runHover.hovered ? Theme.textPrimary : Theme.textSecondary
+                                    width: 13; height: 13; fit: true
+                                }
+                                HoverHandler { id: runHover; cursorShape: Qt.PointingHandCursor }
+                                TapHandler {
+                                    onTapped: root.runActionRequested(actionRow.modelData.id)
+                                }
+                            }
+                        }
+
+                        Row {
+                            anchors.left: parent.left
+                            anchors.leftMargin: 12
+                            anchors.right: actionTrailing.left
+                            anchors.rightMargin: 10
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 10
+
+                            IconGlyph {
+                                anchors.verticalCenter: parent.verticalCenter
+                                name: actionRow.modelData.icon || "flag"
+                                color: Theme.accentLight
+                                width: 15; height: 15; fit: true
+                            }
+                            Column {
+                                width: parent.width - 25
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 2
+                                Text {
+                                    width: parent.width
+                                    text: actionRow.modelData.name !== "" ? actionRow.modelData.name
+                                                                         : qsTr("Unnamed action")
+                                    color: Theme.textPrimary
+                                    elide: Text.ElideRight
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: 14
+                                }
+                                Text {
+                                    width: parent.width
+                                    text: actionRow.modelData.trigger !== ""
+                                        ? root.triggerLabel(actionRow.modelData.trigger)
+                                          + (actionRow.shared !== ""
+                                             ? qsTr("  ·  also on %1").arg(actionRow.shared) : "")
+                                        : qsTr("No custom activation")
+                                    color: actionRow.shared !== "" ? Theme.warningLight
+                                         : actionRow.modelData.trigger !== "" ? Theme.textSecondary
+                                         : Theme.textMuted
+                                    elide: Text.ElideRight
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.textXs
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    visible: root.actionRows.length === 0
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    text: qsTr("No actions yet — create them in Settings · Appearance & Actions.")
+                    color: Theme.textMuted
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.textSm
+                }
             }
         }
         AppScrollBar {
@@ -257,7 +465,7 @@ Item {
             // A running flow is a LIVE surface, so its card wears the live red the
             // GO LIVE pill wears (Theme.liveBgOnAir) — this border used to be its own
             // near-copy of that red, which is how the live red drifted into six values.
-            border.color: root.running ? Theme.liveBgOnAir : "#232530"
+            border.color: root.running ? Theme.liveBgOnAir : Theme.border
 
             Column {
                 id: execCol
@@ -319,7 +527,7 @@ Item {
                         Rectangle {
                             visible: root.execState === "paused" || root.execState === "running"
                             width: 30; height: 30; radius: Theme.radiusMd
-                            color: "#232530"
+                            color: Theme.chip
                             IconGlyph {
                                 anchors.centerIn: parent
                                 name: root.execState === "paused" ? "play" : "pause"
@@ -336,7 +544,7 @@ Item {
                         Rectangle {
                             visible: root.execState === "running" || root.execState === "paused"
                             width: 30; height: 30; radius: Theme.radiusMd
-                            color: "#232530"
+                            color: Theme.chip
                             Text {
                                 anchors.centerIn: parent
                                 text: "⏭"
@@ -385,7 +593,7 @@ Item {
                             color: st === "completed" ? "#173326"
                                  : st === "running" ? Theme.armedLiveBg
                                  : st === "failed" ? "#3a1410"
-                                 : st === "skipped" ? "#22242e"
+                                 : st === "skipped" ? Theme.card
                                  : Theme.inset
                             border.width: st === "running" ? 1 : 0
                             border.color: Theme.liveBg
@@ -400,7 +608,7 @@ Item {
                                     color: st === "completed" ? "#3ddc84"
                                          : st === "running" ? Theme.liveBg
                                          : st === "failed" ? Theme.danger
-                                         : st === "skipped" ? "#5c6475"
+                                         : st === "skipped" ? Theme.textMuted
                                          : "#3a3c48"
                                 }
                                 Text {

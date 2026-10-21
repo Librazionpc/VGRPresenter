@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Effects
 import VGRPresenterUI
 
 // The dim backdrop behind every modal in this app — one shared component
@@ -11,22 +12,52 @@ import VGRPresenterUI
 // (or has nothing to scroll) leaks the scroll into whatever Flickable sits
 // in the page underneath — the settings page visibly scrolling behind the
 // open dialog. This scrim accepts the wheel at the overlay layer, so the
-// event dies here and never reaches the page. Clicking the backdrop still
-// dismisses, exactly as the per-dialog MouseAreas always did.
+// event dies here and never reaches the page. Outside clicks are consumed
+// without closing the dialog; a caller can opt in to backdrop dismissal.
 Rectangle {
     id: root
 
-    // Whether a click on the backdrop itself dismisses the modal (every
-    // current consumer wants this; kept as a property so a future
-    // click-trapping-only scrim doesn't need a fork).
-    property bool clickToDismiss: true
+    // Keep popups open when the user clicks outside them. Callers can opt in
+    // to backdrop dismissal for a specific transient dialog.
+    property bool clickToDismiss: false
+
+    // Optional: the item directly behind this scrim to blur (the Settings
+    // overlay sets this to whichever of Show/Edit is currently visible — see
+    // Main.qml's settingsScrim). null (the default) keeps every OTHER
+    // ModalScrim in the app exactly as it always was — a flat dim, no blur,
+    // no live GPU cost — a caller has to opt in explicitly.
+    property Item blurSource: null
 
     signal dismissed()
 
     anchors.fill: parent
     // Dark enough to read as a backdrop even over this app's own near-black panels, not just over a bright screen - 60% was
     // correct but close to invisible against a background already this dark.
-    color: "#cc000000"
+    // Transparent instead when blurring: the MultiEffect + its own dim
+    // Rectangle below become the backdrop, so this would otherwise paint
+    // UNDER a blur that already covers the whole scrim for nothing.
+    color: root.blurSource !== null ? "transparent" : "#cc000000"
+
+    // Live blur of whatever's behind this scrim — only built when a caller
+    // actually sets blurSource, so every other dialog in the app pays
+    // nothing for this.
+    MultiEffect {
+        anchors.fill: parent
+        visible: root.blurSource !== null
+        source: root.blurSource
+        autoPaddingEnabled: false
+        blurEnabled: true
+        blurMax: 48
+        blur: 1.0
+    }
+    // A lighter dim over the blur than the flat scrim uses — the blur
+    // itself already separates the dialog from the page, so less darkening
+    // reads as modal without flattening the blur to near-black.
+    Rectangle {
+        visible: root.blurSource !== null
+        anchors.fill: parent
+        color: "#80000000"
+    }
 
     MouseArea {
         anchors.fill: parent

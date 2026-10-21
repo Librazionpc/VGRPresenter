@@ -7,7 +7,7 @@ import QtQuick
 // Two Rectangles centered by anchors can't drift off-center, so every "+" in the app draws through
 // this component now instead.
 //
-//   PlusGlyph { size: 22; thickness: 2.4; color: "#ffffff" }
+//   PlusGlyph { size: 22; thickness: 2.4; color: Theme.controlInk }
 //   PlusGlyph { size: 14; thickness: 1.6; anchors.verticalCenter: parent.verticalCenter }   // inline beside a label
 //   PlusGlyph { rotation: open ? 135 : 0; Behavior on rotation { NumberAnimation { duration: 200 } } }   // "+" -> "x"
 Item {
@@ -15,7 +15,7 @@ Item {
 
     property real size: 14
     property real thickness: Math.max(1.2, size * 0.12)
-    property color color: "#ffffff"
+    property color color: Theme.controlInk
 
     implicitWidth: size
     implicitHeight: size

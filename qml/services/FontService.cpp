@@ -8,7 +8,7 @@
 
 namespace {
 
-constexpr const char *kDefaultKey = "\x01default";
+constexpr const char *kDefaultKey = "\x01" "default";
 
 const bps::rendering::FontManager &fonts()
 {

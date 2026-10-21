@@ -2308,11 +2308,12 @@ void LiveOutputService::applyMediaTake(const MediaPreflight &pre)
 
     mediaPath_ = clean;
     mediaName_ = pre.name;
-    // THE FILE'S OWN FILL, from the library ("" = the output's default). It is
-    // handed to the compositor with the first frame and every frame after it, so
-    // every output lays THIS picture out the way the operator asked for the file
-    // — not the way each screen's Fill setting happens to say.
-    mediaFit_ = MediaLibraryService::instance().itemFit(clean);
+    // Prefer this file's saved override; otherwise use the shared default from
+    // Settings · Outputs. The effective fit is handed to every output so all
+    // monitors frame the same media consistently.
+    const QString fileFit = MediaLibraryService::instance().itemFit(clean);
+    mediaFitUsesDefault_ = fileFit.isEmpty();
+    mediaFit_ = mediaFitUsesDefault_ ? defaultMediaFit_ : fileFit;
     g_mediaFitOnAir = mediaFit_.toStdString();
     mediaIsVideo_ = isVideo;
     mediaIsAudio_ = isAudio;
@@ -2388,14 +2389,32 @@ void LiveOutputService::setMediaFit(const QString &fit)
     // THE FILE KEEPS IT: stored in the media library, so the choice is there for
     // the next take and for every output — the take is only what is up now.
     MediaLibraryService::instance().setItemFit(mediaPath_, wanted);
-    if (mediaFit_ == wanted)
+    mediaFitUsesDefault_ = wanted.isEmpty();
+    const QString effective = mediaFitUsesDefault_ ? defaultMediaFit_ : wanted;
+    if (mediaFit_ == effective)
         return;
-    mediaFit_ = wanted;
-    g_mediaFitOnAir = wanted.toStdString();
+    mediaFit_ = effective;
+    g_mediaFitOnAir = effective.toStdString();
     // The picture is already decoded: only the LAYOUT changes, so hand the new
     // fit to the compositor without re-pushing a frame (the pixels are identical)
     // and let the next preview/live tick lay them out again.
-    pl::CompositorState::Instance().SetMediaFit(wanted.toStdString());
+    pl::CompositorState::Instance().SetMediaFit(effective.toStdString());
+    emit mediaChanged();
+}
+
+void LiveOutputService::setDefaultMediaFit(const QString &fit)
+{
+    const QString wanted = (fit == QLatin1String("contain") || fit == QLatin1String("cover")
+                            || fit == QLatin1String("fill"))
+        ? fit : QStringLiteral("contain");
+    if (defaultMediaFit_ == wanted)
+        return;
+    defaultMediaFit_ = wanted;
+    if (mediaOnAir_ && mediaFitUsesDefault_) {
+        mediaFit_ = wanted;
+        g_mediaFitOnAir = wanted.toStdString();
+        pl::CompositorState::Instance().SetMediaFit(wanted.toStdString());
+    }
     emit mediaChanged();
 }
 
@@ -2419,6 +2438,7 @@ void LiveOutputService::clearMedia()
     mediaPath_.clear();
     mediaName_.clear();
     mediaFit_.clear();
+    mediaFitUsesDefault_ = true;
     g_mediaFitOnAir.clear();
     mediaHasAlpha_ = false;
     mediaAlphaDecided_ = false;
@@ -2585,6 +2605,19 @@ bool LiveOutputService::jumpTo(int index)
     if (!live_ || index < 0)
         return false;
     auto r = pl::PresentationEngine::Instance().JumpTo(size_t(index));
+    if (r.ok()) {
+        refreshOnAirSlide();
+        emit onAirChanged();
+        return true;
+    }
+    return false;
+}
+
+bool LiveOutputService::jumpToGroup(const QString &tag)
+{
+    if (!live_ || tag.isEmpty())
+        return false;
+    auto r = pl::PresentationEngine::Instance().JumpByTag(tag.toStdString());
     if (r.ok()) {
         refreshOnAirSlide();
         emit onAirChanged();
@@ -3077,6 +3110,9 @@ void LiveOutputService::recheckNdiPlanOffThread()
     const QString ndiState = EngineBridge::instance().ndiState();
     const bool ndiVerdict = ndiState != QLatin1String("unknown");
     if (want && !ndiUsable) {
+        // The plug-in tears down its SDK sender; force a fresh identity arm
+        // when the runtime becomes ready, even if the output name is unchanged.
+        ndiArmedName_.clear();
         if (ndiVerdict && !ndiGateLogged_) {
             ndiGateLogged_ = true;
             qWarning("LiveOutputService: NDI output requested but NDI is not usable (%s) — no frames will be sent",
@@ -3240,6 +3276,13 @@ void LiveOutputService::applyNdiPlanProbe(bps::display::NdiDisplayProvider *prov
     plan.buffer = fb;
     plan.senderName = senderName;
     plan.fps = fps;
+
+    // The NDI SDK fixes a sender's network-visible name when it is created.
+    // A row can be added, renamed, or become the first enabled NDI output
+    // during a live session, so arm the sender again before publishing the
+    // new plan. The reset itself is queued onto the feed thread by this helper.
+    if (!senderName.isEmpty() && senderName != ndiArmedName_)
+        armNdiSenderForSession();
     setNdiPlan(plan);
 
     // The frame may not exist yet (GO LIVE just pressed): an enabled NDI row
@@ -3535,6 +3578,7 @@ void LiveOutputService::checkNdiFeedRate()
         ndiDriftFrames_ = frames;
         ndiDriftSlowWindows_ = 0;
         ndiDriftWarned_ = false;
+        ndiNoProgressWindows_ = 0;
         ndiRateTier_ = -1;
         ndiLastConfiguredFps_ = 0.0f;
         return;
@@ -3554,6 +3598,29 @@ void LiveOutputService::checkNdiFeedRate()
     const qulonglong delta = frames >= ndiDriftFrames_ ? frames - ndiDriftFrames_ : 0;
     ndiDriftFrames_ = frames;
     ndiDriftClock_.restart();
+
+    // A feed that still has an active plan but has not completed a single send
+    // across two full windows is no longer making progress. Recreate its SDK
+    // sender on the same thread that owns SendFrame; this is serialized between
+    // sends and lets the next clock beat lazily open a fresh sender.
+    if (delta > 0) {
+        ndiNoProgressWindows_ = 0;
+    } else if (++ndiNoProgressWindows_ >= kDriftWindowsToWarn) {
+        ndiNoProgressWindows_ = 0;   // retry after another two windows if this reset does not recover
+        ensureNdiWorker();
+        if (ndiWorker_) {
+            QMetaObject::invokeMethod(ndiWorker_, [] {
+                auto p = bps::display::DisplayEngine::Instance().Provider("Ndi");
+                auto *provider = p
+                    ? dynamic_cast<bps::display::NdiDisplayProvider *>(p.get()) : nullptr;
+                if (provider) {
+                    provider->ResetSender();
+                    qCWarning(lcNdiProgress,
+                              "LiveOutputService: NDI send made no progress for two windows; sender reset for automatic recovery");
+                }
+            }, Qt::QueuedConnection);
+        }
+    }
 
     const float configured = ndiConfiguredFps();
     if (configured <= 0.0f) {
@@ -3650,13 +3717,13 @@ void LiveOutputService::armNdiSenderForSession()
     const QString name = ndiSenderDisplayName();
     if (name == ndiArmedName_)
         return;   // same output, same name — the sender can keep its identity
-    ndiArmedName_ = name;
     auto *provider = []() -> bps::display::NdiDisplayProvider * {
         auto p = bps::display::DisplayEngine::Instance().Provider("Ndi");
         return p ? dynamic_cast<bps::display::NdiDisplayProvider *>(p.get()) : nullptr;
     }();
     if (!provider)
         return;
+    ndiArmedName_ = name;
     // Name + reset ride the WORKER thread (FreeShow's model: the main thread
     // never touches the SDK): ResetSender destroys the old SDK sender — a
     // synchronous SDK call that on the GUI thread stalled GO LIVE — and the

@@ -18,7 +18,9 @@ endif()
 
 # Multimedia: the media-on-air player (LiveOutputService's QMediaPlayer decode
 # of a taken video/image — the engine's render pipeline composites rasters only).
-find_package(Qt6 6.11 REQUIRED COMPONENTS Quick QuickControls2 QuickShapes Multimedia)
+# QuickEffects: MultiEffect's live blur, behind the Settings scrim
+# (ModalScrim's optional blurSource — see its own comment).
+find_package(Qt6 6.11 REQUIRED COMPONENTS Quick QuickControls2 QuickShapes QuickEffects Multimedia)
 
 qt_standard_project_setup(REQUIRES 6.11)
 
@@ -217,6 +219,8 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/project/ProjectManager.cpp
     ${BPS_ROOT}/modules/project/WorkspaceManager.cpp
     ${BPS_ROOT}/modules/project/StyleStore.cpp
+    ${BPS_ROOT}/modules/project/GroupStore.cpp
+    ${BPS_ROOT}/modules/project/ActionStore.cpp
     ${BPS_ROOT}/modules/project/OutputStore.cpp
     ${BPS_ROOT}/modules/project/ShippedConfig.cpp
     ${BPS_ROOT}/modules/project/DocumentManager.cpp
@@ -307,9 +311,10 @@ target_link_libraries(engine_core PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
 # to look inside the MinGW sysroot by default. Hinting it here finds the
 # real thing instead of silently falling back to the stored-only path.
 if(MINGW AND NOT ZLIB_ROOT)
-    get_filename_component(BPS_MINGW_SYSROOT "${CMAKE_CXX_COMPILER}/../.." ABSOLUTE)
-    if(EXISTS "${BPS_MINGW_SYSROOT}/x86_64-w64-mingw32/include/zlib.h")
-        set(ZLIB_ROOT "${BPS_MINGW_SYSROOT}/x86_64-w64-mingw32")
+    get_filename_component(BPS_MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    get_filename_component(BPS_MINGW_SYSROOT "${BPS_MINGW_BIN_DIR}/.." ABSOLUTE)
+    if(EXISTS "${BPS_MINGW_SYSROOT}/include/zlib.h")
+        set(ZLIB_ROOT "${BPS_MINGW_SYSROOT}")
     endif()
 endif()
 find_package(ZLIB)
@@ -474,6 +479,10 @@ qt_add_executable(appVGRPresenterUI
     qml/models/OutputListModel.cpp
     qml/models/include/models/StyleListModel.h
     qml/models/StyleListModel.cpp
+    qml/models/include/models/GroupListModel.h
+    qml/models/GroupListModel.cpp
+    qml/models/include/models/ActionListModel.h
+    qml/models/ActionListModel.cpp
     qml/models/include/models/ChannelTrim.h
     qml/models/include/models/AudioInputListModel.h
     qml/models/AudioInputListModel.cpp
@@ -489,6 +498,9 @@ qt_add_executable(appVGRPresenterUI
 # ("singleton Theme 1.0 ..."), which is exactly what made Theme.* resolve to
 # undefined at deeper nesting and forced literal hex colors everywhere.
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/Theme.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
+# One striping rule for every list (StripedListPanel and the virtualized views
+# that cannot host it) — see ListRows.qml.
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/ListRows.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/AppCursor.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/Db.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/AppScale.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
@@ -506,6 +518,8 @@ set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/Hotkeys.qm
 # pills and the gain knob publish into it, the window-level ToolTipLayer draws it.
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/TipService.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/components/NotificationCenter.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
+# Shared ModalCard stacking-order counter — see ModalStack.qml's own comment.
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/ModalStack.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 
 qt_add_qml_module(appVGRPresenterUI
     URI VGRPresenterUI
@@ -567,7 +581,7 @@ qt_add_resources(appVGRPresenterUI "appfonts"
     FILES "${APP_FONT_REGULAR}" "${APP_FONT_ITALIC}" "${APP_FONT_LICENSE}")
 
 target_link_libraries(appVGRPresenterUI
-    PRIVATE Qt6::Quick Qt6::QuickControls2 Qt6::QuickShapes Qt6::Multimedia engine_core
+    PRIVATE Qt6::Quick Qt6::QuickControls2 Qt6::QuickShapes Qt6::QuickEffects Qt6::Multimedia engine_core
 )
 
 # The generated qmltyperegistrations.cpp does `#if __has_include(<SlideListModel.h>)`

@@ -36,8 +36,8 @@ Rectangle {
 
     layer.enabled: true
 
-    // Swallows clicks anywhere on the card so a scrim behind this shell
-    // (see Main.qml) only closes on a genuine outside-click.
+    // Swallows clicks anywhere on the card so the shared scrim cannot pass
+    // them through to the page behind this shell.
     MouseArea {
         anchors.fill: parent
         onClicked: {}

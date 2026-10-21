@@ -71,7 +71,7 @@ Item {
             width: parent.width
             height: 4
             radius: 2
-            color: "#2a3140"
+            color: Theme.borderSubtle
 
             Rectangle {
                 width: parent.width * root.pct
@@ -103,7 +103,7 @@ Item {
             height: 14
             radius: 7
             anchors.verticalCenter: parent.verticalCenter
-            color: "#ffffff"
+            color: Theme.controlInk
             border.color: Theme.accent
             border.width: 2
 

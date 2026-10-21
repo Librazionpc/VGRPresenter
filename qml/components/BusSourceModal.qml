@@ -687,7 +687,7 @@ Item {
                                     Text {
                                         anchors.centerIn: parent
                                         text: "✓"
-                                        color: "#ffffff"
+                                        color: Theme.controlInk
                                         font.pixelSize: 10
                                         font.weight: Font.Bold
                                     }
@@ -843,7 +843,7 @@ Item {
                     Text {
                         anchors.centerIn: parent
                         text: root.creating ? qsTr("Create") : qsTr("Add")
-                        color: "#ffffff"
+                        color: Theme.controlInk
                         font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: Font.DemiBold

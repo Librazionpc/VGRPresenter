@@ -83,7 +83,7 @@ Item {
         Rectangle {
             id: pill
             anchors.horizontalCenter: parent.horizontalCenter
-            y: 2
+            y: 4
             width: 60
             height: 30
             radius: 8
@@ -110,8 +110,8 @@ Item {
                     visible: tabRoot.glyph !== ""
                     anchors.centerIn: parent
                     name: tabRoot.glyph
-                    color: tabRoot.available && (tabRoot.isActive || tabRoot.isHover)
-                           ? Theme.accent : Theme.textSecondary
+                    color: tabRoot.available && tabRoot.isActive
+                           ? Theme.accent : Theme.controlInk
                     width: 18; height: 18
                     fit: true
                     Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
@@ -128,7 +128,7 @@ Item {
 
                     ShapePath {
                         fillColor: tabRoot.filledIcon ? strokeColor : "#00000000"
-                        strokeColor: (tabRoot.isActive || tabRoot.isHover) ? Theme.accent : Theme.textSecondary
+                        strokeColor: tabRoot.isActive ? Theme.accent : Theme.controlInk
                         strokeWidth: tabRoot.iconStroke / tabRoot.iconScale
                         capStyle: ShapePath.RoundCap
                         joinStyle: ShapePath.RoundJoin
@@ -138,7 +138,7 @@ Item {
                     }
                     ShapePath {
                         fillColor: "#00000000"
-                        strokeColor: (tabRoot.isActive || tabRoot.isHover) ? Theme.accent : Theme.textSecondary
+                        strokeColor: tabRoot.isActive ? Theme.accent : Theme.controlInk
                         strokeWidth: tabRoot.linePath === "" ? 0 : 2 / tabRoot.iconScale
                         capStyle: ShapePath.RoundCap
                         Behavior on strokeColor { ColorAnimation { duration: 100 } }
@@ -166,14 +166,12 @@ Item {
 
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
-            // Icon pill (2..32) + caption ink centred as one unit in the 52 px
+            // Icon pill (4..34) + caption ink centred as one unit in the 52 px
             // row: ink runs ~35.7..50, leaving even 2 px margins above the pill
             // and below the caption. Was y: 33, which pushed the caption's
             // descenders onto the row's bottom border.
-            y: 30
-            color: !tabRoot.available ? Theme.textMuted
-                 : tabRoot.isActive ? Theme.textPrimary
-                 : (tabRoot.isHover ? Theme.navLabelMuted : Theme.textSecondary)
+            y: 32
+            color: !tabRoot.available ? Theme.textMuted : Theme.controlInk
             font.family: Theme.fontFamily
             font.pixelSize: 15
             // One weight for every tab: mixing Bold and DemiBold shifts the glyphs by a pixel.

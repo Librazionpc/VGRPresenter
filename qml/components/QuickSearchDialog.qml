@@ -51,8 +51,8 @@ ModalCard {
         "slide":    { group: qsTr("Slides"),     badge: qsTr("SLIDE"),    color: "#4aa3e0" },
         "template": { group: qsTr("Templates"),  badge: qsTr("TEMPLATE"), color: "#4ac9a4" },
         "overlay":  { group: qsTr("Overlays"),   badge: qsTr("OVERLAY"),  color: "#c46ce7" },
-        "category": { group: qsTr("Categories"), badge: qsTr("CATEGORY"), color: "#8a94a6" },
-        "setting":  { group: qsTr("Settings"),   badge: qsTr("SETTING"),  color: "#8a94a6" },
+        "category": { group: qsTr("Categories"), badge: qsTr("CATEGORY"), color: Theme.textSecondary },
+        "setting":  { group: qsTr("Settings"),   badge: qsTr("SETTING"),  color: Theme.textSecondary },
         "song":     { group: qsTr("Songs"),      badge: qsTr("SONG"),     color: "#e06c8a" },
         "table":    { group: qsTr("Sermons"),    badge: qsTr("SERMON"),   color: "#4ae0b0" },
         "media":    { group: qsTr("Media"),      badge: qsTr("MEDIA"),    color: "#e08a4a" }
@@ -392,7 +392,7 @@ ModalCard {
         // span (the first attempt: bold applied, the yellow silently dropped —
         // "it still showing white"). A colored <font> IS honored: bright gold on
         // the dark card reads as the yellow highlight.
-        return esc(source).replace(re, '<b><font color="#ffd54a">$1</font></b>')
+        return esc(source).replace(re, '<b><font color=Theme.highlightInk>$1</font></b>')
     }
     function move(delta) {
         if (root.results.length === 0) return
@@ -597,7 +597,7 @@ ModalCard {
         visible: text !== ""
         leftPadding: 4
         topPadding: 2
-        color: "#ffd54a"
+        color: Theme.highlightInk
         font.family: Theme.fontFamily
         font.pixelSize: Theme.textSm
         elide: Text.ElideRight
@@ -743,7 +743,7 @@ ModalCard {
                         id: ratingPill
                         readonly property int percent: root.matchRating(entry.modelData)
                         readonly property color tone: percent >= 90 ? "#4ae0b0"
-                                                     : (percent >= 60 ? "#e0b04a" : "#8a94a6")
+                                                     : (percent >= 60 ? "#e0b04a" : Theme.textSecondary)
                         visible: root.canHighlight && root.queryCoverage(entry.modelData) > 0
                         anchors.right: parent.right
                         anchors.rightMargin: 10

@@ -578,12 +578,12 @@ Item {
                 spacing: 8
                 PlusGlyph {
                     anchors.verticalCenter: parent.verticalCenter
-                    size: 12; thickness: 1.6; color: "#ffffff"
+                    size: 12; thickness: 1.6; color: Theme.controlInk
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     text: qsTr("New %1").arg(root.noun)
-                    color: "#ffffff"
+                    color: Theme.controlInk
                     font.family: Theme.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold
                 }
             }

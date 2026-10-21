@@ -110,12 +110,6 @@ Item {
                     font.pixelSize: Theme.textXxl
                     font.weight: Font.DemiBold
                 }
-                Text {
-                    text: qsTr("Record or stream your service — platform, quality, screens.")
-                    color: Theme.textSecondary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
-                }
             }
 
             // ---- Platform card ----
@@ -291,14 +285,6 @@ Item {
                             font.pixelSize: 16
                             font.weight: Font.DemiBold
                         }
-                        Text {
-                            anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: qsTr("shared for record + stream")
-                            color: Theme.textMuted
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.textXs
-                        }
                     }
 
                     // One compact 2×2 grid — four values, nothing else.
@@ -413,14 +399,14 @@ Item {
                                 IconGlyph {
                                     anchors.verticalCenter: parent.verticalCenter
                                     name: root.recActive ? "stop" : "play"
-                                    color: root.recActive ? Theme.dangerLight : "#ffffff"
+                                    color: root.recActive ? Theme.dangerLight : Theme.controlInk
                                     fit: true; width: 14; height: 14
                                 }
                                 Text {
                                     id: startLabel
                                     anchors.verticalCenter: parent.verticalCenter
                                     text: root.recActive ? qsTr("Stop recording") : qsTr("Start recording")
-                                    color: root.recActive ? Theme.dangerLight : "#ffffff"
+                                    color: root.recActive ? Theme.dangerLight : Theme.controlInk
                                     font.family: Theme.fontFamily
                                     font.pixelSize: Theme.textSm
                                     font.weight: Font.DemiBold
@@ -751,12 +737,6 @@ Item {
                                         color: Theme.textPrimary
                                         font.family: Theme.fontFamily
                                         font.pixelSize: Theme.textSm
-                                    }
-                                    Text {
-                                        text: screenRow.modelData.sub
-                                        color: Theme.textMuted
-                                        font.family: Theme.fontFamily
-                                        font.pixelSize: Theme.textXs
                                     }
                                 }
 

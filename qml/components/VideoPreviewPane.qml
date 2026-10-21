@@ -151,7 +151,7 @@ Column {
         width: parent.width
         height: width * 9 / 16
         radius: Theme.radiusMd
-        color: "#0d0f16"
+        color: Theme.windowBg
         border.width: 1
         border.color: Theme.border
         clip: true

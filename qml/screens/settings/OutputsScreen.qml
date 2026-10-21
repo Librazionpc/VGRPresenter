@@ -17,6 +17,21 @@ Item {
     property int deleteIndex: -1
     // Index the right-click context menu was opened for; -1 = closed.
     property int contextMenuIndex: -1
+    property string defaultMediaFit: "contain"
+
+    Component.onCompleted: {
+        const saved = String(SettingsService.value("outputs.defaultMediaFit") ?? "contain")
+        root.defaultMediaFit = ["contain", "cover", "fill"].indexOf(saved) >= 0 ? saved : "contain"
+        LiveOutputService.setDefaultMediaFit(root.defaultMediaFit)
+    }
+
+    function chooseDefaultMediaFit(fit) {
+        if (["contain", "cover", "fill"].indexOf(fit) < 0)
+            return
+        root.defaultMediaFit = fit
+        SettingsService.setValue("outputs.defaultMediaFit", fit)
+        LiveOutputService.setDefaultMediaFit(fit)
+    }
 
     // ---- NDI firewall authorization (see EngineBridge::
     // requestNdiFirewallAccess) ------------------------------------------
@@ -148,7 +163,11 @@ Item {
     // written on Save, matching the dialog's Cancel/Save contract.
     property string editName: ""
     property string editType: "HDMI"
-    property string editRes: ""
+    // "1920 × 1080", matching the Add dialog's own default (addRes) and
+    // ScreenForm's own fallback — an empty default here left the box blank
+    // for an output whose resolution was never explicitly set (user report:
+    // "it[s] the default value not empty").
+    property string editRes: "1920 × 1080"
     property string editRefresh: "60 Hz"
     property string editPattern: "smpte"
     property string editScreenName: ""
@@ -161,27 +180,23 @@ Item {
     // by row index (deleting a style would re-point every later output at
     // the wrong theme).
     property string editStyleId: ""
-    // NO FILL PICKER. How a taken file sits is the FILE's own choice (Media
-    // right-click → Fill), else contain: one picture, one shape on every
-    // output. A per-output Fill is what showed one take two ways on the monitor
-    // wall, and it could not even be corrected here for the ACTIVE output —
-    // the engine compared every style-spec field except the fit, so the save
-    // was read as a no-op and nothing on air moved ("why can't I change the
-    // fits in Settings · Outputs?"). The roster's old value is still loaded
-    // and saved; nothing composes from it.
+    // Media fit is a shared default above, with optional per-file overrides;
+    // it is not stored separately on each output.
+    property string editDefaultMediaFit: "contain"
 
     function openEdit(index) {
         const data = OutputListModel.getOutput(index)
         root.editIndex = index
         root.editName = data.name
         root.editType = data.kind
-        root.editRes = data.res
+        root.editRes = data.res !== "" ? data.res : "1920 × 1080"
         root.editRefresh = data.refresh !== "" ? data.refresh : "60 Hz"
         root.editPattern = data.testPattern !== "none" ? data.testPattern : "smpte"
         root.editScreenName = data.screenName
         root.editLocked = data.boundsLocked
         root.editStayOnTop = data.stayOnTop
         root.editStyleId = data.styleId
+        root.editDefaultMediaFit = root.defaultMediaFit
         root.editOriginalName = data.name
     }
 
@@ -238,6 +253,7 @@ Item {
         OutputListModel.setBoundsLocked(root.editIndex, root.editLocked)
         OutputListModel.setStayOnTop(root.editIndex, root.editStayOnTop)
         OutputListModel.setStyle(row, requestedStyleId)
+        root.chooseDefaultMediaFit(root.editDefaultMediaFit)
         const savedOutput = OutputListModel.getOutput(row)
         if (!savedOutput || savedOutput.styleId !== requestedStyleId) {
             // The style did not stick. Everything else in the form DID save, so
@@ -286,15 +302,6 @@ Item {
                     font.family: Theme.fontFamily
                     font.pixelSize: Theme.textXl
                     font.weight: Font.DemiBold
-                }
-                Text {
-                    // Wraps clear of the pinned "+ Add Output" button.
-                    width: layout.width - 200
-                    text: "Settings · Outputs — manage the screens and streams the show is sent to, and the styles they render with."
-                    color: Theme.textSecondary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
-                    wrapMode: Text.WordWrap
                 }
             }
 
@@ -362,8 +369,6 @@ Item {
                     height: cardCol.height + Theme.space5 * 2
                     radius: Theme.radiusLg
                     color: Theme.card
-                    border.width: card.active ? 1 : 0
-                    border.color: Theme.danger
                     // A disabled screen reads dimmed at a glance.
                     opacity: card.isEnabled ? 1 : 0.45
                     Behavior on opacity { NumberAnimation { duration: 120 } }
@@ -602,14 +607,14 @@ Item {
             Item {
                 width: 11; height: 11
                 anchors.verticalCenter: parent.verticalCenter
-                Rectangle { anchors.centerIn: parent; width: 11; height: 1.6; radius: 0.8; color: "#ffffff" }
-                Rectangle { anchors.centerIn: parent; width: 1.6; height: 11; radius: 0.8; color: "#ffffff" }
+                Rectangle { anchors.centerIn: parent; width: 11; height: 1.6; radius: 0.8; color: Theme.controlInk }
+                Rectangle { anchors.centerIn: parent; width: 1.6; height: 11; radius: 0.8; color: Theme.controlInk }
             }
 
             Text {
                 anchors.verticalCenter: parent.verticalCenter
                 text: qsTr("Add Output")
-                color: "#ffffff"
+                color: Theme.controlInk
                 font.family: Theme.fontFamily
                 font.pixelSize: Theme.textSm
                 font.weight: Font.DemiBold
@@ -690,7 +695,6 @@ Item {
         objectName: "selfTestEditOutputDialog"
         shown: root.editIndex >= 0
         title: "Edit output"
-        subtitle: "Rename, restyle, or reposition this output."
         cardWidth: 760
         saveText: "Save"
         onCancelled: root.editIndex = -1
@@ -803,8 +807,8 @@ Item {
                     height: 26
                     width: changeStyleLabel.implicitWidth + 22
                     radius: 13
-                    color: changeStyleArea.containsMouse ? "#20242f" : "#1a1c26"
-                    border.color: "#2a3140"
+                    color: changeStyleArea.containsMouse ? Theme.hoverBg : Theme.inset
+                    border.color: Theme.borderSubtle
                     border.width: 1
                     Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
@@ -833,24 +837,50 @@ Item {
                 }
             }
 
-            // THE FILL PICKER THAT USED TO SIT HERE IS GONE ON PURPOSE — said
-            // out loud, in the one place an operator goes looking for it, so
-            // its absence doesn't read as "the fit setting broke again". How a
-            // taken file sits is the PICTURE's own choice now (the file's fit,
-            // else contain — SceneBuilder::AddCompositorLayers composes every
-            // output with it), so the control lives where the picture is: Media
-            // right-click → Fill, and the Show Center's fit chips for what is on
-            // air. A per-output fill is what made one take show as two pictures
-            // across the wall, and it could not even be corrected for the ACTIVE
-            // output (the engine compared every style-spec field except the fit,
-            // so the change was swallowed as a no-op).
-            Text {
+            Column {
                 width: parent.width
-                text: qsTr("Pictures keep their own shape on every output. Set Fill on the file in Media (right-click → Fill), or on the Show Center's fit chips for what is on air.")
-                color: Theme.textMuted
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textXs
-                wrapMode: Text.WordWrap
+                spacing: Theme.space2
+
+                Text {
+                    text: qsTr("Default media fit")
+                    color: Theme.textSecondary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.textXs
+                }
+
+                Row {
+                    spacing: Theme.space2
+                    Repeater {
+                        model: [
+                            { value: "contain", label: qsTr("Contain") },
+                            { value: "cover", label: qsTr("Cover") },
+                            { value: "fill", label: qsTr("Stretch") }
+                        ]
+                        delegate: Rectangle {
+                            id: editFitOption
+                            required property var modelData
+                            width: Math.max(92, editFitLabel.implicitWidth + 28)
+                            height: 34
+                            radius: Theme.radiusMd
+                    color: root.editDefaultMediaFit === modelData.value
+                                   ? Qt.alpha(Theme.accent, 0.18) : Theme.surface
+                    border.width: root.editDefaultMediaFit === modelData.value ? 1 : 0
+                            border.color: Theme.accent
+                            Text {
+                                id: editFitLabel
+                                anchors.centerIn: parent
+                                text: editFitOption.modelData.label
+                        color: editFitOption.modelData.value === root.editDefaultMediaFit
+                                       ? Theme.accentLight : Theme.textPrimary
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.textSm
+                                font.weight: Font.Medium
+                            }
+                            HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: root.editDefaultMediaFit = editFitOption.modelData.value }
+                        }
+                    }
+                }
             }
         }
 
@@ -871,7 +901,6 @@ Item {
         objectName: "selfTestAddOutputDialog"
         shown: root.addShown
         title: "Add Output"
-        subtitle: "Create an output window, position it on a display, or send it to NDI, SDI, recording or streaming"
         cardWidth: 760
         saveText: "Add Output"
         onCancelled: root.addShown = false

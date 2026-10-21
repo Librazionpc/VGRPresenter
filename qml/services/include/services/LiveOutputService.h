@@ -170,13 +170,11 @@ class LiveOutputService : public QObject {
     Q_PROPERTY(qulonglong mediaRev READ mediaRev NOTIFY mediaTick)
     // Muted playback (monitoring the file's own audio off the program mix).
     Q_PROPERTY(bool mediaMuted READ mediaMuted NOTIFY mediaChanged)
-    // THE FILE'S OWN FILL ("contain" | "cover" | "fill", "" = none), which
-    // WINS over the output's default when this file is on air. A per-file choice
-    // is a fact about the picture, so it is stored on the file in the media
-    // library and travels into the compositor with every frame; this property is
-    // the copy the surfaces read for the take that is up right now, so the tile
-    // and the engine lay the picture out the same way.
+    // Effective fill for the media currently on air: the file's saved override,
+    // or the app-wide Outputs setting when the file has no override.
     Q_PROPERTY(QString mediaFit READ mediaFit NOTIFY mediaChanged)
+    // App-wide fallback used when a media file has no personal fill choice.
+    Q_PROPERTY(QString defaultMediaFit READ defaultMediaFit NOTIFY mediaChanged)
     // DOES THE PICTURE ON AIR ACTUALLY CARRY TRANSPARENCY? True only when the
     // take is a STILL whose decoded pixels include at least one with alpha < 255
     // (see preflightMediaTake). A video never does, and neither does an opaque
@@ -271,6 +269,7 @@ public:
     qulonglong mediaRev() const { return mediaRev_; }
     bool mediaMuted() const { return mediaMuted_; }
     QString mediaFit() const { return mediaFit_; }
+    QString defaultMediaFit() const { return defaultMediaFit_; }
     bool mediaHasAlpha() const { return mediaHasAlpha_; }
     QString mediaMeterLabel() const;
     // No lock inside any of these: the pill's four fields are the GUI thread's
@@ -385,11 +384,10 @@ public:
     // the program mix the loopback tap meters).
     Q_INVOKABLE void takeMedia(const QString &path, const QString &name);
     Q_INVOKABLE void clearMedia();
-    // THIS FILE'S OWN FILL, set from the take (the Media pane's picker): stored
-    // on the file in the library — so it is remembered for the next take and for
-    // any other output, and wins over that output's default — and applied to the
-    // frame on air right away. "" means "whatever the output says".
+    // Update the current file's optional fill override and apply it to the
+    // on-air frame. An empty value returns the file to the Outputs default.
     Q_INVOKABLE void setMediaFit(const QString &fit);
+    Q_INVOKABLE void setDefaultMediaFit(const QString &fit);
     // Transport: play/pause toggle, seek to a fraction of the duration (0..1;
     // images ignore), mute toggle. stop() (going off air) pauses the player.
     Q_INVOKABLE void mediaTogglePlay();
@@ -490,6 +488,11 @@ public:
     Q_INVOKABLE bool next();
     Q_INVOKABLE bool previous();
     Q_INVOKABLE bool jumpTo(int index);
+    // The live group-shortcut jump (Settings · Look & Feel's "Manage
+    // groups" — a group's own shortcut letter calls this with its name):
+    // the next visible slide carrying this tag, cycling. false when
+    // nothing is live or no slide carries it.
+    Q_INVOKABLE bool jumpToGroup(const QString &tag);
 
     // The preview toolbar's ‹ ›: advance within the on-air set when it has
     // somewhere to go; at either end (or on a single-slide pick) the step
@@ -871,7 +874,9 @@ private:
     bool mediaOnAir_ = false;
     QString mediaPath_;
     QString mediaName_;
-    QString mediaFit_;   // the on-air file's own fill ("" = the output's default)
+    QString mediaFit_;   // effective per-file override or shared Outputs default
+    QString defaultMediaFit_ = QStringLiteral("contain");
+    bool mediaFitUsesDefault_ = true;
     // Real transparency in the picture on air (see the mediaHasAlpha property).
     bool mediaHasAlpha_ = false;
     // Whether THIS take's alpha is already known: a still decides it at take
@@ -1011,6 +1016,7 @@ private:
     qulonglong ndiDriftFrames_ = 0;  // last sample of the provider's counter
     int ndiDriftSlowWindows_ = 0;    // consecutive windows below the setting
     bool ndiDriftWarned_ = false;    // one warning per slow episode
+    int ndiNoProgressWindows_ = 0;   // consecutive 4s windows with zero successful sends
     // Coarse tier of the last window's measured rate: -1 unknown, 0 at the
     // configured rate, 1 at (about) its half — the backpressure halving — and
     // 2 for anything lower. A transition between them is what the runtime

@@ -102,9 +102,23 @@ Result<void> PresentationNavigator::JumpById(std::string_view slideId) {
 Result<void> PresentationNavigator::JumpByTag(std::string_view tag) {
     if (!pres_) return Error::Make(Err::Presentation_NotOpen, "Navigator",
                                    "no presentation open");
-    for (size_t i = 0; i < order_.size(); ++i) {
-        const auto& tags = pres_->slides[order_[i]].tags;
-        if (std::find(tags.begin(), tags.end(), tag) != tags.end()) return JumpTo(i);
+    if (order_.empty())
+        return Error::Make(Err::Presentation_NoSlides, "Navigator",
+                           "presentation has no visible slides");
+    const auto hasTag = [&](size_t visibleIndex) {
+        const auto& tags = pres_->slides[order_[visibleIndex]].tags;
+        return std::find(tags.begin(), tags.end(), tag) != tags.end();
+    };
+    // CYCLE, not "always the first" — a live operator pressing the same
+    // shortcut repeatedly (FreeShow's own group-shortcut behavior: press V
+    // to walk verse 1, 2, 3...) must advance each time, landing on the NEXT
+    // tagged slide after wherever playback is now, wrapping past the end.
+    // Starts the search one past the current slide so a press while ALREADY
+    // on a tagged slide moves on rather than re-landing on itself — unless
+    // it is the only match, where wrapping brings the search back to it.
+    for (size_t step = 1; step <= order_.size(); ++step) {
+        const size_t i = (current_ + step) % order_.size();
+        if (hasTag(i)) return JumpTo(i);
     }
     return Error::Make(Err::Presentation_NotFound, "Navigator",
                        "no slide with tag '" + std::string(tag) + "'");

@@ -88,8 +88,8 @@ Item {
         width: 620
         height: Math.min(parent.height - 80, content.height + 40)
         radius: 14
-        color: "#13151c"
-        border.color: "#232530"
+        color: Theme.surface
+        border.color: Theme.border
         border.width: 1
         clip: true
 
@@ -114,7 +114,7 @@ Item {
                         anchors.left: parent.left
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Select Style")
-                        color: "#f1f3f8"
+                        color: Theme.textPrimary
                         font.family: Theme.fontFamily
                         font.pixelSize: 18
                         font.weight: Font.DemiBold
@@ -127,13 +127,13 @@ Item {
                         width: 28
                         height: 28
                         radius: 7
-                        color: closeArea.containsMouse ? "#20222c" : "transparent"
+                        color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
                         Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         Text {
                             anchors.centerIn: parent
                             text: "✕"
-                            color: "#8a94a6"
+                            color: Theme.textSecondary
                             font.pixelSize: 14
                         }
 
@@ -150,13 +150,13 @@ Item {
                 Text {
                     width: parent.width
                     text: qsTr("Choose a presentation theme for this output.")
-                    color: "#8a94a6"
+                    color: Theme.textSecondary
                     font.family: Theme.fontFamily
                     font.pixelSize: 14
                 }
             }
 
-            Rectangle { width: parent.width; height: 1; color: "#232530" }
+            Rectangle { width: parent.width; height: 1; color: Theme.border }
 
             // Empty state — the roster starts empty by design (see
             // StyleListModel's own header comment).
@@ -165,7 +165,7 @@ Item {
                 visible: StyleListModel.rowCount() === 0
                 horizontalAlignment: Text.AlignHCenter
                 text: qsTr("No styles yet — add one from Settings · Styles first.")
-                color: "#5c6475"
+                color: Theme.textMuted
                 font.family: Theme.fontFamily
                 font.pixelSize: 14
                 wrapMode: Text.Wrap
@@ -185,9 +185,9 @@ Item {
                     width: (parent.width - 28) / 3
                     height: 140
                     radius: 10
-                    color: "#0d0f16"
+                    color: Theme.windowBg
                     border.width: selected ? 1.5 : 1
-                        border.color: selected ? Theme.accent : "#262a38"
+                        border.color: selected ? Theme.accent : Theme.borderSubtle
                     Behavior on border.color { ColorAnimation { duration: 100 } }
 
                     Rectangle {
@@ -197,13 +197,13 @@ Item {
                         height: 80
                         radius: 6
                         color: "#0a0b10"
-                        border.color: "#262a38"
+                        border.color: Theme.borderSubtle
                         border.width: 1
 
                         Text {
                             anchors.centerIn: parent
                             text: qsTr("—")
-                            color: "#5c6475"
+                            color: Theme.textMuted
                             font.family: Theme.fontFamily
                             font.pixelSize: 25
                             font.weight: Font.DemiBold
@@ -220,7 +220,7 @@ Item {
                             width: parent.width
                             horizontalAlignment: Text.AlignHCenter
                             text: qsTr("None")
-                            color: "#eef1f8"
+                            color: Theme.textPrimary
                             font.family: Theme.fontFamily
                             font.pixelSize: 14
                             font.weight: Font.Medium
@@ -230,7 +230,7 @@ Item {
                             width: parent.width
                             horizontalAlignment: Text.AlignHCenter
                             text: qsTr("No style")
-                            color: "#5c6475"
+                            color: Theme.textMuted
                             font.family: Theme.fontFamily
                             font.pixelSize: 12
                         }
@@ -259,9 +259,9 @@ Item {
                         width: (parent.width - 28) / 3
                         height: 140
                         radius: 10
-                        color: "#0d0f16"
+                        color: Theme.windowBg
                         border.width: styleCard.selected ? 1.5 : 1
-                        border.color: styleCard.selected ? Theme.accent : "#262a38"
+                        border.color: styleCard.selected ? Theme.accent : Theme.borderSubtle
                         Behavior on border.color { ColorAnimation { duration: 100 } }
 
                         // Preview "slide" — the style's real background when it
@@ -281,7 +281,7 @@ Item {
                             Text {
                                 anchors.centerIn: parent
                                 text: "Aa"
-                                color: "#ffffff"
+                                color: Theme.controlInk
                                 font.family: Theme.fontFamily
                                 font.pixelSize: 25
                                 font.weight: Font.DemiBold
@@ -298,7 +298,7 @@ Item {
                                 width: parent.width
                                 horizontalAlignment: Text.AlignHCenter
                                 text: styleCard.name
-                                color: "#eef1f8"
+                                color: Theme.textPrimary
                                 font.family: Theme.fontFamily
                                 font.pixelSize: 14
                                 font.weight: Font.Medium
@@ -308,7 +308,7 @@ Item {
                                 width: parent.width
                                 horizontalAlignment: Text.AlignHCenter
                                 text: styleCard.res
-                                color: "#5c6475"
+                                color: Theme.textMuted
                                 font.family: Theme.fontFamily
                                 font.pixelSize: 12
                             }
@@ -323,7 +323,7 @@ Item {
                 }
             }
 
-            Rectangle { width: parent.width; height: 1; color: "#232530" }
+            Rectangle { width: parent.width; height: 1; color: Theme.border }
 
             Row {
                 anchors.right: parent.right
@@ -333,15 +333,15 @@ Item {
                     width: 90
                     height: 34
                     radius: 9
-                    color: cancelArea.containsMouse ? "#20222c" : "#1a1c26"
-                    border.color: "#2a2f3a"
+                    color: cancelArea.containsMouse ? Theme.hoverBg : Theme.inset
+                    border.color: Theme.toggleOffTrack
                     border.width: 1
                     Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent
                         text: qsTr("Cancel")
-                        color: "#c8cdd9"
+                        color: Theme.navLabelMuted
                         font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: Font.Medium
@@ -366,7 +366,7 @@ Item {
                     Text {
                         anchors.centerIn: parent
                         text: qsTr("Select")
-                        color: "#ffffff"
+                        color: Theme.controlInk
                         font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: Font.DemiBold

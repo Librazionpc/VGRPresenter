@@ -514,6 +514,9 @@ Result<void> PresentationEngine::JumpTo(size_t index) { return runtime_.JumpTo(i
 Result<void> PresentationEngine::JumpById(std::string_view slideId) {
     return runtime_.JumpById(slideId);
 }
+Result<void> PresentationEngine::JumpByTag(std::string_view tag) {
+    return runtime_.JumpByTag(tag);
+}
 Result<size_t> PresentationEngine::Search(std::string_view query) const {
     return runtime_.Search(query);
 }

@@ -21,6 +21,11 @@ Item {
     // binding carries `peekRevision` as its dependency — that is what re-evaluates
     // it when a read lands, or when this app writes that show's file.
     readonly property var loaded: { root.reload; ShowService.peekRevision; return root.type === "show" ? ShowService.peekShow(item.ref) : null }
+    readonly property string imageFit: {
+        const fileFit = root.type === "image" && root.item
+            ? MediaLibraryService.itemFit(String(root.item.ref)) : ""
+        return fileFit !== "" ? fileFit : LiveOutputService.defaultMediaFit
+    }
     readonly property var show: loaded && loaded.ok ? loaded.show : null
     readonly property var slides: show ? show.slides : []
     property int selectedSlide: -1
@@ -31,10 +36,10 @@ Item {
     readonly property string viewMode: String(SettingsService.values["session.slideView"] ?? "grid")
     readonly property real cellWidth: Math.floor((width - 10) / columns)     // (FreeShow: the grid has 5px padding, a cell is 100 / columns %)
     // FreeShow's "dark" theme
-    readonly property color cLighter: "#2f3542"
-    readonly property color cDarker: "#191923"
-    readonly property color cDarkest: "#12121c"
-    readonly property color cText: "#f0f0ff"
+    readonly property color cLighter: Theme.border
+    readonly property color cDarker: Theme.rowBg
+    readonly property color cDarkest: Theme.panelBg
+    readonly property color cText: Theme.textPrimary
     // Selection and focus accents follow the user's Appearance setting.
     readonly property color cSecondary: Theme.accent
     readonly property string mono: FontService.monoFamily
@@ -47,6 +52,29 @@ Item {
     }
     property bool barOpen: false      // the floating bar's chevron: shows the zoom
     property bool zoomOpen: false     // the zoom's + / - popup
+
+    // ESCAPE, the ladder this component owns (Main's cancel binding calls it):
+    // while the “…” menu is up, put it away — a menu is a menu on every surface
+    // of this app; otherwise act as that menu's own Close row, which is how the
+    // page is dismissed from the keyboard. It fires the SAME signal the click
+    // sends, so the two can never disagree about what closing means. Returns
+    // false when there is nothing to close, so the caller can tell the key did
+    // no work here.
+    function escapeBack() {
+        if (root.headerMenuOpen) {
+            root.headerMenuOpen = false
+            return true
+        }
+        if (root.item !== null) {
+            // The one line that says the KEY did this rather than a click —
+            // "the page closed" alone cannot tell the two apart afterwards.
+            EngineBridge.log("info", "Navigation",
+                             "Esc closed the centre page (" + root.type + " “" + (root.item.name ?? "") + "”)")
+            root.closeRequested()
+            return true
+        }
+        return false
+    }
 
     function setColumns(n) {
         const next = Math.max(2, Math.min(10, n))
@@ -190,7 +218,7 @@ Item {
         }
         Item {
             x: parent.width - width; width: 32; height: parent.height
-            Rectangle { anchors.fill: parent; color: headerMoreHover.hovered ? "#14ffffff" : "transparent" }
+            Rectangle { anchors.fill: parent; color: headerMoreHover.hovered ? Theme.hoverBg : "transparent" }
             IconGlyph { anchors.centerIn: parent; name: "moreVertical"; color: root.cText; opacity: root.headerMenuOpen ? 1 : 0.8; width: 4; height: 14 }
             HoverHandler { id: headerMoreHover; cursorShape: Qt.PointingHandCursor }
             TapHandler { onTapped: root.headerMenuOpen = !root.headerMenuOpen }
@@ -215,8 +243,14 @@ Item {
                     width: headerMenuColumn.width
                     height: modelData === "-" ? 1 : 34
                     Rectangle { visible: menuEntry.modelData === "-"; width: parent.width; height: 1; color: root.cLighter }
-                    Rectangle { visible: menuEntry.modelData !== "-"; anchors.fill: parent; color: menuEntryHover.hovered ? "#0dffffff" : "transparent" }
-                    Text { visible: menuEntry.modelData !== "-"; x: 12; anchors.verticalCenter: parent.verticalCenter; text: menuEntry.modelData; color: root.cText; font.family: root.mono; font.pixelSize: 15 }
+                    Rectangle { visible: menuEntry.modelData !== "-"; anchors.fill: parent; color: menuEntryHover.hovered ? Theme.hoverBg : "transparent" }
+                    // WHITE, and MEDIUM: these two rows are ACTIONS (edit the
+                    // show / close it). Pure #ffffff at Font.Normal on the mono
+                    // face still read grey — a 15 px regular stroke never covers
+                    // its pixels completely (measured: 223,223,226 at its
+                    // brightest), so the weight, not the colour, is what makes a
+                    // label look white at this size.
+                    Text { visible: menuEntry.modelData !== "-"; x: 12; anchors.verticalCenter: parent.verticalCenter; text: menuEntry.modelData; color: Theme.controlInk; font.family: root.mono; font.pixelSize: 15; font.weight: Font.Medium }
                     HoverHandler { id: menuEntryHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler {
                         enabled: menuEntry.modelData !== "-"
@@ -243,10 +277,14 @@ Item {
         boundsBehavior: Flickable.StopAtBounds
 
         // A 100-slide show overflowed wheel-only — a real draggable bar.
+        // Same positioning convention ReferencePane's verse/paragraph list
+        // uses: clear the floating bar (below) instead of running the
+        // track straight through it.
         AppScrollBar {
             flickable: grid
             anchors.top: parent.top; anchors.bottom: parent.bottom
-            anchors.right: parent.right; anchors.rightMargin: 3
+            anchors.topMargin: 2; anchors.bottomMargin: 56   // clear floatingBar
+            anchors.right: parent.right; anchors.rightMargin: 4
         }
 
         // Ctrl + wheel zooms, like FreeShow.
@@ -304,7 +342,7 @@ Item {
                                 showCheckerboard: cell.styled.frameTransparent === true
                                 checkerSize: 32
                             }
-                            Rectangle { anchors.fill: parent; color: "#0dffffff"; visible: cellHover.hovered }      // the hover veil
+                            Rectangle { anchors.fill: parent; color: Theme.hoverBg; visible: cellHover.hovered }      // the hover veil
                             // the slide's next timer
                             Rectangle {
                                 visible: (cell.modelData.nextTimer ?? 0) > 0
@@ -374,10 +412,10 @@ Item {
                     width: listCol.width
                     height: Math.max(80, lyricText.y + lyricText.implicitHeight + 10)
                     radius: 6
-                    color: selected ? "#1a1b23" : (listHover.hovered ? "#15161d" : "#12131a")
+                    color: selected ? Theme.activeBg : (listHover.hovered ? Theme.surface : Theme.panelBg)
                     // Purple selection — the app-wide selection accent
                     // (see cSecondary above).
-                    border.color: selected ? Theme.accent : "#1d1f2a"
+                    border.color: selected ? Theme.accent : Theme.borderSubtle
                     Rectangle {
                         x: 10; y: 10; width: 106; height: StageGrid.heightForWidth(width); color: "#000"; radius: 3; clip: true
                         DesignPreview {
@@ -390,7 +428,7 @@ Item {
                             checkerSize: 24
                         }
                     }
-                    Text { x: 130; y: 10; text: (listRow.index + 1) + "  " + (listRow.modelData.title ?? "") + ((listRow.modelData.nextTimer ?? 0) > 0 ? "  ·  " + root.formatTime(listRow.modelData.nextTimer) : ""); color: "#e2e8f0"; font.family: Theme.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold }
+                    Text { x: 130; y: 10; text: (listRow.index + 1) + "  " + (listRow.modelData.title ?? "") + ((listRow.modelData.nextTimer ?? 0) > 0 ? "  ·  " + root.formatTime(listRow.modelData.nextTimer) : ""); color: Theme.textPrimary; font.family: Theme.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold }
                     // EDITABLE — same live-autosave mechanism as the "lyrics"
                     // view (ShowService.rewriteShowFromText), just presented
                     // per row instead of one big text block: a row's own
@@ -402,7 +440,7 @@ Item {
                         id: lyricText
                         x: 130; y: 32; width: parent.width - 146
                         text: root.slideText(listRow.modelData)
-                        color: "#8a94a6"; wrapMode: TextEdit.Wrap
+                        color: Theme.textSecondary; wrapMode: TextEdit.Wrap
                         selectByMouse: true
                         font.family: Theme.fontFamily; font.pixelSize: 14
 
@@ -481,7 +519,7 @@ Item {
                 id: lyricsEditor
                 width: lyricsCol.width
                 wrapMode: TextEdit.Wrap
-                color: "#e2e8f0"
+                color: Theme.textPrimary
                 font.family: Theme.fontFamily; font.pixelSize: 17
                 selectByMouse: true
                 onTextChanged: if (lyricsCol.loaded) autosaveTimer.restart()
@@ -517,7 +555,7 @@ Item {
             Item {
                 objectName: "selfTestBarChevron"
                 width: 40; height: parent.height
-                Rectangle { anchors.centerIn: parent; width: 32; height: 32; radius: 16; color: chevHover.hovered ? "#22242e" : "transparent" }
+                Rectangle { anchors.centerIn: parent; width: 32; height: 32; radius: 16; color: chevHover.hovered ? Theme.hoverBg : "transparent" }
                 // a chevron drawn as two bars, so it sits dead centre: > while the bar is open, < while it is shut
                 Item {
                     anchors.centerIn: parent
@@ -539,8 +577,8 @@ Item {
                 id: timerButton
                 objectName: "selfTestBarClock"
                 width: 40; height: parent.height
-                Rectangle { anchors.centerIn: parent; width: 32; height: 32; radius: 16; color: timerHover.hovered || root.timerOpen ? "#22242e" : "transparent" }
-                IconGlyph { anchors.centerIn: parent; name: "clock"; color: root.timerTotal > 0 ? Theme.accent : "#ffffff"; fit: true; width: 16; height: 16 }
+                Rectangle { anchors.centerIn: parent; width: 32; height: 32; radius: 16; color: timerHover.hovered || root.timerOpen ? Theme.hoverBg : "transparent" }
+                IconGlyph { anchors.centerIn: parent; name: "clock"; color: root.timerTotal > 0 ? Theme.accent : Theme.controlInk; fit: true; width: 16; height: 16 }
                 HoverHandler { id: timerHover; cursorShape: Qt.PointingHandCursor }
                 TapHandler {
                     onTapped: {
@@ -570,15 +608,15 @@ Item {
                         x: 16; y: 14; width: parent.width - 32
                         spacing: 12
 
-                        Text { text: qsTr("NEXT TIMER"); color: "#8a94a6"; font.family: Theme.fontFamily; font.pixelSize: 12; font.weight: Font.Bold; font.letterSpacing: 1.2 }
+                        Text { text: qsTr("NEXT TIMER"); color: Theme.textSecondary; font.family: Theme.fontFamily; font.pixelSize: 12; font.weight: Font.Bold; font.letterSpacing: 1.2 }
 
                         // seconds: - [ 10 ] +
                         Rectangle {
-                            width: parent.width; height: 40; radius: 8; color: "#0f1015"; border.color: "#232530"
+                            width: parent.width; height: 40; radius: 8; color: Theme.windowBg; border.color: Theme.border
                             Item {
                                 width: 40; height: parent.height
                                 opacity: root.timerSeconds > 0 ? 1 : 0.35
-                                Rectangle { anchors.centerIn: parent; width: 12; height: 2; radius: 1; color: "#ffffff" }
+                                Rectangle { anchors.centerIn: parent; width: 12; height: 2; radius: 1; color: Theme.controlInk }
                                 HoverHandler { cursorShape: Qt.PointingHandCursor }
                                 TapHandler { onTapped: root.timerSeconds = Math.max(0, root.timerSeconds - 1) }
                             }
@@ -587,7 +625,7 @@ Item {
                                 TextInput {
                                     id: timerInput
                                     width: 44; horizontalAlignment: TextInput.AlignRight
-                                    color: "#ffffff"; selectByMouse: true
+                                    color: Theme.controlInk; selectByMouse: true
                                     font.family: Theme.fontFamily; font.pixelSize: 18; font.weight: Font.DemiBold
                                     validator: IntValidator { bottom: 0; top: 3600 }
                                     inputMethodHints: Qt.ImhDigitsOnly
@@ -598,14 +636,14 @@ Item {
                                         function onTimerSecondsChanged() { if (timerInput.text !== String(root.timerSeconds)) timerInput.text = String(root.timerSeconds) }
                                     }
                                 }
-                                Text { anchors.baseline: timerInput.baseline; text: qsTr("seconds"); color: "#5c6475"; font.family: Theme.fontFamily; font.pixelSize: 14 }
+                                Text { anchors.baseline: timerInput.baseline; text: qsTr("seconds"); color: Theme.textMuted; font.family: Theme.fontFamily; font.pixelSize: 14 }
                             }
                             Item {
                                 anchors.right: parent.right
                                 width: 40; height: parent.height
                                 opacity: root.timerSeconds < 3600 ? 1 : 0.35
-                                Rectangle { anchors.centerIn: parent; width: 12; height: 2; radius: 1; color: "#ffffff" }
-                                Rectangle { anchors.centerIn: parent; width: 2; height: 12; radius: 1; color: "#ffffff" }
+                                Rectangle { anchors.centerIn: parent; width: 12; height: 2; radius: 1; color: Theme.controlInk }
+                                Rectangle { anchors.centerIn: parent; width: 2; height: 12; radius: 1; color: Theme.controlInk }
                                 HoverHandler { cursorShape: Qt.PointingHandCursor }
                                 TapHandler { onTapped: root.timerSeconds = Math.min(3600, root.timerSeconds + 1) }
                             }
@@ -616,11 +654,11 @@ Item {
                             width: parent.width; height: 40; radius: 20
                             readonly property bool usable: root.timerApplied || root.timerSeconds > 0
                             opacity: usable ? 1 : 0.4
-                            color: root.timerApplied ? (applyHover.hovered ? "#22242e" : "transparent") : (applyHover.hovered ? "#4a3fd1" : "#3f35b5")
-                            border.color: root.timerApplied ? "#3a3d4c" : Theme.accent
+                            color: root.timerApplied ? (applyHover.hovered ? Theme.hoverBg : "transparent") : (applyHover.hovered ? Theme.accentLight : Theme.accent)
+                            border.color: root.timerApplied ? Theme.border : Theme.accent
                             Row {
                                 anchors.centerIn: parent; spacing: 8
-                                Text { text: root.timerApplied ? qsTr("Reset") : qsTr("To all slides"); color: "#ffffff"; font.family: Theme.fontFamily; font.pixelSize: 15; font.weight: Font.DemiBold }
+                                Text { text: root.timerApplied ? qsTr("Reset") : qsTr("To all slides"); color: Theme.controlInk; font.family: Theme.fontFamily; font.pixelSize: 15; font.weight: Font.DemiBold }
                                 Text { visible: !root.timerApplied && root.timerSeconds > 0; text: root.formatTime(root.timerSeconds * root.slides.length); color: Theme.dangerLight; font.family: Theme.fontFamily; font.pixelSize: 14 }
                             }
                             HoverHandler { id: applyHover; cursorShape: parent.usable ? Qt.PointingHandCursor : Qt.ArrowCursor }
@@ -631,7 +669,7 @@ Item {
                             visible: root.timerTotal > 0
                             width: parent.width; horizontalAlignment: Text.AlignHCenter
                             text: qsTr("Duration: %1").arg(root.formatTime(root.timerTotal))
-                            color: "#8a94a6"; font.family: Theme.fontFamily; font.pixelSize: 13
+                            color: Theme.textSecondary; font.family: Theme.fontFamily; font.pixelSize: 13
                         }
                     }
                 }
@@ -644,8 +682,8 @@ Item {
                 id: zoomButton
                 visible: root.barOpen
                 width: 40; height: parent.height
-                Rectangle { anchors.centerIn: parent; width: 32; height: 32; radius: 16; color: zoomHover.hovered || root.zoomOpen ? "#22242e" : "transparent" }
-                IconGlyph { anchors.centerIn: parent; name: "zoomIn"; color: root.zoomOpen ? "#ffffff" : "#c9cedd"; fit: true; width: 16; height: 16 }
+                Rectangle { anchors.centerIn: parent; width: 32; height: 32; radius: 16; color: zoomHover.hovered || root.zoomOpen ? Theme.hoverBg : "transparent" }
+                IconGlyph { anchors.centerIn: parent; name: "zoomIn"; color: root.zoomOpen ? Theme.controlInk : Theme.navLabelMuted; fit: true; width: 16; height: 16 }
                 HoverHandler { id: zoomHover; cursorShape: Qt.PointingHandCursor }
                 TapHandler { onTapped: { root.zoomOpen = !root.zoomOpen; root.timerOpen = false } }
 
@@ -663,7 +701,7 @@ Item {
                         anchors.fill: parent; anchors.topMargin: 1
                         Item {
                             width: parent.width; height: 38
-                            Text { anchors.centerIn: parent; text: Math.round(100 / root.columns) + "%"; color: "#8a94a6"; font.family: Theme.fontFamily; font.pixelSize: 13 }
+                            Text { anchors.centerIn: parent; text: Math.round(100 / root.columns) + "%"; color: Theme.textSecondary; font.family: Theme.fontFamily; font.pixelSize: 13 }
                             HoverHandler { cursorShape: Qt.PointingHandCursor }
                             TapHandler { onTapped: root.setColumns(4) }   // the usual size
                         }
@@ -672,15 +710,15 @@ Item {
                         Item {
                             width: parent.width; height: 40
                             opacity: root.columns > 2 ? 1 : 0.35
-                            Rectangle { anchors.centerIn: parent; width: 12; height: 2; radius: 1; color: "#ffffff" }
-                            Rectangle { anchors.centerIn: parent; width: 2; height: 12; radius: 1; color: "#ffffff" }
+                            Rectangle { anchors.centerIn: parent; width: 12; height: 2; radius: 1; color: Theme.controlInk }
+                            Rectangle { anchors.centerIn: parent; width: 2; height: 12; radius: 1; color: Theme.controlInk }
                             HoverHandler { cursorShape: Qt.PointingHandCursor }
                             TapHandler { onTapped: root.setColumns(root.columns - 1) }
                         }
                         Item {
                             width: parent.width; height: 40
                             opacity: root.columns < 10 ? 1 : 0.35
-                            Rectangle { anchors.centerIn: parent; width: 12; height: 2; radius: 1; color: "#ffffff" }
+                            Rectangle { anchors.centerIn: parent; width: 12; height: 2; radius: 1; color: Theme.controlInk }
                             HoverHandler { cursorShape: Qt.PointingHandCursor }
                             TapHandler { onTapped: root.setColumns(root.columns + 1) }
                         }
@@ -693,11 +731,11 @@ Item {
             // the view: grid -> list -> lyrics
             Item {
                 width: 44; height: parent.height
-                Rectangle { anchors.centerIn: parent; width: 34; height: 34; radius: 17; color: viewHover.hovered ? "#22242e" : "transparent" }
+                Rectangle { anchors.centerIn: parent; width: 34; height: 34; radius: 17; color: viewHover.hovered ? Theme.hoverBg : "transparent" }
                 IconGlyph {
                     anchors.centerIn: parent
                     name: root.viewMode === "list" ? "listView" : (root.viewMode === "lyrics" ? "textLines" : "gridView")
-                    color: root.viewMode === "grid" ? "#ffffff" : "#c9cedd"
+                    color: root.viewMode === "grid" ? Theme.controlInk : Theme.navLabelMuted
                     fit: true; width: 18; height: 18
                 }
                 HoverHandler { id: viewHover; cursorShape: Qt.PointingHandCursor }
@@ -727,10 +765,27 @@ Item {
     // ---- a picture ----
     Image {
         visible: root.type === "image"
-        anchors.fill: parent; anchors.margins: 16; anchors.topMargin: 56
-        fillMode: Image.PreserveAspectFit
+        // Start below the 30px preview header so its dark surface never covers
+        // the image; use the dock divider as the lower edge to avoid a gutter.
+        anchors.fill: parent
+        anchors.leftMargin: 16
+        anchors.rightMargin: 16
+        anchors.topMargin: 40
+        anchors.bottomMargin: 0
+        fillMode: root.imageFit === "cover" ? Image.PreserveAspectCrop
+                 : root.imageFit === "fill" ? Image.Stretch : Image.PreserveAspectFit
         asynchronous: true
         source: root.type === "image" && root.item ? "file:///" + String(root.item.ref).replace(/\\/g, "/") : ""
+
+        // A single click previews the picture here; a double-click sends it
+        // to the monitor output, matching the media library's take gesture.
+        TapHandler {
+            acceptedButtons: Qt.LeftButton
+            onDoubleTapped: {
+                if (root.item)
+                    LiveOutputService.takeMedia(String(root.item.ref), String(root.item.name ?? ""))
+            }
+        }
     }
 
     // ---- an overlay ----
@@ -808,62 +863,28 @@ Item {
             target: MediaLibraryService
             function onFoldersChanged() { mediaView.fitPulse++ }
         }
-        // WHILE IT IS ON AIR the take is the truth (the picker writes both); off
-        // air the file's stored value is.
+        // While the file is on air, use the compositor's effective fit;
+        // otherwise use this file's optional override.
         readonly property string storedFit: {
             void mediaView.fitPulse
             return MediaLibraryService.itemFit(mediaView.filePath)
         }
-        readonly property string shownFit: mediaView.onAir ? LiveOutputService.mediaFit : mediaView.storedFit
+        readonly property string shownFit: mediaView.onAir ? LiveOutputService.mediaFit
+            : (mediaView.storedFit !== "" ? mediaView.storedFit : LiveOutputService.defaultMediaFit)
         readonly property int previewFill: mediaView.shownFit === "cover" ? Image.PreserveAspectCrop
                                             : mediaView.shownFit === "fill" ? Image.Stretch
                                                                             : Image.PreserveAspectFit
 
-        // THE FILL PICKER — on the FILE, where the choice belongs. One of the
-        // four is always current ("Output default" included): a picture that is
-        // letterboxed over here and cropped over there is a decision nobody can
-        // find otherwise.
-        component FitChip: Rectangle {
-            id: chip
-            required property string value
-            required property string label
-            readonly property bool current: mediaView.shownFit === chip.value
-            width: chipLabel.implicitWidth + 20
-            height: 26
-            radius: 13
-            color: chip.current ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.18)
-                                : "#1b1d26"
-            border.width: chip.current ? 1 : 0
-            border.color: Theme.accent
-            Text {
-                id: chipLabel
-                anchors.centerIn: parent
-                text: chip.label
-                color: chip.current ? Theme.accentLight : "#8a90a5"
-                font.family: Theme.fontFamily
-                font.pixelSize: 11
-            }
-            PositionHoverArea {
-                anchors.fill: parent
-                showCursor: false
-                onClicked: {
-                    // On air, the take writes the file AND re-lays the picture
-                    // out right now; off air the file is written for next time.
-                    if (mediaView.onAir)
-                        LiveOutputService.setMediaFit(chip.value)
-                    else
-                        MediaLibraryService.setItemFit(mediaView.filePath, chip.value)
-                }
-            }
-        }
-
+        // The media preview follows the saved file override or Outputs default.
         Rectangle {
             id: videoBox
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.top: parent.top
             width: Math.min(parent.width, parent.height * 16 / 9)
             height: Math.round(width * 9 / 16)
-            color: "#000"
+            // Letterboxed media uses the preview surface, not a black box
+            // that appears around the image when it is taken to output.
+            color: root.cDarkest
             radius: 4
             clip: true
 
@@ -888,7 +909,7 @@ Item {
                 IconGlyph {
                     anchors.centerIn: parent
                     name: "play"
-                    color: "#ffffff"
+                    color: Theme.controlInk
                     fit: true
                     width: 26; height: 26
                 }
@@ -905,23 +926,10 @@ Item {
             }
         }
 
-        // ---- the fill picker: Contain / Cover / Stretch / Output default ----
-        Row {
-            id: fitRow
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.top: videoBox.bottom
-            anchors.topMargin: 10
-            spacing: 8
-            FitChip { value: "contain"; label: qsTr("Contain") }
-            FitChip { value: "cover"; label: qsTr("Cover") }
-            FitChip { value: "fill"; label: qsTr("Stretch") }
-            FitChip { value: ""; label: qsTr("Output default") }
-        }
-
         // ---- the transport (videos only; an on-air still shows just OFF AIR)
         Column {
             anchors.horizontalCenter: parent.horizontalCenter
-            anchors.top: fitRow.bottom
+            anchors.top: videoBox.bottom
             anchors.topMargin: 10
             width: Math.min(videoBox.width, 560)
             spacing: 8
@@ -943,7 +951,7 @@ Item {
                     width: parent.width
                     height: 4
                     radius: 2
-                    color: "#232530"
+                    color: Theme.toggleOffTrack
                 }
                 // Fill + thumb.
                 Rectangle {
@@ -957,7 +965,7 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     x: Math.max(0, parent.width * seekBar.frac - 6)
                     width: 12; height: 12; radius: 6
-                    color: "#ffffff"
+                    color: Theme.controlInk
                     visible: mediaView.onAir
                 }
                 MouseArea {
@@ -969,7 +977,7 @@ Item {
                 Text {
                     anchors.right: parent.right
                     anchors.top: parent.bottom
-                    color: "#8a90a5"
+                    color: Theme.textMuted
                     font.family: Theme.fontFamily; font.pixelSize: 11
                     text: mediaView.onAir
                         ? LiveOutputService.formatMediaTime(LiveOutputService.mediaPosition)
@@ -978,40 +986,27 @@ Item {
                 }
             }
 
-            // Buttons: take/off-air, play/pause, mute.
+            // Buttons: play/pause, mute. Taking media on/off air has its own
+            // explicit control (the big centre take-overlay above, and the
+            // off-air state's own play glyph there) — this row USED TO carry
+            // a second button that duplicated that exact takeMedia/clearMedia
+            // call behind a "play" icon, so clicking what looked like a
+            // transport play button silently took the media live instead of
+            // just starting playback (user report: "the play button... goes
+            // live and it's meant to pause and play"). Removed; the
+            // play/pause toggle below (mediaTogglePlay) is the only button
+            // here now, and it never touches on-air state.
             Row {
                 anchors.horizontalCenter: parent.horizontalCenter
                 spacing: 10
-
-                Rectangle {
-                    width: 34; height: 34; radius: 17
-                    color: mediaView.onAir ? Theme.liveBg : "#232530"
-                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-                    IconGlyph {
-                        anchors.centerIn: parent
-                        name: mediaView.onAir ? "stop" : "play"
-                        color: "#ffffff"
-                        fit: true; width: 15; height: 15
-                    }
-                    PositionHoverArea {
-                        anchors.fill: parent
-                        showCursor: false
-                        onClicked: {
-                            if (mediaView.onAir)
-                                LiveOutputService.clearMedia()
-                            else
-                                LiveOutputService.takeMedia(mediaView.filePath, root.item.name)
-                        }
-                    }
-                }
                 Rectangle {
                     visible: mediaView.onAir
                     width: 34; height: 34; radius: 17
-                    color: "#232530"
+                    color: Theme.chip
                     IconGlyph {
                         anchors.centerIn: parent
                         name: mediaView.playing ? "pause" : "play"
-                        color: "#e2e8f0"
+                        color: Theme.textPrimary
                         fit: true; width: 15; height: 15
                     }
                     PositionHoverArea {
@@ -1023,11 +1018,11 @@ Item {
                 Rectangle {
                     visible: mediaView.onAir
                     width: 34; height: 34; radius: 17
-                    color: "#232530"
+                    color: Theme.chip
                     IconGlyph {
                         anchors.centerIn: parent
                         name: LiveOutputService.mediaMuted ? "close" : "volume2"
-                        color: LiveOutputService.mediaMuted ? Theme.dangerLight : "#e2e8f0"
+                        color: LiveOutputService.mediaMuted ? Theme.dangerLight : Theme.textPrimary
                         fit: true; width: 15; height: 15
                     }
                     PositionHoverArea {
@@ -1051,20 +1046,20 @@ Item {
             anchors.horizontalCenter: parent.horizontalCenter
             name: root.type === "audio" ? "music" : root.type === "video" || root.type === "media" ? "play" : root.type === "scripture" ? "bible"
                 : root.type === "camera" ? "camera" : root.type === "pdf" ? "fileText" : "layoutDashboard"
-            color: "#5c6475"; fit: true; width: 40; height: 40
+            color: Theme.textMuted; fit: true; width: 40; height: 40
         }
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
             visible: root.type === "section"
             text: root.item ? root.item.name : ""
-            color: "#e2e8f0"; font.family: Theme.fontFamily; font.pixelSize: 30; font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase
+            color: Theme.textPrimary; font.family: Theme.fontFamily; font.pixelSize: 30; font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase
         }
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
             visible: root.type !== "section" && root.item !== null
             width: Math.min(root.width - 60, 520); horizontalAlignment: Text.AlignHCenter
             text: root.item ? String(root.item.ref) : ""
-            color: "#5c6475"; elide: Text.ElideMiddle
+            color: Theme.textMuted; elide: Text.ElideMiddle
             font.family: Theme.fontFamily; font.pixelSize: 14
         }
     }

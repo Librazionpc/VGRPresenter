@@ -106,6 +106,10 @@ Rectangle {
     // A card's Edit action in the Overlays / Templates tab: open design `id` (`kind` = "overlay" | "template") in the
     // Edit screen (Main.qml switches to it).
     signal designEditRequested(string kind, string id)
+    // The Functions pane's action rows: run stored action `actionId` now.
+    // Main.qml owns the dispatcher (runEffect), so the request goes up rather
+    // than the pane growing a second copy of the effect switch.
+    signal actionRunRequested(string actionId)
     // What the centre page shows (FreeShow's activeShow): a project item, or a show clicked in the Shows table. null = the splash.
     property var centerItem: null
     // ---- the Shows table's arrow keys (from the Hotkeys map) ---------------
@@ -147,6 +151,11 @@ Rectangle {
     // The Scripture tab's "Convert to show": the show's name and its slides ([{ title, background, blocks }]), built by the engine.
     signal scriptureShowRequested(string name, var slides)
 
+    // Esc, one level down from the window's cancel binding (qml/Main.qml): the
+    // centre page's “…” menu if it is up, otherwise its Close row — i.e. the
+    // page goes away and the splash behind it is what is left. False when there
+    // is nothing to close, so the caller knows the key had no job here.
+    function escapeBack() { return showCenter.escapeBack() }
     // Opens a dock tab with a search already typed in it ("media" + a name = that media file, found).
     // The app-wide search uses this to take you to what it found.
     function showInLibrary(pane, query) {
@@ -227,7 +236,7 @@ Rectangle {
 
             border.color: Theme.border
             border.width: 1
-            color: Theme.panelBg
+            color: Theme.workspacePaneBg
 
             Rectangle {
                 id: projects_section
@@ -243,11 +252,14 @@ Rectangle {
                     id: projects_list
                     objectName: "selfTestProjectsPanel"
 
-                    x: 12
-                    y: 10
+                    // Let the Projects panel's header, divider and scrollbar
+                    // reach the actual column edges. Its own cards retain
+                    // their internal spacing.
+                    x: 0
+                    y: 0
 
-                    height: workspace_body.topHeight - 22
-                    width: parent.width - 24
+                    height: workspace_body.topHeight
+                    width: parent.width
 
                     onItemActivated: (item) => vGRPresenter_Main_Screen.centerItem = item
                     // Double-click here used to jump straight to Edit — the
@@ -678,6 +690,7 @@ Rectangle {
                 }
                 // What the clicked show / item looks like (FreeShow's centre page); the splash above stays until something is clicked.
                 ShowCenter {
+                    id: showCenter
                     objectName: "selfTestShowCenter"
                     anchors.fill: parent
                     visible: vGRPresenter_Main_Screen.centerItem !== null
@@ -701,7 +714,7 @@ Rectangle {
                 height: parent.height - workspace_body.topHeight
                 width: parent.width
 
-                color: Theme.panelBg
+                color: Theme.workspacePaneBg
 
                 Rectangle {
                     id: dock_tab_bar
@@ -715,7 +728,7 @@ Rectangle {
 
                     border.color: Theme.border
                     border.width: 1
-                    color: "transparent"
+                    color: Theme.panelBg
 
                     // ---- Live tab bar ---- one shared component
                     // (qml/components/LibraryTabBar.qml): all nine tabs —
@@ -941,6 +954,7 @@ Rectangle {
                         objectName: "selfTestFunctionsPane"
                         visible: media_tab_bar.currentPane === "functions"
                         width: parent.width - shows_template_sidebar.width; height: parent.height
+                        onRunActionRequested: (actionId) => vGRPresenter_Main_Screen.actionRunRequested(actionId)
                     }
 
                     // ---- Categories sidebar (Shows tab) ---- the sample's
@@ -1542,60 +1556,13 @@ Rectangle {
                         }
                     }
 
-                    // The original shows table — visible only on the Shows
-                    // tab; the other tabs' panes replace it above. Shifted
-                    // right of the categories sidebar (its width + 12 margins).
-                    Rectangle {
-                        id: table_row_header
-
-                        visible: media_tab_bar.currentPane === "shows"
-                        x: categories_sidebar.width + 12
-                        y: 12
-
-                        height: 21
-                        width: parent.width - categories_sidebar.width - 24 - shows_template_sidebar.width
-
-                        color: "transparent"
-
-                        Text {
-                            id: nAME
-
-                            x: 8
-                            y: 4
-
-                            height: 13
-                            width: 34
-
-                            color: Theme.textMuted
-                            font.family: Theme.fontFamily
-                            font.pixelSize: 13
-                            font.weight: Font.DemiBold
-                            horizontalAlignment: Text.AlignLeft
-                            text: qsTr("NAME")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                        }
-                        Text {
-                            id: mODIFIED
-
-                            anchors.right: parent.right
-                            anchors.rightMargin: 16
-                            y: 4
-
-                            height: 13
-                            width: 201
-
-                            color: Theme.textMuted
-                            font.family: Theme.fontFamily
-                            font.pixelSize: 13
-                            font.weight: Font.DemiBold
-                            horizontalAlignment: Text.AlignRight
-                            text: qsTr("MODIFIED")
-                            textFormat: Text.PlainText
-                            verticalAlignment: Text.AlignTop
-                            wrapMode: Text.Wrap
-                        }
-                    }
+                    // The old NAME/MODIFIED column header is gone — Scripture
+                    // and The Table's reference lists have no header row at
+                    // all, just rows starting near the top of their container
+                    // (ReferencePane's sourcesFlick: y: 42 for its OWN "Sources"
+                    // label above it; this list has no such label, so it starts
+                    // even higher). table_body's own y below was adjusted to
+                    // match: it used to leave room for this header.
                     Rectangle {
                         id: table_body
                         objectName: "selfTestShowsRows"
@@ -1620,7 +1587,10 @@ Rectangle {
 
                         visible: media_tab_bar.currentPane === "shows"
                         x: categories_sidebar.width + 12
-                        y: 35
+                        // No header row above it any more (see the removed
+                        // NAME/MODIFIED comment above) — a small top margin,
+                        // same idiom as ReferencePane's own lists.
+                        y: 8
 
                         // No bottom reserve: the "+ New show" pill FLOATS
                         // over the table (same idiom as DesignLibraryPane's
@@ -1762,15 +1732,25 @@ Rectangle {
                                 // reuse pool), so a row asks the VIEW for its width —
                                 // ListView.view is the documented way in (the old
                                 // Repeater could rely on the contentItem).
-                                width: ListView.view.width - 24
+                                // -24 used to reserve room for an inline scrollbar
+                                // at this view's own right edge — the bar now
+                                // lives OUTSIDE table_body, in the gutter beside
+                                // shows_template_sidebar, so that reservation is
+                                // stale and left the rows stopping well short of
+                                // the scrollbar's new position.
+                                width: ListView.view.width - 8
 
                                 radius: 4
                                 // The floating "New show" pill sits OVER the last rows.
                                 // PositionHoverArea reads pure geometry (AppCursor.hovered),
                                 // so it cannot see the pill on top of it — without the gate
                                 // the row beneath lit up while the pointer was on the pill.
+                                // Odd rows carry the app's shared list stripe
+                                // (ListRows), so the shows table reads in the same
+                                // bands as the action lists.
                                 color: ((rowHover.hovered || index === table_body.showCursor)
-                                        && !newShowDockHover.hovered) ? Theme.activeBg : "transparent"
+                                        && !newShowDockHover.hovered) ? Theme.activeBg
+                                                                      : ListRows.stripeOverlay(index)
                                 Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                                 PositionHoverArea {
                                     id: rowHover
@@ -1837,14 +1817,22 @@ Rectangle {
                             }
                         }   // ListView table_scroll
 
-                        // A real draggable bar for the now-scrolling table
-                        // (auto-hides when every row already fits).
-                        AppScrollBar {
-                            flickable: table_scroll
-                            anchors.top: parent.top; anchors.bottom: parent.bottom
-                            anchors.right: parent.right; anchors.rightMargin: 3
-                        }
-
+                    }
+                    // A real draggable bar for the now-scrolling table
+                    // (auto-hides when every row already fits). Same
+                    // positioning convention ReferencePane's verse/paragraph
+                    // list uses: clear the floating "New show" FAB below
+                    // instead of running the track through it. A SIBLING of
+                    // table_body, not a child — table_body itself clips
+                    // (clip: true), so a bar positioned in the 24px gutter
+                    // between the table and shows_template_sidebar would be
+                    // cut off if it lived inside that clipped rectangle.
+                    AppScrollBar {
+                        flickable: table_scroll
+                        visible: table_body.visible
+                        y: table_body.y + 2
+                        height: table_body.height - 60   // 2 top + 58 to clear new_show_dock_btn
+                        x: table_body.x + table_body.width + 4   // into the gutter, beside the sidebar
                     }
                     // A true FAB (DesignLibraryPane's "New <design>" pill is
                     // the reference this now matches): no border, no footer
@@ -1907,7 +1895,7 @@ Rectangle {
                                 anchors.verticalCenter: parent.verticalCenter
                                 anchors.verticalCenterOffset: 1
                                 name: "newShow"
-                                color: "#ffffff"
+                                color: Theme.controlInk
                                 strokeWidth: 2
                                 width: 16; height: 16
                             }
@@ -1917,7 +1905,7 @@ Rectangle {
 
                                 anchors.verticalCenter: parent.verticalCenter
 
-                                color: "#ffffff"
+                                color: Theme.controlInk
                                 font.family: Theme.fontFamily
                                 font.pixelSize: 14
                                 font.weight: Font.Bold
@@ -1942,6 +1930,18 @@ Rectangle {
                 // This dock carried a clock panel here in the earlier build;
                 // this is that panel back, now the one shared component every
                 // clock in the app uses.
+                Rectangle {
+                    visible: media_tab_bar.currentPane === "media"
+                          || media_tab_bar.currentPane === "overlays"
+                          || media_tab_bar.currentPane === "templates"
+                          || media_tab_bar.currentPane === "soon"
+                          || media_tab_bar.currentPane === "functions"
+                    x: parent.width - width
+                    y: 39
+                    width: vGRPresenter_Main_Screen.templateColumnWidth
+                    height: parent.height - 39
+                    color: Theme.panelBg
+                }
                 ClockPanel {
                     id: dock_clock
                     visible: media_tab_bar.currentPane === "media"
@@ -1974,7 +1974,7 @@ Rectangle {
                     width: vGRPresenter_Main_Screen.templateColumnWidth
                     height: parent.height - 39
 
-                    color: Theme.windowBg
+                    color: Theme.panelBg
 
                     // The selected category's name ("" for All — the DEFAULT row).
                     readonly property string categoryName: media_table.currentCategory <= 0
@@ -2338,7 +2338,7 @@ Rectangle {
                                         }
                                         border.width: 1
                                         border.color: shows_template_sidebar.optionsOpen ? Theme.dangerLight : Theme.borderSubtle
-                                        IconGlyph { anchors.centerIn: parent; name: "sliders"; color: shows_template_sidebar.optionsOpen ? "#ffffff" : Theme.textPrimary; fit: true; width: 22; height: 22 }
+                                        IconGlyph { anchors.centerIn: parent; name: "sliders"; color: shows_template_sidebar.optionsOpen ? Theme.controlInk : Theme.textPrimary; fit: true; width: 22; height: 22 }
                                     }
                                     HoverHandler { id: optionsHover; cursorShape: Qt.PointingHandCursor }
                                     TapHandler { onTapped: shows_template_sidebar.optionsOpen = !shows_template_sidebar.optionsOpen }
@@ -2372,11 +2372,17 @@ Rectangle {
                     }
                 }
 
-                // Match the draggable category rail on the left: the Shows
-                // template inspector can be widened or narrowed, while the
-                // show list automatically takes the remaining width.
+                // Resize the library's right-side pane (the template inspector
+                // on Shows, and the clock area on Media / Overlays / Templates /
+                // Calendar / Functions); the active list takes the remaining
+                // width. Double-click restores the responsive default.
                 SplitHandle {
                     visible: media_tab_bar.currentPane === "shows"
+                          || media_tab_bar.currentPane === "media"
+                          || media_tab_bar.currentPane === "overlays"
+                          || media_tab_bar.currentPane === "templates"
+                          || media_tab_bar.currentPane === "soon"
+                          || media_tab_bar.currentPane === "functions"
                     value: parent.width - shows_template_sidebar.width
                     minValue: parent.width - Math.min(560, Math.max(220, parent.width - 360))
                     maxValue: parent.width - 220
@@ -2396,7 +2402,7 @@ Rectangle {
 
             border.color: Theme.border
             border.width: 1
-            color: Theme.panelBg            // ---- Monitor wall — the shared MonitorWall component
+            color: Theme.workspacePaneBg    // ---- Monitor wall — the shared MonitorWall component
             // (qml/components/MonitorWall.qml), driven by OutputListModel.
             // The old preview_Main_Output / preview_Stage_Screen /
             // preview_Nursery_Display / preview_Stream_Overlay blocks were

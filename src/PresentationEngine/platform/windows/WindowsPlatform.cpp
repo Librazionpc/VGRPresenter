@@ -106,7 +106,8 @@ private:
     {
         DWORD size = 0;
         DWORD type = 0;
-        if (PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &size, &type, nullptr) != PDH_MORE_DATA || size == 0)
+        if (PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &size, &type, nullptr)
+                != static_cast<PDH_STATUS>(PDH_MORE_DATA) || size == 0)
             return;
         std::vector<BYTE> buf(size);
         auto *items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W *>(buf.data());

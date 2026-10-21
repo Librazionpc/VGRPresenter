@@ -346,7 +346,7 @@ Item {
                         visible: el.meta.showDate === true
                         anchors.horizontalCenter: parent.horizontalCenter
                         text: Qt.formatDate(root.now, "dddd, MMMM d")
-                        color: el.meta.color !== undefined ? Qt.alpha(el.meta.color, 0.7) : "#5c6475"
+                        color: el.meta.color !== undefined ? Qt.alpha(el.meta.color, 0.7) : Theme.textMuted
                         font.family: Theme.fontFamily
                         font.pixelSize: 10
                     }
@@ -463,7 +463,7 @@ Item {
                             anchors.horizontalCenter: parent.horizontalCenter
                             visible: (el.modelData.text ?? "") !== ""
                             text: el.modelData.text ?? ""
-                            color: "#5c6475"; font.family: Theme.fontFamily; font.pixelSize: 10
+                            color: Theme.textMuted; font.family: Theme.fontFamily; font.pixelSize: 10
                         }
                     }
                 }

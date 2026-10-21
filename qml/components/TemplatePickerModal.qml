@@ -222,8 +222,8 @@ Item {
         // off with no way to reach them.
         height: Math.min(Math.max(360, parent.height - 40), content.height + 40)
         radius: 14
-        color: "#13151c"
-        border.color: "#232530"
+        color: Theme.surface
+        border.color: Theme.border
         border.width: 1
         clip: true
 
@@ -257,7 +257,7 @@ Item {
                         anchors.left: parent.left
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Choose template")
-                        color: "#f1f3f8"
+                        color: Theme.textPrimary
                         font.family: Theme.fontFamily
                         font.pixelSize: 21
                         font.weight: Font.DemiBold
@@ -270,13 +270,13 @@ Item {
                         width: 28
                         height: 28
                         radius: 7
-                        color: closeArea.containsMouse ? "#20222c" : "transparent"
+                        color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
                         Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         Text {
                             anchors.centerIn: parent
                             text: "✕"
-                            color: "#8a94a6"
+                            color: Theme.textSecondary
                             font.pixelSize: 14
                         }
 
@@ -313,14 +313,14 @@ Item {
                     Text {
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Templates for ") + root.contentTypeLabel.toLowerCase()
-                        color: "#8a94a6"
+                        color: Theme.textSecondary
                         font.family: Theme.fontFamily
                         font.pixelSize: 14
                     }
                 }
             }
 
-            Rectangle { width: parent.width; height: 1; color: "#232530" }
+            Rectangle { width: parent.width; height: 1; color: Theme.border }
 
             Row {
                 width: parent.width
@@ -333,7 +333,7 @@ Item {
 
                     Text {
                         text: qsTr("Preview")
-                        color: "#5c6475"
+                        color: Theme.textMuted
                         font.family: Theme.fontFamily
                         font.pixelSize: 10
                         font.weight: Font.Bold
@@ -344,8 +344,8 @@ Item {
                         width: parent.width
                         height: width * 9 / 16
                         radius: 8
-                        color: "#0a0b0f"
-                        border.color: "#262a38"
+                        color: Theme.windowBg
+                        border.color: Theme.borderSubtle
                         border.width: 1
                         clip: true
 
@@ -376,7 +376,7 @@ Item {
 
                     Text {
                         text: root.previewTemplate.name
-                        color: "#eef1f8"
+                        color: Theme.textPrimary
                         font.family: Theme.fontFamily
                         font.pixelSize: 16
                         font.weight: Font.DemiBold
@@ -386,10 +386,10 @@ Item {
                         height: 20
                         width: aspectLabel.implicitWidth + 14
                         radius: 4
-                        color: "#1a1c26"
-                        border.color: "#2a2f3a"
+                        color: Theme.inset
+                        border.color: Theme.toggleOffTrack
                         border.width: 1
-                        Text { id: aspectLabel; anchors.centerIn: parent; text: "16:9"; color: "#8a94a6"; font.family: Theme.fontFamily; font.pixelSize: 10 }
+                        Text { id: aspectLabel; anchors.centerIn: parent; text: "16:9"; color: Theme.textSecondary; font.family: Theme.fontFamily; font.pixelSize: 10 }
                     }
                 }
 
@@ -402,7 +402,7 @@ Item {
                     Text {
                         visible: root.hasCategoryFilter
                         text: qsTr("Category")
-                        color: "#5c6475"
+                        color: Theme.textMuted
                         font.family: Theme.fontFamily
                         font.pixelSize: 10
                         font.weight: Font.Bold
@@ -416,8 +416,8 @@ Item {
                         height: 32
                         width: parent.width
                         radius: 8
-                        color: "#1a1c26"
-                        border.color: "#2a2f3a"
+                        color: Theme.inset
+                        border.color: Theme.toggleOffTrack
                         border.width: 1
 
                         Text {
@@ -426,7 +426,7 @@ Item {
                             anchors.leftMargin: 12
                             anchors.verticalCenter: parent.verticalCenter
                             text: root.categoryFilterName
-                            color: "#c9cedd"
+                            color: Theme.navLabelMuted
                             font.family: Theme.fontFamily
                             font.pixelSize: 14
                         }
@@ -435,7 +435,7 @@ Item {
                             anchors.rightMargin: 12
                             anchors.verticalCenter: parent.verticalCenter
                             text: "▾"
-                            color: "#5c6475"
+                            color: Theme.textMuted
                             font.pixelSize: 10
                         }
 
@@ -453,7 +453,7 @@ Item {
 
                     Text {
                         text: qsTr("Templates")
-                        color: "#5c6475"
+                        color: Theme.textMuted
                         font.family: Theme.fontFamily
                         font.pixelSize: 10
                         font.weight: Font.Bold
@@ -463,8 +463,8 @@ Item {
                         width: parent.width
                         height: 32
                         radius: 8
-                        color: "#1a1c26"
-                        border.color: "#2a2f3a"
+                        color: Theme.inset
+                        border.color: Theme.toggleOffTrack
                         border.width: 1
 
                         Row {
@@ -475,12 +475,12 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             spacing: 8
 
-                            IconGlyph { anchors.verticalCenter: parent.verticalCenter; name: "search"; color: "#5c6475"; width: 12; height: 12 }
+                            IconGlyph { anchors.verticalCenter: parent.verticalCenter; name: "search"; color: Theme.textMuted; width: 12; height: 12 }
 
                             TextInput {
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: parent.width - 24
-                                color: "#c9cedd"
+                                color: Theme.navLabelMuted
                                 font.family: Theme.fontFamily
                                 font.pixelSize: 14
                                 selectByMouse: true
@@ -489,7 +489,7 @@ Item {
                                 Text {
                                     visible: parent.text.length === 0
                                     text: qsTr("Search templates")
-                                    color: "#5c6475"
+                                    color: Theme.textMuted
                                     font.family: Theme.fontFamily
                                     font.pixelSize: 14
                                 }
@@ -503,7 +503,7 @@ Item {
                         text: root.hasCategoryFilter
                               ? qsTr("Type to search, or pick a category, to see templates here.")
                               : qsTr("Type to search for a template.")
-                        color: "#5c6475"
+                        color: Theme.textMuted
                         wrapMode: Text.Wrap
                         font.family: Theme.fontFamily
                         font.pixelSize: 14
@@ -540,9 +540,9 @@ Item {
                                     width: listCol.width
                                     height: 52
                                     radius: 8
-                                    color: tplRow.selected ? "#1a2240" : (rowArea.containsMouse ? "#191b24" : "#161823")
+                                    color: tplRow.selected ? "#1a2240" : (rowArea.containsMouse ? Theme.card : Theme.surface)
                                     border.width: tplRow.selected ? 1.5 : 1
-                                    border.color: tplRow.selected ? Theme.accent : "#262a38"
+                                    border.color: tplRow.selected ? Theme.accent : Theme.borderSubtle
                                     Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                                     // A plain generic mark, not a redundant tiny render of the design - the actual preview is the
@@ -554,8 +554,8 @@ Item {
                                         width: 36
                                         height: 36
                                         radius: 5
-                                        color: "#0d0f16"
-                                        border.color: "#262a38"
+                                        color: Theme.windowBg
+                                        border.color: Theme.borderSubtle
                                         border.width: 1
 
                                         // layoutTemplate is a hand-sized (non-24-grid) glyph — its
@@ -571,7 +571,7 @@ Item {
                                             IconGlyph {
                                                 anchors.centerIn: parent
                                                 name: "layoutTemplate"
-                                                color: "#8a94a6"
+                                                color: Theme.textSecondary
                                                 width: 18; height: 18
                                             }
                                         }
@@ -582,7 +582,7 @@ Item {
                                         anchors.verticalCenter: parent.verticalCenter
                                         width: parent.width - 58 - 36
                                         text: tplRow.modelData.name
-                                        color: "#eef1f8"
+                                        color: Theme.textPrimary
                                         font.family: Theme.fontFamily
                                         font.pixelSize: 15
                                         font.weight: Font.Medium
@@ -594,7 +594,7 @@ Item {
                                         anchors.rightMargin: 12
                                         anchors.verticalCenter: parent.verticalCenter
                                         text: root.isFavorite(tplRow.modelData.key) ? "★" : "☆"
-                                        color: root.isFavorite(tplRow.modelData.key) ? "#f5c26b" : "#5c6475"
+                                        color: root.isFavorite(tplRow.modelData.key) ? Theme.warning : Theme.textMuted
                                         font.pixelSize: 15
 
                                         MouseArea {
@@ -626,7 +626,7 @@ Item {
                 }
             }
 
-            Rectangle { width: parent.width; height: 1; color: "#232530" }
+            Rectangle { width: parent.width; height: 1; color: Theme.border }
 
             Row {
                 anchors.right: parent.right
@@ -636,15 +636,15 @@ Item {
                     width: 90
                     height: 34
                     radius: 9
-                    color: cancelArea.containsMouse ? "#20222c" : "#1a1c26"
-                    border.color: "#2a2f3a"
+                    color: cancelArea.containsMouse ? Theme.hoverBg : Theme.inset
+                    border.color: Theme.toggleOffTrack
                     border.width: 1
                     Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                     Text {
                         anchors.centerIn: parent
                         text: qsTr("Cancel")
-                        color: "#c8cdd9"
+                        color: Theme.navLabelMuted
                         font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: Font.Medium
@@ -669,7 +669,7 @@ Item {
                     Text {
                         anchors.centerIn: parent
                         text: qsTr("Use template")
-                        color: "#ffffff"
+                        color: Theme.controlInk
                         font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: Font.DemiBold

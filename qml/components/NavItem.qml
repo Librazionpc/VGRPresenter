@@ -72,7 +72,13 @@ Item {
 
         Text {
             anchors.verticalCenter: parent.verticalCenter
+            // Bounded + elided so a long label (this row's own width is the
+            // rail's, not this component's unused implicitWidth — see
+            // NavRail's `width: parent.width` override) can never overflow
+            // the pill the way "Appearance & Actions" did unbounded.
+            width: root.width - 14 - 28 - Theme.space3 - Theme.space2
             text: root.label
+            elide: Text.ElideRight
             font.family: Theme.fontFamily
             font.pixelSize: Theme.textMd
             color: root.selected ? Theme.accentLight : Theme.navLabelMuted

@@ -748,7 +748,7 @@ Item {
             radius: 21
             color: Theme.surface
             border.width: 1
-            border.color: "#4a4d5e"
+            border.color: Theme.border
 
             Row {
                 id: pickRow
@@ -1970,12 +1970,12 @@ Item {
                 spacing: 8
                 PlusGlyph {
                     anchors.verticalCenter: parent.verticalCenter
-                    size: 12; thickness: 1.6; color: "#ffffff"
+                    size: 12; thickness: 1.6; color: Theme.controlInk
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     text: qsTr("New Bus")
-                    color: "#ffffff"
+                    color: Theme.controlInk
                     font.family: Theme.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold
                 }
             }

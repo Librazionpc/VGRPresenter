@@ -16,8 +16,16 @@ import VGRPresenterUI
 Item {
     id: root
     // Shared top-level modal layer: keep the scrim and card above the page
-    // so clicks and hover never reach the controls behind the dialog.
-    z: 30000
+    // so clicks and hover never reach the controls behind the dialog. Bumped
+    // to the top of ModalStack's shared counter whenever this opens (see
+    // onOpenChanged below and ModalStack.qml's own comment) — a flat 30000
+    // shared with every other modal in the app stacked simultaneously-open
+    // dialogs by declaration order, not by which one actually opened last.
+    z: ModalStack.base
+
+    // Resolved automatically from ModalStack's open-dialog stack — see
+    // ModalCard.qml's identical property for the full explanation.
+    readonly property Item blurSource: ModalStack.blurSourceFor(dialogCard)
 
     property bool open: false
     signal closed()
@@ -37,8 +45,13 @@ Item {
     anchors.fill: parent
     visible: root.open
     onOpenChanged: {
-        if (open)
+        if (open) {
             root.page = ""
+            root.z = ModalStack.nextZ()
+            ModalStack.push(dialogCard)
+        } else {
+            ModalStack.pop(dialogCard)
+        }
         if (root.open && root.hotkeyScope === 0) {
             root.hotkeyScope = Hotkeys.open({
                 name: qsTr("Import"),
@@ -49,7 +62,7 @@ Item {
             root.hotkeyScope = 0
         }
     }
-    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
+    Component.onDestruction: { Hotkeys.close(root.hotkeyScope); ModalStack.pop(dialogCard) }
 
     readonly property var formats: ImportService.formats
     function inSection(name, primaryOnly, restOnly) {
@@ -112,6 +125,7 @@ Item {
 
     ModalScrim {
         anchors.fill: parent
+        blurSource: root.blurSource
         onDismissed: root.closed()
     }
 

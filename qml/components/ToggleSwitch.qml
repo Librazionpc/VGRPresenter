@@ -30,7 +30,7 @@ Item {
         radius: width / 2
         anchors.verticalCenter: parent.verticalCenter
         x: root.checked ? root.width - width - 2 : 2
-        color: "#ffffff"
+        color: Theme.controlInk
         Behavior on x { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
     }
 

@@ -94,7 +94,9 @@ Result<void> RenderEngine::Initialize() {
     // Where the request comes from is ResolveBackendName's business (one rule
     // for the boot and for every switch after it). Whichever one a run uses is
     // logged, so it is never a guess.
-    SelectBackend(ConfiguredBackendName());
+    auto selected = SelectBackend(ConfiguredBackendName());
+    if (!selected.ok())
+        return selected.error();
 
     gpu_.BindBackend(backend_);
     uploader_.BindGpu(&gpu_);
@@ -1079,6 +1081,11 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
                 case DrawCommand::Type::BlitImage: ++nBlit; break;
                 case DrawCommand::Type::DrawGlyph: ++nGlyph; break;
                 case DrawCommand::Type::DrawShape: ++nShape; break;
+                // Effects and blend changes are state commands, not draw
+                // primitives counted by this dispatch summary.
+                case DrawCommand::Type::PushEffect:
+                case DrawCommand::Type::PopEffect:
+                case DrawCommand::Type::SetBlend: break;
             }
             if (firstCmds.size() < 220)
                 firstCmds += std::format(" [{}({:.0f},{:.0f},{:.0f}x{:.0f})]",

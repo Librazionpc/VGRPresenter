@@ -19,10 +19,14 @@
 // does not populate alpha at all on a 32bpp DIB.
 // ---------------------------------------------------------------------------
 #ifdef _WIN32
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #include <gdiplus.h>
+#ifdef _MSC_VER
 #pragma comment(lib, "gdiplus.lib")
+#endif
 
 namespace {
 

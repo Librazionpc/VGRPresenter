@@ -17,9 +17,9 @@ Item {
     property var model: []
     signal chosen(string id, var arg)
 
-    readonly property color cLighter: "#2f3542"
-    readonly property color cDarkest: "#12121c"
-    readonly property color cText: "#f0f0ff"
+    readonly property color cLighter: Theme.border
+    readonly property color cDarkest: Theme.panelBg
+    readonly property color cText: Theme.textPrimary
     readonly property string mono: FontService.monoFamily
 
     property int openSub: -1          // the row whose submenu is showing
@@ -52,7 +52,7 @@ Item {
         id: panel
         width: 250
         height: column.height + 12
-        radius: 10; color: "#191923"; border.color: root.cLighter
+        radius: 10; color: Theme.card; border.color: root.cLighter
         // (the panel and its submenu swallow their own clicks)
         MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; onPressed: (mouse) => mouse.accepted = true }
 
@@ -77,7 +77,7 @@ Item {
                     Rectangle {
                         visible: !row.isDivider
                         anchors.fill: parent; anchors.leftMargin: 4; anchors.rightMargin: 4; radius: 6
-                        color: rowHover.hovered || root.openSub === row.index ? "#14ffffff" : "transparent"
+                        color: rowHover.hovered || root.openSub === row.index ? Theme.hoverBg : "transparent"
                     }
 
                     // a big entry: the icon over the label, both centred
@@ -98,7 +98,7 @@ Item {
                             x: 52; anchors.verticalCenter: parent.verticalCenter
                             width: parent.width - 52 - 46
                             text: row.modelData.label ?? ""; elide: Text.ElideRight
-                            color: row.modelData.disabled === true ? "#6b7280" : root.cText
+                            color: row.modelData.disabled === true ? Theme.textMuted : root.cText
                             font.family: root.mono; font.pixelSize: 17; font.weight: Font.Medium
                         }
                         Text {
@@ -137,7 +137,7 @@ Item {
         readonly property var entries: visible ? root.model[root.openSub].children : []
         width: 230
         height: subColumn.height + 12
-        radius: 10; color: "#191923"; border.color: root.cLighter
+        radius: 10; color: Theme.card; border.color: root.cLighter
         x: panel.x + panel.width + width + 8 < root.width ? panel.x + panel.width - 2 : panel.x - width + 2
         y: Math.max(4, Math.min(panel.y + 6 + root.subY, root.height - height - 4))
         MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; onPressed: (mouse) => mouse.accepted = true }
@@ -153,16 +153,16 @@ Item {
                     width: subColumn.width
                     height: modelData.divider === true ? 9 : 34
                     Rectangle { visible: subRow.modelData.divider === true; y: 4; width: parent.width; height: 1; color: root.cLighter }
-                    Rectangle { visible: subRow.modelData.divider !== true; anchors.fill: parent; anchors.leftMargin: 4; anchors.rightMargin: 4; radius: 6; color: subHover.hovered && subRow.modelData.disabled !== true ? "#14ffffff" : "transparent" }
+                    Rectangle { visible: subRow.modelData.divider !== true; anchors.fill: parent; anchors.leftMargin: 4; anchors.rightMargin: 4; radius: 6; color: subHover.hovered && subRow.modelData.disabled !== true ? Theme.hoverBg : "transparent" }
                     // the group's colour, or a check for the chosen one
                     Rectangle { visible: (subRow.modelData.dot ?? "") !== ""; x: 18; anchors.verticalCenter: parent.verticalCenter; width: 12; height: 12; radius: 6; color: subRow.modelData.dot ?? "transparent" }
-                    IconGlyph { visible: subRow.modelData.checked === true; x: 17; anchors.verticalCenter: parent.verticalCenter; name: "check"; color: "#93f190"; width: 10; height: 8 }
+                    IconGlyph { visible: subRow.modelData.checked === true; x: 17; anchors.verticalCenter: parent.verticalCenter; name: "check"; color: Theme.successLight; width: 10; height: 8 }
                     Text {
                         visible: subRow.modelData.divider !== true
                         x: 44; anchors.verticalCenter: parent.verticalCenter
                         width: parent.width - 44 - 12
                         text: subRow.modelData.label ?? ""; elide: Text.ElideRight
-                        color: subRow.modelData.disabled === true ? "#6b7280" : root.cText
+                        color: subRow.modelData.disabled === true ? Theme.textMuted : root.cText
                         font.family: root.mono; font.pixelSize: 16
                     }
                     HoverHandler { id: subHover; cursorShape: Qt.PointingHandCursor }

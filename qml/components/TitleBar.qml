@@ -84,6 +84,13 @@ Rectangle {
         border.color: searchInput.activeFocus ? Theme.accent : Theme.border
         Behavior on border.color { ColorAnimation { duration: 100 } }
 
+        // Clicking the magnifier or the otherwise-empty part of the field
+        // should activate typing just like clicking directly on the text.
+        MouseArea {
+            anchors.fill: parent
+            onClicked: searchInput.forceActiveFocus()
+        }
+
         IconGlyph {
             x: 12
             anchors.verticalCenter: parent.verticalCenter
@@ -95,7 +102,7 @@ Rectangle {
         TextInput {
             id: searchInput
             anchors.left: parent.left
-            anchors.leftMargin: Theme.space6
+            anchors.leftMargin: Theme.space6 + Theme.space2
             anchors.right: parent.right
             anchors.rightMargin: Theme.space3
             anchors.verticalCenter: parent.verticalCenter
@@ -235,7 +242,7 @@ Rectangle {
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 170
                                 text: resultRow.modelData.title
-                                color: resultRow.selected ? "#ffffff" : Theme.textPrimary
+                                color: resultRow.selected ? Theme.controlInk : Theme.textPrimary
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.textSm
                                 elide: Text.ElideRight
@@ -256,7 +263,7 @@ Rectangle {
                                 id: chipLabel
                                 anchors.centerIn: parent
                                 text: resultRow.modelData.section
-                                color: resultRow.selected ? "#ffffff" : Theme.textSecondary
+                                color: resultRow.selected ? Theme.controlInk : Theme.textSecondary
                                 font.family: Theme.fontFamily
                                 font.pixelSize: 10
                             }

@@ -115,7 +115,7 @@ Item {
                 Text {
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: index + 1
-                    color: "#ffffff"
+                    color: Theme.controlInk
                     font.pixelSize: 368
                     font.weight: Font.Bold
                 }
@@ -695,6 +695,13 @@ Item {
             resMenu.visible = false
         }
     }
+    // Unlike SelectField's own menu (the shared pattern this box otherwise
+    // copies), resMenu/refreshMenu had no outside-click dismiss layer at
+    // all — clicking elsewhere in the dialog, or the OTHER box, left this
+    // one standing open (user report: both lists visible at once after
+    // picking Resolution then Refresh rate). closesOnWheel: false matches
+    // SelectField's own field-attached combobox feel.
+    MenuCatcher { menu: resMenu; closesOnWheel: false }
 
     DropdownPanel {
         id: refreshMenu
@@ -705,4 +712,5 @@ Item {
             refreshMenu.visible = false
         }
     }
+    MenuCatcher { menu: refreshMenu; closesOnWheel: false }
 }

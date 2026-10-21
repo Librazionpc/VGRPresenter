@@ -38,7 +38,7 @@ Item {
         id: btn
         property bool danger: false
         readonly property bool hovered: hoverArea.hovered
-        readonly property color glyphColor: btn.danger && btn.hovered ? "#ffffff" : Theme.iconChrome
+        readonly property color glyphColor: btn.danger && btn.hovered ? Theme.controlInk : Theme.iconChrome
         default property alias glyph: glyphHolder.data
         signal activated()
 

@@ -4,7 +4,8 @@ import VGRPresenterUI
 
 // Reusable "type a name" dialog: dim scrim + centered card with one text field, in the same style as
 // ConfirmDialog. The caller opens it with the field's starting text and reacts to accepted(text) /
-// dismissed(); Enter accepts, Escape or a click outside dismisses. It closes itself on either.
+// dismissed(); Enter accepts and Escape dismisses. Outside clicks are trapped by
+// the shared scrim and leave the dialog open.
 //
 //   NameDialog { id: nameDialog; title: qsTr("New category"); confirmLabel: qsTr("Create")
 //                onAccepted: (text) => service.createCategory(text) }

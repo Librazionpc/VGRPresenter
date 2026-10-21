@@ -33,7 +33,7 @@ Rectangle {
         height: 14
         radius: 7
         anchors.verticalCenter: parent.verticalCenter
-        color: "#ffffff"
+        color: Theme.controlInk
         x: root.checked ? root.width - width - 3 : 3
         Behavior on x { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
     }

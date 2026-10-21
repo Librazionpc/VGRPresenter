@@ -135,6 +135,7 @@ public:
     Result<void> Previous();
     Result<void> JumpTo(size_t index);
     Result<void> JumpById(std::string_view slideId);
+    Result<void> JumpByTag(std::string_view tag);
     Result<size_t> Search(std::string_view query) const;
 
     // --- Timeline / cues ----------------------------------------------------------

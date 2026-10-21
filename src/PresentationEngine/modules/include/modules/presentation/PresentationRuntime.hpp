@@ -88,6 +88,11 @@ public:
     Result<void> Last();
     Result<void> JumpTo(size_t index);
     Result<void> JumpById(std::string_view slideId);
+    // The live group-shortcut jump (Settings · Look & Feel's groups): the
+    // NEXT visible slide carrying this tag after the current one, wrapping —
+    // see PresentationNavigator::JumpByTag for why it cycles instead of
+    // always landing on the first match.
+    Result<void> JumpByTag(std::string_view tag);
     Result<size_t> Search(std::string_view query) const;
     Result<void> Back();
 

@@ -19,7 +19,7 @@ Item {
     // such as folder or search: their natural size is not a 24 grid.)
     property bool fit: false
     // The glyphs drawn on the Lucide 24-unit grid (the ones `fit` can scale). The others are hand-sized.
-    readonly property bool grid24: ["camera", "mic", "micOff", "volume2", "clock", "play", "bookOpen", "wrench", "music", "star", "info", "cash", "lock", "sliders", "zoomIn", "gridView", "listView", "textLines", "download", "pencil", "flag", "link", "typeCase", "blend", "ban", "copy", "trash", "alignLeft", "alignCenter", "alignRight", "alignJustify", "alignTop", "alignMiddle", "alignBottom", "listBullets", "transition", "locked", "unlocked", "image", "overlays", "audio", "slide", "scripture", "timerFill", "previous", "next", "shows", "newShow", "media", "template", "bible", "book", "calendar", "overlay", "layoutDashboard", "layers", "folder", "penTool", "fileText", "close", "presentation", "home", "cpu", "activity", "memoryStick", "thermometer", "gauge"].indexOf(name) >= 0
+    readonly property bool grid24: ["camera", "mic", "micOff", "volume2", "clock", "play", "bookOpen", "wrench", "music", "star", "info", "cash", "lock", "sliders", "zoomIn", "gridView", "listView", "textLines", "download", "pencil", "flag", "link", "typeCase", "blend", "ban", "copy", "trash", "alignLeft", "alignCenter", "alignRight", "alignJustify", "alignTop", "alignMiddle", "alignBottom", "listBullets", "transition", "locked", "unlocked", "image", "overlays", "audio", "slide", "scripture", "timerFill", "previous", "next", "shows", "newShow", "media", "template", "bible", "book", "calendar", "overlay", "layoutDashboard", "layers", "folder", "penTool", "fileText", "close", "presentation", "home", "cpu", "activity", "memoryStick", "thermometer", "gauge", "eye", "eyeOff", "cornerDownLeft", "zap"].indexOf(name) >= 0
     implicitWidth: 14
     implicitHeight: 14
 
@@ -47,6 +47,8 @@ Item {
             case "check": return checkC
             case "arrowLeft": return arrowLeftC
             case "sliders": return slidersC
+            case "cornerDownLeft": return cornerDownLeftC
+            case "zap": return zapC
             case "zoomIn": return zoomInC
             case "download": return downloadC
             case "ban": return banC
@@ -112,6 +114,8 @@ Item {
             case "memoryStick": return memoryStickC
             case "thermometer": return thermometerC
             case "gauge": return gaugeC
+            case "eye": return eyeC
+            case "eyeOff": return eyeOffC
             default: return dotC
             }
     }
@@ -434,6 +438,29 @@ Item {
     }
 
     // Lucide "zoom-in".
+    // Lucide "corner-down-left" — the return/Enter mark beside a keypress
+    // field (the action editor's "press the key this runs on" affordance).
+    Component {
+        id: cornerDownLeftC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"; strokeColor: root.color; strokeWidth: 2
+                capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 20 4 L 20 11 A 4 4 0 0 1 16 15 L 4 15 M 9 10 L 4 15 L 9 20" }
+            }
+        }
+    }
+
+    // Lucide "zap", solid — the bolt that marks Custom activation.
+    Component {
+        id: zapC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M 13 2 L 3 14 L 10 14 L 10 22 L 21 10 L 13 10 Z"
+        }
+    }
+
     Component {
         id: zoomInC
         StrokeIcon {
@@ -1234,6 +1261,36 @@ Item {
                 capStyle: ShapePath.RoundCap
                 joinStyle: ShapePath.RoundJoin
                 PathSvg { path: "M 12 14 L 16 10 M 3.34 19 A 10 10 0 1 1 20.66 19" }
+            }
+        }
+    }
+
+    Component {
+        id: eyeC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 2 12 C 3.5 8 7.2 5 12 5 C 16.8 5 20.5 8 22 12 C 20.5 16 16.8 19 12 19 C 7.2 19 3.5 16 2 12 Z M 12 9 A 3 3 0 1 0 12 15 A 3 3 0 1 0 12 9 Z" }
+            }
+        }
+    }
+
+    Component {
+        id: eyeOffC
+        StrokeIcon {
+            width: 24; height: 24; scale: 0.5833
+            ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.color
+                strokeWidth: 2
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: "M 10.6 5.2 C 11.1 5.1 11.5 5 12 5 C 16.8 5 20.5 8 22 12 C 21.5 13.4 20.6 14.7 19.5 15.7 M 6.6 6.6 C 4.4 7.7 2.9 9.6 2 12 C 3.5 16 7.2 19 12 19 C 13.6 19 15.1 18.6 16.4 17.8 M 9.9 9.9 A 3 3 0 0 0 14.1 14.1 M 3 3 L 21 21" }
             }
         }
     }

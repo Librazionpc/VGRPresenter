@@ -16,8 +16,16 @@ import VGRPresenterUI
 Item {
     id: root
     // Shared top-level modal layer: keep the scrim and card above the page
-    // so clicks and hover never reach the controls behind the dialog.
-    z: 30000
+    // so clicks and hover never reach the controls behind the dialog. Bumped
+    // to the top of ModalStack's shared counter on open() (see its own
+    // comment) — a flat 30000 shared with every other modal in the app
+    // stacked simultaneously-open dialogs by declaration order, not by
+    // which one actually opened last.
+    z: ModalStack.base
+
+    // Resolved automatically from ModalStack's open-dialog stack — see
+    // ModalCard.qml's identical property for the full explanation.
+    readonly property Item blurSource: ModalStack.blurSourceFor(dialogCard)
 
     // The saved show's path — the caller opens it on the Edit screen.
     signal showCreated(string path)
@@ -40,9 +48,14 @@ Item {
         nameField.text = ""
         lyricsEdit.text = ""
         root.shown = true
+        root.z = ModalStack.nextZ()
+        ModalStack.push(dialogCard)
         Qt.callLater(nameField.focusInput)
     }
-    function close() { root.shown = false }
+    function close() {
+        root.shown = false
+        ModalStack.pop(dialogCard)
+    }
 
     // Esc closes (qml/settings/Hotkeys.qml). Enter is deliberately NOT claimed:
     // the dialog is a staged form whose fields use Enter to move between
@@ -59,7 +72,7 @@ Item {
             root.hotkeyScope = 0
         }
     }
-    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
+    Component.onDestruction: { Hotkeys.close(root.hotkeyScope); ModalStack.pop(dialogCard) }
 
     anchors.fill: parent
     visible: opacity > 0
@@ -187,6 +200,7 @@ Item {
 
     ModalScrim {
         anchors.fill: parent
+        blurSource: root.blurSource
         onDismissed: root.close()
     }
 

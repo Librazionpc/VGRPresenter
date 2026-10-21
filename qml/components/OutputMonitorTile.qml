@@ -313,12 +313,9 @@ Rectangle {
     // WASAPI capture per routed input — the "go live is opening WASAPI" report.
     // Both are gone; the tile needs no bridge call at all now.
     radius: 8
-    // Live = the live red the GO LIVE pill uses (Theme.liveBgOnAir) — NOT danger,
-    // which is reserved for faults; inactive = visible slate border so an off
-    // tile reads as "inactive", not just black.
-    border.color: root.active && LiveOutputService.live ? Theme.liveBgOnAir : "#2b2e3d"
+    border.color: "#2b2e3d"
     border.width: 1
-    color: "#16171e"
+    color: Theme.rowBg
     // Disabled screens dim everywhere — same model, same state.
     opacity: root.isEnabled ? 1 : 0.45
     Behavior on opacity { NumberAnimation { duration: 120 } }

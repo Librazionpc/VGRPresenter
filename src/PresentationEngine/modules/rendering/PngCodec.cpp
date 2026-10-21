@@ -11,14 +11,10 @@ namespace bps::rendering {
 
 namespace {
 
+#ifdef BPS_HAVE_ZLIB
 // CRC32 used by PNG chunk integrity (zlib provides crc32 when available).
 uint32_t Crc32(const uint8_t* data, size_t len) {
-#ifdef BPS_HAVE_ZLIB
     return static_cast<uint32_t>(::crc32(0L, data, static_cast<uInt>(len)));
-#else
-    (void)data; (void)len;
-    return 0;
-#endif
 }
 
 struct Chunk {
@@ -117,7 +113,6 @@ void Unfilter(uint8_t filter, const uint8_t* prev, const uint8_t* cur,
     }
 }
 
-#ifdef BPS_HAVE_ZLIB
 // zlib-inflates the concatenated IDAT payloads into one buffer, never producing
 // more than maxOut bytes (decompression-bomb guard — a crafted but valid
 // deflate stream could otherwise expand to gigabytes from a tiny input).
@@ -158,7 +153,6 @@ Result<std::vector<uint8_t>> InflateIdat(const std::vector<uint8_t>& idat,
     inflateEnd(&zs);
     return Result<std::vector<uint8_t>>{std::move(out)};
 }
-#endif
 
 // Converts a raw (unfiltered, 8-bit) scanline to RGBA8 into `rgba` at row `y`.
 void ScanlineToRgba(const uint8_t* scan, size_t w, uint8_t colorType, uint8_t bitDepth,
@@ -231,6 +225,7 @@ void ScanlineToRgba(const uint8_t* scan, size_t w, uint8_t colorType, uint8_t bi
         }
     }
 }
+#endif // BPS_HAVE_ZLIB
 
 } // namespace
 

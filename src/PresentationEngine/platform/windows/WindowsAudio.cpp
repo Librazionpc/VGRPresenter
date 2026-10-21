@@ -1419,7 +1419,7 @@ Result<void> WindowsAudio::StartRender(RenderCallback callback, uint32_t deviceI
     // a second Start is the UI asking twice, not a new mix).
     if (render_ && render_->running.load())
         return Ok();
-    StopRender();   // a dead stream's thread may need joining before reuse
+    (void)StopRender();   // a dead stream's thread may need joining before reuse
 
     auto s = std::make_unique<RenderStream>();
     s->callback = std::move(callback);

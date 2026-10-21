@@ -56,6 +56,16 @@ Rectangle {
     // The search button at the left end of the tab row.
     signal searchClicked()
 
+    // Give the navigation toolbar its own pane shade, distinct from the
+    // title/menu strip above it.
+    Rectangle {
+        x: 0
+        y: root.titleRowHeight
+        width: root.width
+        height: root.tabRowHeight
+        color: Theme.workspacePaneBg
+    }
+
     // Window drag / maximize by the strip itself. Declared FIRST — z-order is
     // declaration order, so every control below (GO LIVE, tabs, Search,
     // Settings, window buttons) stacks ABOVE this and takes its own clicks
@@ -129,7 +139,7 @@ Rectangle {
             Rectangle {
                 anchors.centerIn: parent
                 width: 8; height: 8; radius: 4
-                color: root.live ? Theme.dangerLight : "#ffffff"
+                color: root.live ? Theme.dangerLight : Theme.controlInk
                 // On air: the dot pulses (a quiet "this is live" tell).
                 SequentialAnimation on opacity {
                     running: root.live
@@ -151,7 +161,7 @@ Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
             y: 32
             text: root.live ? qsTr("STOP") : qsTr("GO LIVE")
-            color: root.live ? Theme.dangerLight : Theme.textPrimary
+            color: root.live ? Theme.dangerLight : Theme.controlInk
             font.family: Theme.fontFamily
             font.pixelSize: 13
             font.weight: Font.DemiBold
@@ -161,6 +171,7 @@ Rectangle {
     }
 
     ViewTabs {
+        id: viewTabs
         // Second row, centred under the title bar (and vertically in the row).
         anchors.horizontalCenter: parent.horizontalCenter
         y: root.titleRowHeight + (root.tabRowHeight - height) / 2
@@ -169,6 +180,15 @@ Rectangle {
         // (see ViewTabs.editAvailable).
         editAvailable: root.editAvailable
         onTabSelected: (tab) => root.tabSelected(tab)
+    }
+
+    // Separate the title/menu row from the lower navigation toolbar.
+    Rectangle {
+        x: 0
+        y: root.titleRowHeight - 1
+        width: root.width
+        height: 1
+        color: Theme.border
     }
 
     // Search - the extreme LEFT of the tab row. Opens the search dialog. Like the tabs, the
@@ -203,7 +223,7 @@ Rectangle {
                 height: 24
                 preferredRendererType: Shape.CurveRenderer
                 scale: 0.83
-                property color stroke: searchHover.hovered ? Theme.textPrimary : Theme.iconChrome
+                property color stroke: Theme.controlInk
                 ShapePath {
                     fillColor: "transparent"
                     strokeColor: searchGlyph.stroke
@@ -232,7 +252,7 @@ Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
             y: 32
             text: qsTr("Search")
-            color: searchHover.hovered ? Theme.textPrimary : Theme.textSecondary
+            color: Theme.controlInk
             font.family: Theme.fontFamily
             font.pixelSize: 15
             font.bold: true
@@ -326,7 +346,7 @@ Rectangle {
                     scale: enlarge
                     strokeWidth: 2 / enlarge
                     name: "settings"
-                    color: gearHover.hovered ? Theme.textPrimary : Theme.iconChrome
+                    color: Theme.controlInk
                 }
             }
             PositionHoverArea {
@@ -340,7 +360,7 @@ Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
             y: 32
             text: qsTr("Settings")
-            color: gearHover.hovered ? Theme.textPrimary : Theme.textSecondary
+            color: Theme.controlInk
             font.family: Theme.fontFamily
             font.pixelSize: 15
             font.bold: true

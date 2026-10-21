@@ -25,14 +25,28 @@ Item {
     signal searchRequested()        // the + button's Show: the app-wide search
     signal dockTabRequested(string tab)   // the + button's Scripture / Media: that tab of the library dock
 
-    // FreeShow's "dark" theme
-    readonly property color cPrimary: "#242832"
-    readonly property color cLighter: "#2f3542"
-    readonly property color cDarker: "#191923"
-    readonly property color cDarkest: "#12121c"
-    readonly property color cText: "#f0f0ff"
+    // THE PANEL'S PALETTE COMES FROM THE THEME, not from FreeShow's own dark
+    // literals. It used to be a private copy (#f0f0ff names on #12121c/#191923
+    // cards), which made this column the one surface that ignored the app's
+    // appearance: picking Light left the panel dark, and the NAMES — the thing
+    // read most here — stayed that panel-local off-white instead of the theme's
+    // own text colour. Names are the theme's primary text now, and the surfaces
+    // under them come from the same place, so dark stays as it looked and Light
+    // is readable rather than white-on-white.
+    readonly property color cPrimary: Theme.inset
+    readonly property color cLighter: Theme.borderSubtle
+    readonly property color cDarker: Theme.rowBg
+    readonly property color cDarkest: Theme.panelBg
+    readonly property color cText: Theme.textPrimary
     readonly property color cSecondary: Theme.accent
-    readonly property string mono: FontService.monoFamily
+    // Font follows the theme too (user call: "the fonts as well... meant to
+    // use font and colour that [other] tabs['] text is using") — this panel
+    // kept FreeShow's own monospace face for every label (names, headers,
+    // menu entries, counts) even after the colours above moved to Theme
+    // tokens, so it was the one surface still typefacing itself differently
+    // from Media/Overlays/Templates/Scripture/The Table. None of these
+    // labels are digit-aligned columns that would benefit from a fixed
+    // width, so there's no case left for keeping it separate.
 
     readonly property bool inProject: ProjectService.activeProjectId !== ""
     readonly property var items: ProjectService.activeProject.items ?? []
@@ -243,15 +257,23 @@ Item {
     // buttons; the inner bars keep the same darkened-relative-to-the-body shade
     // the red version used).
     component ProjectDoc: Item {
+        // The pill is lighter than the accent, not the accent itself (user
+        // call: "this pill is meant to be lighter than its base color") —
+        // same ratio the item rows already use for a section's own colour
+        // (Qt.lighter(sectionColor, 1.4) below), so the two lightening
+        // conventions in this file agree.
+        readonly property color pillColor: Qt.lighter(root.cSecondary, 1.4)
         width: 16; height: 20
-        Rectangle { anchors.fill: parent; radius: 3; color: root.cSecondary }
-        Rectangle { x: 3; y: 6; width: 10; height: 1.6; radius: 0.8; color: Qt.darker(root.cSecondary, 2.2) }
-        Rectangle { x: 3; y: 10; width: 10; height: 1.6; radius: 0.8; color: Qt.darker(root.cSecondary, 2.2) }
-        Rectangle { x: 3; y: 14; width: 6; height: 1.6; radius: 0.8; color: Qt.darker(root.cSecondary, 2.2) }
+        Rectangle { anchors.fill: parent; radius: 3; color: parent.pillColor }
+        Rectangle { x: 3; y: 6; width: 10; height: 1.6; radius: 0.8; color: Qt.darker(parent.pillColor, 2.2) }
+        Rectangle { x: 3; y: 10; width: 10; height: 1.6; radius: 0.8; color: Qt.darker(parent.pillColor, 2.2) }
+        Rectangle { x: 3; y: 14; width: 6; height: 1.6; radius: 0.8; color: Qt.darker(parent.pillColor, 2.2) }
     }
 
     // The panel itself.
-    Rectangle { anchors.fill: parent; color: root.cDarkest }
+    // The Projects column is the lighter alternate surface in the home
+    // workspace; cards and nested project rows keep their own darker tones.
+    Rectangle { anchors.fill: parent; color: Theme.workspacePaneBg }
 
     // ---- the tree: cards of folders and projects -------------------------------------------------------------------------------
     Flickable {
@@ -267,7 +289,9 @@ Item {
         Column {
             id: treeColumn
             width: parent.width
-            topPadding: 10; bottomPadding: 10
+            // The first folder/project card should meet the header divider;
+            // keep bottom breathing room for the floating add button only.
+            topPadding: 0; bottomPadding: 10
             spacing: 5
 
             Repeater {
@@ -275,10 +299,21 @@ Item {
                 delegate: Item {
                     id: card
                     required property var modelData
-                    width: treeColumn.width - 5          // (FreeShow: margin-right 5px)
+                    width: treeColumn.width
                     height: cardBody.height
-                    clip: true                           // hides the card's left border and rounded corners: it is flush with the panel
-                    Rectangle { x: -12; width: parent.width + 12; height: parent.height; radius: 10; color: root.cDarker; border.color: root.cLighter }
+                    clip: true
+                    // Folder contents sit in their own inset box, like the
+                    // reference layout; the folder row above stays full width.
+                    Rectangle {
+                        visible: card.modelData.title === "" && card.modelData.rows.length > 1
+                        x: 10
+                        y: 34
+                        width: parent.width - 20
+                        height: parent.height - 34
+                        radius: 8
+                        color: root.cDarker
+                        border.color: root.cLighter
+                    }
 
                     Column {
                         id: cardBody
@@ -289,7 +324,7 @@ Item {
                             width: parent.width; height: 26
                             color: root.cDarkest
                             Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.cLighter }
-                            Text { x: 14; anchors.verticalCenter: parent.verticalCenter; text: card.modelData.title; opacity: 0.8; color: root.cText; font.family: root.mono; font.pixelSize: 15; font.weight: Font.Medium }
+                            Text { x: 14; anchors.verticalCenter: parent.verticalCenter; text: card.modelData.title; opacity: 0.8; color: root.cText; font.family: Theme.fontFamily; font.pixelSize: 15; font.weight: Font.Medium }
                         }
 
                         Repeater {
@@ -297,14 +332,30 @@ Item {
                             delegate: Rectangle {
                                 id: treeRow
                                 required property var modelData
+                                required property int index
                                 readonly property bool isFolder: modelData.type === "folder"
                                 readonly property bool active: !isFolder && modelData.id === ProjectService.activeProjectId
+                                readonly property bool inFolder: card.modelData.title === ""
                                 readonly property real indent: 8 * modelData.depth
-                                x: indent; width: card.width - indent
+                                // Nested project rows begin at their document
+                                // icon, while folder rows still span the card.
+                                x: indent + (!isFolder ? 15 : 0)
+                                width: card.width - x - (!isFolder && inFolder ? 10 : 0)
                                 height: isFolder ? 34 : 28
+                                // Folder rows span the panel; nested project
+                                // rows reveal the shared inset box beneath them.
                                 color: root.dropFolder === modelData.id ? Qt.alpha(Theme.accent, 0.19)
-                                     : (active ? root.cDarkest : Qt.rgba(1, 1, 1, 0.01 * modelData.depth))
+                                     : (isFolder || active ? root.cDarkest
+                                        : (inFolder ? "transparent" : root.cDarker))
                                 opacity: modelData.archived ? 0.55 : 1
+
+                                // The app's shared stripe applies only to root-level
+                                // rows, leaving boxed folder contents uniform.
+                                Rectangle {
+                                    anchors.fill: parent
+                                    color: treeRow.isFolder || treeRow.modelData.depth > 0
+                                         ? "transparent" : ListRows.stripeOverlay(treeRow.index)
+                                }
 
                                 // The pointer's light is the app's shared hover
                                 // layer, so a project row fades like every other
@@ -313,16 +364,17 @@ Item {
                                     anchors.fill: parent
                                     radius: parent.radius
                                     hovered: treeHover.hovered
-                                    glowColor: "#0dffffff"
+                                    // The global hover wash is too faint over
+                                    // these dark project rows; keep the accent
+                                    // visible while preserving the row's base.
+                                    glowColor: Qt.alpha(Theme.accent, 0.18)
                                 }
 
-                                // an indented row keeps a line down its left, like FreeShow's
-                                Rectangle { visible: treeRow.modelData.depth > 0; width: 1; height: parent.height; color: root.cLighter }
                                 // the 4px left edge of a tab button: the accent while it is the open one
-                                Rectangle { width: 4; height: parent.height; color: treeRow.active ? root.cSecondary : root.cDarker }
+                                Rectangle { width: 4; height: parent.height; color: treeRow.active || treeRow.isFolder ? root.cSecondary : root.cDarker }
 
                                 Row {
-                                    x: 15
+                                    x: treeRow.isFolder ? 15 : 0
                                     anchors.verticalCenter: parent.verticalCenter
                                     spacing: 8
                                     IconGlyph {
@@ -334,11 +386,18 @@ Item {
                                     ProjectDoc { visible: !treeRow.isFolder; anchors.verticalCenter: parent.verticalCenter }
                                     Text {
                                         anchors.verticalCenter: parent.verticalCenter
-                                        width: card.width - treeRow.indent - (treeRow.isFolder ? 100 : 72)
+                                        // Project names fill from the document
+                                        // icon to the card's right edge; folder
+                                        // names reserve room for the item count.
+                                        width: Math.max(0, treeRow.width - (treeRow.isFolder ? 100 : 32))
                                         text: treeRow.modelData.name
                                         color: root.cText; elide: Text.ElideRight
-                                        font.family: root.mono; font.pixelSize: 16
-                                        font.weight: treeRow.isFolder ? Font.Medium : Font.Normal
+                                        font.family: Theme.fontFamily; font.pixelSize: 16
+                                        // Medium for BOTH: a Normal stroke on this
+                                        // mono face never fills its pixels at this
+                                        // size, so a project's or folder's name read
+                                        // grey however white its colour was set.
+                                        font.weight: Font.Medium
                                     }
                                 }
                                 // a folder's count
@@ -347,10 +406,10 @@ Item {
                                     anchors.right: parent.right; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
                                     width: 28; horizontalAlignment: Text.AlignRight
                                     text: treeRow.modelData.itemCount
-                                    opacity: 0.5; color: root.cText; font.family: root.mono; font.pixelSize: 13
+                                    opacity: 0.5; color: root.cText; font.family: Theme.fontFamily; font.pixelSize: 13
                                 }
 
-                                HoverHandler { id: treeHover }
+                                HoverHandler { id: treeHover; cursorShape: Qt.PointingHandCursor }
                                 DragSource {
                                     anchors.fill: parent
                                     payload: ({ kind: treeRow.modelData.type, items: [{ ref: treeRow.modelData.id, name: treeRow.modelData.name }], reorder: true })
@@ -390,7 +449,7 @@ Item {
                 width: parent.width; topPadding: 40
                 text: qsTr("Empty")
                 opacity: 0.5; color: root.cText; horizontalAlignment: Text.AlignHCenter
-                font.family: root.mono; font.pixelSize: 16
+                font.family: Theme.fontFamily; font.pixelSize: 16
             }
         }
 
@@ -449,6 +508,7 @@ Item {
                                 delegate: Rectangle {
                                     id: itemRow
                                     required property var modelData
+                                    required property int index
                                     readonly property bool isSection: modelData.type === "section"
                                     readonly property bool selected: modelData.index === ProjectService.activeIndex
                                     readonly property color sectionColor: modelData.color !== "" && modelData.color !== undefined ? modelData.color : ""
@@ -457,6 +517,17 @@ Item {
                                     color: isSection ? (sectionColor !== "" ? Qt.rgba(Qt.color(sectionColor).r, Qt.color(sectionColor).g, Qt.color(sectionColor).b, 0.2) : root.cDarkest)
                                                      : (selected ? root.cDarkest : "transparent")
 
+                                    // The app's shared list stripe (ListRows), laid
+                                    // over the row's own ground so the project's
+                                    // items alternate like every other list while
+                                    // selection and a section's tint survive.
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        color: itemRow.isSection
+                                               ? "transparent"
+                                               : ListRows.stripeOverlay(itemRow.index)
+                                    }
+
                                     // Hover = the shared layer (selection and a
                                     // section's tint are state, so they stay on
                                     // the row itself).
@@ -464,7 +535,7 @@ Item {
                                         anchors.fill: parent
                                         radius: parent.radius
                                         hovered: itemHover.hovered && !itemRow.selected && !itemRow.isSection
-                                        glowColor: "#0dffffff"
+                                        glowColor: Theme.hoverBg
                                     }
 
                                     // a section has a line above it, the item list has the tab edge
@@ -487,8 +558,12 @@ Item {
                                             text: itemRow.modelData.name !== "" ? itemRow.modelData.name : qsTr("Unnamed")
                                             color: itemRow.isSection && itemRow.sectionColor !== "" ? Qt.lighter(itemRow.sectionColor, 1.4) : root.cText
                                             elide: Text.ElideRight
-                                            font.family: root.mono; font.pixelSize: itemRow.isSection ? 13 : 14
-                                            font.weight: itemRow.isSection ? Font.Bold : Font.Normal
+                                            font.family: Theme.fontFamily; font.pixelSize: itemRow.isSection ? 13 : 14
+                                            // Medium, not Normal — same reason as the
+                                            // tree rows above: these are the names the
+                                            // operator reads down the list, and a thin
+                                            // stroke at 14 px is what made them grey.
+                                            font.weight: itemRow.isSection ? Font.Bold : Font.Medium
                                         }
                                     }
                                     // the layout a show is used with
@@ -496,7 +571,7 @@ Item {
                                         visible: !itemRow.isSection && itemRow.modelData.layout !== undefined && itemRow.modelData.layout !== ""
                                         anchors.right: parent.right; anchors.rightMargin: 10; anchors.verticalCenter: parent.verticalCenter
                                         text: itemRow.modelData.layout ?? ""
-                                        opacity: 0.8; color: root.cText; font.family: root.mono; font.pixelSize: 13
+                                        opacity: 0.8; color: root.cText; font.family: Theme.fontFamily; font.pixelSize: 13
                                     }
 
                                     HoverHandler { id: itemHover }
@@ -531,7 +606,7 @@ Item {
                 width: parent.width; topPadding: 40
                 text: qsTr("Empty")
                 opacity: 0.5; color: root.cText; horizontalAlignment: Text.AlignHCenter
-                font.family: root.mono; font.pixelSize: 16
+                font.family: Theme.fontFamily; font.pixelSize: 16
             }
         }
 
@@ -593,13 +668,15 @@ Item {
         width: parent.width; height: 30
         clip: true
         // (rounded at the bottom only: the top rounding sits above the panel)
-        Rectangle { y: -10; width: parent.width; height: 40; radius: 10; color: "#ef0b0b14" }
+        // The bar is the panel's own surface at 94%, so it follows the theme
+        // with it instead of staying FreeShow's dark literal in Light.
+        Rectangle { y: -10; width: parent.width; height: 40; radius: 10; color: Qt.alpha(Theme.panelBg, 0.94) }
 
         // back (inside a project): 42px wide, full height
         Item {
             visible: root.inProject
             width: 42; height: parent.height
-            Rectangle { anchors.fill: parent; color: backHover.hovered ? "#14ffffff" : "transparent" }
+            Rectangle { anchors.fill: parent; color: backHover.hovered ? Theme.hoverBg : "transparent" }
             IconGlyph { anchors.centerIn: parent; name: "arrowLeft"; color: root.cText; width: 15; height: 12 }
             HoverHandler { id: backHover; cursorShape: Qt.PointingHandCursor }
             TapHandler { onTapped: ProjectService.closeProject() }
@@ -611,14 +688,14 @@ Item {
             horizontalAlignment: Text.AlignHCenter
             text: root.inProject ? (ProjectService.activeProject.name ?? "") : qsTr("Projects")
             color: root.cText; elide: Text.ElideRight
-            font.family: root.mono; font.pixelSize: 17; font.weight: Font.DemiBold
+            font.family: Theme.fontFamily; font.pixelSize: 17; font.weight: Font.DemiBold
             TapHandler { enabled: root.inProject; onDoubleTapped: nameDialog.ask("rename", qsTr("Rename project"), ProjectService.activeProject.name, ProjectService.activeProject.id) }
         }
         // the dots: 32px wide, full height
         Item {
             id: moreBtn
             x: parent.width - width; width: 32; height: parent.height
-            Rectangle { anchors.fill: parent; color: moreHover.hovered ? "#14ffffff" : "transparent" }
+            Rectangle { anchors.fill: parent; color: moreHover.hovered ? Theme.hoverBg : "transparent" }
             IconGlyph { anchors.centerIn: parent; name: "moreVertical"; color: root.cText; opacity: root.dropdown !== "" ? 1 : 0.8; width: 4; height: 14 }
             HoverHandler { id: moreHover; cursorShape: Qt.PointingHandCursor }
             TapHandler { onTapped: { root.addMenuOpen = false; root.dropdown = root.dropdown === "" ? (root.inProject ? "project" : "view") : "" } }
@@ -644,13 +721,15 @@ Item {
                     width: dropdownColumn.width
                     height: modelData.divider === true ? 1 : 34
                     Rectangle { visible: entry.modelData.divider === true; width: parent.width; height: 1; color: root.cLighter }
-                    Rectangle { visible: entry.modelData.divider !== true; anchors.fill: parent; color: entryHover.hovered ? "#0dffffff" : "transparent" }
+                    Rectangle { visible: entry.modelData.divider !== true; anchors.fill: parent; color: entryHover.hovered ? Theme.hoverBg : "transparent" }
                     Text {
                         visible: entry.modelData.divider !== true
                         x: 12; anchors.verticalCenter: parent.verticalCenter
                         text: entry.modelData.label ?? ""
                         color: entry.modelData.danger === true ? Theme.dangerLight : root.cText
-                        font.family: root.mono; font.pixelSize: 15
+                        // Medium for the same reason as the names behind it: a
+                        // Normal mono stroke at 15 px reads grey, not white.
+                        font.family: Theme.fontFamily; font.pixelSize: 15; font.weight: Font.Medium
                     }
                     HoverHandler { id: entryHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler {
@@ -679,7 +758,7 @@ Item {
         property string hint: ""       // a small icon at the right
         signal picked()
         width: parent ? parent.width : 190; height: 35; radius: 17.5
-        color: pillHover.hovered ? "#1a1a2a" : "#12121c"
+        color: pillHover.hovered ? Theme.hoverBg : Theme.panelBg
         border.color: root.cLighter
         ProjectDoc { visible: pill.glyph === "project"; x: 18; anchors.verticalCenter: parent.verticalCenter; scale: 0.8 }
         IconGlyph { visible: pill.glyph !== "project" && pill.glyph !== ""; x: 18; anchors.verticalCenter: parent.verticalCenter; name: pill.glyph; color: root.cText; fit: true; width: 15; height: 15 }
@@ -687,7 +766,7 @@ Item {
             x: 46; anchors.verticalCenter: parent.verticalCenter
             width: parent.width - 46 - (pill.hint !== "" ? 40 : 16)
             text: pill.label; color: root.cText; elide: Text.ElideRight
-            font.family: root.mono; font.pixelSize: 16; font.weight: Font.Medium
+            font.family: Theme.fontFamily; font.pixelSize: 16; font.weight: Font.Medium
         }
         IconGlyph { visible: pill.hint !== ""; anchors.right: parent.right; anchors.rightMargin: 16; anchors.verticalCenter: parent.verticalCenter; name: pill.hint; color: root.cText; opacity: 0.25; fit: true; width: 12; height: 12 }
         HoverHandler { id: pillHover; cursorShape: Qt.PointingHandCursor }
@@ -700,7 +779,7 @@ Item {
         z: 20
         x: root.width - width - 12; y: root.height - 70 - height
         width: 202; height: trayColumn.height + 12
-        radius: 25; color: "#f00b0b14"; border.color: "#14ffffff"
+        radius: 25; color: Qt.alpha(Theme.panelBg, 0.94); border.color: Theme.borderSubtle
         Column {
             id: trayColumn
             x: 6; y: 6; width: parent.width - 12
@@ -745,7 +824,7 @@ Item {
             }
             Rectangle {
                 anchors.fill: parent; anchors.margins: 2; radius: width / 2
-                color: addHover.hovered ? "#f01f1f2c" : "#d9191923"     // rgba(25, 25, 35, .85)
+                color: Qt.alpha(addHover.hovered ? Theme.hoverBg : Theme.rowBg, 0.94)
                 PlusGlyph {
                     anchors.centerIn: parent
                     size: 21; thickness: 2.4; color: root.cText

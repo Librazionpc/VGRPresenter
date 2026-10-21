@@ -56,9 +56,9 @@ Rectangle {
     // The thumbnail keeps the stage's proportions (StageGrid.w x StageGrid.h), so the row is as tall as the picture needs.
     height: canvasThumb.height + 8
     width: 256
-    border.color: root.active ? Theme.accent : "#232530"
+    border.color: root.active ? Theme.accent : Theme.border
     border.width: root.active ? 1.2 : 1
-    color: "#161823"
+    color: Theme.surface
     radius: 9
 
     Rectangle {
@@ -75,9 +75,9 @@ Rectangle {
         y: 4
         width: Math.max(96, parent.width - 32)
         height: StageGrid.heightForWidth(width - 2) + 2
-        border.color: "#262a38"
+        border.color: Theme.borderSubtle
         border.width: 1
-        color: "#0d0f16"
+        color: Theme.windowBg
         radius: 4
 
         DesignPreview {
@@ -100,7 +100,7 @@ Rectangle {
             Text {
                 id: emptyLabel
                 anchors.centerIn: parent
-                color: "#8a91a3"
+                color: Theme.textMuted
                 font.family: Theme.fontFamily
                 font.pixelSize: 10
                 text: qsTr("Empty slide")
@@ -118,7 +118,7 @@ Rectangle {
 
         Text {
             anchors.centerIn: parent
-            color: "#c9cedd"
+            color: Theme.navLabelMuted
             font.family: Theme.fontFamily
             font.pixelSize: 9
             text: String(root.num)

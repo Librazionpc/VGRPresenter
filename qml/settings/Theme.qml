@@ -177,24 +177,38 @@ QtObject {
     // insets recessed - inverted for a light ground.
     readonly property color windowBg: dark ? "#0f1015" : "#f4f5f8"   // app root background
     readonly property color panelBg: dark ? "#12131a" : "#ffffff"    // app-header / side columns
+    readonly property color workspacePaneBg: dark ? "#1b1d26" : "#ffffff" // alternating home workspace panes
+    readonly property color referenceContentBg: dark ? "#1b1d26" : "#ffffff" // Scripture / The Table reading area
     readonly property color rowBg: dark ? "#16171e" : "#ffffff"      // list rows, cards, hero bg
     readonly property color surface: dark ? "#15161d" : "#ffffff"    // Settings modal surface
     readonly property color card: dark ? "#191b24" : "#ffffff"       // Settings card background
     readonly property color inset: dark ? "#1a1c26" : "#f1f2f6"      // input/inset fields
     readonly property color chip: dark ? "#232733" : "#e8eaf0"       // neutral tag chips
-    readonly property color border: dark ? "#232530" : "#e2e5ec"     // borders, dividers, hover bg
+    // Dark mode's old #232530 was nearly the same value as `card` (#191b24)
+    // — a divider row between two settings rows (e.g. General's "All
+    // backups" card) rendered as an invisible 1px line (user report: "the
+    // division is not even showing here"). Every border/divider in the app
+    // reads this one token, so raising it here fixes them all at once.
+    readonly property color border: dark ? "#333948" : "#e2e5ec"     // borders, dividers, hover bg
     readonly property color borderSubtle: dark ? "#2c3140" : "#d7dbe4"
     // ---- App chrome (title bar, tab strip, menu bar, dropdowns) ----
     // These close the last gap Light mode had: the chrome files at one point
     // hardcoded their own dark shades, so picking Light recoloured the settings
     // screens and left the header/menus dark. Their families live here now.
-    readonly property color hoverBg: dark ? "#1c1d26" : "#eceef3"     // pill / menu-row hover wash
+    // A restrained accent wash keeps button and row hovers on-brand without
+    // making the hover state look like a selected control.
+    readonly property color hoverBg: Qt.alpha(accent, 0.08)
     readonly property color activeBg: dark ? "#1e1f29" : "#e9ebf1"    // active tab pill
     readonly property color iconChrome: dark ? "#b4bccb" : "#5a6272"  // header icon at rest
 
     readonly property color textPrimary: dark ? "#e2e8f0" : "#16181f"
     readonly property color textSecondary: dark ? "#8a94a6" : "#5b6472"
-    readonly property color textMuted: dark ? "#5c6475" : "#7b8496"
+    // Dark mode's old #5c6475 read as barely-there against the near-black
+    // #15161d surface (user report: muted labels "matching the bg") — every
+    // consumer reads this one token, so raising it here fixes all of them at
+    // once instead of patching each call site. Still clearly dimmer than
+    // textSecondary, just no longer illegible.
+    readonly property color textMuted: dark ? "#747e92" : "#7b8496"
 
     // ---- Nav rail (Settings) ----
     readonly property color iconMuted: dark ? "#8b93a7" : "#6b7484"      // unselected nav/glyph icon

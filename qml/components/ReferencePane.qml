@@ -1414,7 +1414,7 @@ Item {
         const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
         // Qt StyledText ignores background-color on spans (bold survived, the yellow
         // didn't render — user screenshot). A colored <font> is honored.
-        return esc(source).replace(re, '<b><font color="#ffd54a">$1</font></b>')
+        return esc(source).replace(re, '<b><font color=Theme.highlightInk>$1</font></b>')
     }
     readonly property bool canHighlight: root.activeQuery.trim().length >= 2
 
@@ -2331,7 +2331,7 @@ Item {
         Rectangle {
             id: sourcesHeader
             x: 8; y: 8; width: parent.width - 16; height: 27
-            color: "#12131a"; radius: 6
+            color: Theme.panelBg; radius: 6
             Text {
                 x: 10; y: 7
                 text: (root.adapter ? root.adapter.sidebarLabel : qsTr("Sources"))
@@ -2360,7 +2360,7 @@ Item {
                         required property var modelData
                         readonly property bool active: modelData.id === root.sourceId
                         width: sourceList.width; height: 29; radius: 6
-                        color: active ? "#1a1414" : "transparent"
+                        color: active ? Theme.accentSoft : "transparent"
 
                         // The pointer's wash is the app's shared hover layer
                         // (HoverGlow) — a row here lights exactly like a row in
@@ -2369,7 +2369,7 @@ Item {
                             anchors.fill: parent
                             radius: parent.radius
                             hovered: sourceHoverPA.hovered
-                            glowColor: "#0dffffff"
+                            glowColor: Theme.hoverBg
                         }
 
                         Rectangle { visible: sourceRow.active; x: 0; y: 4; width: 3; height: 21; color: Theme.accent; radius: 1.5 }
@@ -2461,7 +2461,7 @@ Item {
                 width: parent.width
                 height: bulk ? 22 : 0
                 radius: 6
-                color: "#0f1015"
+                color: Theme.windowBg
                 border.color: Theme.border
 
                 Rectangle {
@@ -2512,7 +2512,7 @@ Item {
         id: booksCol
         x: sidebar.width; y: 0
         width: root.booksColWidth; height: parent.height
-        color: "#12131a"
+        color: Theme.panelBg
 
         Flickable {
             id: booksFlick
@@ -2539,12 +2539,12 @@ Item {
                         width: booksList.width; height: 28
                         Rectangle {
                             anchors.fill: parent; anchors.margins: 2; radius: 4
-                            color: bookRow.active ? "#1e1f28" : "transparent"
+                            color: bookRow.active ? Theme.activeBg : "transparent"
                             HoverGlow {
                                 anchors.fill: parent
                                 radius: parent.radius
                                 hovered: bookHoverPA.hovered
-                                glowColor: "#0dffffff"
+                                glowColor: Theme.hoverBg
                             }
                             // WHICH COLUMN OWNS THE SELECTOR: the accent bar is red on the
                             // column the ‹ › are on and dim elsewhere, so moving the selector
@@ -2618,7 +2618,7 @@ Item {
         onHasTitlesChanged: if (hasTitles && !widenedForTitles && !root.chaptersWidthRemembered) { widenedForTitles = true; root.chaptersColWidth = 190 }
         x: booksCol.x + booksCol.width; y: 0
         width: root.chaptersColWidth; height: parent.height
-        color: "#101118"
+        color: Theme.windowBg
 
         Flickable {
             id: chaptersFlick
@@ -2644,12 +2644,12 @@ Item {
                         width: chapterList.width; height: 28
                         Rectangle {
                             anchors.fill: parent; anchors.margins: 2; radius: 4
-                            color: chapterRow.active ? "#1e1f28" : "transparent"
+                            color: chapterRow.active ? Theme.activeBg : "transparent"
                             HoverGlow {
                                 anchors.fill: parent
                                 radius: parent.radius
                                 hovered: chapterHoverPA.hovered
-                                glowColor: "#0dffffff"
+                                glowColor: Theme.hoverBg
                             }
                             Rectangle { visible: chapterRow.active; x: 0; y: 4; width: 2; height: parent.height - 8
                                         color: root.column === 1 ? Theme.accent : Theme.border }
@@ -2707,7 +2707,7 @@ Item {
         id: versesCol
         x: chaptersCol.x + chaptersCol.width; y: 0
         width: parent.width - x - previewCol.width; height: parent.height
-        color: "#0f1015"
+        color: Theme.referenceContentBg
 
         // THE PARAGRAPH ROWS. A LISTVIEW, not a Column-and-Repeater: only the rows
         // in view are built. A sermon is one row per output slide once its chapter
@@ -2771,6 +2771,7 @@ Item {
                 objectName: "selfTestVerseRow_" + Number(modelData.number)
                             + (continuation ? "-" + partIndex : "")
                 required property var modelData
+                required property int index
                 readonly property bool continuation: modelData.continuation === true
                 readonly property int verseNumber: Number(modelData.number)
                 readonly property int partIndex: Number(modelData.partIndex ?? 0)
@@ -2797,12 +2798,14 @@ Item {
                     // delivers, hover-exit never does; see PositionHoverArea's
                     // header), which is exactly the "verse row stays highlighted
                     // after I click it" report.
-                    color: verseRow.active ? "#2a2b35" : "transparent"
+                    // An inactive row carries the app's shared list stripe on odd
+                    // rows (ListRows); the open verse keeps its own solid ground.
+                    color: verseRow.active ? Theme.chip : ListRows.stripeOverlay(verseRow.index)
                     HoverGlow {
                         anchors.fill: parent
                         radius: parent.radius
                         hovered: verseHover.hovered
-                        glowColor: "#0dffffff"
+                        glowColor: Theme.hoverBg
                     }
                 }
                 PositionHoverArea {
@@ -2819,7 +2822,7 @@ Item {
                     text: verseRow.continuation
                         ? qsTr("%1-%2").arg(verseRow.verseNumber).arg(verseRow.partIndex)
                         : verseRow.verseNumber
-                    color: verseRow.marked ? "#f5c542" : Theme.accent
+                    color: verseRow.marked ? Theme.markedInk : Theme.accent
                     font.family: Theme.fontFamily; font.pixelSize: 16; font.bold: true
                 }
                 Text {
@@ -2931,19 +2934,19 @@ Item {
                     width: 24; height: 24
                     Rectangle {
                         anchors.fill: parent; radius: 5
-                        color: noteBtn.editing ? "#22242e" : "transparent"
+                        color: noteBtn.editing ? Theme.hoverBg : "transparent"
                         HoverGlow {
                             anchors.fill: parent
                             radius: parent.radius
                             hovered: noteHover.hovered
-                            glowColor: "#0dffffff"
+                            glowColor: Theme.hoverBg
                             quick: true
                         }
                     }
                     IconGlyph {
                         anchors.centerIn: parent
                         name: "pencil"
-                        color: noteBtn.editing || verseRow.hasNote ? "#f5c542" : Theme.textSecondary
+                        color: noteBtn.editing || verseRow.hasNote ? Theme.markedInk : Theme.textSecondary
                         width: 11; height: 11
                     }
                     HoverHandler { id: noteHover; cursorShape: Qt.PointingHandCursor }
@@ -2955,7 +2958,7 @@ Item {
                     x: 4; y: 40
                     width: parent.width - 8; height: 76
                     radius: 6
-                    color: "#14151d"
+                    color: Theme.surface
                     border.color: Theme.border
                     TextInput {
                         id: noteInput
@@ -3032,7 +3035,7 @@ Item {
                                                      || (w.candidates && w.candidates.length > 0))
                     width: parent.width
                     leftPadding: 10
-                    color: "#ffd54a"
+                    color: Theme.highlightInk
                     font.family: Theme.fontFamily; font.pixelSize: 13
                     elide: Text.ElideRight
                     // Corrections ("thn → then") AND the half-typed last word's
@@ -3063,7 +3066,7 @@ Item {
                             anchors.fill: parent
                             radius: parent.radius
                             hovered: hitHover.hovered
-                            glowColor: "#0dffffff"
+                            glowColor: Theme.hoverBg
                         }
                     }
                     Text {
@@ -3168,12 +3171,12 @@ Item {
                     width: matchesList.width; height: 30
                     Rectangle {
                         anchors.fill: parent; anchors.margins: 1; radius: 4
-                        color: matchRow.active ? "#2a2b35" : "transparent"
+                        color: matchRow.active ? Theme.chip : "transparent"
                         HoverGlow {
                             anchors.fill: parent
                             radius: parent.radius
                             hovered: matchHover.hovered
-                            glowColor: "#0dffffff"
+                            glowColor: Theme.hoverBg
                         }
                         Rectangle { visible: matchRow.active; x: 0; y: 4; width: 2; height: parent.height - 8
                                     color: root.column === 2 ? Theme.accent : Theme.border }
@@ -3256,7 +3259,7 @@ Item {
                 // walking is something the eye can confirm (the same accent a row's own
                 // selector bar uses). The template column on the far right is NOT a
                 // stop and carries no such edge (user call).
-                Rectangle { anchors.fill: parent; radius: 6; color: "#101118"
+                Rectangle { anchors.fill: parent; radius: 6; color: Theme.windowBg
                             border.color: root.column === 3 ? Theme.accent : Theme.border
                             border.width: root.column === 3 ? 2 : 1 }
                 Text {
@@ -3301,7 +3304,7 @@ Item {
                         // The paragraph the arrows are reading (see stepPeek).
                         Rectangle {
                             anchors.fill: parent; radius: 4
-                            color: parent.active ? "#2a2b35" : "transparent"
+                            color: parent.active ? Theme.chip : "transparent"
                         }
                         Text {
                             id: peekNum
@@ -3377,7 +3380,7 @@ Item {
             visible: root.currentSource !== null && root.referenceText !== ""
             x: 12; y: parent.height - height - 12
             height: 30; width: Math.min(refRow.implicitWidth + 24, Math.max(60, parent.width - pill.width - 36)); radius: 15
-            color: "#e6101118"
+            color: Qt.alpha(Theme.windowBg, 0.9)
             border.color: Theme.border
             Row {
                 id: refRow
@@ -3402,7 +3405,7 @@ Item {
             id: pill
             x: parent.width - width - 12; y: parent.height - height - 12
             height: 34; width: pillRow.width + (root.searching ? 8 : 12) + 8; radius: 17
-            color: "#e6101118"
+            color: Qt.alpha(Theme.windowBg, 0.9)
             border.color: Theme.border
 
             Row {
@@ -3413,7 +3416,7 @@ Item {
                 Item {   // search field, while searching
                     visible: root.searching
                     width: 220; height: 26
-                    Rectangle { anchors.fill: parent; radius: 13; color: "#181a22"; border.color: Theme.border }
+                    Rectangle { anchors.fill: parent; radius: 13; color: Theme.surface; border.color: Theme.border }
                     TextInput {
                         id: searchInput
                         // Named per content type, like the locks beside it: BOTH
@@ -3502,7 +3505,7 @@ Item {
                                 anchors.fill: parent
                                 radius: parent.radius
                                 hovered: scopeHover.hovered
-                                glowColor: "#0dffffff"
+                                glowColor: Theme.hoverBg
                                 quick: true
                             }
                         }
@@ -3532,7 +3535,7 @@ Item {
                         width: 20; height: 20
                         Rectangle {
                             anchors.fill: parent; radius: 10
-                            color: lockHover.hovered ? "#22242e" : (root.exact ? "#241f36" : "transparent")
+                            color: lockHover.hovered ? Theme.hoverBg : (root.exact ? Theme.accentSoft : "transparent")
                         }
                         IconGlyph {
                             anchors.centerIn: parent
@@ -3570,7 +3573,7 @@ Item {
                                     + (root.adapter && root.adapter.contentType
                                        ? "-" + root.adapter.contentType : "")
                         width: 28; height: 26
-                        Rectangle { anchors.fill: parent; radius: 13; color: stepHover.hovered ? "#22242e" : "transparent" }
+                        Rectangle { anchors.fill: parent; radius: 13; color: stepHover.hovered ? Theme.hoverBg : "transparent" }
                         IconGlyph {
                             anchors.centerIn: parent
                             name: stepBtn.modelData.glyph
@@ -3601,7 +3604,7 @@ Item {
                     width: 28; height: 26
                     readonly property bool isOurs: root.adapter && root.adapter.liveIsOurs
                                                    ? root.adapter.liveIsOurs(root.referenceText) : false
-                    Rectangle { anchors.fill: parent; radius: 13; color: playPickedHover.hovered || parent.isOurs ? "#22242e" : "transparent" }
+                    Rectangle { anchors.fill: parent; radius: 13; color: playPickedHover.hovered || parent.isOurs ? Theme.hoverBg : "transparent" }
                     // FreeShow's scripture play button: PLAY (outlined) when this
                     // passage is not on air; when it IS, the green filled STOP
                     // square — clicking takes it off air (their "stop" state),
@@ -3611,7 +3614,7 @@ Item {
                     IconGlyph {
                         anchors.centerIn: parent
                         name: parent.isOurs ? "stop" : "play"
-                        color: parent.isOurs ? "#6dff85" : Theme.textPrimary
+                        color: parent.isOurs ? Theme.successLight : Theme.textPrimary
                         width: 13; height: 13
                         fit: true
                     }
@@ -3631,11 +3634,11 @@ Item {
                     width: 28; height: 26
                     readonly property bool marked: root.hasUserData && root.selected.length > 0
                                                    && root.markFor(root.selected[0]).highlight === true
-                    Rectangle { anchors.fill: parent; radius: 13; color: starHover.hovered || parent.marked ? "#22242e" : "transparent" }
+                    Rectangle { anchors.fill: parent; radius: 13; color: starHover.hovered || parent.marked ? Theme.hoverBg : "transparent" }
                     IconGlyph {
                         anchors.centerIn: parent
                         name: "star"
-                        color: parent.marked ? "#f5c542" : Theme.textPrimary
+                        color: parent.marked ? Theme.markedInk : Theme.textPrimary
                         width: 13; height: 13
                         fit: true
                     }
@@ -3655,7 +3658,7 @@ Item {
 
                 Item {
                     width: 28; height: 26
-                    Rectangle { anchors.fill: parent; radius: 13; color: searchHover.hovered || root.searching ? "#22242e" : "transparent" }
+                    Rectangle { anchors.fill: parent; radius: 13; color: searchHover.hovered || root.searching ? Theme.hoverBg : "transparent" }
                     IconGlyph {
                         anchors.centerIn: parent
                         name: "search"
@@ -3689,7 +3692,7 @@ Item {
             x: 10; y: 10
             width: Math.min(340, parent.width - 20); height: parent.height - 20
             radius: 8
-            color: "#12131a"
+            color: Theme.panelBg
             border.color: Theme.border
 
             Item {
@@ -3704,7 +3707,7 @@ Item {
                 Item {
                     id: drawerClose
                     anchors.right: parent.right; width: 20; height: 20
-                    Rectangle { anchors.fill: parent; radius: 10; color: closeHover.hovered ? "#22242e" : "transparent" }
+                    Rectangle { anchors.fill: parent; radius: 10; color: closeHover.hovered ? Theme.hoverBg : "transparent" }
                     IconGlyph { anchors.centerIn: parent; name: "ban"; color: Theme.textSecondary; width: 10; height: 10 }
                     HoverHandler { id: closeHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler { onTapped: root.notesOpen = false }
@@ -3739,7 +3742,7 @@ Item {
                                     anchors.fill: parent
                                     radius: parent.radius
                                     hovered: noteRowHover.hovered
-                                    glowColor: "#0dffffff"
+                                    glowColor: Theme.hoverBg
                                 }
                             }
                             Text {
@@ -3753,7 +3756,7 @@ Item {
                             Text {
                                 x: 8; anchors.bottom: parent.bottom; anchors.bottomMargin: 6
                                 text: noteRowItem.modelData.reference
-                                color: "#f5c542"
+                                color: Theme.markedInk
                                 font.family: Theme.fontFamily; font.pixelSize: 11
                             }
                             HoverHandler { id: noteRowHover; cursorShape: Qt.PointingHandCursor }
@@ -3789,7 +3792,7 @@ Item {
         id: previewCol
         anchors.right: parent.right
         width: root.previewColWidth; height: parent.height
-        color: "#101118"
+        color: Theme.windowBg
 
         Rectangle { anchors.left: parent.left; width: 1; height: parent.height; color: Theme.border }
 
@@ -3822,7 +3825,7 @@ Item {
                     property string info: ""
                     signal clicked()
                     width: parent.width; height: 44; radius: 6
-                    color: btnHover.hovered ? "#181a22" : "#0f1015"; border.color: Theme.border
+                    color: btnHover.hovered ? Theme.surface : Theme.windowBg; border.color: Theme.border
                     Row {
                         anchors.centerIn: parent
                         spacing: 8
@@ -3865,7 +3868,7 @@ Item {
                             visible: root.selected.length === 0
                             anchors.centerIn: parent
                             text: qsTr("Pick a verse")
-                            color: "#5c6475"
+                            color: Theme.textMuted
                             font.family: Theme.fontFamily; font.pixelSize: 14
                         }
                     }
@@ -3879,7 +3882,7 @@ Item {
 
                     Rectangle {
                         width: parent.width; height: 56; radius: 6
-                        color: "#0f1015"; border.color: Theme.border
+                        color: Theme.windowBg; border.color: Theme.border
                         clip: true
 
                         Column {
@@ -3921,7 +3924,7 @@ Item {
                             }
                             // edit it on the Edit screen
                             Rectangle {
-                                width: 46; height: 56; color: editHover.hovered ? "#1a1b23" : "#0b0c11"
+                                width: 46; height: 56; color: editHover.hovered ? Theme.hoverBg : Theme.windowBg
                                 IconGlyph { anchors.centerIn: parent; name: "penTool"; color: Theme.textPrimary; width: 14; height: 14 }
                             HoverHandler { id: editHover; cursorShape: Qt.PointingHandCursor }
                             // Edits the template the OUTPUT is rendering this tab's content with —
@@ -3961,7 +3964,7 @@ Item {
                 }
                 Rectangle {
                     x: 10; width: parent.width - 20; height: optionsColumn.height + 8
-                    radius: 8; color: "#0f1015"; border.color: Theme.border
+                    radius: 8; color: Theme.windowBg; border.color: Theme.border
 
                     Column {
                         id: optionsColumn
@@ -3973,7 +3976,7 @@ Item {
                             property string settingKey: ""
                             width: parent.width; height: 40
                             readonly property var def: SettingsService.definitions[opt.settingKey]
-                            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: "#1a1c25" }
+                            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.borderSubtle }
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: opt.def ? opt.def.label : ""
@@ -3993,7 +3996,7 @@ Item {
                             property int step: 1
                             width: parent.width; height: 40
                             readonly property var def: SettingsService.definitions[num.settingKey]
-                            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: "#1a1c25" }
+                            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.borderSubtle }
                             function nudge(delta) {
                                 const next = Math.max(num.def.min, Math.min(num.def.max, Number(root.options[num.settingKey]) + delta))
                                 if (next !== root.options[num.settingKey])
@@ -4009,7 +4012,7 @@ Item {
                                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                                 spacing: 6
                                 Rectangle {
-                                    width: 24; height: 24; radius: 6; color: minusHover.hovered ? "#22242e" : "#181a22"; border.color: Theme.border
+                                    width: 24; height: 24; radius: 6; color: minusHover.hovered ? Theme.hoverBg : Theme.surface; border.color: Theme.border
                                     Text { anchors.centerIn: parent; text: "−"; color: Theme.textPrimary; font.pixelSize: 15 }
                                     HoverHandler { id: minusHover; cursorShape: Qt.PointingHandCursor }
                                     TapHandler { onTapped: num.nudge(-num.step) }
@@ -4021,7 +4024,7 @@ Item {
                                     font.family: Theme.fontFamily; font.pixelSize: Theme.textSm
                                 }
                                 Rectangle {
-                                    width: 24; height: 24; radius: 6; color: plusHover.hovered ? "#22242e" : "#181a22"; border.color: Theme.border
+                                    width: 24; height: 24; radius: 6; color: plusHover.hovered ? Theme.hoverBg : Theme.surface; border.color: Theme.border
                                     Text { anchors.centerIn: parent; text: "+"; color: Theme.textPrimary; font.pixelSize: 15 }
                                     HoverHandler { id: plusHover; cursorShape: Qt.PointingHandCursor }
                                     TapHandler { onTapped: num.nudge(num.step) }
@@ -4078,12 +4081,12 @@ Item {
                     Rectangle {
                         anchors.fill: parent; radius: width / 2
                         gradient: Gradient {
-                            GradientStop { position: 0.0; color: root.optionsOpen ? (optionsHover.hovered ? Theme.accentLight : Theme.accent) : (optionsHover.hovered ? "#2a2d3b" : "#222533") }
-                            GradientStop { position: 1.0; color: root.optionsOpen ? "#5a50d6" : "#181a24" }
+                            GradientStop { position: 0.0; color: root.optionsOpen ? (optionsHover.hovered ? Theme.accentLight : Theme.accent) : (optionsHover.hovered ? Theme.hoverBg : Theme.surface) }
+                            GradientStop { position: 1.0; color: root.optionsOpen ? Theme.accent : Theme.surface }
                         }
                         border.width: 1
-                        border.color: root.optionsOpen ? Theme.dangerLight : "#34384a"
-                        IconGlyph { anchors.centerIn: parent; name: "sliders"; color: "#ffffff"; fit: true; width: 22; height: 22 }
+                        border.color: root.optionsOpen ? Theme.dangerLight : Theme.borderSubtle
+                        IconGlyph { anchors.centerIn: parent; name: "sliders"; color: Theme.controlInk; fit: true; width: 22; height: 22 }
                     }
                     HoverHandler { id: optionsHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler { onTapped: root.optionsOpen = !root.optionsOpen }

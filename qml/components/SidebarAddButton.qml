@@ -14,7 +14,7 @@ Rectangle {
 
     height: 32
     radius: 6
-    color: "#12131a"
+    color: Theme.panelBg
     border.color: Theme.border
     border.width: 1
 

@@ -244,12 +244,6 @@ Item {
                     font.pixelSize: Theme.textXxl
                     font.weight: Font.DemiBold
                 }
-                Text {
-                    text: qsTr("Presentation themes an output renders with — assign one per screen in its Edit dialog.")
-                    color: Theme.textSecondary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
-                }
             }
 
             // ---- Styles card ----
@@ -310,7 +304,7 @@ Item {
                     Text {
                         visible: (root.modelsRev, StyleListModel.rowCount() === 0)
                         width: parent.width
-                        text: qsTr("No styles yet. Add one, then assign it to an output via its Edit dialog.")
+                        text: qsTr("No styles yet.")
                         color: Theme.textMuted
                         font.family: Theme.fontFamily
                         font.pixelSize: Theme.textSm
@@ -369,7 +363,7 @@ Item {
                                 height: 40
                                 radius: Theme.radiusMd
                                 clip: true
-                                color: styleRow.isTransparent ? "#1a1c26" : styleRow.backgroundColor
+                                color: styleRow.isTransparent ? Theme.inset : styleRow.backgroundColor
                                 border.color: Theme.borderSubtle
                                 border.width: 1
 
@@ -384,7 +378,7 @@ Item {
                                             required property int index
                                             width: 10
                                             height: 10
-                                            color: (Math.floor(index / 4) + (index % 4)) % 2 === 0 ? "#242633" : "#15161d"
+                                            color: (Math.floor(index / 4) + (index % 4)) % 2 === 0 ? "#242633" : Theme.surface
                                         }
                                     }
                                 }
@@ -459,7 +453,7 @@ Item {
                                             anchors.centerIn: parent
                                             text: root.templateNameFor(styleRow.templateKey)
                                             color: root.templateColorFor(styleRow.templateKey) !== ""
-                                                   ? "#ffffff" : Theme.textPrimary
+                                                   ? Theme.controlInk : Theme.textPrimary
                                             font.family: Theme.fontFamily
                                             font.pixelSize: 10
                                             font.weight: Font.Bold
@@ -749,7 +743,6 @@ Item {
         id: editStyleDialog
         shown: root.editStyleIndex >= 0
         title: qsTr("Edit Style")
-        subtitle: qsTr("Choose the content type, template, and background for this style.")
         cardWidth: 560
         saveText: qsTr("Save Changes")
         onCancelled: root.editStyleIndex = -1
@@ -830,14 +823,6 @@ Item {
                 }
             }
 
-            Text {
-                width: parent.width
-                text: qsTr("An unselected type is not allowed on an output wearing this style — its content is refused on air. The Template below belongs to the picked type; a type with none set renders plain (Shows falls back to the Bible template).")
-                color: Theme.textMuted
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textXs
-                wrapMode: Text.WordWrap
-            }
         }
 
         // OVERLAY — a plain on/off gate, same effect as the four chips above
@@ -862,14 +847,6 @@ Item {
                 onPicked: root.editShowOverlay = !root.editShowOverlay
             }
 
-            Text {
-                width: parent.width
-                text: qsTr("Off refuses the Overlays pane's live overlays on an output wearing this style — the rest of the output still shows normally.")
-                color: Theme.textMuted
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textXs
-                wrapMode: Text.WordWrap
-            }
         }
 
         // SHOWS-ONLY CATEGORY — a dropdown over the shows library's own
@@ -1130,7 +1107,7 @@ Item {
                             height: 22
                             radius: 6
                             clip: true
-                            color: root.editStyleBackgroundImage === "" ? Theme.inset : "#22242e"
+                            color: root.editStyleBackgroundImage === "" ? Theme.inset : Theme.card
                             border.color: Theme.borderSubtle
                             border.width: 1
 
@@ -1217,8 +1194,7 @@ Item {
             // FreeShow's clearStyleBackgroundOnText: slides that carry their own
             // background keep it when this style is on air; plain text slides
             // get the style's background. SettingsToggle is the pill only —
-            // label/description are built here like GeneralScreen's rows
-            // (controlled component: the dialog owns the state, the pill reports).
+            // The dialog owns the state; the pill reports its value.
             Row {
                 width: parent.width
                 spacing: Theme.space2
@@ -1232,12 +1208,6 @@ Item {
                         color: Theme.textPrimary
                         font.family: Theme.fontFamily
                         font.pixelSize: Theme.textSm
-                    }
-                    Text {
-                        text: qsTr("Slides with their own background colour keep it; others get this style's.")
-                        color: Theme.textMuted
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textXs
                     }
                 }
 

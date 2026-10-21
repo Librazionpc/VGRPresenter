@@ -78,7 +78,7 @@ Item {
             id: chip
             anchors.centerIn: parent
             text: ghost.count > 1 ? qsTr("%1  (+%2)").arg(ghost.label).arg(ghost.count - 1) : ghost.label
-            color: "#e2e8f0"
+            color: Theme.textPrimary
             font.family: Theme.fontFamily; font.pixelSize: 14
             elide: Text.ElideRight
             width: Math.min(implicitWidth, 260)

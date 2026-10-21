@@ -3570,6 +3570,7 @@ Rectangle {
         model: [
             { label: "Edit" },
             { label: "Duplicate" },
+            { label: "Change group…" },
             { label: "Next timer…" },
             { divider: true },
             { label: "Delete", danger: true }
@@ -3579,6 +3580,21 @@ Rectangle {
             case "Edit":
                 slideModel.selectSlide(root.contextMenuSlideIndex)
                 break
+            case "Change group…": {
+                // The slide's own "group" (Settings · Appearance & Actions'
+                // registry — verse, chorus...): a plain string, same field
+                // ShowCenter.qml's groupColor() already reads to colour the
+                // grid. Listing the registry's own names first (so the
+                // colour actually matches one of them) plus "None" to clear
+                // and a custom entry for a one-off name the registry
+                // doesn't carry.
+                const eid = slideModel.engineIdAt(root.contextMenuSlideIndex)
+                if (eid !== "") {
+                    groupPickerMenu.slideId = eid
+                    groupPickerMenu.openAt(slideContextMenu, 0, 0, root)
+                }
+                break
+            }
             case "Next timer…": {
                 // How long this slide stays up before the show moves on by itself (0 = it waits).
                 const eid = slideModel.engineIdAt(root.contextMenuSlideIndex)
@@ -3600,6 +3616,27 @@ Rectangle {
                 break
             }
             slideContextMenu.visible = false
+        }
+    }
+
+    DropdownPanel {
+        id: groupPickerMenu
+        property string slideId: ""
+        visible: false
+        model: {
+            void GroupListModel.rosterChanged
+            const rows = []
+            for (let i = 0; i < GroupListModel.rowCount(); ++i)
+                rows.push({ label: GroupListModel.getGroup(i).name })
+            rows.push({ divider: true })
+            rows.push({ label: "None" })
+            return rows
+        }
+        onItemActivated: (label) => {
+            if (groupPickerMenu.slideId !== "")
+                ShowService.updateSlide(groupPickerMenu.slideId, { tag: label === "None" ? "" : label })
+            groupPickerMenu.visible = false
+            groupPickerMenu.slideId = ""
         }
     }
 

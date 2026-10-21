@@ -105,11 +105,10 @@ Item {
         anchors.margins: 6
         radius: 6
         clip: true
-        color: "#16171e"
-        // ON AIR is state (a 2px accent ring that must stay put); the pointer's
-        // edge is the shared hover layer at the foot of this card.
-        border.width: root.onAir ? 2 : 0
-        border.color: root.onAir ? Theme.accent : "#4a4d5e"
+        color: Theme.rowBg
+        // The monitor wall indicates the on-air state; keep the library tile
+        // free of an accent ring when the file is taken.
+        border.width: 0
 
         // ---- preview ----
         Rectangle {
@@ -211,7 +210,7 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.horizontalCenterOffset: root.isAudio ? 0 : 1   // a triangle looks centred a little right of its box centre
                     name: root.isAudio ? "music" : "play"
-                    color: "#ffffff"
+                    color: Theme.controlInk
                     fit: true
                     width: 12; height: 12
                 }
@@ -258,7 +257,7 @@ Item {
             hovered: hover.hovered && !root.onAir
             glowColor: "transparent"
             edge: true
-            edgeColor: "#4a4d5e"
+            edgeColor: Theme.border
         }
         // PICKED — OVER the hover edge, and a step thicker, so "this one is part of
         // what Delete would act on" cannot be read as "the pointer is here".

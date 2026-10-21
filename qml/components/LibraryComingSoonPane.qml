@@ -21,7 +21,7 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        color: "#0f1015"
+        color: Theme.windowBg
 
         Column {
             anchors.centerIn: parent
@@ -60,7 +60,7 @@ Item {
             width: newPillRow.implicitWidth + 32
             height: 38
             radius: 19
-            color: newPillMouse.containsMouse ? "#1e1f28" : "#12131a"
+            color: newPillMouse.containsMouse ? "#1e1f28" : Theme.panelBg
             border.color: Theme.border
             border.width: 1
             MouseArea {

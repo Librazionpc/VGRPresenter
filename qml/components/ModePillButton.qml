@@ -44,7 +44,7 @@ Item {
         id: pill
         anchors.fill: parent
         radius: Theme.radiusSm
-        color: hover.containsMouse || menu.visible ? "#3a3f55" : Theme.chip
+        color: hover.containsMouse || menu.visible ? Theme.controlBg : Theme.chip
         border.width: menu.visible ? 1 : 0
         border.color: Theme.accent
         Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }

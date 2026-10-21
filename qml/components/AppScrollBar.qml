@@ -27,7 +27,7 @@ Item {
 
     property Flickable flickable
     property int trackWidth: 8
-    property color trackColor: "#161823"
+    property color trackColor: Theme.surface
     property color thumbColor: "#3a3f4d"
     property int minThumbLength: 24
     // Horizontal mode: laid out along the BOTTOM, thumb maps contentX

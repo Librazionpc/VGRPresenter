@@ -1483,14 +1483,6 @@ Item {
                     font.pixelSize: Theme.textXl
                     font.weight: Font.DemiBold
                 }
-                Text {
-                    text: qsTr("Sources and routing — send audio & video to buses, add inputs and sources, and wire what feeds each bus from its Edit dialog.")
-                    color: Theme.textSecondary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
-                    wrapMode: Text.WordWrap
-                    width: layout.width
-                }
             }
 
             // ---- Routing board ----
@@ -1685,12 +1677,6 @@ Item {
                                 font.family: Theme.fontFamily
                                 font.pixelSize: 12
                                 font.weight: Font.Bold
-                            }
-                            Text {
-                                text: qsTr("devices · media")
-                                color: Theme.textMuted
-                                font.family: Theme.fontFamily
-                                font.pixelSize: Theme.textXs
                             }
                         }
 
@@ -1891,12 +1877,6 @@ Item {
                                 font.family: Theme.fontFamily
                                 font.pixelSize: 12
                                 font.weight: Font.Bold
-                            }
-                            Text {
-                                text: qsTr("audio + video mix")
-                                color: Theme.textMuted
-                                font.family: Theme.fontFamily
-                                font.pixelSize: Theme.textXs
                             }
                         }
 
@@ -2125,12 +2105,6 @@ Item {
                                 font.pixelSize: 12
                                 font.weight: Font.Bold
                             }
-                            Text {
-                                text: qsTr("cams · screen · media · ndi")
-                                color: Theme.textMuted
-                                font.family: Theme.fontFamily
-                                font.pixelSize: Theme.textXs
-                            }
                         }
 
                         AppButton {
@@ -2304,7 +2278,7 @@ Item {
                                 // pane stops being 16:9 and letterboxes.
                                 width: Math.min(96, Math.round((height) * 16 / 9))
                                 radius: Theme.radiusSm
-                                color: "#0d0f16"
+                                color: Theme.windowBg
                                 border.width: 1
                                 border.color: Theme.border
                                 clip: true
@@ -2764,7 +2738,7 @@ Item {
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
             text: kindRow.railLabel
-            color: "#8a94a6"
+            color: Theme.textSecondary
             font.family: Theme.fontFamily
             font.pixelSize: Theme.textSm
         }
@@ -3157,9 +3131,6 @@ Item {
         objectName: "selfTestBusDialog"
         shown: root.busDialogOpen
         title: root.busDialogIsAdd ? qsTr("Add Bus") : qsTr("Edit Bus")
-        subtitle: root.busDialogIsAdd
-                  ? qsTr("Create a bus, then right-click it to route sources in.")
-                  : qsTr("Route audio inputs and/or video sources into this bus.")
         cardWidth: 500
         saveText: root.busDialogIsAdd ? qsTr("Add Bus") : qsTr("Save Changes")
         onCancelled: root.busDialogOpen = false
@@ -3352,15 +3323,6 @@ Item {
                     }
                 }
             }
-            Text {
-                width: parent.width
-                visible: busVideoList.videoSourceRouted
-                text: qsTr("A bus shows one video source at a time \u2014 untick the routed one before choosing another.")
-                color: Theme.textMuted
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textXs
-                wrapMode: Text.WordWrap
-            }
         }
 
         Row {
@@ -3387,7 +3349,6 @@ Item {
         objectName: "selfTestAddSourceDialog"
         shown: root.addSourceShown
         title: qsTr("Add Source")
-        subtitle: qsTr("Add an audio input or video source, set its level, and dial in its effects rack.")
         cardWidth: 640
         saveText: qsTr("Add Source")
         // Same cancel-leaks-the-tap bug as Edit Audio's dialog above — see

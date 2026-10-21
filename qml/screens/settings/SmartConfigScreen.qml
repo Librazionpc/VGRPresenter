@@ -41,13 +41,6 @@ Item {
                 return choices[i].label
         return ""
     }
-    function modeText(key) {
-        for (let i = 0; i < root.modeChoices.length; ++i)
-            if (root.modeChoices[i].value === key)
-                return root.modeChoices[i].description
-        return ""
-    }
-
     // ---- Glow-dial thresholds ----
     // The CPU / GPU dials are the BUDGET the sliders set: green while there is
     // headroom, amber once usage is within 15% of the cap, red once it is past
@@ -99,12 +92,6 @@ Item {
                     font.family: Theme.fontFamily
                     font.pixelSize: Theme.textXxl
                     font.weight: Font.DemiBold
-                }
-                Text {
-                    text: qsTr("Let VGR analyze your hardware and optimize the production pipeline.")
-                    color: Theme.textSecondary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
                 }
             }
 
@@ -168,14 +155,6 @@ Item {
                                         font.weight: modeCell.active ? Font.DemiBold : Font.Medium
                                         opacity: root.lockedIn ? 0.6 : 1
                                     }
-                                    Text {
-                                        width: modeCell.width - 28
-                                        text: modeCell.modelData.description
-                                        color: Theme.textMuted
-                                        font.family: Theme.fontFamily
-                                        font.pixelSize: Theme.textSub
-                                        elide: Text.ElideRight
-                                    }
                                 }
 
                                 MouseArea {
@@ -204,7 +183,7 @@ Item {
                         }
                         Text {
                             width: modeCol.width - 14
-                            text: qsTr("Lock In Mode is on (Settings \u00b7 General): the engine is running in Presentation mode, whichever mode is picked here.")
+                            text: qsTr("Lock In Mode is on \u2014 running in Presentation mode regardless of the pick here.")
                             color: Theme.warning
                             font.family: Theme.fontFamily
                             font.pixelSize: Theme.textSub
@@ -346,7 +325,7 @@ Item {
                     Text {
                         anchors.centerIn: parent
                         text: parent.parent.inForce ? qsTr("In use") : qsTr("Apply")
-                        color: "#ffffff"
+                        color: Theme.controlInk
                         font.family: Theme.fontFamily
                         font.pixelSize: Theme.textSm
                         font.weight: Font.Medium

@@ -228,7 +228,7 @@ Column {
                         anchors.centerIn: parent
                         visible: root.borderEnabled
                         text: "✓"
-                        color: "#ffffff"
+                        color: Theme.controlInk
                         font.pixelSize: 13
                         font.weight: Font.Bold
                     }
@@ -255,7 +255,7 @@ Column {
                     border.width: 1
                     radius: 5
                     Behavior on opacity { NumberAnimation { duration: 100 } }
-                    color: root.primary ? root.primary.borderColor : "#ffffff"
+                    color: root.primary ? root.primary.borderColor : Theme.controlInk
                 }
 
                 Rectangle {
@@ -353,7 +353,7 @@ Column {
                         Text {
                             anchors.centerIn: parent
                             text: styleBtn.modelData.label
-                            color: styleBtn.active ? "#ffffff" : Theme.textSecondary
+                            color: styleBtn.active ? Theme.controlInk : Theme.textSecondary
                             font.family: Theme.fontFamily
                             font.pixelSize: 13
                             font.weight: Font.Medium

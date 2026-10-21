@@ -341,9 +341,8 @@ Item {
     anchors.fill: parent
     visible: root.open
 
-    // Dim scrim behind the card; clicking it cancels, same as an
-    // outside-click on any other overlay in this app. Shared ModalScrim —
-    // also consumes wheel so the canvas behind can't scroll through it.
+    // Dim scrim behind the card. Outside clicks are trapped without cancelling;
+    // the shared scrim also prevents wheel events reaching the canvas behind.
     // The dialog belongs to the WINDOW, not to the pane that declares it. A modal
     // declared inside a settings page (every Add / Edit dialog in Settings) must dim
     // the whole app, not just that page's content column: parented in place its scrim
@@ -636,6 +635,20 @@ Item {
                                 onClicked: {
                                     root.selectedColorIndex = colorSwatch.index
                                     root.liveKind = ""
+                                    // Sync the hex field + Opacity slider to THIS
+                                    // swatch (user call: "i selected black why do
+                                    // now have hex color" — clicking a preset left
+                                    // the hex field and the slider showing
+                                    // whatever the PREVIOUS pick/item left behind,
+                                    // not black's own values). Same reseed a typed
+                                    // hex already gets via commitCustomColor —
+                                    // every way of picking a colour must agree on
+                                    // what the two readouts show for it.
+                                    if (!colorSwatch.isTransparent) {
+                                        root.customHex = colorSwatch.modelData
+                                        hexInput.text = colorSwatch.modelData
+                                        root.opacityPct = root.alphaPctOf(colorSwatch.modelData)
+                                    }
                                 }
                             }
                         }

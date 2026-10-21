@@ -28,7 +28,7 @@ Rectangle {
     default property alias content: body.data
 
     width: defaultWidth
-    color: "#0f1015"
+    color: Theme.windowBg
     // Above the content beside it, so the drag strip's outer half is reachable.
     z: 10
 
@@ -42,7 +42,7 @@ Rectangle {
         anchors.right: parent.right
         width: 1
         height: parent.height
-        color: "#232530"
+        color: Theme.border
     }
 
     SplitHandle {

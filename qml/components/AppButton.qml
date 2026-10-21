@@ -16,10 +16,6 @@ Rectangle {
     implicitHeight: 34
     radius: Theme.radiusMd
 
-    // Hoisted out: chaining Theme.<color>.r/.g/.b inline miscompiles under
-    // Qt's QML AOT compiler (see NavItem.qml for the same fix).
-    readonly property color ghostHoverTint: Qt.rgba(Theme.textPrimary.r, Theme.textPrimary.g, Theme.textPrimary.b, 0.06)
-
     // The RESTING fill only — hover is the shared layer below, so a button
     // lights the same way a card or a row does instead of lightening its own
     // fill by a hand-picked factor.
@@ -42,9 +38,7 @@ Rectangle {
         anchors.fill: parent
         radius: parent.radius
         hovered: mouseArea.containsMouse && root.enabled
-        glowColor: root.variant === "ghost" ? root.ghostHoverTint
-                 : root.variant === "secondary" ? Qt.rgba(1, 1, 1, 0.05)
-                 : Qt.rgba(1, 1, 1, 0.10)
+        glowColor: Theme.hoverBg
     }
 
     border.width: (root.variant === "secondary" || root.variant === "ghost") ? 1 : 0

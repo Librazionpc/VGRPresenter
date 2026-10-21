@@ -85,18 +85,18 @@ Item {
         anchors.margins: 6
         radius: 6
         clip: true
-        color: "#16171e"
+        color: Theme.rowBg
         // The pointer's edge is the shared hover layer at the foot of this
         // card (see below), so the card itself keeps no hover border.
         border.width: 0
-        border.color: "#4a4d5e"
+        border.color: Theme.border
 
         // ---- preview ----
         Rectangle {
             id: stage
             width: parent.width
             height: root.previewHeight
-            color: "#0d0e14"
+            color: Theme.windowBg
 
             DesignPreview {
                 anchors.fill: parent
@@ -129,13 +129,13 @@ Item {
                     property string tip: ""
                     signal activated()
                     width: 24; height: 24; radius: 5
-                    color: actHover.hovered ? "#2a2c3a" : "#191a24"
+                    color: actHover.hovered ? Theme.hoverBg : Theme.surface
                     border.width: 1
-                    border.color: "#333648"
+                    border.color: Theme.borderSubtle
                     IconGlyph {
                         anchors.centerIn: parent
                         name: actionBtn.icon
-                        color: "#c7cdd8"
+                        color: Theme.navLabelMuted
                         width: 12; height: 12
                         // All five actions are on the 24 grid now (penTool /
                         // folder / fileText / copy / close), so `fit` lines
@@ -200,8 +200,8 @@ Item {
                 Rectangle {
                     visible: root.design.locked === true
                     width: 18; height: 18; radius: 9
-                    color: "#20222e"
-                    IconGlyph { anchors.centerIn: parent; name: "lock"; color: "#8f96a8"; width: 10; height: 10 }
+                    color: Theme.card
+                    IconGlyph { anchors.centerIn: parent; name: "lock"; color: Theme.textMuted; width: 10; height: 10 }
                 }
             }
         }
@@ -229,7 +229,7 @@ Item {
                 anchors.fill: parent
                 anchors.margins: 3
                 radius: 4
-                color: "#0f1015"
+                color: Theme.windowBg
                 border.width: 1
                 border.color: Theme.accent
             }
@@ -270,7 +270,7 @@ Item {
             hovered: hover.hovered
             glowColor: "transparent"
             edge: true
-            edgeColor: "#4a4d5e"
+            edgeColor: Theme.border
         }
     }
 

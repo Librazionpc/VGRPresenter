@@ -125,14 +125,13 @@ std::vector<SettingDef> BuildDefinitions() {
     d.push_back(Choice("appearance.language", "appearance", "Language", "en-US", {
         C("en-US", "English (US)"), C("en-GB", "English (UK)"),
         C("de-DE", "Deutsch"), C("es-ES", "Espa\xc3\xb1" "ol"), C("fr-FR", "Fran\xc3\xa7" "ais"),
-    }, "Dates, times and numbers follow it at once; translated interface strings appear as the build ships them."));
+    }, "Formats dates and numbers now; UI text follows once translated."));
     // Says the half that is invisible from this row: Lock In Mode outranks the
     // Smart Config mode, so the engine runs in Presentation mode while it is on
     // (Smart Config states the same precedence on its own page — see
     // SmartConfigScreen's locked-in note).
     d.push_back(Bool("appearance.lockInMode", "appearance", "Lock In Mode", false,
-                     "Keeps the engine focused on the live show: background work is paused, only errors interrupt you, "
-                     "and it takes precedence over the Smart Config mode (the engine runs in Presentation mode while it is on)."));
+                     "Pauses background work during the live show — only errors interrupt — and overrides Smart Config."));
     d.push_back(Choice("appearance.accent", "appearance", "Accent color", "purple", {
         Accent("red", "Red", "#ff4d3d", "#ff6b61"),
         Accent("blue", "Blue", "#4da6ff", "#8ecbff"),
@@ -158,9 +157,9 @@ std::vector<SettingDef> BuildDefinitions() {
     // I open it back it automatically opens [a project] in edit mode". Turning it
     // on is a deliberate choice to resume instead of start.
     d.push_back(Bool("preferences.restoreLastSession", "preferences", "Resume last session", false,
-                     "Comes back to where you left: the screen, the show or design, and the Settings page you had open — instead of the home screen."));
+                     "Opens back to the screen and show you left, instead of the home screen."));
     d.push_back(Bool("preferences.closeToTray", "preferences", "Close to tray", false,
-                     "Closing the window keeps the app running in the system tray; its icon brings the window back or quits."));
+                     "Keeps running in the system tray instead of quitting."));
     // HARDWARE RENDERING — OFF by default, and that default is the engine's own
     // (see RenderEngine::kDefaultRenderBackend for the readback fault behind it,
     // and ResolveBackendName for how this preference and the explicit
@@ -169,9 +168,7 @@ std::vector<SettingDef> BuildDefinitions() {
     // every machine, including the laptops with no GPU at all, and the GPU path
     // is still being finished. It is a user's choice to make, not a machine's.
     d.push_back(Bool("preferences.hardwareAcceleration", "preferences", "Hardware rendering (GPU)", false,
-                     "Draws the frames on the graphics card instead of the processor. Off by default: the software "
-                     "renderer works on every machine, and this one falls back to it when no usable GPU is found. "
-                     "The hardware path is still being finished."));
+                     "Off by default — the GPU path is still being finished."));
 
     // ---- Backups & recovery ----
     d.push_back(Bool("backups.automatic", "backups", "Automatic backups", true));
@@ -198,13 +195,12 @@ std::vector<SettingDef> BuildDefinitions() {
                      "Toasts for saves, backups and warnings. Errors always show."));
     d.push_back(Choice("notifications.logLevel", "notifications", "Log level", "info", {
         C("error", "Error"), C("warning", "Warning"), C("info", "Info"), C("debug", "Debug"),
-    }, "How much the engine writes to its log (engine.log): Debug is verbose, Error keeps it quiet."));
+    }, "How much the engine writes to engine.log."));
 
     // ---- Resource profile ----
     d.push_back(Choice("resources.profile", "resources", "Resource profile", "performance", {
         C("performance", "Performance"), C("balanced", "Balanced"), C("powerSaver", "Power Saver"),
-    }, "Runtime priority for rendering, encoding and outputs — it sets the GPU and CPU budgets Smart Config shows; "
-       "in Smart Config's Manual mode the two budget sliders take precedence."));
+    }, "Sets the GPU/CPU budgets Smart Config uses."));
 
     // ---- Smart Config ----
     d.push_back(Choice("smart.mode", "smart", "Configuration mode", "smart", {

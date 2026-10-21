@@ -600,7 +600,7 @@ Rectangle {
                                 color: alive && !modelData.disabled && root.highlightedIndex === index
                                        ? (modelData.danger ? Qt.alpha(Theme.danger, 0.14)
                                                            : Theme.border)
-                                       : "transparent"
+                                       : ListRows.stripeOverlay(index)
                                 Behavior on color {
                                     ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing }
                                 }

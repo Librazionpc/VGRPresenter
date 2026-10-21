@@ -18,8 +18,12 @@ import VGRPresenterUI
 Item {
     id: root
     // Shared top-level modal layer: keep the scrim and card above the page
-    // so clicks and hover never reach the controls behind the dialog.
-    z: 30000
+    // so clicks and hover never reach the controls behind the dialog. The
+    // actual value is bumped to the top of ModalStack's shared counter the
+    // moment this card OPENS (see open() below) — a flat 30000 on every
+    // instance stacked simultaneously-open dialogs by declaration order
+    // instead of by which one was opened last (see ModalStack.qml).
+    z: ModalStack.base
 
     property string title: ""
     property string subtitle: ""
@@ -34,6 +38,29 @@ Item {
     property real cardRadius: Theme.radiusLg
     property bool showFooter: true
     property bool showSave: true
+    // ModalCard forms can contain edits that are saved continuously. Keep an
+    // outside tap from silently cancelling them; dialogs that intentionally
+    // support backdrop dismissal can opt in at their call site.
+    property bool clickOutsideToDismiss: false
+    // Resolved automatically from ModalStack's open-dialog stack (see its
+    // own comment) — whatever is directly behind THIS card, whether that's
+    // the Settings panel, another dialog this one opened on top of, or the
+    // real page. No per-dialog wiring: push/pop below is the only plumbing,
+    // and blurSourceFor() does the rest, so a dialog three files deep from
+    // Main.qml gets the right answer without knowing where it lives.
+    readonly property Item blurSource: ModalStack.blurSourceFor(card)
+    // An optional single header action, drawn left of the close X (the action
+    // editor's icon picker). Empty icon = no button, so every other dialog's
+    // header is unchanged; `headerActionActive` gives it the accent wash the
+    // same way a selected chip reads.
+    property string headerActionIcon: ""
+    property bool headerActionActive: false
+    signal headerActionClicked()
+    // A leading back arrow beside the title, for a dialog that dives into a
+    // sub-view of itself (the action editor's trigger list). The title stays
+    // put, so the operator can see which action they are still inside.
+    property bool headerBackVisible: false
+    signal headerBackClicked()
     property string saveText: "Save"
     property string cancelText: "Cancel"
     // Real, not caller-guessed — the footer's own implicit height, so the
@@ -71,8 +98,15 @@ Item {
     Behavior on opacity { NumberAnimation { duration: 130 } }
 
     property bool shown: false
-    function open() { shown = true }
-    function close() { shown = false }
+    function open() {
+        shown = true
+        root.z = ModalStack.nextZ()
+        ModalStack.push(card)
+    }
+    function close() {
+        shown = false
+        ModalStack.pop(card)
+    }
 
     // ---- Esc = cancel, Enter = accept (qml/settings/Hotkeys.qml) ---------
     // Every dialog built on this card answers the app's two keys while it is
@@ -112,7 +146,7 @@ Item {
         root.hotkeyScope = 0
         root.syncHotkeyScope()
     }
-    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
+    Component.onDestruction: { Hotkeys.close(root.hotkeyScope); ModalStack.pop(card) }
 
     // Brings an item from the content column into view. A selection that
     // REVEALS a new section (AudioEffectsPanel's selected-effect editor)
@@ -150,6 +184,8 @@ Item {
     // empty) dialog can't leak into the page's Flickable behind the modal.
     ModalScrim {
         anchors.fill: parent
+        blurSource: root.blurSource
+        clickToDismiss: root.clickOutsideToDismiss
         onDismissed: root.cancelled()
     }
 
@@ -188,6 +224,19 @@ Item {
         height: Math.min(roomHeight,
                          Theme.space6 * 2 + headerItem.height + Theme.space4
                          + flick.height + root.footerHeight)
+        // A caller whose content swaps shape while open (as ManageActionsModal
+        // does when an inline picker opens) gets a smooth resize instead of a snap, with no per-dialog
+        // code: ONE fix here covers every ModalCard, which is the whole
+        // point of sharing this shell (user call: "that is why i want a
+        // single point of use"). Disabled for the dialog's OWN open/close
+        // (shown flips, not root.shown) — the height is already correct
+        // the instant `visible` turns true (opacity fades it in separately),
+        // so animating height on open would have the card visibly grow from
+        // whatever its height happened to be the PREVIOUS time it opened.
+        Behavior on height {
+            enabled: root.shown
+            NumberAnimation { duration: 160; easing.type: Easing.OutQuad }
+        }
         anchors.centerIn: parent
         radius: root.cardRadius
         color: Theme.surface
@@ -204,7 +253,10 @@ Item {
 
             Column {
                 id: headerCol
+                x: root.headerBackVisible ? 30 : 0
                 width: parent.width - closeBtn.width - Theme.space3
+                       - (root.headerActionIcon !== "" ? headerAction.width + Theme.space2 : 0)
+                       - x
                 spacing: Theme.space1
 
                 Text {
@@ -224,6 +276,43 @@ Item {
                     font.pixelSize: Theme.textSm
                     wrapMode: Text.WordWrap
                 }
+            }
+
+            IconGlyph {
+                id: headerBack
+                visible: root.headerBackVisible
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.topMargin: 4
+                name: "arrowLeft"
+                color: Theme.textSecondary
+                implicitWidth: 16
+                implicitHeight: 16
+                MouseArea {
+                    anchors.fill: parent
+                    anchors.margins: -8
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.headerBackClicked()
+                }
+            }
+
+            Rectangle {
+                id: headerAction
+                visible: root.headerActionIcon !== ""
+                anchors.right: closeBtn.left
+                anchors.rightMargin: Theme.space3
+                anchors.verticalCenter: closeBtn.verticalCenter
+                width: 30; height: 30; radius: Theme.radiusMd
+                color: root.headerActionActive ? Qt.alpha(Theme.accent, 0.18)
+                     : (headerActionHover.hovered ? Theme.hoverBg : "transparent")
+                IconGlyph {
+                    anchors.centerIn: parent
+                    name: root.headerActionIcon
+                    color: root.headerActionActive ? Theme.accentLight : Theme.textSecondary
+                    width: 15; height: 15; fit: true
+                }
+                HoverHandler { id: headerActionHover; cursorShape: Qt.PointingHandCursor }
+                TapHandler { onTapped: root.headerActionClicked() }
             }
 
             IconGlyph {

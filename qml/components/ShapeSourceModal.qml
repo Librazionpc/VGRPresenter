@@ -259,7 +259,7 @@ Item {
                     Text {
                         anchors.centerIn: parent
                         text: qsTr("Add Shape")
-                        color: "#ffffff"
+                        color: Theme.controlInk
                         font.family: Theme.fontFamily
                         font.pixelSize: 14
                         font.weight: Font.DemiBold
