@@ -160,6 +160,13 @@ Rectangle {
                 cursorShape: Qt.PointingHandCursor
                 onClicked: root.live ? LiveOutputService.stop() : LiveOutputService.goLive()
             }
+            HoverDetail {
+                anchors.fill: parent
+                title: root.live ? qsTr("Stop live output") : qsTr("Go live")
+                detail: root.live
+                        ? qsTr("Stop sending the current program to live outputs")
+                        : qsTr("Send the staged program to live outputs")
+            }
         }
         Text {
             id: goLiveLabel
@@ -256,6 +263,11 @@ Rectangle {
                 id: searchHover
                 anchors.fill: parent
                 onClicked: root.searchClicked()
+            }
+            HoverDetail {
+                anchors.fill: parent
+                title: qsTr("Search")
+                detail: qsTr("Find shows, media, scripture, and other content")
             }
         }
         Text {
@@ -370,6 +382,11 @@ Rectangle {
                 id: gearHover
                 anchors.fill: parent
                 onClicked: root.settingsClicked()
+            }
+            HoverDetail {
+                anchors.fill: parent
+                title: qsTr("Settings")
+                detail: qsTr("Configure outputs, styles, audio, and app preferences")
             }
         }
         Text {

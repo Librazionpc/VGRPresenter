@@ -2178,6 +2178,24 @@ void TestFeedHealth() {
         CHECK(findAge(ages, "feed-probe-cold") == -1);
     }
 
+    // THE COUNT ON THE ROW IS THE OUTPUT'S OWN, whatever its kind: the Outputs
+    // screen prints "N frames delivered" from this field, and it used to print a
+    // line only for the kinds with a sender of their own (the report "the
+    // notification is only instantiated in one output"). FramesReceived is the
+    // number here, so the row cannot drift from the feed it describes.
+    {
+        const auto framesOf = [](const std::vector<r::RenderEngine::OutputFeedAge>& ages,
+                                 const std::string& name) -> uint64_t {
+            for (const auto& row : ages)
+                if (row.name == name) return row.frames;
+            return 0;
+        };
+        const auto ages = engine.OutputFeedAges();
+        CHECK(framesOf(ages, "feed-probe-fed") == 1);
+        CHECK(framesOf(ages, "feed-probe-cold") == 0);   // never presented
+        CHECK(framesOf(ages, "feed-probe-off") == 0);    // disabled: nothing sent
+    }
+
     // BLACKOUT: an opaque black frame at the output's own target size. Opaque,
     // not transparent — a keyer behind a transparent hole would fill it with
     // something, and the point is that nothing reaches the audience.

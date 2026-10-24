@@ -912,6 +912,42 @@ How it fits together:
   delegate's own `styleLayout` — the value the line under the Style pill binds
   to — so a role that resolved in the model but never reached the row reads as
   `described < styled` and fails.
+
+The same scenario also checks that EVERY row prints a runtime line of its own
+(`reported == rows`, `statusText` opening with the row's own kind), and
+`run_outputs_live_test.sh` takes that line through a live session: it puts one
+real slide on air, opens Settings · Outputs, and prints every row's status while
+live, while blacked out (a real click on the wall's Blackout control, with the
+dialog closed so the click lands on the control), and after the blackout ends.
+
+The report behind it: "anything the notification does for one output should be
+implemented for all — it seems like the notification is only instantiated in one
+output … fps change, blackout, whatever." The row's live line used to exist only
+for the kinds with a sender (NDI, SDI), so an HDMI row said "Inactive" and
+nothing else. Every kind of output now reports the same facts, measured by the
+engine (`RenderEngine::OutputFeedAges` — frames delivered and the age of the
+last present) and published per row by `LiveOutputService.outputRuntime`.
+
+```bash
+bash tools/selftest/run_outputs_live_test.sh 120
+# ... [SELFTEST-OUTSLIVE] live row=0 kind="HDMI" status="HDMI · live · 2 frames delivered"
+#     [SELFTEST-OUTSLIVE] blackout row=1 kind="NDI" status="NDI · sending · 502 frames · blackout up"
+#     OUTSLIVE: PASS rows=2 live=2 blackout=2 restored=2
+#     OUTSLIVE: FAIL launch | notrun | missing | stale | blackout | restore
+```
+
+The scenario is the `selfTestOutsLive*` Timer block in `qml/Main.qml`, gated on
+`VGR_OUTSLIVE_TEST` (+ `VGR_SELFTEST`), armed in `src/main.cpp` like the rest.
+
+The same component is on the monitor wall: each tile carries its output's state as
+a colour dot (`components/OutputRuntimeDot.qml`, built on the reusable hover
+wrapper `components/HoverDetail.qml`) — green frames are landing, amber blacked
+out or stalled, grey off air / waiting / switched off — and the frames and the age
+of the last one are in its hover tip ("Main Output · live · 3 frames · last 222 ms
+ago"). The runner parks the real pointer on the dot with `SelfTest.move` and
+fails if no tip with a frame count comes back, because a colour-only indicator is
+unreadable if its detail cannot be reached. Both surfaces (wall and Outputs rows)
+instantiate that one component rather than deriving the state again.
 - **`described` must equal `styled`**: every row wearing a style has to print one
   of the three documented answers. `scopes=` prints how many rows answered, so a
   machine whose styles are all background-only is visible in the verdict instead
@@ -1607,3 +1643,64 @@ Verdict codes: `APPLIED`, `FAIL missing` (the scenario never reached its verdict
 never received the colour — a missing value counts as missing, never as "faded"),
 `FAIL text` (the known-good control broke too, so it is not shape-specific), and
 `FAIL canvas` (the item and its delegate hold the colour, the pixels do not).
+
+## The live video path under CPU load: frames and age, per output
+
+The report: *"when I'm showing HDMI and the laptop is stressed the video lags badly"*.
+That is a claim about a NUMBER, so `run_videoperf_test.sh` measures it:
+
+```bash
+bash tools/selftest/run_videoperf_test.sh            # the shipped path, under load
+bash tools/selftest/run_videoperf_test.sh --compare  # legacy behaviour, then shipped
+VIDEOPERF_HOGS=8 bash tools/selftest/run_videoperf_test.sh   # heavier stress
+```
+
+The app's own scenario (`VGR_VIDEOPERF_TEST=1`) puts the first camera/HDMI input on
+air, goes LIVE with it, and samples for ten seconds what the engine already publishes
+per output — delivered frames and the age of the last presented frame — plus the live
+loop's throughput and the pump's frame revisions (`inputRev`: one bump per frame the
+pump actually took, i.e. the capture path's own rate, independent of rendering). The
+runner launches it with N busy processes, so the stressed machine of the report is the
+machine being measured.
+
+**Before/after on the same machine.** The engine keeps two measurement hooks — not
+settings — that restore the pre-fix behaviour for one run:
+
+| env | restores |
+|---|---|
+| `BPS_LAYER_REFRESH_ALWAYS=1` | every live layer re-copied and re-uploaded on every build, every output |
+| `BPS_TAP_COPY_UNDER_LOCK=1` | the PAL pixel pull copies under the tap's mutex (capture waiting on consumers) |
+
+Measured 2026-10-24, Integrated Webcam on air, 2 enabled outputs, 10 s window, this
+build's default **software** renderer. Three `--compare` runs plus one idle reference:
+
+| load | leg | capture (`input`) | slowest output | mean last-frame age |
+|---|---|---|---|---|
+| 4 cores | legacy | 12.8 fps | 0.21 fps | 1474 ms |
+| 4 cores | shipped | 24.6 fps | 0.42 fps | 1205 ms |
+| 4 cores | legacy | 11.8 fps | 0.32 fps | 2060 ms |
+| 4 cores | shipped | 10.2 fps | 0.21 fps | 2018 ms |
+| 12 cores | legacy | 2.4 fps | 0.17 fps | 2009 ms |
+| 12 cores | shipped | 3.8 fps | 0.10 fps | 2070 ms |
+| idle | legacy | 14.3 fps | 0.33 fps | 1992 ms |
+| idle | shipped | 14.9 fps | 0.30 fps | 1881 ms |
+
+**What this actually says** — and it is not a win to report proudly: the run-to-run
+spread on this machine is larger than the effect, so the before/after delta is **not
+measurable here**. The reason is visible in the `loop` number: this build rasterizes
+in software, one live iteration is a 1920×1080 CPU raster per output, and the loop
+manages 0.2–0.7 fps whether or not the copies happen. At that cadence the render
+thread pulls the tap twice in ten seconds and the GUI pump's copies are ~90 MB/s of a
+very idle budget — the tap's mutex is simply not contended, so removing the contention
+cannot show up.
+
+So the copy/lock work is a correctness-and-headroom change, not a measured speed-up on
+this box. What the measurement DOES establish is the shape of the user's lag on this
+machine: the video path is not the bottleneck — the software rasterizer drawing every
+output is, and a machine under load stretches that from "tens of ms" to seconds. The
+sensitive configuration for re-running this is one where the loop can actually run
+(30–60 fps): hardware rendering on (Settings · General), or fewer/smaller outputs.
+
+Budgets are floors for "the feed is alive and reachable" (`VIDEOPERF_MIN_INPUT_FPS=8`,
+`VIDEOPERF_MIN_FPS=0.15`, `VIDEOPERF_MAX_AGE_MS=3000`); the printed numbers, and the
+`--compare` spread, are the point.

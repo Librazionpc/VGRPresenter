@@ -229,27 +229,17 @@ Item {
         Column {
             id: layout
             x: Theme.space6
-            y: Theme.space5
+            // Below the fixed title/Add-style header (pinned to root, same
+            // as Outputs' own header) so the styles card flows underneath
+            // it instead of scrolling the title away with it.
+            y: Theme.space6 * 2 + addStyleBtn.height
             width: flick.width - Theme.space6
             spacing: 16
-
-            // ---- Page header ----
-            Column {
-                spacing: 2
-
-                Text {
-                    text: qsTr("Styles")
-                    color: Theme.textPrimary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textXxl
-                    font.weight: Font.DemiBold
-                }
-            }
 
             // ---- Styles card ----
             Rectangle {
                 width: parent.width
-                height: stylesCol.height + 36
+                height: stylesCol.height + 28
                 radius: Theme.radiusLg
                 color: Theme.card
                 border.color: Theme.border
@@ -261,39 +251,6 @@ Item {
                     y: 14
                     width: parent.width - 40
                     spacing: 14
-
-                    // A plain Item, not a Row — Row/Column/Grid forbid their
-                    // own children from using anchors.left/right/fill/
-                    // centerIn (the positioner sets each child's geometry
-                    // itself), and both children here need anchors to sit
-                    // on opposite edges of the row.
-                    Item {
-                        width: parent.width
-                        height: Math.max(styleHeaderText.implicitHeight, addStyleButton.height)
-
-                        Text {
-                            id: styleHeaderText
-                            anchors.left: parent.left
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: qsTr("All styles")
-                            color: Theme.textPrimary
-                            font.family: Theme.fontFamily
-                            font.pixelSize: 16
-                            font.weight: Font.DemiBold
-                        }
-
-                        AppButton {
-                            id: addStyleButton
-                            // Hook for the output-save scenario, which adds a style
-                            // the way the operator does before saving an output.
-                            objectName: "selfTestAddStyle"
-                            anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: qsTr("+ Add style")
-                            variant: "ghost"
-                            onClicked: StyleListModel.addStyle()
-                        }
-                    }
 
                     // Empty state — the roster starts empty by design.
                     // root.modelsRev is read (not used) purely to establish
@@ -719,6 +676,82 @@ Item {
                     }
                 }
             }
+        }
+    }
+
+    // The header's own ground — without this, a scrolled-up card would show
+    // straight through the pinned title/button (see Outputs' own header,
+    // which this mirrors).
+    Rectangle {
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: Theme.space6 * 2 + addStyleBtn.height
+        color: Theme.surface
+    }
+
+    // "Styles" title — pinned alongside the Add-style button (sits above
+    // the Flickable in paint order, same as that button) so the header
+    // stays put while the roster scrolls underneath it.
+    Text {
+        anchors.left: parent.left
+        anchors.leftMargin: Theme.space6
+        anchors.verticalCenter: addStyleBtn.verticalCenter
+        text: qsTr("Styles")
+        color: Theme.textPrimary
+        font.family: Theme.fontFamily
+        font.pixelSize: Theme.textXl
+        font.weight: Font.DemiBold
+    }
+
+    // "+ Add style" pinned top-right — always visible no matter how far the
+    // roster scrolls. Same drawn-plus-glyph button Outputs uses, not the
+    // ghost AppButton this used to be (that lived inside the card as a
+    // secondary action; pinned beside the title it is the page's one
+    // primary call-to-action, same as "+ Add Output").
+    Rectangle {
+        id: addStyleBtn
+        objectName: "selfTestAddStyle"
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.topMargin: Theme.space6
+        anchors.rightMargin: Theme.space6 + Theme.space2
+        width: addStyleRow.width + Theme.space6 * 2
+        height: 40
+        radius: Theme.radiusMd
+        color: addStyleArea.pressed ? Qt.darker(Theme.accent, 1.15)
+             : addStyleArea.containsMouse ? Qt.lighter(Theme.accent, 1.1)
+             : Theme.accent
+        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+        Row {
+            id: addStyleRow
+            anchors.centerIn: parent
+            spacing: 8
+
+            Item {
+                width: 11; height: 11
+                anchors.verticalCenter: parent.verticalCenter
+                Rectangle { anchors.centerIn: parent; width: 11; height: 1.6; radius: 0.8; color: Theme.controlInk }
+                Rectangle { anchors.centerIn: parent; width: 1.6; height: 11; radius: 0.8; color: Theme.controlInk }
+            }
+
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: qsTr("Add style")
+                color: Theme.controlInk
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textSm
+                font.weight: Font.DemiBold
+            }
+        }
+
+        MouseArea {
+            id: addStyleArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: StyleListModel.addStyle()
         }
     }
 

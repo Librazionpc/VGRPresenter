@@ -31,6 +31,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -381,9 +382,27 @@ struct VideoTapShared {
     // frame as unpacked RGBA and advance `frameSeq` once per stored sample;
     // the JPEG stays for the small tiles, at a much lower rate.
     std::atomic<bool> live{false};
-    std::vector<uint8_t> latestRgba;    // tightly packed RGBA8, guarded by `mutex`
+    // THE LIVE PIXEL SLOT IS A SHARED BUFFER, NOT A VECTOR.
+    //
+    // It used to be a plain vector that a reader COPIED under `mutex` — and
+    // that copy is 8 MB at 1080p, taken on the same lock the capture callback
+    // holds for every sample. So each pull (a scene build per output, the
+    // GUI's own pump) stopped the device from delivering its next frame, and
+    // each capture sample stopped every reader. On a machine already under
+    // load that handshake is what "the HDMI input lags badly" looked like: the
+    // device's effective rate was the speed of this lock being passed around,
+    // not the speed of the device.
+    //
+    // A shared_ptr makes the hand-off O(1): readers swap the POINTER under the
+    // lock and copy pixels outside it, and they copy the same buffer the
+    // capture thread has already finished with (it publishes a NEW buffer per
+    // frame, never writing into one a reader holds).
+    std::shared_ptr<const std::vector<uint8_t>> latestRgba;   // tightly packed RGBA8
     uint32_t rgbaW = 0, rgbaH = 0;
-    uint64_t frameSeq = 0;              // bumped per stored frame, read under `mutex`
+    // Bumped once per stored frame. ATOMIC so the "has anything arrived?"
+    // question (PreviewFrameSeq) costs no lock at all — it is asked on every
+    // scene build, for every output, and must never queue behind capture work.
+    std::atomic<uint64_t> frameSeq{0};
     int64_t lastStoreMs = 0;            // the PANE gate (unused by a live tap)
 
     void Publish(std::vector<uint8_t> jpeg)
@@ -398,17 +417,25 @@ struct VideoTapShared {
     }
 
     // The screen/window worker's live publish: that thread does NOT hold the
-    // mutex when it hands a grab over (the camera callback is called with it
-    // held), so this takes it itself. `seq` is bumped under the same lock as the
-    // pixels, which is what makes PreviewFrameSeq/PreviewFramePixels a
-    // consistent pair for the puller.
+    // mutex when it hands a grab over (the camera callback does its pixel work
+    // outside it too — see StoreSampleFrame), so this takes it itself. `seq` is
+    // bumped under the same lock as the pixels, which is what makes
+    // PreviewFrameSeq/PreviewFramePixels a consistent pair for the puller.
     void PublishRgba(uint32_t w, uint32_t h, std::vector<uint8_t> rgba)
+    {
+        PublishRgbaFrame(std::make_shared<const std::vector<uint8_t>>(std::move(rgba)), w, h);
+    }
+
+    // The same publish for a caller that already built the buffer (the camera
+    // callback, whose swizzle happens outside every lock): no second copy on the
+    // way in.
+    void PublishRgbaFrame(std::shared_ptr<const std::vector<uint8_t>> rgba, uint32_t w, uint32_t h)
     {
         const std::lock_guard<std::mutex> lock(mutex);
         latestRgba = std::move(rgba);
         rgbaW = w;
         rgbaH = h;
-        ++frameSeq;
+        frameSeq.fetch_add(1, std::memory_order_release);
     }
 
     // ---- the ASYNC camera read: the MF callback <-> this tap's worker ----
@@ -536,10 +563,18 @@ namespace {
 std::vector<uint8_t> EncodeJpeg(const uint8_t *bgra, UINT32 w, UINT32 h, UINT32 stride, UINT32 quality);
 } // namespace
 
-// RGB32 / YUY2 / NV12 -> JPEG — the conversions the synchronous loop used,
-// verbatim. CALLER HOLDS `shared.mutex` and passes a sample it is inside: the
-// async contract owns the sample only for the callback's own call, so the
-// frame is consumed and published before that call returns.
+// RGB32 / YUY2 / NV12 -> the tap's published forms — the conversions the
+// synchronous loop used, verbatim.
+//
+// CALLER HOLDS NO LOCK. This runs on Media Foundation's sample callback, i.e. on
+// the CAPTURE PATH, and it is the frame the device's own rate is made of: every
+// microsecond spent inside `shared.mutex` here is a microsecond the device
+// cannot deliver its next sample — and a microsecond the renderer's pull, the
+// GUI's pull and this callback spend queuing behind each other (they all take
+// that same mutex). So the swizzle writes into a buffer nobody else can see
+// yet, the JPEG is encoded unlocked, and only the finished buffers are swapped
+// in (see PublishRgbaFrame / Publish). The async contract owns the sample only
+// for this call's duration, so everything still happens before it returns.
 void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
 {
     IMFSourceReader *reader = shared.reader.load();
@@ -569,18 +604,22 @@ void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
             cur->Release();
         }
         // ONE publish path for every subtype: the branch below only decides how
-        // to reach a packed BGRA picture, and this does the rest — store the
+        // to reach a packed BGRA picture, and this does the rest — build the
         // pixels for a live tap (swizzled to RGBA8, the IVideo contract), then
-        // encode the JPEG a live tap re-encodes at kLiveJpegMs, a pane tap at
-        // the kPreviewFrameMs gate its caller already applied.
-        // CALLER HOLDS `shared.mutex`.
+        // encode the JPEG a live tap re-encodes at kLiveJpegMs, a pane tap on
+        // every sample (its caller already applied the kPreviewFrameMs gate).
+        //
+        // NO LOCK IS HELD ACROSS THE WORK (see this function's header): the tap's
+        // mutex is taken only for the swaps, never across the swizzle or the
+        // encode.
         const auto publish = [&shared, w, h](const uint8_t *bgra, UINT32 stride) {
             const bool live = shared.live.load(std::memory_order_relaxed);
             if (live) {
-                std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4);
+                auto rgba = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(w) * h * 4);
+                uint8_t *dstBase = rgba->data();
                 for (UINT32 y = 0; y < h; ++y) {
                     const uint8_t *src = bgra + static_cast<size_t>(y) * stride;
-                    uint8_t *dst = rgba.data() + static_cast<size_t>(y) * w * 4;
+                    uint8_t *dst = dstBase + static_cast<size_t>(y) * w * 4;
                     for (UINT32 x = 0; x < w; ++x, src += 4, dst += 4) {
                         dst[0] = src[2];   // R <- the BGRA picture's red
                         dst[1] = src[1];
@@ -588,17 +627,24 @@ void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
                         dst[3] = 0xFF;
                     }
                 }
-                shared.latestRgba = std::move(rgba);
-                shared.rgbaW = w;
-                shared.rgbaH = h;
-                ++shared.frameSeq;   // the pullers' "is there anything new?"
+                // The hand-over is one pointer move: the buffer is complete, so
+                // a reader that takes it copies OUTSIDE every lock while the
+                // next sample overwrites a different buffer entirely.
+                shared.PublishRgbaFrame(std::move(rgba), w, h);
             }
-            const int64_t now = SteadyMs();
-            if (live && now - shared.lastEncodeMs < kLiveJpegMs)
-                return;
-            shared.lastEncodeMs = now;
+            // THE JPEG'S RATE: decided under the lock (it is that timestamp's),
+            // paid for outside it — a 1080p encode is milliseconds, and the
+            // capture callback must not hand those to every other thread that
+            // waits on the tap.
+            {
+                const std::lock_guard<std::mutex> lock(shared.mutex);
+                const int64_t now = SteadyMs();
+                if (live && now - shared.lastEncodeMs < kLiveJpegMs)
+                    return;
+                shared.lastEncodeMs = now;
+            }
             std::vector<uint8_t> jpeg = EncodeJpeg(bgra, w, h, stride, 70);
-            if (!jpeg.empty()) shared.latestJpeg = std::move(jpeg);
+            if (!jpeg.empty()) shared.Publish(std::move(jpeg));
         };
         if (w > 0 && h > 0 && subtype == MFVideoFormat_RGB32
             && curLen >= static_cast<DWORD>(w) * h * 4) {
@@ -712,39 +758,58 @@ public:
     STDMETHODIMP OnReadSample(HRESULT hr, DWORD /*stream*/, DWORD flags,
                               LONGLONG /*timestamp*/, IMFSample *sample) override
     {
-        const std::lock_guard<std::mutex> lock(shared_->mutex);
-        // The worker is past this callback: the reader it owned is released, so
-        // there is nothing to do and — critically — nothing to touch.
-        if (shared_->stopping) return S_OK;
-        const bool stopping = !shared_->running.load();                if (FAILED(hr)) {
-                    if (!stopping) {   // a cancelled read is not a dead stream
-                        shared_->failed.store(true);
-                        shared_->failure = hr;
-                        shared_->cv.notify_all();
-                    }
-                    return S_OK;
+        // THE STORE IS NOT DONE UNDER THE LOCK (see StoreSampleFrame): this
+        // callback IS the capture path, and holding the tap's mutex across a
+        // swizzle plus a JPEG encode (and across every reader's 8 MB frame copy)
+        // is what made a live HDMI feed lag when the machine got busy. The lock
+        // below covers only the tap's flags and the read handshake.
+        bool stopping = false;
+        bool store = false;
+        {
+            const std::lock_guard<std::mutex> lock(shared_->mutex);
+            // The worker is past this callback: the reader it owned is released,
+            // so there is nothing to do and — critically — nothing to touch.
+            if (shared_->stopping) return S_OK;
+            stopping = !shared_->running.load();
+            if (FAILED(hr)) {
+                if (!stopping) {   // a cancelled read is not a dead stream
+                    shared_->failed.store(true);
+                    shared_->failure = hr;
+                    shared_->cv.notify_all();
                 }
-        if (sample && !(flags & MF_SOURCE_READERF_ENDOFSTREAM)) {
-            // A LIVE tap stores EVERY sample — the camera's own rate is the
-            // program rate (the missing half of the "video bus lags on HDMI and
-            // NDI" fix; the other half is that this gate used to be the only
-            // rate the compositor ever saw). A pane tap keeps the 15 fps gate,
-            // which is what keeps a wall of thumbnails cheap.
-            const bool live = shared_->live.load(std::memory_order_relaxed);
-            const int64_t now = SteadyMs();
-            if (live || now - shared_->lastStoreMs >= kPreviewFrameMs) {
-                shared_->lastStoreMs = now;
-                StoreSampleFrame(*shared_, sample);
+                return S_OK;
+            }
+            if (sample && !(flags & MF_SOURCE_READERF_ENDOFSTREAM)) {
+                // A LIVE tap stores EVERY sample — the camera's own rate is the
+                // program rate (the missing half of the "video bus lags on HDMI
+                // and NDI" fix; the other half is that this gate used to be the
+                // only rate the compositor ever saw). A pane tap keeps the 15
+                // fps gate, which is what keeps a wall of thumbnails cheap.
+                const bool live = shared_->live.load(std::memory_order_relaxed);
+                const int64_t now = SteadyMs();
+                if (live || now - shared_->lastStoreMs >= kPreviewFrameMs) {
+                    shared_->lastStoreMs = now;
+                    store = true;
+                }
             }
         }
-        if (stopping) {
-            shared_->cv.notify_all();   // the worker is waiting to shut this down
-            return S_OK;
+        if (store)
+            StoreSampleFrame(*shared_, sample);
+        // Re-arm under the lock, so the worker cannot release `reader` between
+        // the load and the call (a cancelled read that raced that far would be a
+        // call into a released object).
+        {
+            const std::lock_guard<std::mutex> lock(shared_->mutex);
+            stopping = stopping || !shared_->running.load() || shared_->stopping;
+            if (stopping) {
+                shared_->cv.notify_all();   // the worker is waiting to shut this down
+                return S_OK;
+            }
+            IMFSourceReader *reader = shared_->reader.load();
+            if (reader)   // the next sample; this is the whole read loop
+                reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0,
+                                   nullptr, nullptr, nullptr, nullptr);
         }
-        IMFSourceReader *reader = shared_->reader.load();
-        if (reader)   // the next sample; this is the whole read loop
-            reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0,
-                               nullptr, nullptr, nullptr, nullptr);
         return S_OK;
     }
 
@@ -1664,8 +1729,18 @@ void WindowsVideo::ScreenPreviewThread(PreviewTap &tap)
                 // The JPEG is the small tiles' feed: every grab for a pane (the
                 // caller's own ~15 fps wait paces it), 5 Hz for a live tap whose
                 // real output is the pixels above.
-                if (!live || now - tap.shared->lastEncodeMs >= kLiveJpegMs) {
-                    tap.shared->lastEncodeMs = now;
+                // The timestamp is the TAP's, and the camera path now owns it
+                // under the tap's mutex (see StoreSampleFrame) — so read and
+                // stamp it there too, and encode outside (a 1080p encode is
+                // milliseconds; it must not be under the lock).
+                bool encodeJpeg = true;
+                {
+                    const std::lock_guard<std::mutex> frameLock(tap.shared->mutex);
+                    encodeJpeg = !live || now - tap.shared->lastEncodeMs >= kLiveJpegMs;
+                    if (encodeJpeg)
+                        tap.shared->lastEncodeMs = now;
+                }
+                if (encodeJpeg) {
                     // Quality 85 (was 70) — quality-70 JPEG blocking on fine UI
                     // text is what "rumbled up" chat text actually was.
                     std::vector<uint8_t> jpeg = EncodeJpeg(static_cast<const uint8_t *>(bits),
@@ -1821,7 +1896,9 @@ std::vector<uint8_t> WindowsVideo::PreviewFrame(const std::string &deviceId)
 IVideo::DecodedFrame WindowsVideo::PreviewFramePixels(const std::string &deviceId)
 {
     IVideo::DecodedFrame out;
+    std::shared_ptr<const std::vector<uint8_t>> pixels;
     std::vector<uint8_t> jpeg;
+    uint32_t w = 0, h = 0;
     {
         const std::lock_guard<std::mutex> lock(previews_->mutex);
         auto it = previews_->taps.find(deviceId);
@@ -1829,17 +1906,44 @@ IVideo::DecodedFrame WindowsVideo::PreviewFramePixels(const std::string &deviceI
             return {};
         auto &shared = *it->second->shared;
         const std::lock_guard<std::mutex> frameLock(shared.mutex);
-        out.seq = shared.frameSeq;
+        out.seq = shared.frameSeq.load(std::memory_order_acquire);
         // A LIVE tap already keeps the frame unpacked, in the contract's own
         // format — one copy, no JPEG decode on the puller. That is the whole
         // program path; the decode below only serves a pane tap.
-        if (!shared.latestRgba.empty()) {
-            out.width = shared.rgbaW;
-            out.height = shared.rgbaH;
-            out.rgba = shared.latestRgba;
+        //
+        // The TAKE of it is a pointer move; the copy itself happens BELOW, with
+        // both locks released. Copying 8 MB while holding the tap's mutex is the
+        // handshake that used to throttle the capture callback (see
+        // VideoTapShared::latestRgba) — the buffer cannot change under us either
+        // way, because the capture thread publishes a new one per frame instead
+        // of writing into this one.
+        pixels = shared.latestRgba;
+        w = shared.rgbaW;
+        h = shared.rgbaH;
+        if (!pixels)
+            jpeg = shared.latestJpeg;
+    }
+    if (pixels) {
+        out.width = w;
+        out.height = h;
+        // MEASUREMENT HOOK, not a setting: BPS_TAP_COPY_UNDER_LOCK reproduces the
+        // OLD hand-off for one run — the 8 MB copy taken with the tap's mutex
+        // held, i.e. the capture callback waiting on its consumers. See
+        // tools/selftest/run_videoperf_test.sh, which runs the same feed with and
+        // without it.
+        static const bool legacyLockedCopy = std::getenv("BPS_TAP_COPY_UNDER_LOCK") != nullptr;
+        if (legacyLockedCopy) {
+            const std::lock_guard<std::mutex> lock(previews_->mutex);
+            auto it = previews_->taps.find(deviceId);
+            if (it != previews_->taps.end()) {
+                const std::lock_guard<std::mutex> frameLock(it->second->shared->mutex);
+                if (it->second->shared->latestRgba)
+                    out.rgba = *it->second->shared->latestRgba;
+            }
             return out;
         }
-        jpeg = shared.latestJpeg;
+        out.rgba = *pixels;   // the only copy, and it holds no lock
+        return out;
     }
     if (jpeg.empty())
         return {};
@@ -1856,8 +1960,10 @@ uint64_t WindowsVideo::PreviewFrameSeq(const std::string &deviceId)
     auto it = previews_->taps.find(deviceId);
     if (it == previews_->taps.end())
         return 0;
-    const std::lock_guard<std::mutex> frameLock(it->second->shared->mutex);
-    return it->second->shared->frameSeq;
+    // Atomic: this is asked on EVERY scene build, for every output, and the
+    // answer must never wait on the tap's own mutex (that mutex is the capture
+    // path's). No pixel is touched, so there is nothing to be consistent with.
+    return it->second->shared->frameSeq.load(std::memory_order_acquire);
 }
 
 void WindowsVideo::SetPreviewLive(const std::string &deviceId, bool live)
@@ -1878,7 +1984,7 @@ void WindowsVideo::SetPreviewLive(const std::string &deviceId, bool live)
             // Back to a pane: the stale pixels must not keep answering as the
             // newest frame (the JPEG path is the pane's, and the next grab or
             // sample overwrites it).
-            shared.latestRgba.clear();
+            shared.latestRgba.reset();
             shared.rgbaW = shared.rgbaH = 0;
         }
     }

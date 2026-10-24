@@ -5,7 +5,7 @@ import VGRPresenterUI
 // colours and measurements (defaultThemes.ts, MaterialButton.svelte, FloatingInputs.svelte).
 //
 //   no project open   a header ("Projects" and a vertical-dots menu), then cards of folders and projects: every root folder is a card
-//                     with its contents, the projects that are in no folder share the "Unlabeled" card. A click opens a project.
+//                     with its contents, the projects that are in no folder share the "No Folder" card. A click opens a project.
 //   a project open    a header (back arrow, its name, the dots menu), then cards of its items: a card starts at each section, the
 //                     section heading first, then what the section holds. A click puts an item on the centre page.
 //   the + button      bottom right, a gradient ring that turns its plus into an x while its menu is open. The menu is a column of
@@ -83,7 +83,7 @@ Item {
             else if (row.depth === 0) loose.push(row)
             else if (current) current.rows.push(row)
         })
-        if (loose.length > 0) cards.push({ title: qsTr("Unlabeled"), rows: loose })
+        if (loose.length > 0) cards.push({ title: qsTr("No Folder"), rows: loose })
         return cards
     }
     // An open project's cards: one starts at each section.
@@ -301,29 +301,20 @@ Item {
                     required property var modelData
                     width: treeColumn.width
                     height: cardBody.height
-                    clip: true
-                    // Folder contents sit in their own inset box, like the
-                    // reference layout; the folder row above stays full width.
-                    Rectangle {
-                        visible: card.modelData.title === "" && card.modelData.rows.length > 1
-                        x: 10
-                        y: 34
-                        width: parent.width - 20
-                        height: parent.height - 34
-                        radius: 8
-                        color: root.cDarker
-                        border.color: root.cLighter
-                    }
 
                     Column {
                         id: cardBody
                         width: parent.width
-                        // "Unlabeled": the heading of the projects that are in no folder
+                        // No gap between a folder's header row and its own
+                        // children — one continuous block, like the
+                        // reference. Cards (different folders) still get
+                        // breathing room from treeColumn's own spacing.
+                        spacing: 0
+                        // "No Folder": the heading of the projects that are in no folder
                         Rectangle {
                             visible: card.modelData.title !== ""
                             width: parent.width; height: 26
-                            color: root.cDarkest
-                            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.cLighter }
+                            color: "transparent"
                             Text { x: 14; anchors.verticalCenter: parent.verticalCenter; text: card.modelData.title; opacity: 0.8; color: root.cText; font.family: Theme.fontFamily; font.pixelSize: 15; font.weight: Font.Medium }
                         }
 
@@ -336,26 +327,21 @@ Item {
                                 readonly property bool isFolder: modelData.type === "folder"
                                 readonly property bool active: !isFolder && modelData.id === ProjectService.activeProjectId
                                 readonly property bool inFolder: card.modelData.title === ""
-                                readonly property real indent: 8 * modelData.depth
-                                // Nested project rows begin at their document
-                                // icon, while folder rows still span the card.
-                                x: indent + (!isFolder ? 15 : 0)
-                                width: card.width - x - (!isFolder && inFolder ? 10 : 0)
-                                height: isFolder ? 34 : 28
-                                // Folder rows span the panel; nested project
-                                // rows reveal the shared inset box beneath them.
+                                readonly property real indent: 14 * modelData.depth
+                                // Flat, edge-to-edge rows — EVERY row (folder
+                                // or a project nested under one) starts right
+                                // at the panel's own left edge, matching the
+                                // reference: a folder's children sit flush
+                                // with it, not shifted right. Depth still
+                                // nudges the row's own CONTENT (see the Row
+                                // below), just not its background bounds.
+                                x: 0
+                                width: card.width
+                                height: isFolder ? 34 : 30
+                                radius: 0
                                 color: root.dropFolder === modelData.id ? Qt.alpha(Theme.accent, 0.19)
-                                     : (isFolder || active ? root.cDarkest
-                                        : (inFolder ? "transparent" : root.cDarker))
+                                     : (isFolder || active ? root.cDarkest : root.cDarker)
                                 opacity: modelData.archived ? 0.55 : 1
-
-                                // The app's shared stripe applies only to root-level
-                                // rows, leaving boxed folder contents uniform.
-                                Rectangle {
-                                    anchors.fill: parent
-                                    color: treeRow.isFolder || treeRow.modelData.depth > 0
-                                         ? "transparent" : ListRows.stripeOverlay(treeRow.index)
-                                }
 
                                 // The pointer's light is the app's shared hover
                                 // layer, so a project row fades like every other
@@ -370,11 +356,14 @@ Item {
                                     glowColor: Qt.alpha(Theme.accent, 0.18)
                                 }
 
-                                // the 4px left edge of a tab button: the accent while it is the open one
+                                // Flush at the row's own left edge (no rounded
+                                // corner to overhang now) — the accent bar the
+                                // reference design uses to mark a folder or
+                                // the active project.
                                 Rectangle { width: 4; height: parent.height; color: treeRow.active || treeRow.isFolder ? root.cSecondary : root.cDarker }
 
                                 Row {
-                                    x: treeRow.isFolder ? 15 : 0
+                                    x: 14 + treeRow.indent
                                     anchors.verticalCenter: parent.verticalCenter
                                     spacing: 8
                                     IconGlyph {
@@ -389,7 +378,7 @@ Item {
                                         // Project names fill from the document
                                         // icon to the card's right edge; folder
                                         // names reserve room for the item count.
-                                        width: Math.max(0, treeRow.width - (treeRow.isFolder ? 100 : 32))
+                                        width: Math.max(0, treeRow.width - treeRow.indent - (treeRow.isFolder ? 100 : 32))
                                         text: treeRow.modelData.name
                                         color: root.cText; elide: Text.ElideRight
                                         font.family: Theme.fontFamily; font.pixelSize: 16
@@ -492,13 +481,14 @@ Item {
                     width: itemColumn.width - 5
                     height: itemCardBody.height + 2 * 8 + 2
                     Item {
-                        y: 8; width: parent.width; height: itemCardBody.height + 2; clip: true
-                        // (a card's left border and rounded corners are outside the panel, like the tree's)
-                        Rectangle {
-                            x: -12; width: parent.width + 12; height: parent.height; radius: 10
-                            color: root.cDarker
-                            border.color: itemCard.modelData.color !== "" && itemCard.modelData.color !== undefined ? itemCard.modelData.color : root.cLighter
-                        }
+                        y: 8; width: parent.width; height: itemCardBody.height + 2
+                        // No more boxed card around a section's rows (flat
+                        // FreeShow-style list, like the tree above) — each row
+                        // is its own rounded pill, inset from the panel edge.
+                        // itemCardBody keeps zero spacing: the drag/drop
+                        // insertion math in root.itemLayout computes each
+                        // row's y from sectionHeight/itemHeight alone, with no
+                        // inter-row gap, so the Column can't add one either.
                         Column {
                             id: itemCardBody
                             y: 1; width: parent.width
@@ -512,21 +502,14 @@ Item {
                                     readonly property bool isSection: modelData.type === "section"
                                     readonly property bool selected: modelData.index === ProjectService.activeIndex
                                     readonly property color sectionColor: modelData.color !== "" && modelData.color !== undefined ? modelData.color : ""
+                                    // Flat, edge-to-edge (no floating pill
+                                    // inset) — matches the tree view above and
+                                    // the reference flat-list design.
                                     width: itemCardBody.width
                                     height: isSection ? root.sectionHeight : root.itemHeight
+                                    radius: 0
                                     color: isSection ? (sectionColor !== "" ? Qt.rgba(Qt.color(sectionColor).r, Qt.color(sectionColor).g, Qt.color(sectionColor).b, 0.2) : root.cDarkest)
-                                                     : (selected ? root.cDarkest : "transparent")
-
-                                    // The app's shared list stripe (ListRows), laid
-                                    // over the row's own ground so the project's
-                                    // items alternate like every other list while
-                                    // selection and a section's tint survive.
-                                    Rectangle {
-                                        anchors.fill: parent
-                                        color: itemRow.isSection
-                                               ? "transparent"
-                                               : ListRows.stripeOverlay(itemRow.index)
-                                    }
+                                                     : (selected ? root.cDarkest : root.cDarker)
 
                                     // Hover = the shared layer (selection and a
                                     // section's tint are state, so they stay on
@@ -538,8 +521,8 @@ Item {
                                         glowColor: Theme.hoverBg
                                     }
 
-                                    // a section has a line above it, the item list has the tab edge
-                                    Rectangle { visible: itemRow.isSection && itemRow.modelData.index > 0; width: parent.width; height: 1; color: root.cLighter }
+                                    // Flush left accent bar — the reference
+                                    // design's marker for the selected item.
                                     Rectangle { visible: !itemRow.isSection; width: 4; height: parent.height; color: itemRow.selected ? root.cSecondary : root.cDarker }
 
                                     Row {
@@ -554,7 +537,7 @@ Item {
                                         }
                                         Text {
                                             anchors.verticalCenter: parent.verticalCenter
-                                            width: itemCardBody.width - (itemRow.isSection ? 32 : 60) - (itemRow.modelData.layout ? 70 : 0)
+                                            width: itemRow.width - (itemRow.isSection ? 32 : 60) - (itemRow.modelData.layout ? 70 : 0)
                                             text: itemRow.modelData.name !== "" ? itemRow.modelData.name : qsTr("Unnamed")
                                             color: itemRow.isSection && itemRow.sectionColor !== "" ? Qt.lighter(itemRow.sectionColor, 1.4) : root.cText
                                             elide: Text.ElideRight

@@ -85,7 +85,13 @@ QtObject {
         previousPassage: "Up",
         nextPassage: "Down",
         previousSlide: "Left",
-        nextSlide: "Right"
+        nextSlide: "Right",
+        // The library dock's tab row (Shows, Media, Overlays, Templates,
+        // Scripture, The Table, Calendar, Functions) — Ctrl+1 through the
+        // last tab, in the row's own left-to-right order. ONE array entry,
+        // read by index (LibraryTabBar's Repeater), so adding a ninth tab
+        // is a single new chord here rather than a new named binding.
+        libraryTabs: ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8"]
     })
 
     // The sequences for an action name (one entry for most, two for `accept`),

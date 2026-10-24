@@ -13,6 +13,7 @@
 
 #include <QGuiApplication>
 #include <QJSEngine>
+#include <QRegularExpression>
 #include <QScreen>
 #include <QStringList>
 #include <QTimer>
@@ -65,10 +66,37 @@ bool isScreenTransport(const OutputItem &o)
 QPointer<OutputListModel> OutputListModel::s_instance = nullptr;
 QPointer<StyleListModel> OutputListModel::s_adoptedStyleRoster = nullptr;
 
-// The one instance, for C++ AND QML — see the header for why this is eager.
+// The one instance, for C++ AND QML — see the header for why this is eager,
+// and why it is the CONSTRUCTED object rather than a private static.
 OutputListModel *OutputListModel::instance()
 {
-    static OutputListModel s;    return &s;
+    // Whichever object exists first IS the roster: the constructor below
+    // registers itself here, so this returns the one QML built when QML got
+    // there first (it always does — the singleton is constructed during Main.qml
+    // load) instead of building a second roster beside it. The static below is
+    // then only the pre-QML bootstrap (a C++ reader that runs before the
+    // interface loads), and once QML's object exists the hand-over in
+    // adoptEngineInstance points every later reader at it.
+    if (s_instance)
+        return s_instance;
+    static OutputListModel s;
+    return &s;
+}
+
+// The deliberate half of the rule above (main.cpp calls it after
+// loadFromModule): the engine's own object becomes the roster every C++ reader
+// resolves, even if a reader built the static here first. Two rosters is the
+// shape of "an output I just created never sends NDI until I restart", so the
+// join is made once, explicitly, instead of depending on construction order.
+void OutputListModel::adoptEngineInstance(OutputListModel *model)
+{
+    if (!model)
+        return;
+    if (s_instance == model)
+        return;
+    s_instance = model;
+    qInfo("OutputListModel: adopted the QML engine's roster object %p (rows=%d)",
+          static_cast<void *>(model), model->rowCount());
 }
 
 OutputListModel *OutputListModel::create(QQmlEngine *engine, QJSEngine *jsEngine)
@@ -90,9 +118,16 @@ OutputListModel::OutputListModel(QObject *parent)
     if (qEnvironmentVariableIsSet("VGR_STYLEBG_TEST"))
         fprintf(stderr, "[SELFTEST-STYLEBG-ID] OutputListModel ctor this=%p s_instance=%p\n",
                 static_cast<void *>(this), static_cast<void *>(s_instance.data()));
-    Q_ASSERT_X(!s_instance || s_instance == this, "OutputListModel",
-               "a second OutputListModel was constructed — instance() would "
-               "silently rebind and every C++ reader would hold the wrong one");
+    // A SECOND object is possible and no longer fatal: QML default-constructs
+    // the registered singleton, so if a C++ reader built the static here first
+    // (or the QML side is constructed after one), this logs it and instance()
+    // follows the newest object — the adoption in main.cpp then makes it
+    // deliberate. It used to be a silent split: QML edited one roster while
+    // every reader resolved the other.
+    if (s_instance && s_instance != this)
+        qWarning("OutputListModel: a second roster object was constructed (%p, existing %p) — "
+                 "instance() now follows the new one; main.cpp adopts the QML-side object explicitly",
+                 static_cast<void *>(this), static_cast<void *>(s_instance.data()));
     s_instance = this;
 
     // THE BOOT GAP (found live: "my saved styles/outputs don't show after a
@@ -210,6 +245,23 @@ void OutputListModel::reloadFromStore()
         m_outputs.append(item);
     }
 
+    // HEAL a roster saved before the one-name-per-row rule (or written by the
+    // old add path, whose auto name was the row count and could therefore repeat
+    // an existing "New Screen N"). Two rows with one name are one output to
+    // every reader — one NDI provider, one send clock, one state entry, one
+    // frame buffer — so the LATER row could never be fed and nothing could
+    // report it. Renamed, never dropped: nothing the operator configured is
+    // thrown away, and saveRoster() below persists the repair.
+    for (int i = 0; i < m_outputs.size(); ++i) {
+        const QString unique = uniqueOutputName(m_outputs.at(i).name, i);
+        if (unique == m_outputs.at(i).name)
+            continue;
+        qWarning("OutputListModel: two outputs were saved as '%s' — renaming this one to '%s' "
+                 "(a name is a roster key: two rows sharing it share one NDI sender)",
+                 qUtf8Printable(m_outputs.at(i).name), qUtf8Printable(unique));
+        m_outputs[i].name = unique;
+    }
+
     // First-run seed only: a brand-new (EMPTY) roster starts with the
     // primary display so the Outputs screen isn't empty. A DELETED Main
     // Output stays deleted — no re-seed on a non-empty roster (the user's
@@ -294,7 +346,13 @@ void OutputListModel::saveRoster()
             ndiNames.append(item.name);
         }
     }
-    qInfo("OutputListModel: roster saved rows=%d enabledNdi=%d names=[%s] persisted=%d booted=%d",
+    // (`model=` is the object the write landed on. Do NOT resolve instance()
+    // here: reloadFromStore() calls this function, and reloadFromStore() runs
+    // from the singleton's own constructor — a re-entrant instance() call hits
+    // the static-init guard and deadlocks the GUI thread at QML load. That is
+    // how a diagnostic line froze the whole startup.)
+    qInfo("OutputListModel: roster saved model=%p rows=%d enabledNdi=%d names=[%s] persisted=%d booted=%d",
+          static_cast<void *>(this),
           m_outputs.size(), enabledNdi, qUtf8Printable(ndiNames.join(QStringLiteral(", "))),
           saveResult.ok() ? 1 : 0, EngineBridge::instance().booted() ? 1 : 0);
     if (!saveResult.ok())
@@ -488,6 +546,51 @@ QHash<int, QByteArray> OutputListModel::roleNames() const
     };
 }
 
+// See the header: one name per row, because the name is the roster's key.
+QString OutputListModel::uniqueOutputName(const QString &candidate, int skipIndex) const
+{
+    auto taken = [this, skipIndex](const QString &name) {
+        for (int i = 0; i < m_outputs.size(); ++i)
+            if (i != skipIndex && m_outputs.at(i).name.compare(name, Qt::CaseInsensitive) == 0)
+                return true;
+        return false;
+    };
+
+    const QString base = candidate.trimmed();
+    if (base.isEmpty() || !taken(base))
+        return base;
+
+    // An auto name ("New Screen 7") keeps its FAMILY: take the first free
+    // number, so the result reads like a name the app would have chosen, not
+    // "New Screen 7 2".
+    static const QRegularExpression autoName(
+        QStringLiteral("^(New Screen|Output)\\s+(\\d+)$"));
+    const QRegularExpressionMatch m = autoName.match(base);
+    const QString prefix = m.hasMatch() ? m.captured(1) : QString();
+    if (!prefix.isEmpty()) {
+        // Continue the family ABOVE this name's own number ("New Screen 4" …
+        // "New Screen 8"), so a healed roster still reads in order; only if
+        // nothing above is free does it wrap to the low numbers.
+        const int own = m.captured(2).toInt();
+        for (int pass = 0; pass < 2; ++pass) {
+            for (int n = pass == 0 ? own + 1 : 1; n < 100000; ++n) {
+                if (pass == 1 && n > own)
+                    break;
+                const QString next = QStringLiteral("%1 %2").arg(prefix).arg(n);
+                if (!taken(next))
+                    return next;
+            }
+        }
+        return base;
+    }
+    for (int n = 2; n < 100000; ++n) {
+        const QString next = QStringLiteral("%1 %2").arg(base).arg(n);
+        if (!taken(next))
+            return next;
+    }
+    return base;
+}
+
 void OutputListModel::addScreen(const QString &name, const QString &type,
                                 const QString &resolution, const QString &refresh,
                                 const QString &testPattern)
@@ -495,10 +598,19 @@ void OutputListModel::addScreen(const QString &name, const QString &type,
     const QString trimmed = name.trimmed();
     const QString res = resolution.trimmed();
 
+    // The auto name is a NUMBER IN A FAMILY, not the row count: a roster of
+    // {Main Output, New Screen 2, New Screen 4} used to mint a second
+    // "New Screen 4" for the next add, and a duplicated name is a duplicated
+    // KEY — the new row then shared the existing one's NDI provider, send
+    // clock, state and frame buffer, so it never sent a frame of its own.
+    // uniqueOutputName takes the first free number instead.
+    const QString wanted = trimmed.isEmpty()
+        ? QStringLiteral("New Screen %1").arg(m_outputs.size() + 1)
+        : trimmed;
+
     beginInsertRows(QModelIndex(), m_outputs.size(), m_outputs.size());
     OutputItem item;
-    item.name = trimmed.isEmpty() ? QStringLiteral("New Screen %1").arg(m_outputs.size() + 1)
-                                  : trimmed;
+    item.name = uniqueOutputName(wanted);
     item.kind = type;
     item.res = res.isEmpty() ? QStringLiteral("1920×1080") : res;
     item.refresh = refresh.trimmed().isEmpty() ? QStringLiteral("60 Hz") : refresh.trimmed();
@@ -623,10 +735,15 @@ void OutputListModel::renameOutput(int index, const QString &name)
     if (index < 0 || index >= m_outputs.size())
         return;
     const QString trimmed = name.trimmed();
-    if (trimmed.isEmpty() || m_outputs[index].name == trimmed)
+    if (trimmed.isEmpty())
+        return;
+    // A rename must not collide either: two rows with one name are one output
+    // to every reader (see uniqueOutputName).
+    const QString finalName = uniqueOutputName(trimmed, index);
+    if (m_outputs[index].name == finalName)
         return;
 
-    m_outputs[index].name = trimmed;
+    m_outputs[index].name = finalName;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { NameRole });
     saveRoster();

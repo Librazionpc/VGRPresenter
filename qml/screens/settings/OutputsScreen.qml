@@ -290,20 +290,12 @@ Item {
         Column {
             id: layout
             x: Theme.space6
-            y: Theme.space6
+            // Below the fixed title/Add-Output header (pinned to root, same
+            // as addOutputBtn) so the tiles flow underneath it instead of
+            // scrolling the title away with them.
+            y: Theme.space6 * 2 + addOutputBtn.height
             width: flick.width - Theme.space6
             spacing: Theme.space6
-
-            Column {
-                spacing: Theme.space1
-                Text {
-                    text: "Outputs"
-                    color: Theme.textPrimary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textXl
-                    font.weight: Font.DemiBold
-                }
-            }
 
             // ---- Screens list ----
             Repeater {
@@ -359,6 +351,79 @@ Item {
                             && card.screenName !== "" && LiveOutputService.live)
                         || (card.kind !== "HDMI" && card.kind !== "NDI"
                             && card.active && LiveOutputService.live)
+
+                    // ---- THIS ROW'S OWN RUNTIME (every kind, not just NDI) --
+                    // The live line under a row used to exist only for the kinds
+                    // with a sender of their own (NDI, SDI), so an HDMI row said
+                    // nothing about itself while an NDI row reported frames —
+                    // read by the operator as "the notification only exists for
+                    // one output". Every output has a feed, and the engine
+                    // measures the same two facts for all of them
+                    // (RenderEngine::OutputFeedAges: frames delivered + how long
+                    // since the last present), which LiveOutputService publishes
+                    // as outputRuntime. So every row reports the same way.
+                    readonly property var runtime: LiveOutputService.outputRuntime[card.name] || null
+                    // outputFeedStalled() is an invokable — an invokable alone is
+                    // opaque to QML's dependency tracking, so the revision is read
+                    // to make this binding re-run when the stall set changes.
+                    readonly property bool stalledNow: {
+                        void LiveOutputService.feedHealthRev
+                        return LiveOutputService.live && card.isEnabled
+                            && LiveOutputService.outputFeedStalled(card.name)
+                    }
+                    readonly property bool delivering: !!card.runtime
+                        && card.runtime.presented === true && !card.stalledNow
+                    // ONE line for every row, in the kind's own words. Deliberate
+                    // states first (switched off / off air), then the feed: no
+                    // feed beats a stale frame count, a frame count beats a guess.
+                    // The STAGE-WIDE facts are appended to every kind afterwards,
+                    // because a blackout is exactly as true of the HDMI screen
+                    // as of the NDI feed — that is the whole point of one line
+                    // per row instead of one line per kind.
+                    readonly property string statusText: {
+                        let text = ""
+                        if (!card.isEnabled) {
+                            text = card.kind + " · switched off"
+                        } else if (card.kind === "NDI") {
+                            if (card.ndiFeedIsThisRow) {
+                                const state = LiveOutputService.ndiOutputStates[card.name]
+                                text = "NDI · sending · " + state.frames + " frames"
+                            } else if (card.ndiWarmingIsThisRow) {
+                                text = "NDI · warming up · waiting for the first frame"
+                            } else if (!EngineBridge.ndiAvailable) {
+                                text = "NDI · runtime not installed"
+                            } else {
+                                text = LiveOutputService.live
+                                    ? "NDI · not sending — no frame yet"
+                                    : "NDI · ready (go live to send)"
+                            }
+                        } else if (card.kind === "SDI") {
+                            text = EngineBridge.sdiAvailable
+                                ? "SDI · " + EngineBridge.sdiDevices.length + " DeckLink device(s)"
+                                : "SDI · " + EngineBridge.sdiStatus
+                        } else {
+                            // HDMI / whatever else the roster grows: the row's own
+                            // buffer, counted by the engine.
+                            const rowKind = card.kind
+                            if (!LiveOutputService.live)
+                                text = rowKind + " · ready (go live to send)"
+                            else if (card.delivering)
+                                text = rowKind + " · live · " + card.runtime.frames + " frames delivered"
+                            else
+                                text = rowKind + " · warming up · waiting for the first frame"
+                        }
+                        if (card.isEnabled && LiveOutputService.blackedOut
+                                && text.indexOf("blackout") < 0)
+                            text += " · blackout up"
+                        if (card.isEnabled && card.stalledNow && text.indexOf("no feed") < 0)
+                            text += " · no feed"
+                        return text
+                    }
+                    readonly property color statusColor: !card.isEnabled
+                        ? Theme.textMuted
+                        : (card.stalledNow ? Theme.dangerLight
+                            : (card.ndiFeedIsThisRow || card.delivering ? "#3ddc84"
+                                : (card.ndiWarmingIsThisRow ? Theme.warning : Theme.textMuted)))
 
                     width: layout.width
                     height: cardCol.height + Theme.space5 * 2
@@ -440,63 +505,46 @@ Item {
                             width: parent.width
                         }
 
-                        // NETWORK OUTPUTS — real runtime state, not a label.
+                        // EVERY OUTPUT'S OWN RUNTIME — real state, not a label
+                        // (see statusText above for the per-kind wording).
                         // NDI: the live sender's frame counter while the active
                         // output is sending (the counter only moves when frames
-                        // actually flow), PLUS the SDK's connected-monitor
-                        // count — 0 while sending reads "firewall?". SDI: the
-                        // DeckLink runtime/device truth from the engine.
+                        // actually flow) with the SDK's connected-monitor count
+                        // deciding what "sending" means. SDI: the DeckLink
+                        // runtime/device truth from the engine. HDMI and every
+                        // other kind: this row's own buffer, counted by the
+                        // engine — frames delivered and whether they stopped.
                         Row {
                             spacing: Theme.space2
-                            visible: card.kind === "NDI" || card.kind === "SDI"
                             // The once-per-session firewall ask rides the NDI
-                            // row's visibility: an NDI output on the roster +
+                            // row's presence: an NDI output on the roster +
                             // a usable runtime is exactly the moment it matters.
                             Component.onCompleted: if (card.kind === "NDI") root.maybeRequestNdiFirewall()
 
-                            Rectangle {
+                            // The same dot the monitor wall shows (components/
+                            // OutputRuntimeDot.qml): one component owns the state,
+                            // the colour and the hover detail (this row's own
+                            // numbers on hover), so the two surfaces cannot
+                            // describe one output differently. The row keeps its
+                            // text; the dot pulses here because a row is a status
+                            // surface rather than a picture.
+                            OutputRuntimeDot {
                                 anchors.verticalCenter: parent.verticalCenter
-                                width: 6; height: 6; radius: 3
-                                visible: card.kind === "NDI"
-                                color: card.ndiFeedIsThisRow ? "#3ddc84"
-                                     : (card.ndiWarmingIsThisRow ? Theme.warning : Theme.textMuted)
-
-                                SequentialAnimation on opacity {
-                                    // Pulse while feeding OR warming — a still
-                                    // amber dot reads as "stuck"; the pulse says
-                                    // "working on it" for both states.
-                                    running: card.ndiFeedIsThisRow || card.ndiWarmingIsThisRow
-                                    loops: Animation.Infinite
-                                    NumberAnimation { from: 1; to: 0.3; duration: 700 }
-                                    NumberAnimation { from: 0.3; to: 1; duration: 700 }
-                                }
+                                outputName: card.name
+                                outputEnabled: card.isEnabled
+                                dotSize: 6
+                                width: 6; height: 6
+                                dotColor: card.statusColor
+                                pulse: card.isEnabled && LiveOutputService.live
+                                       && (card.ndiFeedIsThisRow || card.ndiWarmingIsThisRow
+                                           || card.delivering || card.stalledNow)
                             }
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
-                                text: {
-                                    if (card.kind === "NDI") {
-                                        // The monitor-connection truth from the
-                                        // SDK: sending with 0 connected receivers
-                                        // is THE firewall symptom — frames go
-                                        // out, nothing accepts them.
-                                        if (card.ndiFeedIsThisRow) {
-                                            const state = LiveOutputService.ndiOutputStates[card.name]
-                                            return "NDI · sending · " + state.frames + " frames"
-                                        }
-                                        if (card.ndiWarmingIsThisRow)
-                                            return "NDI · warming up · waiting for the first frame"
-                                        return "NDI · " + (EngineBridge.ndiAvailable
-                                                          ? "ready (go live to send)"
-                                                          : "runtime not installed")
-                                    }
-                                    if (card.kind === "SDI")
-                                        return EngineBridge.sdiAvailable
-                                            ? "SDI · " + EngineBridge.sdiDevices.length + " DeckLink device(s)"
-                                            : "SDI · " + EngineBridge.sdiStatus
-                                    return ""
-                                }
-                                color: card.ndiFeedIsThisRow ? "#3ddc84"
-                                     : (card.ndiWarmingIsThisRow ? Theme.warning : Theme.textMuted)
+                                width: cardCol.width - 20
+                                elide: Text.ElideRight
+                                text: card.statusText
+                                color: card.statusColor
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.textXs
                             }
@@ -566,6 +614,33 @@ Item {
             }
 
         }
+    }
+
+    // The header needs its OWN ground, not just a higher paint order: without
+    // this, a scrolled-up card shows straight through the title/button (the
+    // text read as laid INSIDE the first row instead of pinned above it).
+    // Same surface the settings card itself sits on, so there's no seam.
+    Rectangle {
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: Theme.space6 * 2 + addOutputBtn.height
+        color: Theme.surface
+    }
+
+    // "Outputs" title — pinned alongside the Add-Output button (sits above
+    // the Flickable in paint order, same as that button) so the header
+    // stays put while the roster scrolls underneath it, instead of
+    // scrolling away with the tiles it used to sit inside.
+    Text {
+        anchors.left: parent.left
+        anchors.leftMargin: Theme.space6
+        anchors.verticalCenter: addOutputBtn.verticalCenter
+        text: "Outputs"
+        color: Theme.textPrimary
+        font.family: Theme.fontFamily
+        font.pixelSize: Theme.textXl
+        font.weight: Font.DemiBold
     }
 
     // "+ Add Output" pinned top-right — always visible no matter how far

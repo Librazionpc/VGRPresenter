@@ -16,6 +16,7 @@ Rectangle {
     property string level: "info"
     property string title: ""
     property string message: ""
+    property bool active: true
     // The NAMES this notice is about (a device, a source, a show…) — the crux the
     // eye should land on first. Rendered bold inside the message, the rest of the
     // sentence stays plain ("not the whole text, just the main crux"). A string
@@ -33,9 +34,9 @@ Rectangle {
     // notice that offers nothing, where the card is exactly what it was before.
     property var action: null
     property int duration: 5000
-    // How many identical notices this ONE card stands for (NotificationCenter
-    // coalesces a repeat onto the card already on screen instead of stacking a
-    // second copy), and a nonce that moves on every one of them.
+    // How many identical notices this ONE card stands for, plus the front
+    // queue item's id. The id changes only when the next notice becomes active;
+    // repeats and queue appends do not restart this card's timeout.
     property int groupCount: 1
     property int nonce: 1
 
@@ -124,6 +125,7 @@ Rectangle {
     }
 
     width: 320
+    visible: root.active
     implicitHeight: contentColumn.implicitHeight + Theme.space4 * 2
     radius: Theme.radiusLg
     color: Theme.card
@@ -244,15 +246,15 @@ Rectangle {
     Timer {
         id: autoTimer
         interval: root.duration
-        running: !hoverArea.containsMouse
+        running: root.active && !hoverArea.containsMouse
         onTriggered: root.dismissed()
     }
 
-    // A repeat of this same notice refreshed this card instead of stacking a
-    // second one, so the countdown starts over: the newest occurrence gets the
-    // same reading time as the first. Not while the pointer is holding the card
-    // open, where the timer is deliberately off (see the hover behaviour above).
-    onNonceChanged: if (!hoverArea.containsMouse) autoTimer.restart()
+    // Start a fresh reading window only when a queued notice becomes active.
+    // Repeats and newly queued notices do not change the active id. Hovering
+    // pauses the timer; leaving resumes it with a full reading window.
+    onActiveChanged: if (active) autoTimer.restart()
+    onNonceChanged: if (active && !hoverArea.containsMouse) autoTimer.restart()
 
     MouseArea {
         id: hoverArea

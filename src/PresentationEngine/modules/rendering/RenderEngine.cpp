@@ -466,6 +466,9 @@ std::vector<RenderEngine::OutputFeedAge> RenderEngine::OutputFeedAges() const {
         OutputFeedAge row;
         row.name = output->Name();
         row.enabled = output->Enabled();
+        // The output's own delivered-frame count (atomic, no device, no frame
+        // copy) — the same fact the NDI pill shows, available for every kind.
+        row.frames = output->FramesReceived();
         const int64_t stamp = output->LastPresentSteadyMs();
         row.ageMs = stamp > 0 ? now - stamp : -1;
         out.push_back(std::move(row));

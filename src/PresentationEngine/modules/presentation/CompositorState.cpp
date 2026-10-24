@@ -45,6 +45,7 @@ void CompositorState::SetMediaFrame(MediaFrame frame) {
         std::lock_guard<std::mutex> lock(mutex_);
         flipped = mediaFrame_.empty() != incomingEmpty;
         mediaFrame_ = std::move(frame);
+        ++mediaSeq_;
     }
     if (!flipped)
         return;   // same state as before — nothing new to report
@@ -61,6 +62,15 @@ void CompositorState::SetMediaFit(std::string fit) {
     // (the next SetMediaFrame carries its own from the take).
     if (mediaFrame_.empty()) return;
     mediaFrame_.fit = std::move(fit);
+    // A fit change REPLACES the picture's layout without new pixels, and a
+    // consumer that skips an unchanged frame (see GetMediaSeq) must not skip
+    // this one: the numbers say something moved.
+    ++mediaSeq_;
+}
+
+uint64_t CompositorState::GetMediaSeq() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return mediaSeq_;
 }
 
 void CompositorState::ClearMedia() {
@@ -126,7 +136,12 @@ void CompositorState::SetBusFeeds(std::vector<BusFeed> feeds) {
         for (auto it = busFrames_.begin(); it != busFrames_.end();) {
             const bool listed = std::any_of(busFeeds_.begin(), busFeeds_.end(),
                                             [&it](const BusFeed& f) { return f.busId == it->first; });
-            it = listed ? std::next(it) : busFrames_.erase(it);
+            if (listed) {
+                it = std::next(it);
+                continue;
+            }
+            busFrameSeqs_.erase(it->first);   // its counter goes with its frame
+            it = busFrames_.erase(it);
         }
     }
     Logger::Instance().Info(std::format("bus feeds: {} -> {}", before, after), "Compositor");
@@ -150,6 +165,7 @@ void CompositorState::SetBusFrame(int busId, MediaFrame frame) {
         width = frame.width;
         height = frame.height;
         slot = std::move(frame);
+        ++busFrameSeqs_[busId];
     }
     if (!flipped)
         return;   // same state as before — one line per transition, not per frame
@@ -167,6 +183,17 @@ CompositorState::MediaFrame CompositorState::GetBusFrame(int busId) const {
     return it == busFrames_.end() ? MediaFrame{} : it->second;
 }
 
+// The cheap half of GetBusFrame: no pixel copy, so a composition can ask "did
+// this bus push anything since I last drew it?" at its own rate (see
+// SceneBuilder::LayerFrameUnchanged). A bus dropped from the feed list lost its
+// counter with its frame (see SetBusFeeds), which is what keeps a re-added bus
+// from being mistaken for the one that left.
+uint64_t CompositorState::GetBusFrameSeq(int busId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = busFrameSeqs_.find(busId);
+    return it == busFrameSeqs_.end() ? 0 : it->second;
+}
+
 bool CompositorState::HasBusFrames() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return std::any_of(busFrames_.begin(), busFrames_.end(),
@@ -176,6 +203,7 @@ bool CompositorState::HasBusFrames() const {
 void CompositorState::ClearBusFrames() {
     std::lock_guard<std::mutex> lock(mutex_);
     busFrames_.clear();
+    busFrameSeqs_.clear();
 }
 
 void CompositorState::SetActiveOverlays(std::vector<ActiveOverlay> overlays) {

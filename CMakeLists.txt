@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(VGRPresenterUI VERSION 0.0.9 LANGUAGES CXX)
+project(VGRPresenterUI VERSION 0.1.0 LANGUAGES CXX)
 
 # C++23 project-wide — the Qt app and the engine (src/PresentationEngine/)
 # build as one project now, one CMakeLists.txt, so they share one dialect
@@ -827,5 +827,55 @@ if(BPS_ENABLE_GUI_THREAD_CHECK)
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
     set_tests_properties(gui_thread PROPERTIES
         LABELS "gui-thread"
+        TIMEOUT 120)
+endif()
+
+# =============================================================================
+# Settings-key guard (tools/check_settings_keys.mjs) — default build
+# =============================================================================
+# AppSettings refuses a key it does not declare ("there is no setting '…'"), and
+# SettingsService turns that into a RED TOAST in front of the operator while the
+# write is simply lost. The interface could therefore name a key that exists
+# nowhere in the engine and nothing noticed until the control was touched:
+# Settings · Outputs' "Fill" wrote `outputs.defaultMediaFit` for months with no
+# descriptor behind it, and every pick toasted and forgot itself.
+#
+# This gate reads BOTH sides instead of restating them — the keys qml/ passes to
+# SettingsService (call form and the `values[…]` map) and every descriptor in
+# AppSettings.cpp, including the per-tab keys generated from the kFillTabs table
+# — then fails on a key that is used and not declared.
+option(BPS_ENABLE_SETTINGS_KEYS_CHECK
+    "Fail the build when the interface names a settings key AppSettings does not declare" ON)
+
+if(BPS_ENABLE_SETTINGS_KEYS_CHECK)
+    if(NOT BPS_NODE_EXE)
+        # Declared by the guards above; find node here so this one can also be
+        # enabled on its own.
+        find_program(BPS_NODE_EXE
+            NAMES node node.exe
+            HINTS ENV NODE_BIN
+            DOC "node runtime used by the settings-key guard")
+    endif()
+    if(NOT BPS_NODE_EXE)
+        message(FATAL_ERROR
+            "check_settings_keys needs node, which was not found on PATH. Install "
+            "node, pass -DBPS_NODE_EXE=/path/to/node (or set NODE_BIN), or build once "
+            "without the guard: -DBPS_ENABLE_SETTINGS_KEYS_CHECK=OFF")
+    endif()
+
+    add_custom_target(settings_keys_check ALL
+        COMMAND "${BPS_NODE_EXE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_settings_keys.mjs"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "check_settings_keys: settings keys the interface uses, declared in AppSettings"
+        VERBATIM)
+    add_dependencies(appVGRPresenterUI settings_keys_check)
+    add_dependencies(bps_unit_tests settings_keys_check)
+
+    # Also a CTest entry (`ctest -R settings_keys`), same ON/OFF switch.
+    add_test(NAME settings_keys
+        COMMAND "${BPS_NODE_EXE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_settings_keys.mjs"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_tests_properties(settings_keys PROPERTIES
+        LABELS "settings-keys"
         TIMEOUT 120)
 endif()

@@ -48,6 +48,7 @@
 
 #include "models/AudioInputListModel.h"
 #include "models/BusListModel.h"
+#include "models/OutputListModel.h"
 #include "models/VideoSourceListModel.h"
 
 #include "core/logging/QtMessagePolicy.hpp"
@@ -764,6 +765,25 @@ int main(int argc, char *argv[])
                                            "hold different instances of them"));
     }
 
+    // ---- THE OUTPUT ROSTER, same one-object rule ---------------------------
+    // The settings screen edits the object THIS engine built (see above), so
+    // OutputListModel::instance() has to resolve that one — otherwise every C++
+    // reader keeps a second roster and only sees what the store held at boot.
+    // That is exactly how an output added during a live session reached
+    // Settings · Outputs and never the NDI feed: the feed's plan is re-read from
+    // instance()'s rows every poll, so a row that lived only in the QML copy got
+    // no sender until the next launch (both copies then hydrate from the same
+    // OutputStore, which is why a restart "fixed" it).
+    auto *outputs = engine.singletonInstance<OutputListModel *>(
+        QStringLiteral("VGRPresenterUI"), QStringLiteral("OutputListModel"));
+    OutputListModel::adoptEngineInstance(outputs);
+    if (!outputs) {
+        EngineBridge::write(QStringLiteral("warning"), QStringLiteral("Startup"),
+                            QStringLiteral("output roster: the QML singleton could not be "
+                                           "resolved; an output added while live may not "
+                                           "reach the outputs that C++ feeds"));
+    }
+
     // The window's own taskbar/alt-tab icon: a QQuickWindow does NOT reliably
     // adopt QGuiApplication::setWindowIcon() on Windows — the exe carried the
     // icon (RC_ICONS) while the taskbar still showed the generic placeholder
@@ -944,6 +964,16 @@ int main(int argc, char *argv[])
         QStringLiteral("SelfTestOutputsLayout"),
         QVariant(qEnvironmentVariableIsSet("VGR_OUTS_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The other half of the same screen (VGR_OUTSLIVE_TEST=1): it goes live, opens
+    // Settings · Outputs and prints EVERY row's own runtime line while live,
+    // blacked out and restored — the report it answers is "the notification is
+    // only instantiated in one output", so the check is per row, not per kind.
+    // Its own env var like the rest: a plain VGR_SELFTEST=1 run must never go
+    // live, open Settings or quit early.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestOutputsLive"),
+        QVariant(qEnvironmentVariableIsSet("VGR_OUTSLIVE_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     // The monitor-wall tile-facts diagnostic (VGR_TILEFACTS_TEST=1): prints what
     // EACH wall tile is drawing — its own style, the composition's facts and
     // which of its pane's layers is visible — in three states (nothing on air, a
@@ -1099,6 +1129,14 @@ int main(int argc, char *argv[])
         QStringLiteral("SelfTestForensics"),
         QVariant(qEnvironmentVariableIsSet("VGR_FORENSICS_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The NDI-late-output scenario: it goes live with one NDI row, adds a
+    // SECOND NDI row mid-session and reads the feed's per-output frame counters —
+    // its own env var like the rest, so a plain VGR_SELFTEST=1 run never edits the
+    // roster.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestNdiLate"),
+        QVariant(qEnvironmentVariableIsSet("VGR_NDILATE_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     // The blank GO LIVE carrier scenario: it takes a real window input, presses
     // GO LIVE with nothing staged (which sends the one blank carrier slide) and
     // quits — the exact live state the "only media doesn't go" report is about,
@@ -1115,6 +1153,16 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty(
         QStringLiteral("SelfTestInputRate"),
         QVariant(qEnvironmentVariableIsSet("VGR_INPUTRATE_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The live-video measurement scenario: takes the first camera, goes LIVE with
+    // it on air and samples EVERY output's delivered frames + last-frame age for
+    // ten seconds — the measured half of "the HDMI video lags when the machine is
+    // stressed" (tools/selftest/run_videoperf_test.sh runs it under CPU load).
+    // Its own env var like the rest, so a plain VGR_SELFTEST=1 run never opens a
+    // camera or goes live.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestVideoPerf"),
+        QVariant(qEnvironmentVariableIsSet("VGR_VIDEOPERF_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     // The blackout scenario: goes live with one real slide, presses the wall
     // toolbar's Blackout control, checks the engine painted an empty frame, then

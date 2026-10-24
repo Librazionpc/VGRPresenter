@@ -88,6 +88,13 @@ public:
         bool empty() const { return width == 0 || height == 0 || rgba.empty(); }
     };
     void SetMediaFrame(MediaFrame frame);
+    // HOW MANY FRAMES HAVE BEEN PUSHED — bumped once per SetMediaFrame, so a
+    // consumer that runs at a DIFFERENT rate than the decoder (the composition
+    // builds up to once per output per tick, a 30 fps file pushes half as
+    // often) can tell "nothing new arrived" without copying the pixel buffer to
+    // find out. See SceneBuilder::LayerFrameUnchanged — that copy was 3 x 8 MB
+    // per build per output for a picture that had not changed.
+    uint64_t GetMediaSeq() const;
     // Changes ONLY the fit of the frame already on air: the operator picking
     // Contain/Cover/Fill while the picture is up must not cost a re-push of its
     // pixels (the decoder will push the next frame regardless). A no-op when
@@ -130,6 +137,11 @@ public:
     void SetBusFeeds(std::vector<BusFeed> feeds);
     std::vector<BusFeed> GetBusFeeds() const;
     void SetBusFrame(int busId, MediaFrame frame);
+    // The same "nothing new arrived" counter, per bus (see GetMediaSeq). 0 means
+    // this bus has never had a frame pushed; a bus that was dropped from the
+    // feed list starts from 0 again, so the plane that names it cannot mistake
+    // its old picture for a current one.
+    uint64_t GetBusFrameSeq(int busId) const;
     // Empty = no frame (the bus's source is not delivering): the renderer
     // clears that plane rather than freezing on the last picture it had.
     MediaFrame GetBusFrame(int busId) const;
@@ -163,6 +175,11 @@ private:
     MediaFrame mediaFrame_;
     std::vector<BusFeed> busFeeds_;
     std::map<int, MediaFrame> busFrames_;
+    // Push counters (see GetMediaSeq / GetBusFrameSeq): bumped under the same
+    // lock as the frame they describe, so a reader that takes a seq and then a
+    // frame cannot pair an old picture with a new number.
+    uint64_t mediaSeq_ = 0;
+    std::map<int, uint64_t> busFrameSeqs_;
     std::vector<ActiveOverlay> activeOverlays_;
 };
 

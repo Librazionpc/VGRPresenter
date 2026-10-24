@@ -3256,6 +3256,32 @@ void TestBusWindowPlane() {
                 if (v) {
                     CHECK(v->FrameRevision() > firstRev);
                     CHECK(v->Frame().width == 4 && v->Frame().height == 4);
+                    // ...and the object KNOWS which frame that was: the bus's own
+                    // push counter rode along with the pixels.
+                    CHECK(v->SourceSeq() == compositor.GetBusFrameSeq(3));
+                    CHECK(v->SourceSeq() != 0);
+
+                    // NOTHING NEW ⇒ NOTHING COPIED. A build that finds the same
+                    // push counter must leave the plane completely alone — same
+                    // picture, same revision, no re-upload. This is the per-frame
+                    // cost that made a live HDMI feed lag on a loaded machine
+                    // (every layer re-copied twice and re-uploaded on EVERY
+                    // build, and a tick builds one scene per output); skipping
+                    // it is only safe while the frame still reaches the plane
+                    // when it DOES move, which the check above pins.
+                    const uint64_t quietRev = v->FrameRevision();
+                    auto quietBuild = builder.BuildSlideScene(pres, slide, style, engine);
+                    CHECK(quietBuild.ok() && quietBuild.value() == built.value());
+                    auto quiet = engine.GetObject(built.value(), "bus:busA");
+                    CHECK(quiet.ok());
+                    if (quiet.ok()) {
+                        auto* q = dynamic_cast<r::VideoObject*>(quiet.value());
+                        CHECK(q != nullptr);
+                        if (q) {
+                            CHECK(q->FrameRevision() == quietRev);
+                            CHECK(q->Frame().width == 4 && q->Frame().height == 4);
+                        }
+                    }
                 }
             }
 

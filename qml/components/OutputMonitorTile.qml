@@ -965,6 +965,44 @@ Rectangle {
         }
     }
 
+    // ---- THIS TILE'S OWN RUNTIME, AS A COLOUR ---------------------------------
+    // The wall used to speak only when something had already died (the "No live
+    // feed" chip): a tile that was working said nothing at all, so "is THIS one
+    // actually sending?" could only be answered in Settings · Outputs. It is now
+    // a DOT (green = frames landing, amber = up but blacked out or stalled, grey =
+    // off air / waiting / switched off) whose hover detail gives the numbers — the
+    // frames this output has received and how long ago the last one landed.
+    //
+    // The dot itself is the shared component (components/OutputRuntimeDot.qml,
+    // built on HoverDetail), which the Outputs rows use too: the state, the
+    // colour and the tip live in one place instead of being re-derived here.
+    // `runtimeState` / `runtimeDot` are kept as read-throughs because the
+    // self-tests and the tile-facts diagnostic read them off the tile.
+    // The dot AND its state word ("live", "off air", "blackout", "no feed", …)
+    // on a dark chip so the word stays readable over video — the numbers are the
+    // hover detail, never printed here.
+    Rectangle {
+        anchors.left: previewPane.left
+        anchors.leftMargin: 8           // clear of the left meter strip
+        anchors.bottom: previewPane.bottom
+        anchors.bottomMargin: 6
+        width: runtimeIndicator.implicitWidth + 12
+        height: runtimeIndicator.implicitHeight + 6
+        radius: 9
+        color: "#b3101219"
+
+        OutputRuntimeDot {
+            id: runtimeIndicator
+            objectName: "selfTestTileRuntime"
+            anchors.centerIn: parent
+            outputName: root.name
+            outputEnabled: root.isEnabled
+            showState: true
+        }
+    }
+    readonly property string runtimeState: runtimeIndicator.state
+    readonly property color runtimeDot: runtimeIndicator.dotColor
+
     // Taken-input marker (the old name footer's right side): purple dot /
     // play glyph + label, so the layer's presence reads even when the feed
     // is hidden behind on-air content — a monitor op must see WHY the

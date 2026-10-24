@@ -157,12 +157,27 @@ public:
     Q_ENUM(Role)
 
     explicit OutputListModel(QObject *parent = nullptr);
-    // Model-to-model callers (StyleListModel::removeStyle) use this.
+    // THE roster, for C++ AND QML.
     //
     // EAGER, not lazy (fixed 2026-10-01). QML_SINGLETON alone let QML build
     // the object itself on first property access, so a C++ reader running
     // earlier got null and silently did nothing.
+    //
+    // AND WHICHEVER OBJECT EXISTS IS THE ROSTER (fixed 2026-10-24). QML does
+    // not call create() below — it DEFAULT-CONSTRUCTS the registered singleton
+    // (see main.cpp's note) — so a plain `static` here built a SECOND roster:
+    // QML edited one, every C++ reader resolved the other, and an output added
+    // mid-session reached the settings screen but never the NDI feed (no row in
+    // the feed's plan, so no sender was armed for it — it only appeared after a
+    // restart, when both copies hydrate from the same OutputStore). Returning
+    // s_instance makes the object the constructor registered the one every
+    // reader gets, so the two halves cannot disagree about the roster.
     static OutputListModel *instance();
+    // Hand over the instance the QML engine actually built, so instance()
+    // resolves it rather than a second, private roster (see main.cpp, which
+    // makes this call after loadFromModule — the same one-object-per-model rule
+    // the routing models follow). Safe to call with null (logged, no-op).
+    static void adoptEngineInstance(OutputListModel *model);
     // See StyleListModel::create's comment: the engine does not call this,
     // which is why the style roster is handed over explicitly at startup.
     static OutputListModel *create(QQmlEngine *engine, QJSEngine *jsEngine);
@@ -213,6 +228,15 @@ public:
     Q_INVOKABLE void setEnabled(int index, bool on);
     Q_INVOKABLE void duplicateOutput(int index);
     Q_INVOKABLE void renameOutput(int index, const QString &name);
+    // One name per row. A name IS this roster's key everywhere else — the NDI
+    // provider map, the per-output send clock, the published per-row state and
+    // the styled frame buffer are all indexed by it — so two rows sharing one
+    // name are ONE output to every reader: the second can never be fed and
+    // nothing can report it (the live report "the output I just created isn't
+    // sending" — its auto name, `New Screen <row count + 1>`, collided with a
+    // row that already had that number). Used by addScreen, renameOutput and
+    // the hydrate-time heal for rosters saved before this rule.
+    QString uniqueOutputName(const QString &candidate, int skipIndex = -1) const;
     Q_INVOKABLE void setKind(int index, const QString &kind);
     Q_INVOKABLE void setResolution(int index, const QString &res);
     Q_INVOKABLE void setRefresh(int index, const QString &refresh);

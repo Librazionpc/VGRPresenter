@@ -274,6 +274,11 @@ Item {
         component ToolButton: Item {
             id: toolBtn
             property string icon: ""
+            // What hovering this glyph explains (components/HoverDetail.qml): the
+            // title names the action, the detail says what it does here — a row
+            // of bare icons is otherwise only decodable by trying them.
+            property string tipTitle: ""
+            property string tipDetail: ""
             property bool enabled2: true
             property bool danger: false
             // Lit (red) vs "clickable but currently off" — distinct from
@@ -315,6 +320,14 @@ Item {
             }
             HoverHandler { id: toolArea; cursorShape: toolBtn.enabled2 ? Qt.PointingHandCursor : Qt.ArrowCursor }
             TapHandler { onTapped: if (toolBtn.enabled2) toolBtn.picked() }
+            // The shared hover detail, laid OVER the button: it takes no clicks
+            // (HoverDetail's click sink is off), so the TapHandler above still
+            // gets every press.
+            HoverDetail {
+                anchors.fill: parent
+                title: toolBtn.tipTitle
+                detail: toolBtn.tipDetail
+            }
         }
 
         // A full-width row button — the Clear all / Show all PAIR below. Same
@@ -326,6 +339,8 @@ Item {
             id: rowBtn
             property string icon: ""
             property string caption: ""
+            property string tipTitle: ""
+            property string tipDetail: ""
             property color tint: Theme.dangerLight
             property bool enabled2: true
             signal picked()
@@ -367,6 +382,11 @@ Item {
             }
             HoverHandler { id: rowArea; cursorShape: rowBtn.enabled2 ? Qt.PointingHandCursor : Qt.ArrowCursor }
             TapHandler { onTapped: if (rowBtn.enabled2) rowBtn.picked() }
+            HoverDetail {
+                anchors.fill: parent
+                title: rowBtn.tipTitle !== "" ? rowBtn.tipTitle : rowBtn.caption
+                detail: rowBtn.tipDetail
+            }
         }
 
         Column {
@@ -401,6 +421,8 @@ Item {
                     enabled2: toolbar.canStep && !(toolbar.multiSlide && toolbar.atStart)
                     onPicked: LiveOutputService.stepPassage(-1)
                     objectName: "selfTestWallPrev"
+                    tipTitle: qsTr("Previous")
+                    tipDetail: qsTr("Step back to the previous slide or passage")
                 }
                 ToolButton {
                     width: parent.btnW; height: 30
@@ -408,6 +430,8 @@ Item {
                     enabled2: toolbar.canStep && !(toolbar.multiSlide && toolbar.atEnd)
                     onPicked: LiveOutputService.stepPassage(1)
                     objectName: "selfTestWallNext"
+                    tipTitle: qsTr("Next")
+                    tipDetail: qsTr("Step forward to the next slide or passage")
                 }
                 // Play: the explicit GO LIVE trigger while nothing is on
                 // air yet (commits whatever's staged — see
@@ -425,6 +449,10 @@ Item {
                         if (!LiveOutputService.live) { LiveOutputService.goLive(); return }
                         LiveOutputService.jumpTo(0)
                     }
+                    tipTitle: qsTr("Play")
+                    tipDetail: LiveOutputService.live
+                               ? qsTr("Restart the on-air set from its first slide")
+                               : qsTr("Go live with whatever is staged")
                 }
                 // Lock: Ctrl+L in FreeShow — arms the "nothing can change the
                 // output" state; the engine has no output lock yet, so the
@@ -434,6 +462,8 @@ Item {
                     width: parent.btnW; height: 30
                     icon: "unlocked"
                     enabled2: false
+                    tipTitle: qsTr("Lock output")
+                    tipDetail: qsTr("Not available yet")
                 }
                 // Transition: FreeShow opens its transition popup; there is
                 // no engine transition editor yet, so the glyph is a marker.
@@ -441,6 +471,8 @@ Item {
                     width: parent.btnW; height: 30
                     icon: "transition"
                     enabled2: false
+                    tipTitle: qsTr("Transition")
+                    tipDetail: qsTr("Not available yet")
                 }
             }
 
@@ -467,6 +499,7 @@ Item {
                     // live_ is the ONE thing only the user's own GO LIVE/STOP
                     // press controls (see LiveOutputService::clearAll).
                     onPicked: LiveOutputService.clearAll()
+                    tipDetail: qsTr("Clear everything on air — slide, media, overlays and audio")
                 }
                 RowButton {
                     width: (parent.width - parent.spacing) / 2
@@ -477,6 +510,7 @@ Item {
                     enabled2: LiveOutputService.canRestoreCleared
                     tint: Theme.textPrimary
                     onPicked: LiveOutputService.restoreCleared()
+                    tipDetail: qsTr("Bring back what the last Clear all took off air")
                 }
             }
 
@@ -504,6 +538,9 @@ Item {
                     if (LiveOutputService.blackedOut) LiveOutputService.endBlackout()
                     else LiveOutputService.blackout()
                 }
+                tipDetail: LiveOutputService.blackedOut
+                           ? qsTr("Bring the picture back — the show keeps running")
+                           : qsTr("Hide the picture without stopping the show")
             }
 
             // ClearButtons' per-layer group (image/slide/overlays/audio/timer)
@@ -533,6 +570,8 @@ Item {
                         if (LiveOutputService.mediaOnAir) LiveOutputService.clearMedia()
                         if (root.inputTaken) LiveOutputService.clearInput()
                     }
+                    tipTitle: qsTr("Clear background")
+                    tipDetail: qsTr("Clear the on-air media, or a taken camera/screen input")
                 }
                 // Slide: the on-air text/scripture/song content indicator —
                 // same shape as the image/overlays buttons on either side of
@@ -553,6 +592,8 @@ Item {
                         if (root.staged) LiveOutputService.clearStaged()
                         if (root.hasRealOnAirContent) LiveOutputService.clearOnAirSlide()
                     }
+                    tipTitle: qsTr("Clear slide")
+                    tipDetail: qsTr("Clear the on-air text, scripture or song content")
                 }
                 // Overlays: the whole stacked layer off at once (no
                 // per-overlay button in this 5-slot row — LiveOutputService
@@ -563,6 +604,8 @@ Item {
                     danger: true
                     enabled2: LiveOutputService.activeOverlays.length > 0
                     onPicked: LiveOutputService.clearAllOverlays()
+                    tipTitle: qsTr("Clear overlays")
+                    tipDetail: qsTr("Take every active overlay off air")
                 }
                 // Audio: a taken audio FILE (real program audio) OR a live
                 // input/bus meter tap (the Media pane's audio/bus double-
@@ -592,12 +635,16 @@ Item {
                         // same shared snapshots, so leave their taps alone;
                         // LiveOutputService releases only its own media take.
                     }
+                    tipTitle: qsTr("Clear audio")
+                    tipDetail: qsTr("Clear the on-air audio file or a taken input")
                 }
                 ToolButton {
                     width: parent.btnW; height: 30
                     icon: "timerFill"
                     danger: true
                     enabled2: false
+                    tipTitle: qsTr("Clear timer")
+                    tipDetail: qsTr("Not available yet")
                 }
             }
         }

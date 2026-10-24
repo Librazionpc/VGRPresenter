@@ -194,12 +194,27 @@ public:
     }
     const RgbaImage& Frame() const { return frame_; }
     bool HasFrame() const { return !frame_.empty(); }
+    // THE SOURCE FRAME THESE PIXELS CAME FROM (0 = an uncounted source).
+    //
+    // A live layer (a taken camera/screen input, a bus window, media on air) is
+    // refreshed on every scene build — the pixel pass runs on cache hits too —
+    // and one tick builds a scene per output. Re-copying and re-uploading an
+    // 8 MB frame that has NOT changed is most of the per-frame cost of a live
+    // program feed, and it is pure waste whenever the source runs slower than
+    // the composition (which is exactly what a busy machine does to a capture
+    // device). The producer's own counter is what lets the refresh tell "the
+    // same picture" from "a new one" without comparing a single pixel; it is
+    // stored here, on the object, because the object IS the picture being
+    // asked about (see SceneBuilder::LayerFrameCurrent).
+    uint64_t SourceSeq() const { return sourceSeq_; }
+    void SetSourceSeq(uint64_t seq) { sourceSeq_ = seq; }
     // Monotonic version of the pixels currently in Frame() (0 = never pushed).
     uint64_t FrameRevision() const { return frameRev_; }
 
 private:
     RgbaImage frame_;
     uint64_t frameRev_ = 0;
+    uint64_t sourceSeq_ = 0;
 };
 
 class ShapeObject final : public RenderObject {

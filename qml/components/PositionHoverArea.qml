@@ -18,11 +18,14 @@ import VGRPresenterUI
 //
 //   hovered = window hovered && chain fully visible+enabled && point inside
 //
-// recomputed on every pointer move, on own show/enable transitions, on any
-// ANCESTOR show/enable transition (shownChain is a binding, so it
-// subscribes to every ancestor's visible/enabled — a closing dropdown
-// clears its rows), and at construction — which also makes "freshly shown
-// under a stationary pointer" work, the case containsMouse provably misses.
+// recomputed on every pointer move, on own show/enable transitions, on a
+// popup opening/closing (AppCursor.blockersChanged — how a closing dropdown
+// clears its rows), on a slow re-validate beat while a hover is live (so an
+// ancestor hidden under a still pointer still clears it), and at construction
+// — which also makes "freshly shown under a stationary pointer" work, the case
+// containsMouse provably misses. The ancestor test is a FUNCTION (chainShown),
+// deliberately not a binding: as a binding it was reported as a loop at boot
+// (see chainShown's own comment).
 //
 // It also owns the pointing-hand cursor via AppCursor push/pop
 // (owner-scoped, self-healing): MouseArea.cursorShape suffers the same
@@ -44,12 +47,11 @@ Item {
     // True while the pointer is over the area. Bind visuals to this exactly
     // like the old containsMouse.
     property bool hovered: false
-    // Walk the ancestor chain for hidden/disabled ancestors. Leave true on
-    // top-level surfaces (dropdown rows, tabs). Turn FALSE for a hover area
-    // nested inside a parent whose visibility IS a hover state (a card's
-    // action row shown while the card is hovered): there the walk reads the
-    // very hover that hides the row and the two bindings notify each other
-    // in circles (the "shownChain binding loop" spam).
+    // Walk the ancestor chain for hidden/disabled ancestors (see chainShown).
+    // Leave true on top-level surfaces (dropdown rows, tabs). Turn FALSE for a
+    // hover area nested inside a parent whose visibility IS a hover state (a
+    // card's action row shown while the card is hovered): there the walk would
+    // read the very hover that hides the row, feeding itself.
     property bool checkAncestors: true
     // Cursor pushed to AppCursor while hovered. Set showCursor: false on a
     // hover-only surface that must not claim the cursor.
@@ -75,12 +77,23 @@ Item {
     // DOUBLE-click; single clicks are ignored there).
     signal doubleClicked(var mouse)
 
-    // A BINDING (not a function call) deliberately: its initial evaluation
-    // walks the ancestor chain and subscribes to every visible/enabled it
-    // reads, so hiding or disabling ANY ancestor (a dropdown panel closing,
-    // a modal scrim appearing) re-evaluates this and clears the hover —
-    // without needing the hover-exit events this build never delivers.
-    readonly property bool shownChain: {
+    // A FUNCTION, not a binding — and that is a fix, not a simplification.
+    //
+    // It used to be `readonly property bool shownChain: { ...walk... }`, chosen
+    // so the binding would SUBSCRIBE to every ancestor's visible/enabled and
+    // clear the hover the moment a dropdown closed or a pane switched tabs.
+    // That walk is exactly what QML reported as
+    //
+    //   QML PositionHoverArea: Binding loop detected for property "shownChain"
+    //
+    // at boot (five times, with HoverDetail as the parent: its content is a
+    // control whose label is sized FROM that state, so evaluating the walk
+    // re-entered it). The answer is still needed — a hover area inside a hidden
+    // or disabled ancestor must not report hovered — so it is computed on demand
+    // here, and what replaces the lost subscription is `_recompute` being called
+    // on pointer movement, on blocker changes, on this area's own show/enable
+    // transitions, and by the re-validate timer below.
+    function chainShown() {
         if (!root.visible || root.enabled === false)
             return false
         if (!checkAncestors)
@@ -95,7 +108,7 @@ Item {
     }
 
     function _recompute() {
-        const inside = AppCursor.windowHovered && root.shownChain
+        const inside = AppCursor.windowHovered && root.chainShown()
                        && AppCursor.hovered(root) && !AppCursor.blocked(root)
         if (inside !== root.hovered) {
             root.hovered = inside
@@ -106,9 +119,20 @@ Item {
         }
     }
 
-    onShownChainChanged: _recompute()
     onVisibleChanged: _recompute()
     onEnabledChanged: _recompute()
+
+    // SELF-HEALING RE-VALIDATE (see chainShown): this build delivers no
+    // hover-exit event and there is no longer a binding to invalidate, so an
+    // ancestor hiding under a perfectly still pointer would otherwise leave
+    // this area reporting hovered. One walk up the parents, on a slow beat, and
+    // ONLY while a hover is live — it stops as soon as the hover clears.
+    Timer {
+        interval: 250
+        repeat: true
+        running: root.hovered
+        onTriggered: root._recompute()
+    }
 
     onHoveredChanged: _syncCursor()
     onShowCursorChanged: _syncCursor()

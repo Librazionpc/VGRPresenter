@@ -140,6 +140,18 @@ void TestAppSettings() {
         CHECK(again.GetString("session.videoRoster") == R"([{\"label\":\"Cam\",\"kind\":\"ndi\"}])");
     }
 
+    // ---- Settings · Outputs' default media fit ----
+    // (undeclared, it refused every pick with a red "there is no setting
+    // 'outputs.defaultMediaFit'" toast and forgot the choice on the next launch)
+    CHECK(s.Set("outputs.defaultMediaFit", J::String("cover")).ok());
+    CHECK(s.GetString("outputs.defaultMediaFit") == "cover");
+    CHECK(!s.Set("outputs.defaultMediaFit", J::String("stretch")).ok());   // not one of the three choices
+    {
+        st::AppSettings again(file);
+        CHECK(again.Load().ok());
+        CHECK(again.GetString("outputs.defaultMediaFit") == "cover");
+    }
+
     // ---- the main screen's Projects sidebar: a dragged width, with -1 meaning "auto" ----
     // (an unregistered key refused every write — the new session.projectsColumnWidth toasted
     // "there is no setting 'session.projectsColumnWidth'" as soon as the pane's save timer fired)

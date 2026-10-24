@@ -1238,6 +1238,40 @@ void TestPal() {
                 std::printf("[screenpreview] %-20s FRAMES  (max %zu B, JPEG=%s)\n",
                             mon.id.c_str(), best, jpeg ? "yes" : "NO");
                 CHECK(jpeg);
+
+                // ---- THE LIVE PIXEL PATH (IVideo::SetPreviewLive) ----------
+                // This is what a PROGRAM FEED reads — a live bus window, a taken
+                // input — and it is the path whose hand-off was rebuilt around a
+                // shared buffer (the pixels are taken under the tap's lock and
+                // copied OUTSIDE it, so a reader never makes the capture thread
+                // wait for an 8 MB memcpy). The three facts a puller depends on
+                // are pinned here: the sequence MOVES when frames arrive, the
+                // pixels are non-empty at the source's own size, and the byte
+                // count matches the geometry it reports.
+                vid.SetPreviewLive(mon.id, true);
+                const uint64_t seq0 = vid.PreviewFrameSeq(mon.id);
+                uint64_t seq1 = seq0;
+                auto pixels = vid.PreviewFramePixels(mon.id);
+                for (int ms = 0; ms < 1500; ++ms) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    seq1 = vid.PreviewFrameSeq(mon.id);
+                    if (seq1 == seq0)
+                        continue;
+                    pixels = vid.PreviewFramePixels(mon.id);
+                    if (!pixels.empty())
+                        break;
+                }
+                std::printf("[screenpreview] %-20s PIXELS seq %llu -> %llu, %ux%u (%zu B%s)\n",
+                            mon.id.c_str(),
+                            static_cast<unsigned long long>(seq0),
+                            static_cast<unsigned long long>(seq1), pixels.width, pixels.height,
+                            pixels.rgba.size(), pixels.empty() ? ", EMPTY" : "");
+                CHECK(seq1 != seq0);                 // the tap published while live
+                CHECK(!pixels.empty());
+                CHECK(pixels.width > 1 && pixels.height > 1);
+                CHECK(pixels.rgba.size() == static_cast<size_t>(pixels.width) * pixels.height * 4);
+                CHECK(pixels.seq >= seq1);           // pixels are never OLDER than the counter
+                vid.SetPreviewLive(mon.id, false);
             } else {
                 std::printf("[screenpreview] %-20s NO FRAMES in 2.5 s\n", mon.id.c_str());
                 CHECK(false);   // a monitor that yields nothing is a defect

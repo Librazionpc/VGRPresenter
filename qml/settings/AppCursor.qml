@@ -79,6 +79,11 @@ QtObject {
     // handles re-enabled on select), which is when containsMouse-based
     // logic provably misses.
     property var _point: null
+    // The public read of _point, in window space — for a consumer that needs
+    // the raw point itself (ToolTipLayer positions the hover bubble under it)
+    // rather than a yes/no or an item-local answer the functions above give.
+    // null exactly when _point is (pointer outside the window, or never seen).
+    readonly property var point: _point
     // False whenever the pointer is known to be outside the window (the
     // catcher's HoverHandler unhovers — one of the few hover transitions
     // that DOES deliver reliably). Position-driven consumers read this too,

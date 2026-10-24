@@ -235,6 +235,14 @@ public:
         std::string name;
         int64_t ageMs = -1;   // -1 = this output has never been presented to
         bool enabled = false;
+        // HOW MANY FRAMES THIS OUTPUT HAS EVER RECEIVED (IRenderOutput::
+        // FramesReceived — the same number the NDI sender reports, for every
+        // kind of output). It is what lets the Outputs screen say the same
+        // thing about an HDMI row as about an NDI row: "N frames delivered"
+        // is proof the picture reached THIS output, not a label. Per buffer,
+        // so two rows that mirror the shared preview feed report the same
+        // count — which is exactly the truth about them.
+        uint64_t frames = 0;
     };
     std::vector<OutputFeedAge> OutputFeedAges() const;
     // Present an opaque BLACK frame to the named outputs — what a live output

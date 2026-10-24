@@ -7297,7 +7297,13 @@ ApplicationWindow {
         "No layout of its own"                // background and placement only
     ]
     function outsSample() {
-        const found = { rows: 0, styled: 0, described: 0, lines: [] }
+        // `reported` is the other half of this scenario: EVERY row must say
+        // something about its own runtime, whatever its kind. The live line used
+        // to be NDI/SDI-only, so an HDMI row was silent — read by the operator as
+        // "the notification is only instantiated in one output". A row whose
+        // statusText is empty, or does not open with its own kind, is exactly
+        // that fault, counted here and failed by the runner.
+        const found = { rows: 0, styled: 0, described: 0, reported: 0, lines: [] }
         for (let i = 0; i < 24; ++i) {
             const item = SelfTest.findItem("selfTestOutputRow_" + i)
             if (!item)
@@ -7313,8 +7319,13 @@ ApplicationWindow {
                 if (named !== "none")
                     ++found.described
             }
+            const status = String(item.statusText)
+            const reports = status.indexOf(String(item.kind) + " \u00b7 ") === 0
+            if (reports)
+                ++found.reported
             found.lines.push("[SELFTEST-OUTS] row=" + i + " output=\"" + String(item.name)
-                             + "\" style=\"" + styleName + "\" scope=\"" + named
+                             + "\" kind=\"" + String(item.kind) + "\" status=\"" + status + "\""
+                             + " style=\"" + styleName + "\" scope=\"" + named
                              + "\" note=\"" + note + "\"")
         }
         return found
@@ -7353,10 +7364,155 @@ ApplicationWindow {
             for (const line of found.lines)
                 console.log(line)
             console.log("[SELFTEST-OUTS] result missing=no rows=" + found.rows
-                        + " styled=" + found.styled + " described=" + found.described)
+                        + " styled=" + found.styled + " described=" + found.described
+                        + " reported=" + found.reported)
             selfTestOutsTick.stop()
             SelfTest.quit()
         }
+    }
+
+    // ---- Every row's LIVE runtime line (VGR_OUTSLIVE_TEST=1) -----------------
+    // The other half of the report the block above answers: "the notification is
+    // only instantiated in one output". The row's runtime line must exist for
+    // EVERY kind of output, and must say the same things about all of them — a
+    // live feed with its delivered-frame count, and the stage-wide blackout. So
+    // this scenario puts one real slide on air, opens Settings · Outputs, and
+    // prints each row's statusText while live, while blacked out (a real click
+    // on the wall's control), and after the blackout ends. No fixture is saved
+    // and nothing is staged: a failure here is about the rows, not the show.
+    function outsLiveSample(tag) {
+        let rows = 0
+        let reporting = 0
+        let blackout = 0
+        let offAir = 0
+        for (let i = 0; i < 24; ++i) {
+            const item = SelfTest.findItem("selfTestOutputRow_" + i)
+            if (!item)
+                break
+            ++rows
+            const status = String(item.statusText)
+            const kind = String(item.kind)
+            // A row REPORTS when its line opens with its own kind. A row that
+            // says nothing (the NDI/SDI-only line this replaced) fails here.
+            if (status.indexOf(kind + " \u00b7 ") === 0)
+                ++reporting
+            if (status.indexOf("blackout up") >= 0)
+                ++blackout
+            if (status.indexOf("go live to send") >= 0)
+                ++offAir
+            console.log("[SELFTEST-OUTSLIVE] " + tag + " row=" + i + " kind=\"" + kind
+                        + "\" status=\"" + status + "\"")
+        }
+        console.log("[SELFTEST-OUTSLIVE] " + tag + " result rows=" + rows
+                    + " reporting=" + reporting + " blackout=" + blackout
+                    + " offair=" + offAir)
+        // ...and the SAME state on the wall itself: each tile carries it as a
+        // DOT (no text — the row owns the words), and runtimeState is read here
+        // too (the dialog sits over the wall, which is still there and still
+        // bound), so "on the tile as well" is checked, not assumed. A tile that
+        // cannot be found is printed as <missing> and the runner says so rather
+        // than passing on the dialog alone.
+        const wallTiles = []
+        for (let i = 0; i < OutputListModel.rowCount(); ++i) {
+            const tile = window.tfTile(i)
+            wallTiles.push(i + ":" + (tile ? String(tile.runtimeState) : "<missing>"))
+        }
+        console.log("[SELFTEST-OUTSLIVE] " + tag + " tiles=" + JSON.stringify(wallTiles.join(" | ")))
+    }
+    // The wall's Blackout control is BEHIND the Settings modal, so every press
+    // closes the dialog first and the next read reopens it: a click that lands on
+    // the scrim proves nothing, and this scenario is about the ROWS, not about the
+    // control (run_blackout_test.sh drives that one). The press itself is still the
+    // real control — SelfTest.clickItem, the operator's own gesture.
+    Timer {
+        id: selfTestOutsLiveStart
+        running: typeof SelfTestOutputsLive !== "undefined" && SelfTestOutputsLive
+        interval: 9000           // boot + first frame, like the other scenarios
+        onTriggered: {
+            const slide = {
+                valid: true,
+                title: "Outputs Live Probe",
+                text: "outputs live probe",
+                background: "",
+                blocks: [ { kind: "text", text: "outputs live probe", x: 60, y: 60,
+                            width: 630, height: 300, meta: { fontSize: 48 } } ]
+            }
+            LiveOutputService.goLiveWithSlides("Outputs Live Probe", [ slide ])
+            window.openSettings("outputs")
+            selfTestOutsLiveRead.restart()
+        }
+    }
+    Timer {
+        id: selfTestOutsLiveRead
+        interval: 4000           // the 1 Hz probe has published a state by now
+        onTriggered: {
+            window.outsLiveSample("live")
+            // THE DIALOG CLOSES FIRST — the wall is underneath it. Then the
+            // pointer is put on a tile's runtime DOT and the tip it raises is
+            // read: the dot is colour-only, so the numbers (frames + age) have
+            // to be reachable by hover or they are not reachable at all.
+            settingsScrim.visible = false
+            const dot = SelfTest.itemCenter("selfTestTileRuntime")
+            window.outsHoverAt = dot
+            SelfTest.move(dot.x, dot.y)
+            selfTestOutsLiveHover.restart()
+        }
+    }
+    property var outsHoverAt: null
+    property string outsHoverTip: ""
+    Timer {
+        id: selfTestOutsLiveHover
+        interval: 900            // the tip's own 350 ms show delay + placement
+        onTriggered: {
+            window.outsHoverTip = String(TipService.text)
+            console.log("[SELFTEST-OUTSLIVE] hover tip=" + JSON.stringify(window.outsHoverTip))
+            // Off the dot again (a tip must not outlive the hover), then the
+            // blackout press, which is what the next phase reads.
+            if (window.outsHoverAt)
+                SelfTest.move(window.outsHoverAt.x, window.outsHoverAt.y + 140)
+            SelfTest.clickItem("selfTestWallBlackout")
+            selfTestOutsLiveBlackedOpen.restart()
+        }
+    }
+    Timer {
+        id: selfTestOutsLiveBlackedOpen
+        interval: 3000           // the carrier and the 1 Hz probe both land
+        onTriggered: {
+            window.openSettings("outputs")
+            selfTestOutsLiveBlackedSample.restart()
+        }
+    }
+    Timer {
+        id: selfTestOutsLiveBlackedSample
+        interval: 2500           // rows exist again, the dialog has laid out
+        onTriggered: {
+            window.outsLiveSample("blackout")
+            settingsScrim.visible = false
+            SelfTest.clickItem("selfTestWallBlackout")
+            selfTestOutsLiveRestoredOpen.restart()
+        }
+    }
+    Timer {
+        id: selfTestOutsLiveRestoredOpen
+        interval: 3000
+        onTriggered: {
+            window.openSettings("outputs")
+            selfTestOutsLiveRestoredSample.restart()
+        }
+    }
+    Timer {
+        id: selfTestOutsLiveRestoredSample
+        interval: 2500
+        onTriggered: {
+            window.outsLiveSample("restored")
+            LiveOutputService.stop()
+            selfTestOutsLiveQuit.restart()
+        }
+    }
+    Timer {
+        id: selfTestOutsLiveQuit
+        interval: 1200
+        onTriggered: SelfTest.quit()
     }
 
     // ---- Style background reaches the output tiles (VGR_STYLEBG_TEST=1) -----
@@ -7544,6 +7700,12 @@ ApplicationWindow {
         return "[SELFTEST-TILES] phase=" + phase + " tile=" + i
              + " styleId=" + JSON.stringify(String(tile.styleId))
              + " active=" + tile.active + " enabled=" + tile.isEnabled
+             // The tile's own runtime strip (frames / age / blackout / no feed) —
+             // the same facts the Settings · Outputs row prints, read off the
+             // tile as rendered so a strip that never binds is visible here.
+             + " runtime=" + JSON.stringify(String(tile.runtimeState))
+             + " rtFrames=" + (tile.runtime ? tile.runtime.frames : -1)
+             + " rtAge=" + (tile.runtime ? tile.runtime.ageMs : -1)
              + " modelFit=" + JSON.stringify(String(row.mediaFit))
              + " live=" + LiveOutputService.live
              + " hasFrame=" + tile.hasFrame + " framePriority=" + tile.framePriority
@@ -7754,6 +7916,160 @@ ApplicationWindow {
             SelfTest.quit()
         }
     }
+    // ---- An NDI output added WHILE LIVE (VGR_NDILATE_TEST=1) ----------------
+    // User report: "the NDI source I created is not even getting any frames — as
+    // if NDI is dead — until I restart the app." A row that exists at boot
+    // feeds; a row ADDED during the session did not, until a relaunch — which is
+    // the signature of state that is only assembled once, at GO LIVE or at boot.
+    // So the scenario reproduces the state exactly: go live with one enabled NDI
+    // row, let it send (the baseline), then ADD a second NDI row MID-SESSION and
+    // read the feed's own per-output state (LiveOutputService.ndiOutputStates)
+    // for the next twelve seconds. The verdict is the NEW row's `frames`
+    // counter growing while the session is still the one it was added to
+    // (tools/selftest/run_ndi_late_output_test.sh).
+    //
+    // Not read-only: the rows this adds are removed again before the quit, so a
+    // run cannot leave the operator's roster changed.
+    property string ndiLateName: "NDI Late"
+    property string ndiLateBaseName: "NDI Late Base"
+    property string ndiSilentName: "NDI Silent"
+    property bool ndiSilentAdded: false
+    property bool ndiLateAddedBase: false
+    property bool ndiLateAddedRow: false
+    property int ndiLateTick: 0
+    function ndiLateRowOf(name) {
+        for (let i = 0; i < OutputListModel.rowCount(); ++i)
+            if (String(OutputListModel.getOutput(i).name) === String(name))
+                return i
+        return -1
+    }
+    // The feed's per-output state, one entry per NDI row: what the pill and the
+    // Settings · Outputs row read, so it is the same number the operator sees.
+    function ndiLateStates() {
+        const states = LiveOutputService.ndiOutputStates || {}
+        let line = ""
+        for (let i = 0; i < OutputListModel.rowCount(); ++i) {
+            const row = OutputListModel.getOutput(i)
+            if (String(row.kind) !== "NDI") continue
+            const st = states[row.name] || {}
+            line += (line === "" ? "" : " ") + String(row.name) + "{frames="
+                    + (st.frames !== undefined ? st.frames : "-")
+                    + ",sending=" + st.sending + ",warming=" + st.warming + "}"
+        }
+        return line
+    }
+    function ndiLateReport(tag) {
+        console.log("[SELFTEST-NDILATE] " + tag
+                    + " live=" + LiveOutputService.live
+                    + " rows=" + OutputListModel.rowCount()
+                    + " ndiAvailable=" + EngineBridge.ndiAvailable
+                    + " ndiState=" + JSON.stringify(String(EngineBridge.ndiState))
+                    + " feedSending=" + LiveOutputService.ndiSending
+                    + " feedName=" + JSON.stringify(String(LiveOutputService.ndiSendingOutputName))
+                    + " " + window.ndiLateStates())
+    }
+    // Undo whatever this run added, highest index first (a removal shifts the
+    // rows above it).
+    function ndiLateRestore() {
+        const names = []
+        if (window.ndiLateAddedRow) names.push(window.ndiLateName)
+        if (window.ndiLateAddedBase) names.push(window.ndiLateBaseName)
+        for (const name of names) {
+            const row = window.ndiLateRowOf(name)
+            if (row >= 0) OutputListModel.removeOutput(row)
+        }
+    }
+    // The user-visible half of the same scenario: an output added mid-session is
+    // supposed to ANNOUNCE itself (LiveOutputService's "outputs.ndi.outputLive"
+    // notice), and "I created a new output and got no notification" is the
+    // report this listens for. Logged as a line so the runner can require it
+    // rather than trust that the toast appeared.
+    Connections {
+        target: EventBus
+        function onEventPosted(topic, payload) {
+            if (String(topic).indexOf("outputs.ndi.") !== 0)
+                return
+            console.log("[SELFTEST-NDILATE] notif " + String(topic) + " | " + String(payload.message))
+        }
+    }
+    Timer {
+        id: selfTestNdiLateStart
+        running: typeof SelfTestNdiLate !== "undefined" && SelfTestNdiLate
+        interval: 9000           // boot + first frame, like the other scenarios
+        onTriggered: {
+            // A BASELINE NDI ROW the session already feeds: without one there is
+            // no "the one that works" to compare the new row against.
+            let hasBase = false
+            for (let i = 0; i < OutputListModel.rowCount(); ++i)
+                if (String(OutputListModel.getOutput(i).kind) === "NDI")
+                    hasBase = true
+            if (!hasBase) {
+                OutputListModel.addScreen(window.ndiLateBaseName, "NDI", "1920 × 1080", "30 Hz", "none")
+                OutputListModel.setEnabled(window.ndiLateRowOf(window.ndiLateBaseName), true)
+                window.ndiLateAddedBase = true
+            }
+            window.ndiLateReport("start")
+            LiveOutputService.goLive()
+            selfTestNdiLateBefore.restart()
+        }
+    }
+    Timer {
+        id: selfTestNdiLateBefore
+        interval: 7000           // long enough for the baseline sender to open
+        onTriggered: {
+            window.ndiLateReport("before")
+            // THE ACT: a second NDI output, created while the show is live —
+            // exactly what the operator did when the new source stayed dark.
+            OutputListModel.addScreen(window.ndiLateName, "NDI", "1920 × 1080", "30 Hz", "none")
+            OutputListModel.setEnabled(window.ndiLateRowOf(window.ndiLateName), true)
+            window.ndiLateAddedRow = true
+            window.ndiLateReport("added")
+            window.ndiLateTick = 0
+            selfTestNdiLateSample.start()
+        }
+    }
+    Timer {
+        id: selfTestNdiLateSample
+        interval: 1000
+        repeat: true
+        onTriggered: {
+            ++window.ndiLateTick
+            window.ndiLateReport("sample" + window.ndiLateTick)
+            if (window.ndiLateTick < 12)
+                return
+            selfTestNdiLateSample.stop()
+            // THE OTHER HALF of the same report: an output added mid-session that
+            // CANNOT send. Switched off straight away, it never reaches the feed's
+            // request list — before this it went dark with no explanation. The
+            // feed is supposed to name the wait ("it is switched off on the
+            // Outputs screen") once its grace has passed, and the runner requires
+            // that notice by name.
+            OutputListModel.addScreen(window.ndiSilentName, "NDI", "1920 × 1080", "30 Hz", "none")
+            OutputListModel.setEnabled(window.ndiLateRowOf(window.ndiSilentName), false)
+            window.ndiSilentAdded = true
+            window.ndiLateReport("silent-added")
+            selfTestNdiSilentDone.start()
+        }
+    }
+    Timer {
+        id: selfTestNdiSilentDone
+        interval: 9000           // the feed's 6 s grace + a few polls
+        onTriggered: {
+            const row = window.ndiLateRowOf(window.ndiSilentName)
+            if (row >= 0)
+                OutputListModel.removeOutput(row)
+            window.ndiSilentAdded = false
+            window.ndiLateRestore()
+            LiveOutputService.stop()
+            window.ndiLateReport("done")
+            selfTestNdiLateQuit.start()
+        }
+    }
+    Timer {
+        id: selfTestNdiLateQuit
+        interval: 1500           // let the roster write settle before the quit
+        onTriggered: SelfTest.quit()
+    }
     // ---- Blackout, through the wall's own control (VGR_BLACKOUT_TEST=1) ------
     // "Nothing at all on screen" has to be a DELIBERATE gesture: Clear all now
     // keeps the output's own look, so the ONLY thing that paints an empty frame
@@ -7901,6 +8217,100 @@ ApplicationWindow {
                 LiveOutputService.clearInput()
             console.log("[SELFTEST-BLACKOUT] done")
             SelfTest.quit()
+        }
+    }
+    // ---- THE LIVE VIDEO PATH, MEASURED (VGR_VIDEOPERF_TEST=1) ----------------
+    // "when im showing hdmi and laptop is stressed the video lags badly".
+    //
+    // The scenario puts a REAL camera/HDMI input on air, goes LIVE with it, and
+    // then samples — every 500 ms for ten seconds — the two numbers that ARE that
+    // complaint:
+    //
+    //   frames   the frames the ENGINE says each output has received (the same
+    //            count its Settings · Outputs row prints)
+    //   ageMs    how long ago that output last presented a frame (the freshest
+    //            available measure of end-to-end lag inside the app)
+    //
+    // plus the live loop's own throughput (framesSentNow) and the pump's frame
+    // revisions (inputRev). Nothing here is a screenshot or a guess: these are
+    // the counters the app already publishes per output. The shell runner
+    // (tools/selftest/run_videoperf_test.sh) launches this under CPU load, so the
+    // stressed machine of the report is the machine being measured.
+    property string vpLabel: ""
+    property int vpSamples: 0
+    property double vpT0: 0
+    property var vpFrames: ({})
+    Timer {
+        id: selfTestVideoPerfStart
+        running: typeof SelfTestVideoPerf !== "undefined" && SelfTestVideoPerf
+        interval: 9000           // boot + the roster, like the other scenarios
+        onTriggered: {
+            window.vpLabel = ""
+            for (let i = 0; i < VideoSourceListModel.rowCount(); ++i) {
+                const row = VideoSourceListModel.getSource(i)
+                const label = String(row && row.sublabel ? row.sublabel : "").trim()
+                if (String(row.kind || "") !== "camera" || label === "")
+                    continue
+                window.vpLabel = label
+                break
+            }
+            if (window.vpLabel !== "")
+                LiveOutputService.takeInput(window.vpLabel, "camera", "")
+            const slide = {
+                valid: true,
+                title: "Video Perf Probe",
+                text: "video perf probe",
+                background: "",
+                blocks: [ { kind: "text", text: "video perf probe", x: 60, y: 60,
+                            width: 630, height: 300, meta: { fontSize: 48 } } ]
+            }
+            LiveOutputService.goLiveWithSlides("Video Perf Probe", [ slide ])
+            console.log("[SELFTEST-VIDEOPERF] take label=" + JSON.stringify(window.vpLabel)
+                        + " taken=" + JSON.stringify(String(LiveOutputService.inputLabel))
+                        + " live=" + LiveOutputService.live
+                        + " outputs=" + OutputListModel.rowCount())
+            window.vpSamples = 0
+            window.vpFrames = ({})
+            selfTestVideoPerfWarm.restart()
+        }
+    }
+    Timer {
+        id: selfTestVideoPerfWarm
+        interval: 4000           // the tap opens off-thread; give it frames first
+        onTriggered: {
+            window.vpT0 = Date.now()
+            selfTestVideoPerfSample.start()
+        }
+    }
+    Timer {
+        id: selfTestVideoPerfSample
+        interval: 500
+        repeat: true
+        onTriggered: {
+            const t = Date.now() - window.vpT0
+            for (let i = 0; i < OutputListModel.rowCount(); ++i) {
+                const out = OutputListModel.getOutput(i)
+                const name = String(out && out.name !== undefined ? out.name : ("out" + i))
+                const rt = LiveOutputService.outputRuntime[name] || null
+                const frames = rt ? (Number(rt.frames) || 0) : 0
+                let ageMs = -1
+                if (rt && rt.ageMs !== undefined && rt.ageMs !== null)
+                    ageMs = Number(rt.ageMs)
+                console.log("[SELFTEST-VIDEOPERF] t=" + t + " out=" + JSON.stringify(name)
+                            + " frames=" + frames
+                            + " ageMs=" + (ageMs >= 0 ? Math.round(ageMs) : "-1")
+                            + " enabled=" + (out && out.isEnabled ? 1 : 0))
+            }
+            console.log("[SELFTEST-VIDEOPERF] t=" + t + " loop=" + LiveOutputService.framesSentNow()
+                        + " preview=" + LiveOutputService.previewFramesNow()
+                        + " inputRev=" + LiveOutputService.inputRev
+                        + " inputLive=" + LiveOutputService.inputLive)
+            if (++window.vpSamples >= 20) {
+                selfTestVideoPerfSample.stop()
+                LiveOutputService.clearInput()
+                console.log("[SELFTEST-VIDEOPERF] done samples=" + window.vpSamples)
+                SelfTest.quit()
+            }
         }
     }
     // ---- Program-feed rate for a held camera (VGR_INPUTRATE_TEST=1) ----------

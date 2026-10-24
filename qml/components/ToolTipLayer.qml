@@ -31,12 +31,16 @@ Item {
     // A beat before the bubble appears, so sweeping the pointer across a row of
     // pills does not flash a tip off every one of them. The tip is dismissed
     // immediately, never on a delay.
-    property int showDelay: 350
+    property int showDelay: 1000
     property int gap: 7        // distance from the owner
     property int edge: 6       // keep-out from the window's edges
 
     readonly property bool wanted: TipService.text !== "" && TipService.owner !== null
     property bool shown: false
+    // The owner the visible (or arming) bubble actually belongs to — tells
+    // "this owner's facts just changed" apart from "the pointer moved to a
+    // DIFFERENT owner", which only the latter can ever need to re-earn a delay.
+    property var shownOwner: null
 
     // Party trick of the whole file: nothing is placed until the text and the
     // owner are both known, and a moving owner (a card re-laid out under a
@@ -46,15 +50,28 @@ Item {
         if (!root.wanted || !root.ownerShown()) {
             arm.stop()
             root.shown = false
+            root.shownOwner = null
             return
         }
-        // Already up for this owner: keep it up and only re-place it, so a
-        // control whose tip text updates under the pointer (a pill closed by a
-        // click) does not blink out and back through the delay.
-        if (root.shown) {
+        const owner = TipService.owner
+        // Same owner, facts changed in place (a pill closed by a click): keep
+        // it up and only re-place it, never re-delay — this is not a switch.
+        if (root.shown && root.shownOwner === owner) {
             root.place()
             return
         }
+        // A genuinely different owner. The toolbar-pill sweep default swaps
+        // the bubble in place with no re-delay and no blank gap; a list row
+        // that asked for its own delay (HoverDetail.alwaysDelay) earns one
+        // every time instead of inheriting whatever was already up.
+        if (root.shown && !TipService.forceDelay) {
+            root.shownOwner = owner
+            root.place()
+            return
+        }
+        arm.stop()
+        root.shown = false
+        root.shownOwner = owner
         arm.restart()
     }
 
@@ -83,24 +100,23 @@ Item {
         }
     }
 
+    // ALWAYS under the cursor (user call), not centred over the owner's own
+    // rect: a wide owner (a whole list row) used to plant the bubble at the
+    // row's midpoint regardless of where in it the pointer actually was.
+    // AppCursor.point is the same position-truth every PositionHoverArea
+    // already reads, in the same window space this layer draws in.
     function place() {
-        const o = TipService.owner
-        if (!o || bubble.width <= 0)
+        const p = AppCursor.point
+        if (!p || bubble.width <= 0)
             return
-        // Both corners, so an owner inside the screens' scale transform measures
-        // in the window units the bubble is drawn in.
-        const tl = o.mapToItem(null, 0, 0)
-        const br = o.mapToItem(null, o.width, o.height)
-        const w = Math.max(0, br.x - tl.x)
-        const h = Math.max(0, br.y - tl.y)
         bubble.x = Math.max(root.edge,
                             Math.min(root.width - bubble.width - root.edge,
-                                     tl.x + w / 2 - bubble.width / 2))
-        // Above the owner by default...
-        let y = tl.y - bubble.height - root.gap
-        // ...unless that would leave the window (or be clipped by its top).
-        if (y < root.edge)
-            y = br.y + root.gap
+                                     p.x - bubble.width / 2))
+        // Below the cursor by default...
+        let y = p.y + root.gap
+        // ...unless that would leave the window (or be clipped at its bottom).
+        if (y + bubble.height > root.height - root.edge)
+            y = p.y - bubble.height - root.gap
         bubble.y = Math.max(root.edge, Math.min(root.height - bubble.height - root.edge, y))
     }
 
@@ -118,22 +134,23 @@ Item {
         function onChanged() { root.update() }
     }
 
-    // The owner can MOVE under a stationary pointer — a pane laid out again, a
-    // card scrolled by a wheel event (which is not a pointer move, so the hover
-    // area above legitimately still reports hovered). The bubble travels with
-    // it instead of being left behind over whatever slid underneath.
+    // The bubble follows the cursor now (see place()), so it has to re-place
+    // on every pointer move while it is up, not just once when it appears.
     Connections {
-        target: root.shown && TipService.owner ? TipService.owner : null
-        function onXChanged() { root.place() }
-        function onYChanged() { root.place() }
-        function onWidthChanged() { root.place() }
-        function onHeightChanged() { root.place() }
+        target: root.shown ? AppCursor : null
+        function onPointerMoved() { root.place() }
     }
 
     Rectangle {
         id: bubble
         visible: root.shown && root.wanted
-        width: tipText.implicitWidth + 18
+        // A single-line bubble ran as wide as the text was long — a full
+        // paragraph's worth read as one unbroken strip across the window.
+        // tipText wraps once it would exceed maxTextWidth, and the bubble
+        // follows its wrapped size, so a long tip reads as a proper box
+        // instead of a line.
+        readonly property int maxTextWidth: 460
+        width: tipText.width + 18
         height: tipText.implicitHeight + 12
         radius: Theme.radiusSm
         color: Theme.card
@@ -162,7 +179,10 @@ Item {
             text: TipService.text
             color: Theme.textPrimary
             font.family: Theme.fontFamily
-            font.pixelSize: 11
+            font.pixelSize: 12
+            font.weight: Font.DemiBold
+            wrapMode: Text.WordWrap
+            width: Math.min(implicitWidth, bubble.maxTextWidth)
         }
     }
 }

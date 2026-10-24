@@ -859,12 +859,13 @@ rendering::RgbaImage ToRgbaImage(uint32_t w, uint32_t h, const std::vector<uint8
 // has content again anyway.
 void UpsertVideoLayer(rendering::RenderEngine& engine, const std::string& sceneId,
                       const std::string& objId, const rendering::RgbaImage& img,
-                      const rendering::Rect& bounds) {
+                      const rendering::Rect& bounds, uint64_t sourceSeq = 0) {
     auto existing = engine.GetObject(sceneId, objId);
     if (existing.ok()) {
         if (auto* v = dynamic_cast<rendering::VideoObject*>(existing.value())) {
             v->SetFrame(img);
             v->SetBounds(bounds);
+            v->SetSourceSeq(sourceSeq);
         }
         return;
     }
@@ -873,8 +874,48 @@ void UpsertVideoLayer(rendering::RenderEngine& engine, const std::string& sceneI
     auto videoObj = std::make_shared<rendering::VideoObject>(objId, objId);
     videoObj->SetFrame(img);
     videoObj->SetBounds(bounds);
+    videoObj->SetSourceSeq(sourceSeq);
     videoObj->SetLayer("media");
     (void)engine.AddObject(sceneId, videoObj, "media");
+}
+
+// ---- DRAW A LIVE LAYER ONLY WHEN ITS PICTURE MOVED -------------------------
+//
+// The compositor layers are refreshed on EVERY build, cache hits included (a
+// cached scene still has to show the CURRENT frame), and one tick builds a
+// scene per output — the program pass plus a gated pass per output. Each
+// refresh copies the source frame twice (compositor/PAL -> RgbaImage -> the
+// object) and re-uploads its texture, whether or not anything arrived since:
+// at 1080p that is ~24 MB of memcpy per layer per output per frame for a
+// picture that is pixel-identical to the one already on the object.
+//
+// Every source has a CHEAP counter (the PAL tap's PreviewFrameSeq, the
+// compositor's per-frame seq), so "is this the frame I already drew?" is an
+// integer compare. Under load — when a capture device runs SLOWER than the
+// composition, which is the reported "HDMI video lags when the machine is
+// stressed" — it answers "yes" for most builds and those copies disappear
+// entirely. The counter alone is not enough to skip on: a scene rebuilt from
+// scratch, or one whose object was refused, has no picture to keep, so the
+// object must exist and must carry pixels.
+// MEASUREMENT HOOK, not a setting: with BPS_LAYER_REFRESH_ALWAYS set, every
+// layer is re-copied and re-uploaded on every build exactly as it was before
+// this guard existed. tools/selftest/run_videoperf_test.sh uses it to measure
+// the same machine, the same feed and the same window WITH and WITHOUT the
+// skip, which is the only honest way to report what the skip is worth.
+bool LayerRefreshAlways() {
+    static const bool always = std::getenv("BPS_LAYER_REFRESH_ALWAYS") != nullptr;
+    return always;
+}
+
+bool LayerFrameCurrent(rendering::RenderEngine& engine, const std::string& sceneId,
+                       const std::string& objId, uint64_t seq) {
+    if (seq == 0 || LayerRefreshAlways())
+        return false;   // uncounted source (or the measurement hook): refresh, never guess
+    auto obj = engine.GetObject(sceneId, objId);
+    if (!obj.ok())
+        return false;
+    const auto* video = dynamic_cast<rendering::VideoObject*>(obj.value());
+    return video && video->HasFrame() && video->SourceSeq() == seq;
 }
 
 // ---- Bus video planes (a "bus" block on the on-air slide) -----------------
@@ -949,11 +990,21 @@ void RefreshBusPlanes(rendering::RenderEngine& engine, const std::string& sceneI
     const auto& compositor = presentation::CompositorState::Instance();
     int withFrame = 0;
     for (const BusPlane& plane : planes) {
+        // THE CHEAP QUESTION (see LayerFrameCurrent): the compositor's push
+        // counter for this bus. A plane whose object already shows this frame
+        // is left completely alone — no 8 MB copy, no re-upload — which is
+        // most builds whenever the bus's source runs slower than the
+        // composition (a throttled capture device: the reported lag).
+        const uint64_t seq = compositor.GetBusFrameSeq(plane.busId);
+        if (LayerFrameCurrent(engine, sceneId, plane.objId, seq)) {
+            ++withFrame;   // it has a picture, and it is the current one
+            continue;
+        }
         const auto frame = compositor.GetBusFrame(plane.busId);
         const rendering::RgbaImage img = ToRgbaImage(frame.width, frame.height, frame.rgba);
         if (!img.empty())
             ++withFrame;
-        UpsertVideoLayer(engine, sceneId, plane.objId, img, plane.rect);
+        UpsertVideoLayer(engine, sceneId, plane.objId, img, plane.rect, seq);
     }
     // THE ENGINE HALF OF THE BUS-WINDOW DIAGNOSTIC. "the canvas has the bus but
     // the output is empty" is answered here: a plane count of 0 means the scene
@@ -1040,13 +1091,25 @@ void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sce
     // feed never goes stale waiting on a push from the UI thread.
     const auto taken = presentation::CompositorState::Instance().GetTakenInput();
     rendering::RgbaImage takenImg;
+    // THE CHEAP QUESTION FIRST (see LayerFrameCurrent): the tap's own frame
+    // counter, so a build that finds no new frame skips the pull, both copies
+    // and the texture upload. A build that finds a NEW one — or no counter at
+    // all — does the whole refresh exactly as before.
+    uint64_t takenSeq = 0;
+    bool takenRefresh = true;
     if (!taken.deviceId.empty() && bps::platform::PlatformAccessor::Installed()) {
-        const auto frame = bps::platform::PlatformAccessor::Get().Video()
-                               .PreviewFramePixels(taken.deviceId);
-        takenImg = ToRgbaImage(frame.width, frame.height, frame.rgba);
+        takenSeq = bps::platform::PlatformAccessor::Get().Video().PreviewFrameSeq(taken.deviceId);
+        takenRefresh = !LayerFrameCurrent(engine, sceneId, "takeninput", takenSeq);
     }
-    UpsertVideoLayer(engine, sceneId, "takeninput", takenImg,
-                     rendering::Rect(0, 0, size.width, size.height));
+    if (takenRefresh) {
+        if (!taken.deviceId.empty() && bps::platform::PlatformAccessor::Installed()) {
+            const auto frame = bps::platform::PlatformAccessor::Get().Video()
+                                   .PreviewFramePixels(taken.deviceId);
+            takenImg = ToRgbaImage(frame.width, frame.height, frame.rgba);
+        }
+        UpsertVideoLayer(engine, sceneId, "takeninput", takenImg,
+                         rendering::Rect(0, 0, size.width, size.height), takenSeq);
+    }
 
     // THE ENGINE-SIDE HALF OF THE TAKEN-INPUT CHAIN (the QML half is
     // EngineBridge's own preview taps; the state half is
@@ -1060,7 +1123,7 @@ void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sce
     //   * "no pixels" here with a device named ⇒ the PAL tap the renderer
     //     reads is not the one the UI started (wrong id, or a refused tap);
     //   * pixels and MISSING ⇒ AddObject refused (bounds/layer), not the tap.
-    {
+    if (takenRefresh) {
         const bool present = engine.GetObject(sceneId, "takeninput").ok();
         const std::string state = taken.deviceId.empty()
             ? std::string("absent — no input taken")
@@ -1082,8 +1145,20 @@ void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sce
     // QML tile draws it with PreserveAspectFit. Cover-fit used to crop a
     // portrait photo down to the middle of a landscape stage — the report "the
     // image is portrait and you made it landscape".
-    const auto media = presentation::CompositorState::Instance().GetMediaFrame();
-    const rendering::RgbaImage mediaImg = ToRgbaImage(media.width, media.height, media.rgba);
+    // MEDIA ON AIR — the same cheap question the taken input asks above (see
+    // LayerFrameCurrent): a 30 fps file is pushed half as often as a 60 Hz
+    // composition builds, so half of those builds were re-copying a picture
+    // that had not changed. The FIT travels with the frame and a fit change
+    // bumps the compositor's counter (CompositorState::SetMediaFit), so the
+    // layout can never be skipped while the pixels it belongs to stayed put.
+    const auto& compositorState = presentation::CompositorState::Instance();
+    const uint64_t mediaSeq = compositorState.GetMediaSeq();
+    const bool mediaRefresh = !LayerFrameCurrent(engine, sceneId, "mediaonair", mediaSeq);
+    const auto media = mediaRefresh ? compositorState.GetMediaFrame()
+                                    : presentation::CompositorState::MediaFrame{};
+    const rendering::RgbaImage mediaImg = mediaRefresh
+        ? ToRgbaImage(media.width, media.height, media.rgba)
+        : rendering::RgbaImage{};
     // ONE PICTURE, ONE SHAPE: the FILE's own fit (a per-media choice is the
     // operator saying "this picture, like this", and it travels with the frame
     // — CompositorState::MediaFrame::fit), else CONTAIN. Nothing about the
@@ -1118,7 +1193,8 @@ void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sce
     // 16:1 — if the image is 16:1 I expect the transparent bg around it, that is
     // EMPTY SPACE"). Empty space is empty space; no extra layer, and one less
     // full-stage blit per frame.
-    UpsertVideoLayer(engine, sceneId, "mediaonair", mediaImg, mediaRect);
+    if (mediaRefresh)
+        UpsertVideoLayer(engine, sceneId, "mediaonair", mediaImg, mediaRect, mediaSeq);
 
     // THE ENGINE-SIDE HALF OF THE "media hand-off" DIAGNOSTIC (the UI half is
     // LiveOutputService::pushMediaFrameToCompositor, the state side is
@@ -1135,7 +1211,7 @@ void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sce
     //   * dimensions AND present ⇒ the layer is in the scene, and the fault is
     //     downstream (texture upload / draw order), not in the hand-off.
     // Written once per scene per STATE, not per render tick.
-    {
+    if (mediaRefresh) {
         const bool present = engine.GetObject(sceneId, "mediaonair").ok();
         const std::string state = mediaImg.empty()
             ? std::format("absent — compositor frame empty (media {}x{}, {} bytes)",

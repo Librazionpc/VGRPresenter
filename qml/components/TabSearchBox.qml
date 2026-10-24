@@ -44,9 +44,9 @@ Item {
     // provider FUNCTION (text) => { rows: [{ label, detail, payload }], complete: "" } —
     // called fresh on every edit. `rows` render in the popup; `complete` is the inline
     // autofill tail ("sis " for "gene") appended INTO the box as selected text —
-    // FreeShow's replace-the-value autofill. A special complete marker ": " is inserted
-    // committed (no selection) so the next digits type the verse. Null provider = no
-    // autocomplete (plain filter tabs), popup never built.
+    // FreeShow's replace-the-value autofill. Scripture completes book names only;
+    // chapter and verse separators are typed explicitly so multi-digit chapters remain
+    // editable. Null provider = no autocomplete (plain filter tabs), popup never built.
     property var suggestions: null
     // A tab whose matches live in the pane (The Table) sets this: the floating
     // suggestion popup never opens, no matter what (rows empty + explicit gate).
@@ -139,10 +139,9 @@ Item {
         // FreeShow's inline autofill (their Scripture input sets searchValue =
         // result.autocompleted): the completed word is COMMITTED into the box with the
         // caret at the end — no selection, no ghost. "est" -> "esther |"; the next
-        // keystroke is the chapter digit (the auto-colon then makes the verse digits
-        // follow a colon). Letters typed right after a commit are FROZEN OUT (the
-        // freeze guard below); a digit or a backspace unfreezes instantly.
-        if (completion !== "" && completion !== ": " && completion.trim() !== "" && root.text !== "" &&
+        // keystroke can be the chapter digit. Letters typed right after a commit are
+        // frozen briefly; a digit or Backspace unfreezes instantly.
+        if (completion !== "" && completion.trim() !== "" && root.text !== "" &&
                 !root.lastEditShrank &&
                 input.selectionStart === input.text.length && input.selectionEnd === input.text.length) {
  suppressing = true
@@ -173,11 +172,8 @@ Item {
     // textEdited, which would re-enter edited()/refreshSuggestions() and fight the
     // selection the autofill just made.
     property bool suppressing: false
-    // The LAST textEdited was an erasure (backspace/delete): the autofill must never
-    // re-complete what the user is deleting. Without this, backspacing "genesis 1: "
-    // -> "genesis 1" re-answered the provider (book + valid chapter => ": ") and the
-    // auto-colon re-inserted the colon instantly — the box was stuck and could never
-    // be emptied by deleting. Same for the word commit ("genesi" re-completing "s ").
+    // The LAST textEdited was an erasure (Backspace/Delete): do not re-complete\r
+    // the text the user is deleting.\r
     property bool lastEditShrank: false
     // The tab bar pushes the active tab's stored query back in here on a tab switch
     // (this replaces the old `text: root.text` binding on `input`, which the autofill's
@@ -366,9 +362,8 @@ Item {
             // holds the pre-edit content here (it is assigned below).
             const grew = text.length > root.text.length
             root.lastEditShrank = !grew
-            // Backspacing out of an auto-inserted ": ": the lone space deletion is
-            // invisible ("genesis 1: " looks stuck) and the next press would hit the
-            // re-colon — so erase the whole marker in ONE press ("genesis 1: " -> "genesis 1").
+            // Backspace on the trailing space of a seeded "Book chapter: " reference
+            // removes the colon and space together so the separator is easy to edit.
             if (!grew && root.text.endsWith(": ") && text === root.text.slice(0, -1)) {
                 suppressing = true
                 input.text = root.text.slice(0, -2)
@@ -405,20 +400,6 @@ Item {
                 }
             }
             root.text = text
-            // Auto-colon (FreeShow): the moment the text resolves to book + valid chapter
-            // the provider asks for ": " — insert it committed (no selection; the next
-            // digits type the verse straight through).
-            const res = root.suggestions ? root.suggestions(text) : null
-            if (grew && res && !Array.isArray(res) && res.complete === ": ") {
-                suppressing = true
-                input.text = text + ": "
-                input.cursorPosition = input.text.length
-                suppressing = false
-                root.text = input.text
-                root.edited(input.text)
-                root.refreshSuggestions()
-                return
-            }
             root.edited(text)
             // Deferred one loop turn: Qt emits textEdited BEFORE the cursor settles
             // at the insert position, and the commit below only fires when the caret

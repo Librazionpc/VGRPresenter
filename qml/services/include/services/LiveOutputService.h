@@ -98,6 +98,18 @@ class LiveOutputService : public QObject {
     // through a binding that has to depend on something notifiable, and an
     // invokable alone is opaque to the QML engine's dependency tracking.
     Q_PROPERTY(int feedHealthRev READ feedHealthRev NOTIFY feedHealthChanged)
+    // EVERY OUTPUT'S OWN RUNTIME STATE, keyed by roster name:
+    //   { presented: bool, ageMs: qint64, frames: qulonglong, stalled: bool }
+    // — the same three facts for an HDMI row as for an NDI row. `frames` is
+    // what that output has received (IRenderOutput::FramesReceived through
+    // RenderEngine::OutputFeedAges), `ageMs` how long since its last present
+    // (-1 = never), `stalled` whether the feed probe has given up on it.
+    //
+    // WHY IT EXISTS: the Outputs screen's live line used to be NDI/SDI only,
+    // so a HDMI row said nothing about itself — "the notification is only
+    // instantiated in New Screen 2" (whichever row had a sender), when every
+    // row has a feed that can be measured. Emptied when the session ends.
+    Q_PROPERTY(QVariantMap outputRuntime READ outputRuntime NOTIFY outputRuntimeChanged)
     // Bumped on every new preview frame; QML Image source appends it.
     Q_PROPERTY(qulonglong frameRev READ frameRev NOTIFY frameRevChanged)
     // Frames the loop has rendered this run (diagnostics).
@@ -568,6 +580,9 @@ signals:
     // Any of the feed-health properties above changed (a stall started or
     // cleared, or the recovery notice expired).
     void feedHealthChanged();
+    // A row's measured runtime state moved (see outputRuntime) — once per
+    // probe, not once per frame.
+    void outputRuntimeChanged();
     void stagedChanged();
     void inputChanged();
     void overlaysChanged();
@@ -731,6 +746,11 @@ private:
     // Roster names (not labels) of the outputs whose feed is stalled, the "M1,
     // M2" line built from the SAME rows, and the pill's own text/kind.
     QSet<QString> stalledOutputs_;
+    // What the SAME probe measured for every row — see the outputRuntime
+    // property. Value maps only; no engine handles are kept (a buffer can be
+    // gone by the next probe).
+    QVariantMap outputRuntime_;
+    QVariantMap outputRuntime() const { return outputRuntime_; }
     QString stalledLabels_;
     QString feedNoticeText_;
     QString feedNoticeKind_;
@@ -790,6 +810,37 @@ private:
     void recheckNdiPlanOffThread();
     void connectToNdiOutputRoster();
     bool ndiRosterConnected_ = false; // GUI thread, singleton may be created after this service
+    // WHICH roster object this feed is following (GUI thread). OutputListModel
+    // can hand its singleton over to the object QML actually built (main.cpp's
+    // one-object rule), so the connection made at construction can end up
+    // pointing at a roster nothing edits any more. Every poll compares this
+    // against OutputListModel::instance() and re-connects when they differ —
+    // otherwise a roster change is only noticed by the poll's own re-read, one
+    // tick late, and a signal-driven refresh never arrives at all.
+    class OutputListModel *ndiRosterModel_ = nullptr;
+    // The enabled NDI rows that existed when this session went live, and the
+    // ones added DURING it that have since started sending (both GUI thread).
+    // An output added mid-session gets one "is live — on the network now" note
+    // the first time its sender carries a frame; the rows present at GO LIVE
+    // stay silent, because seven toasts on air is noise rather than news.
+    QSet<QString> ndiSessionNames_;
+    QSet<QString> ndiAnnouncedNames_;
+    // ---- And the ones that never start -------------------------------------
+    // An output added mid-session that does NOT start sending is the other half
+    // of the same report ("I created a new output … it's not being pushed"):
+    // before this, it said so only in a log line the operator never sees. Each
+    // mid-session row is watched from the moment it is seen, and once the grace
+    // below elapses without a frame on the wire it gets ONE warning that names
+    // what it is actually waiting on (no buffer yet / buffer held off / no frame
+    // rendered / switched off on the Outputs screen). GUI thread only.
+    QHash<QString, qint64> ndiSilentSinceMs_;   // first seen not-sending
+    QSet<QString> ndiSilentWarned_;             // one warning per output
+    // Why 6 s: the lazy NDI SDK sender can take a few hundred ms to open, and a
+    // styled output's frame buffer needs a render pass before it holds a frame —
+    // so this is long enough to never fire on a healthy start, short enough that
+    // a dead output is reported while the operator is still looking at it.
+    static constexpr qint64 kNdiSilentWarnMs = 6000;
+    void warnSilentNewOutput(const QString &name, const QString &reason);
     QString ndiRosterLogSignature_; // GUI thread: suppress duplicate roster diagnostics
     QString ndiProbeLogSignature_;  // GUI thread: log probe transitions, not every poll
     // The walk's answer, on the interface thread: install the plan, or the
@@ -939,10 +990,15 @@ private:
     // Update the warming state and notify ONLY on a real change (the send
     // tick would otherwise emit ndiChanged 30-60x/s for a static value).
     void setNdiWarming(bool on, const QString &name);
-    // The provider's own counter: written on the FEED thread by
-    // ndiWorkerSendFrame, read by the GUI's pill and its rate watch. Atomic, so
-    // neither side ever waits for the other — and the feed thread never takes a
-    // lock the GUI thread (or anything else) could be holding mid-operation.
+    // The feed's TOTAL frames on the wire: the SUM of every sender's own
+    // counter, published by the poll (applyNdiPlanProbe) from the counters it
+    // already reads per output. It used to be written by the feed thread from
+    // whichever sender had just sent — so with more than one NDI output it
+    // reported the LAST sender's count, not the feed's, and the rate watch
+    // compared one sender's counter against another's (a healthy seven-output
+    // feed read as "no progress for two windows" and reset a sender at random).
+    // Per-output counts — what the Settings · Outputs pill shows per row — are
+    // ndiOutputStates, published from the same probe.
     std::atomic<qulonglong> ndiFramesSent_{0};
     // ---- The plan: WHAT to send, HANDED to the feed thread -----------------
     // A value copy — never a pointer into the roster or the model — so the feed
@@ -973,10 +1029,16 @@ private:
     void handOverNdiPlan(const std::vector<NdiSendPlan> &plans);
     // One-shot send diagnostics (moved onto the worker with the send): the
     // gate warning, the first SendFrame failure, and the "frames flowing,
-    // monitor discovering" note — each logs once per outage, not per tick.
+    // monitor discovering" note — each logs once per output per outage, not per
+    // tick. PER SENDER, not one flag for the whole feed: with a single flag only
+    // the first output to send ever announced itself, so "New Screen 3, 4, 5 …"
+    // reaching the wire was invisible in the log (and a failure on a later
+    // sender was swallowed for the rest of the session).
     bool ndiGateLogged_ = false;      // GUI thread only
-    bool ndiSendFailedLogged_ = false;   // feed thread only
-    bool ndiFirstFrameLogged_ = false;   // feed thread only
+    QSet<QString> ndiSendFailedNames_;   // feed thread only
+    QSet<QString> ndiFirstFrameNames_;   // feed thread only
+    QSet<QString> ndiSlowNames_;         // feed thread only
+    QHash<QString, int> ndiFastStreaks_; // feed thread only
     bool ndiWaitLogged_ = false;      // GUI thread only; "waiting for buffer/frame" note
     // Backpressure is the feed thread's own pacing now: it clocks each send
     // (feed-thread only, and only ever touched there) and refuses a tick that
@@ -985,12 +1047,12 @@ private:
     // GUI thread at all.
     QElapsedTimer ndiSendClock_;
     QHash<QString, QElapsedTimer> ndiSendClocks_; // feed-thread pacing, one clock per sender
-    // The slow-send incident state: the FEED thread decides it (it measures the
-    // send) and the GUI thread clears it when the session ends (stopNdiFeed) —
-    // so both fields are atomics, and that clear never waits on a lock the feed
-    // thread would have to take around a send.
-    std::atomic<bool> ndiSlowLogged_{false};   // "send is slow" once per incident
-    std::atomic<int> ndiFastStreak_{0};        // consecutive fast sends; ≥30 re-arms the slow-send log (toast-spam guard)
+    // The slow-send incident state is now PER SENDER (ndiSlowNames_ /
+    // ndiFastStreaks_ above, feed thread only): one slow output must not
+    // suppress — or be suppressed by — another's report, and a sender recovering
+    // re-arms only its own note. The GUI clears the sets when the session ends
+    // (stopNdiFeed); they are the feed thread's while it runs, and the feed
+    // thread is parked by then, so no lock is taken around a send.
     // ---- The NDI feed: WHAT on the GUI thread, WHEN on the feed thread -----
     // The feed's cadence lives on the FEED THREAD (ndiWorker_), never on the
     // GUI thread. It used to be a QTimer on the GUI thread, so every late tick
@@ -1030,21 +1092,21 @@ private:
     // output's presented rate. NDI is where the configured rate drives a real
     // stream.) Runs from pollTick while live.
     void checkNdiFeedRate();
-    QElapsedTimer ndiDriftClock_;    // window timer; invalid = not sampling
-    qulonglong ndiDriftFrames_ = 0;  // last sample of the provider's counter
-    int ndiDriftSlowWindows_ = 0;    // consecutive windows below the setting
-    bool ndiDriftWarned_ = false;    // one warning per slow episode
-    int ndiNoProgressWindows_ = 0;   // consecutive 4s windows with zero successful sends
-    // Coarse tier of the last window's measured rate: -1 unknown, 0 at the
-    // configured rate, 1 at (about) its half — the backpressure halving — and
-    // 2 for anything lower. A transition between them is what the runtime
-    // "rate changed" toast announces.
-    int ndiRateTier_ = -1;
-    // The configured rate the previous window saw. A window whose setting
-    // just moved is rebaselined SILENTLY — the Settings-side refresh toast
-    // already covers a changed rate, so the runtime watcher must not add a
-    // second one for a settings-only change.
-    float ndiLastConfiguredFps_ = 0.0f;
+    // ONE WINDOW PER OUTPUT. Every enabled NDI row is its own sender with its
+    // own configured rate, so a single shared window was measuring the sum (or,
+    // worse, one sender's counter against another's) and blaming the wrong
+    // output — the reported "only New Screen 2 is ever reported" shape. Keyed by
+    // the output's row name, GUI thread only (the probe's published state).
+    struct NdiRateWindow {
+        QElapsedTimer clock;        // invalid = not sampling
+        qulonglong frames = 0;      // last sample of THIS output's counter
+        int slowWindows = 0;        // consecutive windows below its setting
+        int noProgressWindows = 0;  // consecutive windows with zero successful sends
+        bool warned = false;        // one drift warning per slow episode
+        int tier = -1;              // -1 unknown, 0 at rate, 1 ~half, 2 lower
+        float configured = 0.0f;    // its configured rate last window (re-baseline on change)
+    };
+    QHash<QString, NdiRateWindow> ndiRateWindows_;   // GUI thread only
     static constexpr int kDriftWindowMs = 4000;
     static constexpr int kDriftWindowsToWarn = 2;
     // The selected NDI output's configured Refresh rate ("60 Hz" → 60).

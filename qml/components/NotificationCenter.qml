@@ -19,8 +19,10 @@ import VGRPresenterUI
 Item {
     id: root
 
-    // [{ id, level, title, message, topic, ts }] — oldest first.
+    // FIFO: oldest first. NotificationOverlay displays only items[0], so a
+    // queued notice's reading timer does not start until it reaches the front.
     property var items: []
+    readonly property var current: items.length > 0 ? items[0] : null
 
     property int _nextId: 1
     readonly property int defaultDurationMs: 5000
@@ -56,22 +58,16 @@ Item {
             delete root.actions[id]
     }
 
-    // The identity of a notice is what the operator can SEE: two notices with
-    // the same level, title and message are the same notice even when different
-    // producers raised them. (Same vocabulary as the engine's own queue —
-    // NotificationQueue's groupKey, which merges duplicates within a window
-    // instead of queueing them; here the window IS the card's lifetime, because
-    // a card that is still on screen is still the thing happening.)
+    // The identity of a notice is what the operator can SEE: identical level,
+    // title and message coalesce even when different producers raised them.
+    // Coalescing preserves the first occurrence's place in the FIFO.
     function groupKeyOf(level, title, message) {
         return (level || "info") + "\u001f" + (title || "") + "\u001f" + message
     }
 
-    // Push a notice. A second copy of one already on screen does NOT become a
-    // second card: it refreshes the card that is there — one more occurrence
-    // (groupCount), a fresh countdown (nonce) so the newest failure gets a full
-    // reading time, and the newest producer's topic. Stacking them six deep was
-    // the observable bug: six refused settings writes, six identical toasts,
-    // and the operator could read none of them.
+    // Push a notice. A repeated notice coalesces with its existing queue entry,
+    // but never restarts its timer or changes its place in the FIFO. Distinct
+    // notices wait behind the current card and each gets its own reading time.
     function push(level, title, message, topic, crux, action) {
         const key = root.groupKeyOf(level, title, message)
         const seen = root.items.find((e) => e.groupKey === key)
@@ -79,7 +75,6 @@ Item {
             root.items = root.items.map((e) => e === seen
                 ? Object.assign({}, e, {
                       groupCount: (e.groupCount || 1) + 1,
-                      nonce: (e.nonce || 1) + 1,
                       topic: topic || e.topic,
                       // Purely presentational, so a repeat may refresh it: the
                       // newest occurrence of the same sentence knows its crux
@@ -89,7 +84,6 @@ Item {
                       // one still worth offering (an id nobody registered draws
                       // no button — see the registry above).
                       action: action || e.action,
-                      ts: Date.now(),
                   })
                 : e)
             return seen.id

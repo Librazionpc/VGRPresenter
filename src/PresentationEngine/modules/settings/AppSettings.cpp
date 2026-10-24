@@ -197,6 +197,21 @@ std::vector<SettingDef> BuildDefinitions() {
         C("error", "Error"), C("warning", "Warning"), C("info", "Info"), C("debug", "Debug"),
     }, "How much the engine writes to engine.log."));
 
+    // ---- Outputs ----
+    // Settings · Outputs' "Fill" — the DEFAULT shape a taken picture gets when the
+    // file itself names none (LiveOutputService::defaultMediaFit_, which the media
+    // pane, the show centre and every monitor tile read). It used to be only a
+    // QML-side value: OutputsScreen wrote "outputs.defaultMediaFit" and Main.qml
+    // read it back, but no definition existed here, so every pick refused with
+    // "there is no setting 'outputs.defaultMediaFit'" in a red Settings toast and
+    // the choice was forgotten on the next launch. Declared, with the three values
+    // the UI offers, so the write lands and the read returns what was chosen.
+    d.push_back(Choice("outputs.defaultMediaFit", "outputs", "Default media fit", "contain", {
+        C("contain", "Contain", "Whole picture, letterboxed"),
+        C("cover", "Cover", "Fill the frame, cropping the edges"),
+        C("fill", "Fill", "Stretch to the frame"),
+    }, "The shape for a picture whose own file does not name one."));
+
     // ---- Resource profile ----
     d.push_back(Choice("resources.profile", "resources", "Resource profile", "performance", {
         C("performance", "Performance"), C("balanced", "Balanced"), C("powerSaver", "Power Saver"),
@@ -312,7 +327,12 @@ std::vector<SettingDef> BuildDefinitions() {
     }));
     // The reference pane's (Scripture / The Table) column widths - dragged by their SplitHandle, remembered so a rebuild or a
     // restart doesn't put them back to their defaults. Shared between the two tabs, the same as the rest of "session".
-    d.push_back(IntRange("session.referencePaneBooksWidth", "session", "Reference books column width", 150, 100, 340));
+    // Floor dropped to 50 (was 100): The Table's "books" column holds only a
+    // 4-digit year, not a Bible book name, and the old 100px floor left it
+    // wasting space the sermon-titles column beside it needed (see
+    // ReferencePane.qml's booksCol SplitHandle, which this must match or
+    // every drag past the old floor gets rejected with a red toast).
+    d.push_back(IntRange("session.referencePaneBooksWidth", "session", "Reference books column width", 150, 50, 340));
     d.push_back(IntRange("session.referencePaneChaptersWidth", "session", "Reference chapters column width", 52, 40, 420));
     d.push_back(IntRange("session.referencePanePreviewWidth", "session", "Reference preview column width", 360, 260, 560));
     // The main screen's left sidebar (the Projects pane) - dragged by its SplitHandle and remembered so a restart

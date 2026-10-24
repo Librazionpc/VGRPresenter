@@ -30,17 +30,23 @@ QtObject {
     // The item the bubble is placed against: the control itself, not its hover
     // area, so the bubble sits on the thing the pointer is actually over.
     property var owner: null
+    // True for a row in a tall scrolling list (Scripture/The Table's verses):
+    // ToolTipLayer earns this tip its own showDelay even while another tip is
+    // already up, instead of the toolbar-pill "swap in place, no re-delay"
+    // default — see HoverDetail.alwaysDelay for why the two need to differ.
+    property bool forceDelay: false
     // Emitted on any change, so the layer can re-read both above. A tip has to
     // be able to draw anywhere, so this is the only channel between the two.
     signal changed()
 
-    function show(tipText, tipOwner) {
+    function show(tipText, tipOwner, alwaysDelay) {
         if (!tipText || !tipOwner)
             return root.hide(tipOwner)
         if (text === String(tipText) && owner === tipOwner)
             return                      // same tip, same owner: nothing to redraw
         text = String(tipText)
         owner = tipOwner
+        forceDelay = alwaysDelay === true
         changed()
     }
 

@@ -23,6 +23,11 @@
 # Judged:
 #   * `rows>=1`        — the screen really listed the operator's outputs (an
 #                        empty screen would make every check below vacuous);
+#   * `reported==rows` — EVERY row printed a runtime line for ITS OWN kind
+#                        ("HDMI · …", "NDI · …"). The line used to exist only
+#                        for NDI/SDI rows, so an HDMI output said nothing about
+#                        its own feed — the report "the notification is only
+#                        instantiated in one output";
 #   * `styled>=1`      — at least one row wears a style, i.e. the case under
 #                        test exists on this machine;
 #   * `described==styled` — EVERY styled row printed one of the documented
@@ -35,8 +40,9 @@
 #                        visible in the verdict instead of passing silently.
 #
 # VERDICT (last line, greppable):
-#   OUTS: PASS rows=N styled=M described=M scopes=<answered/total>
+#   OUTS: PASS rows=N styled=M described=M scopes=<answered/total> reported=N
 #   OUTS: FAIL launch | FAIL notrun | FAIL missing | FAIL empty | FAIL undescribed
+#       | FAIL unreported (a row with no runtime line of its own)
 #
 # Usage:  bash tools/selftest/run_outputs_layout_test.sh [wait-seconds]   (default 90)
 # ============================================================================
@@ -112,6 +118,7 @@ field() { echo "$RESULT" | grep -o "$1=[^ ]*" | head -1 | cut -d= -f2; }
 ROWS="$(field rows)"
 STYLED="$(field styled)"
 DESCRIBED="$(field described)"
+REPORTED="$(field reported)"
 if [ -z "$ROWS" ] || [ "$ROWS" -lt 1 ]; then
     echo "OUTS: FAIL empty — no output row was listed: $RESULT"
     exit 5
@@ -124,6 +131,15 @@ if [ "$DESCRIBED" != "$STYLED" ]; then
     echo "OUTS: FAIL undescribed — $STYLED styled row(s) but only $DESCRIBED printed one of the documented answers: $RESULT"
     exit 7
 fi
+# EVERY row, every kind. A missing `reported` means the scenario predates the
+# per-row runtime line (or the row property disappeared) — either way nothing
+# about "all outputs" was actually checked, so it is a failure, not a skip.
+if [ -z "$REPORTED" ] || [ "$REPORTED" != "$ROWS" ]; then
+    echo "OUTS: FAIL unreported — $ROWS row(s) listed but only '${REPORTED:-0}' printed a runtime line for their own kind: $RESULT"
+    echo "(rows as rendered:)"
+    grep -a "\[SELFTEST-OUTS\] row=" "$LOG" 2>/dev/null | sed -n 's/.*output=\"\([^\"]*\)\".*kind=\"\([^\"]*\)\".*status=\"\([^\"]*\)\".*/  \1 (\2) -> \3/p'
+    exit 8
+fi
 
 # What the rows actually said, so a machine whose styles are all background-only
 # (a real possibility) is visible rather than passing as a silent success.
@@ -131,5 +147,5 @@ SCOPES="$(grep -a "\[SELFTEST-OUTS\] row=" "$LOG" 2>/dev/null \
     | sed -n 's/.*scope="\([^"]*\)".*/\1/p')"
 ANSWERED="$(printf '%s\n' "$SCOPES" | grep -c -v '^none$')"
 TOTAL="$(printf '%s\n' "$SCOPES" | grep -c .)"
-echo "OUTS: PASS rows=$ROWS styled=$STYLED described=$DESCRIBED scopes=$ANSWERED/$TOTAL"
+echo "OUTS: PASS rows=$ROWS styled=$STYLED described=$DESCRIBED scopes=$ANSWERED/$TOTAL reported=$REPORTED"
 exit 0

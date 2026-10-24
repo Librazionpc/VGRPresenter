@@ -1606,25 +1606,17 @@ Item {
             }
             return { rows: [], complete: "" }
         }
-        // Inline autofill (the FreeShow Scripture input): the best completion for the typed
-        // prefix as it reads ("gene" -> "sis ", "genesis 1" -> ": "). TabSearchBox COMMITS
-        // the word into the box with the caret at the end (their searchValue =
-        // result.autocompleted), so the next keystroke is the chapter digit; the ": "
-        // marker inserts the colon so the digits after it type the verse.
+        // Inline book-name completion ("gene" -> "sis "). Do not insert the
+        // chapter/verse colon automatically: a valid one-digit chapter such as 1
+        // may be the start of 10, 11, or 12. The operator types the full chapter,
+        // then `:` and the verse; this keeps the separator easy to edit and avoids
+        // turning the next chapter digit into a verse digit.
         const starts = root.books.filter((b) => b.name.toLowerCase().indexOf(needle) === 0 ||
                                                 needle.indexOf(b.name.toLowerCase()) === 0)
         if (starts.length === 1) {
             const bk = starts[0], bkLower = bk.name.toLowerCase()
             if (bkLower.indexOf(needle) === 0)
                 completion = bk.name.slice(needle.length) + " "
-            else {
-                // Book typed in full + a chapter number -> the ": " marker, the next
-                // digits type the verse straight through. Scripture-only now: The Table
-                // returns above (citation inline search, no book completions).
-                const rest = needle.slice(bkLower.length).trim()
-                if (/^\d+$/.test(rest) && bk.chapters.indexOf(parseInt(rest)) >= 0)
-                    completion = ": "
-            }
         }
         // The Table (a book WITH chapterTitles): once the year is typed in full, the rows
         // ARE that year's sermons — each row carries bookId + chapter so picking one jumps
@@ -1645,7 +1637,7 @@ Item {
         }
         // RESOLVED -> NO dropdown (user call): the pane has already jumped and the
         // chapters column has moved, so a chapter list in a popup is redundant — the
-        // inline completion + auto-colon carry the rest and the chapter is typed straight in.
+        // the operator types the full chapter and then its verse separator.
         const resolved = root.adapter.resolve(String(text), sourceId)
         if (resolved.bookId !== undefined)
             return { rows: [], complete: completion }
@@ -1679,7 +1671,26 @@ Item {
     // "danile 1; b4 icoud and 1".
     property int searchToken: 0
     property int resolveToken: 0
+    // The keyboard/hover cursor into root.searchResults (full-text hits, NOT
+    // citationMatches — see matchCursor/stepMatch for that list's own
+    // version of this same pattern). -1 = nothing walked to or hovered yet.
+    // Reset on every new query: a stale row position from the last search
+    // must not survive onto a different result list.
+    property int hitCursor: -1
+    function stepHit(delta) {
+        const rows = root.searchResults
+        if (rows.length === 0)
+            return false
+        const next = root.hitCursor < 0
+                   ? (delta < 0 ? rows.length - 1 : 0)
+                   : Math.max(0, Math.min(rows.length - 1, root.hitCursor + delta))
+        root.hitCursor = next
+        if (hitsList && hitsList.visible)
+            hitsList.positionViewAtIndex(next, ListView.Contain)
+        return true
+    }
     function runSearch(text) {
+        root.hitCursor = -1
         const t = text.trim()
         if (t === "") {
             root.resolvedWords = []
@@ -2655,7 +2666,11 @@ Item {
         }
         Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: Theme.border }
         SplitHandle {
-            value: booksCol.width; minValue: 100; maxValue: 340
+            // A Bible's book names need real room, but The Table's "books"
+            // column holds only a 4-digit year — 100px was a floor sized for
+            // the wrong content and left it wasting space the sermon-titles
+            // column beside it needed.
+            value: booksCol.width; minValue: 50; maxValue: 340
             onDragged: (v) => root.booksColWidth = v
             onResetRequested: root.booksColWidth = 150
         }
@@ -2876,6 +2891,21 @@ Item {
                     anchors.fill: parent
                     checkAncestors: false   // (rows inside a Flickable; no hover-gated visibility in the chain)
                     clickEnabled: false     // the DragSource below owns verse clicks and drags
+                }
+                // The row itself stays one line (the preview pane is the full
+                // read — see the row's own comment above), but a narrow pane
+                // can hide that preview; hover gives the full text either way.
+                HoverDetail {
+                    anchors.fill: parent
+                    // A scrolling list of verse rows, not a toolbar sweep —
+                    // each row earns its own showDelay (see
+                    // HoverDetail.alwaysDelay) instead of popping up the
+                    // instant the pointer crosses from the row above it.
+                    alwaysDelay: true
+                    title: verseRow.continuation
+                           ? qsTr("%1-%2").arg(verseRow.verseNumber).arg(verseRow.partIndex)
+                           : String(verseRow.verseNumber)
+                    detail: verseRow.oneLine
                 }
                 // The verse number: the usual red, gold while the user has
                 // marked this verse with a highlight or a note.
@@ -3123,6 +3153,9 @@ Item {
                     required property int index
                     objectName: "selfTestHitRow_" + index   // (the pane-rows scenario scrolls to it by name)
                     readonly property real labelWidth: Math.min(260, Math.max(160, width * 0.28))
+                    // The keyboard/hover cursor's row — same pattern as
+                    // citationMatches' matchRow.active, just against hitCursor.
+                    readonly property bool active: root.hitCursor === index
                     // LAYOUT PROBE (VGR_LAYOUT_TEST).
                     Component.onCompleted: root.hitRowBuilds++
                     Component.onDestruction: root.hitRowDrops++
@@ -3130,7 +3163,12 @@ Item {
                     height: 32
                     Rectangle {
                         anchors.fill: parent; anchors.margins: 1; radius: 4
-                        color: "transparent"
+                        // Same treatment as verseRow's own active state: an
+                        // accent-tinted ground and a full outline, not a faint
+                        // neutral chip — that read as no highlight at all.
+                        color: hitRow.active ? Qt.alpha(Theme.accent, 0.24) : "transparent"
+                        border.width: hitRow.active ? 1.5 : 0
+                        border.color: hitRow.active ? Qt.alpha(Theme.accentLight, 0.95) : "transparent"
                         HoverGlow {
                             anchors.fill: parent
                             radius: parent.radius
@@ -3176,20 +3214,48 @@ Item {
                             hitSnippet.collapsed, width, hitMetrics.advanceWidth)
                         text: root.canHighlight ? root.highlight(shown) : shown
                     }
-                    HoverHandler { id: hitHover; cursorShape: Qt.PointingHandCursor }
+                    // Position truth (PositionHoverArea), the codebase
+                    // convention — a bare HoverHandler here was the actual
+                    // reason the hover-follows-selection never caught: this
+                    // build does not reliably deliver per-row hover-enter/exit
+                    // (see PositionHoverArea's own header), and matchRow's
+                    // identical "hover selects, like the arrows" logic already
+                    // relies on this component for exactly that reason.
+                    PositionHoverArea {
+                        id: hitHover
+                        anchors.fill: parent
+                        checkAncestors: false
+                        clickEnabled: false   // the TapHandler below owns clicks
+                        onHoveredChanged: if (hitHover.hovered) root.hitCursor = hitRow.index
+                    }
                     TapHandler {
                         onTapped: {
+                            root.hitCursor = hitRow.index
                             root.goTo({ bookId: hitRow.modelData.bookId, chapter: hitRow.modelData.chapter,
                                         verseStart: hitRow.modelData.verse, verseEnd: hitRow.modelData.verse,
                                         matchText: searchInput.text })
                         }
                         onDoubleTapped: {
+                            root.hitCursor = hitRow.index
                             root.goTo({ bookId: hitRow.modelData.bookId, chapter: hitRow.modelData.chapter,
                                         verseStart: hitRow.modelData.verse, verseEnd: hitRow.modelData.verse,
                                         matchText: searchInput.text })
                             root.searching = false
                             searchInput.text = ""
                         }
+                    }
+                    // Both the title and the snippet elide on this row — hover
+                    // gives the full title and the full (uncentred, untruncated)
+                    // snippet. A scrolling results list, not a toolbar sweep, so
+                    // each row earns its own delay (see HoverDetail.alwaysDelay).
+                    HoverDetail {
+                        anchors.fill: parent
+                        alwaysDelay: true
+                        title: root.adapter && root.adapter.contentType === "table"
+                               ? root.compactTableResultTitle(hitRow.modelData)
+                               : hitRow.modelData.reference
+                                 + (Number(hitRow.modelData.verse) > 0 ? "  ·  ¶" + Number(hitRow.modelData.verse) : "")
+                        detail: hitSnippet.collapsed
                     }
                 }
                 // Nothing found: a FOOTER, so it sits under the empty list instead
@@ -3552,7 +3618,24 @@ Item {
                         onTextChanged: {
                             pillDebounce.restart()
                         }
-                        onAccepted: { pillDebounce.stop(); root.runSearch(text) }
+                        onAccepted: {
+                            pillDebounce.stop()
+                            // Enter on a row the keyboard or the pointer already
+                            // walked to opens IT — the same "that row IS the
+                            // answer" rule stepMatch's own Enter handling
+                            // follows for citationMatches.
+                            if (root.hitCursor >= 0 && root.hitCursor < root.searchResults.length) {
+                                const row = root.searchResults[root.hitCursor]
+                                root.goTo({ bookId: row.bookId, chapter: row.chapter,
+                                            verseStart: row.verse, verseEnd: row.verse, matchText: text })
+                                root.searching = false
+                                searchInput.text = ""
+                            } else {
+                                root.runSearch(text)
+                            }
+                        }
+                        Keys.onDownPressed: root.stepHit(1)
+                        Keys.onUpPressed: root.stepHit(-1)
                         Keys.onTabPressed: {
                             // Accept the engine's corrections: "thn freind" + Tab
                             // -> "then friend", then re-run with the fixed words.
@@ -3633,6 +3716,13 @@ Item {
                             checkAncestors: false
                             onClicked: root.toggleScopeLock()
                         }
+                        HoverDetail {
+                            anchors.fill: parent
+                            title: qsTr("Chapter lock")
+                            detail: root.scopeLock
+                                    ? qsTr("Searching only the passage on screen")
+                                    : qsTr("Searching everything — click to search just this passage")
+                        }
                     }
                     // The exact-words padlock, at the extreme end of the field (user
                     // call). Open (dim) = the search's normal fuzzy matching; closed
@@ -3660,6 +3750,13 @@ Item {
                             anchors.fill: parent
                             checkAncestors: false
                             onClicked: root.toggleExact()
+                        }
+                        HoverDetail {
+                            anchors.fill: parent
+                            title: qsTr("Exact words")
+                            detail: root.exact
+                                    ? qsTr("Every typed word must match exactly")
+                                    : qsTr("Fuzzy matching — click to require exact whole words")
                         }
                     }
                 }
@@ -3704,6 +3801,11 @@ Item {
                             // pick's, exactly as the wall's ‹ › are.
                             onClicked: root.stepAndPlay(stepBtn.modelData.dir)
                         }
+                        HoverDetail {
+                            anchors.fill: parent
+                            title: stepBtn.modelData.tip
+                            detail: qsTr("Step and stage the neighbouring passage")
+                        }
                     }
                 }
 
@@ -3735,12 +3837,20 @@ Item {
                         checkAncestors: false
                         onClicked: playPickedButton.isOurs ? LiveOutputService.stop() : root.playPicked()
                     }
+                    HoverDetail {
+                        anchors.fill: parent
+                        title: playPickedButton.isOurs ? qsTr("Stop") : qsTr("Play")
+                        detail: playPickedButton.isOurs
+                                ? qsTr("Take this passage off air")
+                                : qsTr("Go live with the picked passage")
+                    }
                 }
 
                 // The highlight toggle for the picked passage (the drawer's other half):
                 // gold star while verse 1 of the pick is marked — the star marks the
                 // FIRST picked verse, per-verse stars live on the rows themselves.
                 Item {
+                    id: starToggle
                     visible: !root.searching && root.hasUserData
                     width: 28; height: 26
                     readonly property bool marked: root.hasUserData && root.selected.length > 0
@@ -3762,6 +3872,13 @@ Item {
                                 return
                             root.toggleHighlight(root.selected[0])
                         }
+                    }
+                    HoverDetail {
+                        anchors.fill: parent
+                        title: qsTr("Highlight")
+                        detail: starToggle.marked
+                                ? qsTr("Marked — click to remove the highlight")
+                                : qsTr("Mark the picked passage")
                     }
                 }
 
@@ -3789,6 +3906,11 @@ Item {
                                 searchInput.forceActiveFocus()
                             }
                         }
+                    }
+                    HoverDetail {
+                        anchors.fill: parent
+                        title: qsTr("Search")
+                        detail: root.adapter ? root.adapter.searchPlaceholder : qsTr("Search")
                     }
                 }
             }

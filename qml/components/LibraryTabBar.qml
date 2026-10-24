@@ -449,7 +449,30 @@ Rectangle {
                     anchors.fill: parent
                     onClicked: root.currentTab = tabDelegate.index
                 }
+                HoverDetail {
+                    anchors.fill: parent
+                    title: tabDelegate.modelData.label
+                    detail: root.tabShortcut(tabDelegate.index)
+                }
             }
+        }
+    }
+
+    // Ctrl+1 through the last tab (Hotkeys.libraryTabs — see its own
+    // comment), one Shortcut per tab in the row's own order. A Repeater
+    // over the same `tabs` model the row itself uses, so a tab added there
+    // picks up its chord automatically instead of needing a matching new
+    // Shortcut declared by hand.
+    function tabShortcut(index) {
+        const seqs = Hotkeys.sequences("libraryTabs")
+        return index >= 0 && index < seqs.length ? seqs[index] : ""
+    }
+    Repeater {
+        model: root.tabs
+        delegate: Shortcut {
+            required property int index
+            sequence: root.tabShortcut(index)
+            onActivated: root.currentTab = index
         }
     }
 }
