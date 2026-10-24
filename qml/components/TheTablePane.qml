@@ -46,6 +46,7 @@ ReferencePane {
         readonly property var books: (id) => TheTableService.books(id)
         readonly property var chapter: (src, bookId, n) => TheTableService.chapter(bookId, n)
         readonly property var chapterAsync: (src, bookId, n, token) => TheTableService.chapterAsync(bookId, n, token)
+        readonly property var chapterPeekAsync: (src, bookId, n, token) => TheTableService.previewChapterAsync(bookId, n, token)
         readonly property var reference: (book, ch, nums) => TheTableService.reference(book, ch, nums)
         readonly property var resolve: (text, srcId) => TheTableService.resolve(text)
         // `exact` = the pane's padlock: the typed words must appear verbatim as
@@ -55,10 +56,10 @@ ReferencePane {
         // lock Scripture has — the search is limited to the sermon on screen
         // (the year id and sermon number the pane passes as `bookId`/`chapter`).
         readonly property bool supportsChapterLock: true
-        readonly property var search: (text, srcId, exact, bookId, chapter) => TheTableService.search(text, 60, exact, false, bookId, chapter)
+        readonly property var search: (text, srcId, exact, bookId, chapter) => TheTableService.search(text, 120, exact, false, bookId, chapter)
         // ASYNC pill search: the pane prefers this when present (token-guarded,
         // answers via TheTableService.searchResultsReady -> the pane's Connections).
-        readonly property var searchAsync: (text, srcId, token, exact, bookId, chapter) => TheTableService.searchAsync(text, 60, token, exact, bookId, chapter)
+        readonly property var searchAsync: (text, srcId, token, exact, bookId, chapter) => TheTableService.searchAsync(text, 120, token, exact, bookId, chapter)
         readonly property var preview: (src, bookId, ch, nums) => TheTableService.preview(bookId, ch, nums)
         // The picked paragraphs as show slides, template-split by the tab's options.
         readonly property var slides: (src, bookId, ch, nums) => TheTableService.slides(bookId, ch, nums)

@@ -44,10 +44,16 @@ Item {
         id: pill
         anchors.fill: parent
         radius: Theme.radiusSm
-        color: hover.containsMouse || menu.visible ? Theme.controlBg : Theme.chip
+        color: menu.visible ? Theme.controlBg : Theme.chip
         border.width: menu.visible ? 1 : 0
         border.color: Theme.accent
         Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+        HoverGlow {
+            anchors.fill: parent
+            radius: parent.radius
+            hovered: hover.containsMouse && !menu.visible
+            glowColor: Theme.hoverBg
+        }
 
         Text {
             id: pillLabel

@@ -312,6 +312,9 @@ public:
 
 signals:
     void activeStyleChanged();
+    // Emitted after the roster is persisted and the engine's output styles
+    // are pushed, so live output feeds can safely resolve newly added rows.
+    void outputRosterChanged();
     // A monitor was hot-plugged, unplugged, or its mode (resolution /
     // refresh) changed. QML: ScreenForm bumps its displayRev on this;
     // OutputWindow tracks screensRevision (property, not this signal —

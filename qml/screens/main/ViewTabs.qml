@@ -89,11 +89,17 @@ Item {
             radius: 8
             border.width: 1
             border.color: tabRoot.isActive ? Theme.border : "transparent"
-            color: tabRoot.isActive ? Theme.activeBg : (tabRoot.isHover ? Theme.hoverBg : "transparent")
+            color: tabRoot.isActive ? Theme.activeBg : "transparent"
             // Greyed when there is nothing to open, so "don't press this yet"
             // is visible before the pointer is on it.
             opacity: tabRoot.available ? 1 : 0.4
             Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+            HoverGlow {
+                anchors.fill: parent
+                radius: parent.radius
+                hovered: tabRoot.isHover && tabRoot.available && !tabRoot.isActive
+                glowColor: Theme.hoverBg
+            }
 
             // 24 px icon box, centred in the pill.
             Item {

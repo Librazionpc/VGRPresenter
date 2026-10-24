@@ -26,6 +26,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 // The feed's two engine-side anchors, needed by value in NdiSendPlan below:
 // the display provider that owns the NDI sender, and the render output the
@@ -192,8 +193,8 @@ class LiveOutputService : public QObject {
     // rather than by a copy that can drift from it.
     Q_PROPERTY(QString mediaMeterLabel READ mediaMeterLabel CONSTANT)
     // ---- NDI PROGRAM SENDER ---------------------------------------------
-    // True while the FIRST enabled NDI-kind output (the active one, or any
-    // other enabled NDI row when a projector is on air) is being fed by the
+    // True while the selected enabled NDI-kind output (or the first enabled
+    // NDI row when a projector is on air) is being fed by the
     // live loop via the engine's NDI display provider (native RGBA →
     // BroadcastEngine, no conversion; real NDI when the runtime is installed,
     // software loopback otherwise).
@@ -212,8 +213,10 @@ class LiveOutputService : public QObject {
     // NDI row / not live).
     Q_PROPERTY(bool ndiWarming READ ndiWarming NOTIFY ndiChanged)
     // The roster name of the row being warmed ("" when not warming) — only
-    // the FIRST enabled NDI output feeds, so the row can gate on its own name.
+    // selected NDI output feeds, so the row can gate on its own name.
     Q_PROPERTY(QString ndiWarmingOutputName READ ndiWarmingOutputName NOTIFY ndiChanged)
+    // Per-output NDI state so every enabled NDI row reports its own sender.
+    Q_PROPERTY(QVariantMap ndiOutputStates READ ndiOutputStates NOTIFY ndiChanged)
 
 public:
     static LiveOutputService *create(QQmlEngine *engine, QJSEngine *jsEngine);
@@ -281,6 +284,7 @@ public:
     qulonglong ndiFramesSent() const;
     bool ndiWarming() const;
     QString ndiWarmingOutputName() const;
+    QVariantMap ndiOutputStates() const { return ndiOutputStates_; }
     // The feed thread's send: sender-create (lazy) + the SDK send, from an
     // immutable latest-frame snapshot. Static; the shared frame keeps the
     // pixels alive without copying them on the GUI thread. Provider is a raw
@@ -419,6 +423,8 @@ public:
     // staged the next time it runs (the top button's own GO LIVE click);
     // stageSlides() itself never touches live_.
     Q_INVOKABLE void stageSlides(const QString &name, const QVariantList &slides);
+    Q_INVOKABLE void stageSlidesWithPreview(const QString &name, const QVariantList &slides,
+                                            const QVariantMap &styledPreview);
     // Wipes a pending stage without touching live_/onAirSlide_ — stop()
     // alone never did this (staging and live are independent: a NEXT pick
     // can sit staged while the CURRENT one is still live), which is
@@ -771,10 +777,8 @@ private:
     // {id,name} maps, insertion order = z-order (last taken = topmost).
     QVariantList activeOverlays_;
 
-    // The NDI program sender: the first ENABLED NDI-kind output (not only
-    // the active one — a projector can be on air while NDI must still feed)
-    // gets the live loop's frames pushed at that output's CONFIGURED refresh
-    // rate (Settings · Outputs) while live.
+    // Each enabled NDI-kind output gets an independent sender and frame plan;
+    // per-row sending/warming/count state is published through ndiOutputStates.
     //
     // SPLIT ALONG THE THREAD BOUNDARY (docs/gui_thread_audit.md §6.6). The
     // roster read (a QML model), the bridge's PUBLISHED NDI verdict and the
@@ -784,21 +788,34 @@ private:
     // signals (see applyNdiPlanProbe). One walk at a time: the plan is a value
     // the feed thread reads, so a late answer is simply the next poll's answer.
     void recheckNdiPlanOffThread();
+    void connectToNdiOutputRoster();
+    bool ndiRosterConnected_ = false; // GUI thread, singleton may be created after this service
+    QString ndiRosterLogSignature_; // GUI thread: suppress duplicate roster diagnostics
+    QString ndiProbeLogSignature_;  // GUI thread: log probe transitions, not every poll
     // The walk's answer, on the interface thread: install the plan, or the
     // warm-up/teardown state, exactly as the old inline resolution did. `bufferOk`
     // is whether the output's buffer resolved at all, `enabled` whether it is
     // enabled, `hasFrame` whether it has rendered anything yet — three different
-    // states the UI says three different things about.
-    void applyNdiPlanProbe(bps::display::NdiDisplayProvider *provider,
-                           const std::shared_ptr<bps::rendering::FrameBufferOutput> &buffer,
-                           bool bufferOk, bool enabled, bool hasFrame,
-                           const QString &outputName, const QString &senderName, float fps);
+    // states the UI reports per output through ndiOutputStates.
+    struct NdiProbeResult {
+        QString outputName;
+        QString senderName;
+        float fps = 30.0f;
+        std::shared_ptr<bps::display::NdiDisplayProvider> provider;
+        std::shared_ptr<bps::rendering::FrameBufferOutput> buffer;
+        bool bufferOk = false;
+        bool enabled = false;
+        bool hasFrame = false;
+    };
+    void applyNdiPlanProbe(const std::vector<NdiProbeResult> &results);
     std::atomic<bool> ndiPlanProbeBusy_{false};   // one engine walk in flight at a time
+    QVariantMap ndiOutputStates_;                 // GUI thread: name -> {sending, warming, frames}
+    QHash<QString, std::shared_ptr<bps::display::NdiDisplayProvider>> ndiProviders_; // GUI thread owns each output sender
     void stopNdiFeed();
     // The network-visible NDI source name for an output row: "<AppName>-<Row
     // name>" when the row has a name, or
     // "" to fall back to the provider's own default. With no argument it
-    // resolves the first enabled NDI row itself.
+    // resolves the selected (or fallback enabled) NDI row itself.
     static QString ndiSenderDisplayName(const QString &rowName = QString());
     // NDI sender identity per live session: the NDI SDK can't rename a live
     // sender, so a name change (or a new session) must recreate it. Called
@@ -933,13 +950,13 @@ private:
     // buffer is a shared_ptr (the render registry owns the real one), so a plan
     // outliving its output cannot leave the feed thread reading freed pixels.
     struct NdiSendPlan {
-        bool want = false;
-        bps::display::NdiDisplayProvider *provider = nullptr;
+        QString outputName;
+        std::shared_ptr<bps::display::NdiDisplayProvider> provider;
         std::shared_ptr<bps::rendering::FrameBufferOutput> buffer;
         QString senderName;
         float fps = 30.0f;
         bool operator==(const NdiSendPlan &o) const {
-            return want == o.want && provider == o.provider && buffer == o.buffer
+            return outputName == o.outputName && provider == o.provider && buffer == o.buffer
                    && senderName == o.senderName && fps == o.fps;
         }
     };
@@ -948,12 +965,12 @@ private:
     // nothing else. That is why there is no mutex: the value is not shared, it
     // is given away (and the equal-plan short-circuit below means a steady feed
     // hands over nothing at all).
-    NdiSendPlan ndiFeedPlan_;                            // feed thread only
+    std::vector<NdiSendPlan> ndiFeedPlan_;                // feed thread only
     // The last plan handed over, so a poll that changes nothing posts nothing
     // (the 10 Hz poll republishes the same plan otherwise).
-    NdiSendPlan ndiSentPlan_;                            // GUI thread only
+    std::vector<NdiSendPlan> ndiSentPlan_;               // GUI thread only
     bool ndiPlanPublished_ = false;                      // GUI thread only
-    void handOverNdiPlan(const NdiSendPlan &plan);
+    void handOverNdiPlan(const std::vector<NdiSendPlan> &plans);
     // One-shot send diagnostics (moved onto the worker with the send): the
     // gate warning, the first SendFrame failure, and the "frames flowing,
     // monitor discovering" note — each logs once per outage, not per tick.
@@ -967,6 +984,7 @@ private:
     // without ever lying about the advertised one — and without touching the
     // GUI thread at all.
     QElapsedTimer ndiSendClock_;
+    QHash<QString, QElapsedTimer> ndiSendClocks_; // feed-thread pacing, one clock per sender
     // The slow-send incident state: the FEED thread decides it (it measures the
     // send) and the GUI thread clears it when the session ends (stopNdiFeed) —
     // so both fields are atomics, and that clear never waits on a lock the feed
@@ -1029,7 +1047,7 @@ private:
     float ndiLastConfiguredFps_ = 0.0f;
     static constexpr int kDriftWindowMs = 4000;
     static constexpr int kDriftWindowsToWarn = 2;
-    // The first enabled NDI output's configured Refresh rate ("60 Hz" → 60).
+    // The selected NDI output's configured Refresh rate ("60 Hz" → 60).
     // A row with an unusable/blank value feeds at the engine's 30 fps
     // default; 0 means NO enabled NDI row (the send clock stops).
     static float ndiConfiguredFps();
@@ -1056,7 +1074,7 @@ private:
     // Publish a plan (GUI side). Only ever a value copy plus, when it wants
     // frames and the clock is not up yet, the queued "arm the clock" — so the
     // GUI never blocks on, or reaches into, the feed thread's own state.
-    void setNdiPlan(const NdiSendPlan &plan);
+    void setNdiPlan(const std::vector<NdiSendPlan> &plans);
     // Drop the plan (GUI side): an empty plan is what stops the feed thread's
     // own clock on its next beat, so no cross-thread stop call is needed (and
     // none could race the plan it is stopping).

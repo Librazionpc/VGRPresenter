@@ -244,7 +244,10 @@ DisplayProviderCapabilities NdiDisplayProvider::Capabilities() const noexcept {
     DisplayProviderCapabilities c;
     c.supportsHotPlug = false;
     c.supportsVirtualOutputs = true;
-    c.maxOutputs = 1;
+    // LiveOutputService creates an independent NDI sender for each enabled
+    // configured output. This provider capability describes that transport,
+    // not the old singleton program sender.
+    c.maxOutputs = 16;
     c.scalingModes = {ScalingMode::Fit, ScalingMode::Stretch, ScalingMode::Fill};
     c.colorProfiles = {ColorProfile::SRgb};
     return c;

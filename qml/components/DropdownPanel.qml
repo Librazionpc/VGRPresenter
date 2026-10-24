@@ -613,7 +613,6 @@ Rectangle {
                                     radius: parent.radius
                                     hovered: alive && !modelData.disabled && itemArea.hovered
                                     glowColor: modelData.danger ? Qt.alpha(Theme.danger, 0.14) : Theme.border
-                                    quick: true
                                 }
 
                                 Text {

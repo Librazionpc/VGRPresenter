@@ -359,6 +359,22 @@ QVariantList TheTableService::chapter(const QString &bookId, int chapter) const
     return out;
 }
 
+void TheTableService::previewChapterAsync(const QString &bookId, int chapter, int token)
+{
+    latestPreviewToken_ = token;
+    auto *runner = QThread::create([this, bookId, chapter, token] {
+        if (token != latestPreviewToken_.load(std::memory_order_acquire))
+            return;
+        const QVariantList rows = this->chapter(bookId, chapter);
+        QMetaObject::invokeMethod(this, [this, bookId, chapter, token, rows] {
+            if (token == latestPreviewToken_.load(std::memory_order_acquire))
+                emit previewChapterReady(token, bookId, chapter, rows);
+        }, Qt::QueuedConnection);
+    });
+    connect(runner, &QThread::finished, runner, &QObject::deleteLater);
+    runner->start();
+}
+
 void TheTableService::chapterAsync(const QString &bookId, int chapter, int token)
 {
     // Read on the GUI thread before the worker starts (template + this tab's options):
@@ -582,6 +598,15 @@ QVariantList TheTableService::search(const QString &text, int limit, bool exactW
                                      bool includeFullText, const QString &scopeBookId,
                                      int scopeChapter) const
 {
+    return searchCancellable(text, limit, exactWords, includeFullText,
+                             scopeBookId, scopeChapter, {});
+}
+
+QVariantList TheTableService::searchCancellable(const QString &text, int limit, bool exactWords,
+                                                 bool includeFullText, const QString &scopeBookId,
+                                                 int scopeChapter,
+                                                 const std::function<bool()>& cancelled) const
+{
     QVariantList out;
     if (!library_ || !EngineBridge::instance().booted())
         return out;
@@ -589,7 +614,7 @@ QVariantList TheTableService::search(const QString &text, int limit, bool exactW
     // query reads the one open sermon's paragraphs and stops, instead of scanning
     // the library and discarding everything outside the scope.
     auto hits = tableLibrary(library_)->Search(text.toStdString(), size_t(limit), exactWords,
-                                               scopeBookId.toStdString(), scopeChapter);
+                                               scopeBookId.toStdString(), scopeChapter, cancelled);
     if (!hits.ok())
         return out;
     for (const bl::TheTableSearchHit &h : hits.value()) {
@@ -630,7 +655,10 @@ void TheTableService::searchAsync(const QString &text, int limit, int token, boo
         // finish. Skip queued stale work before it enters the serialized scan.
         if (token != latestSearchToken_.load(std::memory_order_acquire))
             return;
-        const QVariantList rows = search(text, limit, exactWords, false, scopeBookId, scopeChapter);
+        const QVariantList rows = searchCancellable(text, limit, exactWords, false,
+                                                    scopeBookId, scopeChapter, [this, token] {
+            return token != latestSearchToken_.load(std::memory_order_acquire);
+        });
         QMetaObject::invokeMethod(this, [this, token, rows] {
             if (token == latestSearchToken_)
                 emit searchResultsReady(token, rows);

@@ -594,11 +594,15 @@ void SearchService::refreshAggregateOffThread(const QString &text, int perKind, 
     });
 }
 
-QVariantList SearchService::readSearch(const QString &rawText, int perKind, bool exactWords) const
+QVariantList SearchService::readSearch(const QString &rawText, int perKind, bool exactWords,
+                                       const std::function<bool()>& cancelled,
+                                       const std::function<void(const QVariantList&)>& progress) const
 {
     QVariantList out;
     QString text = rawText.trimmed();
     if (text.isEmpty() || !EngineBridge::instance().booted())
+        return out;
+    if (cancelled && cancelled())
         return out;
     const int limit = qMax(1, perKind);
     // Exact mode still forgives a detected typo. Resolve only misspelled terms
@@ -633,6 +637,8 @@ QVariantList SearchService::readSearch(const QString &rawText, int perKind, bool
             }
         }
     }
+    if (cancelled && cancelled())
+        return {};
     // The padlock's words (lower-cased): every surface whose engine matching
     // cannot be locked (Bible, songs, media) has its hits filtered against these.
     const QStringList exactQueryWords = exactWords ? splitWords(text) : QStringList();
@@ -693,6 +699,8 @@ QVariantList SearchService::readSearch(const QString &rawText, int perKind, bool
         for (auto &f : found) if (f.first < 0) f.first = 3;
         take(out, found, limit);
     }
+    if (cancelled && cancelled())
+        return {};
 
     // ---- The working show: slides, templates, overlays, categories ------------------
     ShowService &shows = ShowService::instance();
@@ -767,6 +775,8 @@ QVariantList SearchService::readSearch(const QString &rawText, int perKind, bool
         }
         take(out, found, limit);
     }
+    if (cancelled && cancelled())
+        return {};
 
     // ---- Songs (engine) -------------------------------------------------------------
     if (text.size() >= 2) {
@@ -788,8 +798,15 @@ QVariantList SearchService::readSearch(const QString &rawText, int perKind, bool
             take(out, found, limit);
         }
     }
+    if (cancelled && cancelled())
+        return {};
 
     // ---- Bible text (engine, every installed Bible) ---------------------------------
+    // Let quick local matches render while this whole-Bible index search runs.
+    if (progress)
+        progress(out);
+    if (cancelled && cancelled())
+        return {};
     if (!bibleIds.empty() && !referenceFound && text.size() >= 3) {
         auto &bible = bb::BibleEngine::Instance();
         auto hits = bible.Search(text.toStdString());
@@ -836,6 +853,16 @@ QVariantList SearchService::readSearch(const QString &rawText, int perKind, bool
             }
         }
     }
+    if (cancelled && cancelled())
+        return {};
+
+    // Results from the local libraries, settings and Bible are useful right
+    // away. Publish them before The Table starts its corpus-wide paragraph scan;
+    // the final result event will replace this interim list when that scan ends.
+    if (progress && !(cancelled && cancelled()))
+        progress(out);
+    if (cancelled && cancelled())
+        return {};
 
     // ---- Sermon paragraphs (The Table's library) -------------------------------------
     // (2 chars on: the library's own Search() takes two-char words — "my" —
@@ -863,10 +890,13 @@ QVariantList SearchService::readSearch(const QString &rawText, int perKind, bool
     }
     QVariantList tableRows;
     if (text.size() >= 2) {
-        // A code listing IS The Table's answer ("47-" = every 1947 sermon): the
-        // per-kind cap (4) would truncate the sermon list to a few rows.
-        const int tableLimit = codeShaped ? qMax(limit, 30) : qMax(limit, 4);
-        const QVariantList hits = TheTableService::instance().search(text, tableLimit, exactWords, true);
+        // The Table gets a larger per-query share than other categories so the
+        // quick-search list can show more sermon matches while remaining capped.
+        // A code listing IS The Table's answer ("47-" = every 1947 sermon), so
+        // keep its wider listing cap as well.
+        const int tableLimit = qMin(30, codeShaped ? qMax(limit * 4, 40) : qMax(limit * 3, 24));
+        const QVariantList hits = TheTableService::instance().searchCancellable(
+            text, tableLimit, exactWords, true, QString(), 0, cancelled);
         for (const QVariant &v : hits) {
             const QVariantMap h = v.toMap();
             // Title = the sermon's citation line minus the paragraph — the same
@@ -928,7 +958,16 @@ void SearchService::searchAsync(const QString &text, int perKind, int token, boo
         std::unique_lock<std::mutex> searchLock(asyncSearchMutex);
         if (token != latestToken_.load(std::memory_order_acquire))
             return;
-        const QVariantList rows = readSearch(text, perKind, exactWords);
+        const auto cancelled = [this, token] {
+            return token != latestToken_.load(std::memory_order_acquire);
+        };
+        const auto progress = [this, token](const QVariantList &rows) {
+            QMetaObject::invokeMethod(this, [this, token, rows] {
+                if (token == latestToken_)
+                    emit resultsProgress(token, rows);
+            }, Qt::QueuedConnection);
+        };
+        const QVariantList rows = readSearch(text, perKind, exactWords, cancelled, progress);
         QMetaObject::invokeMethod(this, [this, token, rows] {
             if (token == latestToken_)
                 emit resultsReady(token, rows);

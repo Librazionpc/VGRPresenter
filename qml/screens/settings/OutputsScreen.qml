@@ -335,20 +335,15 @@ Item {
                     required property string screenName
                     required property bool onAirOnly
 
-                    // This NDI row is the one actually being fed: only the
-                    // FIRST enabled NDI output sends (see
-                    // LiveOutputService::pushNdiFrame), so the global
-                    // ndiSending alone would light up every NDI row.
-                    readonly property bool ndiFeedIsThisRow: card.kind === "NDI"
-                        && LiveOutputService.ndiSending
-                        && LiveOutputService.ndiSendingOutputName === card.name
-                    // The FIRST enabled NDI output is the one being fed — while
-                    // it has not produced a frame yet it is WARMING UP, and the
-                    // row says so inline instead of the misleading "ready (go
-                    // live to send)" a not-yet-sending feed used to read as.
-                    readonly property bool ndiWarmingIsThisRow: card.kind === "NDI"
-                        && LiveOutputService.ndiWarming
-                        && LiveOutputService.ndiWarmingOutputName === card.name
+                    // Each enabled NDI output owns an independent sender/feed.
+                    readonly property bool ndiFeedIsThisRow: {
+                        const state = LiveOutputService.ndiOutputStates[card.name]
+                        return card.kind === "NDI" && !!state && state.sending === true
+                    }
+                    readonly property bool ndiWarmingIsThisRow: {
+                        const state = LiveOutputService.ndiOutputStates[card.name]
+                        return card.kind === "NDI" && !!state && state.warming === true
+                    }
                     // LIVE only while a GO LIVE session is actually running:
                     // an NDI row whose frames verifiably flow right now, an
                     // HDMI row that OutputWindowManager/OutputWindow actually
@@ -485,12 +480,8 @@ Item {
                                         // is THE firewall symptom — frames go
                                         // out, nothing accepts them.
                                         if (card.ndiFeedIsThisRow) {
-                                            const connected = EngineBridge.ndiConnectedReceivers
-                                            return connected === 0
-                                                ? "NDI · sending · " + LiveOutputService.ndiFramesSent
-                                                  + " frames · 0 monitors connected (firewall?)"
-                                                : "NDI · sending · " + LiveOutputService.ndiFramesSent
-                                                  + " frames · " + (connected > 0 ? connected + " monitor(s)" : "")
+                                            const state = LiveOutputService.ndiOutputStates[card.name]
+                                            return "NDI · sending · " + state.frames + " frames"
                                         }
                                         if (card.ndiWarmingIsThisRow)
                                             return "NDI · warming up · waiting for the first frame"

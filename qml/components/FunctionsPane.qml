@@ -109,10 +109,16 @@ Item {
                         width: quickRow.width + 18
                         height: 30
                         radius: Theme.radiusMd
-                        color: quickArea.containsMouse ? Theme.hoverBg : Theme.inset
+                        color: Theme.inset
                         border.width: 1
                         border.color: Theme.border
                         Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+                        HoverGlow {
+                            anchors.fill: parent
+                            radius: parent.radius
+                            hovered: quickArea.containsMouse
+                            glowColor: Theme.hoverBg
+                        }
 
                         Row {
                             id: quickRow

@@ -163,6 +163,10 @@ Item {
     property real booksColWidth: Number(SettingsService.values["session.referencePaneBooksWidth"] ?? 150)
     property real chaptersColWidth: Number(SettingsService.values["session.referencePaneChaptersWidth"] ?? 52)
     property real previewColWidth: Number(SettingsService.values["session.referencePanePreviewWidth"] ?? Math.max(320, Math.min(420, root.width * 0.3)))
+    // During The Table search, the year/sermon pickers and design preview are
+    // unnecessary; the result list gets the full reading area.
+    readonly property bool compactTableSearch: !!(root.adapter
+        && root.adapter.contentType === "table" && root.searching)
     // Whether a width was already remembered before this pane ever auto-widened the chapters column for titles (below) - if so, that
     // remembered width IS the user's choice, and the auto-widen must not override it.
     readonly property bool chaptersWidthRemembered: SettingsService.values["session.referencePaneChaptersWidth"] !== undefined
@@ -1076,6 +1080,10 @@ Item {
 
     Connections {
         target: TheTableService
+        function onPreviewChapterReady(token, bookId, chapter, rows) {
+            if (root.adapter && root.adapter.contentType === "table")
+                root.applyPeekChapter(token, bookId, chapter, rows)
+        }
         function onChapterReady(token, bookId, number, rows) {
             if (root.adapter && root.adapter.contentType === "table")
                 root.applyChapter(token, root.sourceId, bookId, number, rows)
@@ -1401,7 +1409,8 @@ Item {
         if (words.length === 0)
             return null   // nothing to highlight (an empty or one-letter query)
         const safeWords = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-        return new RegExp("(" + safeWords.join("|") + ")", "gi")
+        const boundary = root.exact ? "\\b" : ""
+        return new RegExp(boundary + "(" + safeWords.join("|") + ")" + boundary, "gi")
     }
 
     function highlight(text) {
@@ -1414,7 +1423,8 @@ Item {
         const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
         // Qt StyledText ignores background-color on spans (bold survived, the yellow
         // didn't render — user screenshot). A colored <font> is honored.
-        return esc(source).replace(re, '<b><font color=Theme.highlightInk>$1</font></b>')
+        const gold = String(Theme.highlightInk)
+        return esc(source).replace(re, '<b><font color="' + gold + '">$1</font></b>')
     }
     readonly property bool canHighlight: root.activeQuery.trim().length >= 2
 
@@ -1797,6 +1807,17 @@ Item {
     function collapseSnippet(text) {
         return String(text ?? "").replace(/\s*\n+\s*/g, " ").replace(/\s+/g, " ").trim()
     }
+    // Keep The Table's result title to three words after its citation code so
+    // the highlighted paragraph excerpt stays readable beside it.
+    function compactTableResultTitle(row) {
+        const citation = String((row && row.citation) || (row && row.reference) || "")
+        const match = /^(\d{2}\s*-\s*\d{4}[A-Za-z]?)\s*-\s*(.*)$/.exec(citation)
+        if (!match)
+            return citation
+        const words = match[2].trim().split(/\s+/).filter((word) => word !== "")
+        const title = words.length > 3 ? words.slice(0, 3).join(" ") + "…" : words.join(" ")
+        return match[1].replace(/\s+/g, "") + " - " + title
+    }
     // `measuredAdvance` (optional) = the advance width the CALLER measured for
     // `snippet` with the row's own font. The delegate always passes its own (a
     // bound TextMetrics, so this stays a pure function of its arguments); a
@@ -1992,6 +2013,7 @@ Item {
     property var citationMatches: []    // [{ label, trailing, cite, ref }] (citeRow shape)
     property var lastSuggestRows: []    // (the popup's rows — Scripture only now)
     property int peekIndex: -1
+    property int peekRequestToken: 0
     // THE KEYBOARD'S PLACE IN THE RESULT LIST (user call: "if press the down or up
     // button it should search result list and show their paragraph preview"). The
     // tab search box's Up/Down walk this: each row highlights exactly like a hover
@@ -2071,12 +2093,30 @@ Item {
         if (!row || !row.ref)
             return ""
         const cite = String(row.cite !== undefined ? row.cite : row.label)
-        root.applySuggestion(row.ref)
+        // ENTER on the preview's paragraph column must open the paragraph the
+        // selector is sitting on, rather than only opening the sermon at its
+        // default first paragraph.
+        let target = row.ref
+        if (root.column === 3 && root.peekRow >= 0 && root.peekRow < root.peekVerses.length) {
+            const paragraph = Number(root.peekVerses[root.peekRow].number)
+            if (paragraph > 0)
+                target = Object.assign({}, row.ref, {
+                    verseStart: paragraph,
+                    verseEnd: paragraph,
+                    matchText: searchInput.text
+                })
+        }
+        root.applySuggestion(target)
         root.allMatches = []
         root.clearCitationMatches()
         root.bookCursor = -1
         root.chapterCursor = -1
         root.column = 2
+        // Taking a result ends both the tab's query (matchTaken below) and
+        // this pane's local search view. Otherwise the picked paragraph opens
+        // underneath the results and the user has to dismiss the search by hand.
+        root.searching = false
+        searchInput.text = ""
         // TAKEN IS TAKEN: the search is committed, so there is nothing left for Esc to
         // take the reader back from.
         root.searchReturn = null
@@ -2093,6 +2133,7 @@ Item {
     property int peekRow: 0
     function peekSuggestion(index) {
         if (index < 0 || !root.adapter) {
+            root.peekRequestToken++
             root.peekIndex = -1
             root.matchCursor = -1
             root.peekVerses = []
@@ -2103,15 +2144,32 @@ Item {
         const ref = row ? row.ref : null
         const ch = ref ? ref.chapter : 0
         if (!(ch > 0)) {
+            root.peekRequestToken++
             root.peekIndex = -1
             root.peekVerses = []
             return
         }
-        root.peekVerses = root.adapter.chapter(root.sourceId, ref.bookId, ch)
+        root.peekRequestToken++
+        const token = root.peekRequestToken
         root.peekIndex = index
         root.peekRow = 0
+        if (root.adapter.chapterPeekAsync) {
+            root.peekVerses = []
+            root.adapter.chapterPeekAsync(root.sourceId, ref.bookId, ch, token)
+        } else {
+            root.peekVerses = root.adapter.chapter(root.sourceId, ref.bookId, ch)
+        }
+    }
+    function applyPeekChapter(token, bookId, chapter, rows) {
+        if (token !== root.peekRequestToken || root.peekIndex < 0)
+            return
+        const current = root.citationMatches[root.peekIndex]
+        if (!current || !current.ref || current.ref.bookId !== bookId || current.ref.chapter !== chapter)
+            return
+        root.peekVerses = rows
     }
     function clearCitationMatches() {
+        root.peekRequestToken++
         root.citationMatches = []
         root.lastSuggestRows = []
         root.peekIndex = -1
@@ -2511,7 +2569,8 @@ Item {
     Rectangle {
         id: booksCol
         x: sidebar.width; y: 0
-        width: root.booksColWidth; height: parent.height
+        visible: !root.compactTableSearch
+        width: root.compactTableSearch ? 0 : root.booksColWidth; height: parent.height
         color: Theme.panelBg
 
         Flickable {
@@ -2615,9 +2674,10 @@ Item {
         // Widened once, the first time there turn out to be names to show (a bare Bible chapter number needs far less room than a
         // sermon's title) - after that the user's own drag is what decides, same as every other column here.
         property bool widenedForTitles: false
+        visible: !root.compactTableSearch
         onHasTitlesChanged: if (hasTitles && !widenedForTitles && !root.chaptersWidthRemembered) { widenedForTitles = true; root.chaptersColWidth = 190 }
         x: booksCol.x + booksCol.width; y: 0
-        width: root.chaptersColWidth; height: parent.height
+        width: root.compactTableSearch ? 0 : root.chaptersColWidth; height: parent.height
         color: Theme.windowBg
 
         Flickable {
@@ -2800,7 +2860,10 @@ Item {
                     // after I click it" report.
                     // An inactive row carries the app's shared list stripe on odd
                     // rows (ListRows); the open verse keeps its own solid ground.
-                    color: verseRow.active ? Theme.chip : ListRows.stripeOverlay(verseRow.index)
+                    color: verseRow.active ? Qt.alpha(Theme.accent, 0.24)
+                                           : ListRows.stripeOverlay(verseRow.index)
+                    border.width: verseRow.active ? 1.5 : 0
+                    border.color: verseRow.active ? Qt.alpha(Theme.accentLight, 0.95) : "transparent"
                     HoverGlow {
                         anchors.fill: parent
                         radius: parent.radius
@@ -2887,6 +2950,11 @@ Item {
                         const pane = verseSource.owner
                         if (!pane)
                             return
+                        // Row clicks are handled by DragSource/TapHandler and do not
+                        // take keyboard focus. The search field can therefore keep
+                        // activeFocus after a passage is clicked, making keysMine
+                        // mistake ordinary arrow navigation for text editing.
+                        pane.forceActiveFocus()
                         pane.column = 2      // (the paragraph column)
                         if (verseRow.isSplit) {
                             pane.selectSubpart(verseRow.verseNumber, verseRow.partIndex)
@@ -2940,7 +3008,6 @@ Item {
                             radius: parent.radius
                             hovered: noteHover.hovered
                             glowColor: Theme.hoverBg
-                            quick: true
                         }
                     }
                     IconGlyph {
@@ -3055,10 +3122,12 @@ Item {
                     required property var modelData
                     required property int index
                     objectName: "selfTestHitRow_" + index   // (the pane-rows scenario scrolls to it by name)
+                    readonly property real labelWidth: Math.min(260, Math.max(160, width * 0.28))
                     // LAYOUT PROBE (VGR_LAYOUT_TEST).
                     Component.onCompleted: root.hitRowBuilds++
                     Component.onDestruction: root.hitRowDrops++
-                    width: hitsList.width; height: 32
+                    width: hitsList.width
+                    height: 32
                     Rectangle {
                         anchors.fill: parent; anchors.margins: 1; radius: 4
                         color: "transparent"
@@ -3070,8 +3139,12 @@ Item {
                         }
                     }
                     Text {
-                        x: 10; anchors.verticalCenter: parent.verticalCenter; width: 170
-                        text: hitRow.modelData.reference
+                        x: 10; y: 6; width: hitRow.labelWidth
+                        text: (root.adapter && root.adapter.contentType === "table"
+                               ? root.compactTableResultTitle(hitRow.modelData)
+                               : hitRow.modelData.reference)
+                              + (Number(hitRow.modelData.verse) > 0
+                                 ? "  ·  ¶" + Number(hitRow.modelData.verse) : "")
                         color: Theme.textPrimary
                         elide: Text.ElideRight
                         font.family: Theme.fontFamily; font.pixelSize: 15
@@ -3089,18 +3162,19 @@ Item {
                     Text {
                         id: hitSnippet
                         objectName: "selfTestPaneHitSnippet"   // (the pane-highlight scenario reads the rendered row by name)
-                        x: 190; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 198
-                        readonly property string collapsed: root.collapseSnippet(hitRow.modelData.snippet)
-                        // The hit is centred in the row (see centeredSnippet) so the
-                        // words that matched are actually on screen, and the highlight
-                        // wraps every typed word (see highlightQuery).
-                        readonly property string shown: root.centeredSnippet(
-                            hitSnippet.collapsed, width, hitMetrics.advanceWidth)
-                        text: root.canHighlight ? root.highlight(shown) : shown
+                        x: hitRow.labelWidth + 20; anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width - hitRow.labelWidth - 28
                         color: root.textDim
                         elide: Text.ElideRight
                         textFormat: root.canHighlight ? Text.StyledText : Text.PlainText
                         font.family: Theme.fontFamily; font.pixelSize: 15
+                        readonly property string collapsed: root.collapseSnippet(hitRow.modelData.snippet)
+                        // Centre the short excerpt around the matching words, then
+                        // elide at the row edge; the result stays a preview, not a
+                        // full paragraph dump.
+                        readonly property string shown: root.centeredSnippet(
+                            hitSnippet.collapsed, width, hitMetrics.advanceWidth)
+                        text: root.canHighlight ? root.highlight(shown) : shown
                     }
                     HoverHandler { id: hitHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler {
@@ -3108,7 +3182,13 @@ Item {
                             root.goTo({ bookId: hitRow.modelData.bookId, chapter: hitRow.modelData.chapter,
                                         verseStart: hitRow.modelData.verse, verseEnd: hitRow.modelData.verse,
                                         matchText: searchInput.text })
+                        }
+                        onDoubleTapped: {
+                            root.goTo({ bookId: hitRow.modelData.bookId, chapter: hitRow.modelData.chapter,
+                                        verseStart: hitRow.modelData.verse, verseEnd: hitRow.modelData.verse,
+                                        matchText: searchInput.text })
                             root.searching = false
+                            searchInput.text = ""
                         }
                     }
                 }
@@ -3214,12 +3294,12 @@ Item {
                                 root.matchCursor = matchRow.index
                                 root.peekSuggestion(matchRow.index)
                             } else {
-                                // Only this row losing the pointer clears the ownership —
-                                // a later exit from the row the move already left must
-                                // not unseat the one it landed on.
+                                // Keep the current result's preview when the pointer
+                                // leaves the row for its paragraph pane or controls.
+                                // Entering a different result row will replace it.
                                 if (root.hoveredMatch === matchRow.index)
-                                    root.hoveredMatch = -1
-                                peekClear.restart()
+                                    root.hoveredMatch = -2
+                                peekClear.stop()
                             }
                         }
                         // SINGLE CLICK selects (its verses show on the right); OPENING it
@@ -3236,7 +3316,6 @@ Item {
                             root.column = 2
                             root.hoveredMatch = -2
                             root.matchCursor = matchRow.index
-                            root.peekSuggestion(matchRow.index)
                             root.takeMatch()
                         }
                     }
@@ -3262,6 +3341,19 @@ Item {
                 Rectangle { anchors.fill: parent; radius: 6; color: Theme.windowBg
                             border.color: root.column === 3 ? Theme.accent : Theme.border
                             border.width: root.column === 3 ? 2 : 1 }
+                // Moving from the result row into the preview (including its
+                // scrollbar or blank space) pins that result while the user scrolls.
+                PositionHoverArea {
+                    anchors.fill: parent
+                    checkAncestors: false
+                    showCursor: false
+                    clickEnabled: false
+                    onEntered: {
+                        root.hoveredMatch = -2
+                        root.column = 3
+                        peekClear.stop()
+                    }
+                }
                 Text {
                     id: peekHeader
                     x: 12; y: 8
@@ -3321,6 +3413,26 @@ Item {
                             color: Theme.textPrimary
                             wrapMode: Text.Wrap
                             font.family: Theme.fontFamily; font.pixelSize: 14
+                        }
+                        PositionHoverArea {
+                            anchors.fill: parent
+                            checkAncestors: false
+                            showCursor: false
+                            onClicked: {
+                                root.column = 3
+                                root.peekRow = index
+                                root.hoveredMatch = -2
+                            }
+                            onDoubleClicked: {
+                                root.column = 3
+                                root.peekRow = index
+                                root.hoveredMatch = -2
+                                root.takeMatch()
+                            }
+                            onEntered: {
+                                root.column = 3
+                                root.peekRow = index
+                            }
                         }
                     }
                     // The old Column's 20px of room under the last paragraph.
@@ -3467,7 +3579,7 @@ Item {
                         // four-word query queued four full scans, and the results the
                         // user watched arrive belonged to word one. Enter still commits
                         // instantly (onAccepted stops the timer).
-                        interval: 300
+                        interval: 150
                         onTriggered: root.runSearch(searchInput.text)
                     }
                     Text {
@@ -3506,7 +3618,6 @@ Item {
                                 radius: parent.radius
                                 hovered: scopeHover.hovered
                                 glowColor: Theme.hoverBg
-                                quick: true
                             }
                         }
                         IconGlyph {
@@ -3791,7 +3902,8 @@ Item {
     Rectangle {
         id: previewCol
         anchors.right: parent.right
-        width: root.previewColWidth; height: parent.height
+        visible: !root.compactTableSearch
+        width: root.compactTableSearch ? 0 : root.previewColWidth; height: parent.height
         color: Theme.windowBg
 
         Rectangle { anchors.left: parent.left; width: 1; height: parent.height; color: Theme.border }

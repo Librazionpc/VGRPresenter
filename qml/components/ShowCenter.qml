@@ -1,5 +1,6 @@
 import QtQuick
 import VGRPresenterUI
+import "../shortcuts"
 
 // The centre page of the Show screen (FreeShow's Show.svelte): what the item you clicked - in the Projects panel or the Shows table -
 // looks like. A show is its slide grid (drawn by the same DesignPreview as everywhere else, read from the show's file WITHOUT opening
@@ -11,6 +12,7 @@ Item {
     id: root
 
     property var item: null
+    property bool slideHotkeysEnabled: false
     signal editRequested(string path)
     signal closeRequested()
 
@@ -30,6 +32,26 @@ Item {
     readonly property var slides: show ? show.slides : []
     property int selectedSlide: -1
     onItemChanged: { selectedSlide = -1; root.refreshWallStepper() }
+
+    // Reuse the configurable Left/Right slide hotkeys for the centre preview's
+    // slide selector. Do not steal those keys while the user is typing in a field.
+    readonly property bool typingInField: {
+        const w = Window.window
+        const f = w ? w.activeFocusItem : null
+        return !!f && f.text !== undefined && f.cursorPosition !== undefined
+    }
+    Shortcut {
+        action: "previousSlide"
+        enabled: root.visible && root.slideHotkeysEnabled && root.type === "show"
+                 && root.slides.length > 1 && !root.typingInField
+        onActivated: root.stepSlide(-1)
+    }
+    Shortcut {
+        action: "nextSlide"
+        enabled: root.visible && root.slideHotkeysEnabled && root.type === "show"
+                 && root.slides.length > 1 && !root.typingInField
+        onActivated: root.stepSlide(1)
+    }
 
     // The view (FreeShow's slidesOptions), kept by the engine's settings: how many slides across, and grid / list / lyrics.
     readonly property int columns: Math.max(2, Math.min(10, Number(SettingsService.values["session.slideColumns"] ?? 4)))
@@ -134,9 +156,12 @@ Item {
     // open the show for editing or touch the engine's shared "open
     // document" (that would risk discarding whatever the Edit screen has
     // unsaved).
-    function takeSlideLive(index, slide) {
+    function takeSlideLive(index, slide, styledPreview) {
         root.selectedSlide = index
-        LiveOutputService.stageSlides(root.item ? root.item.name : "", [slide])
+        if (styledPreview && !LiveOutputService.live)
+            LiveOutputService.stageSlidesWithPreview(root.item ? root.item.name : "", [slide], styledPreview)
+        else
+            LiveOutputService.stageSlides(root.item ? root.item.name : "", [slide])
     }
 
     // ---- The wall's ‹ › while a SHOW slide is on the tile -------------------
@@ -156,7 +181,9 @@ Item {
         const next = at + direction
         if (next < 0 || next >= slides.length)
             return false               // the show's first/last slide: nothing that way
-        takeSlideLive(next, slides[next])
+        const styled = LiveOutputService.live ? null
+                       : LiveOutputService.previewWithActiveStyle(slides[next])
+        takeSlideLive(next, slides[next], styled)
         return true
     }
 
@@ -378,7 +405,7 @@ Item {
                     TapHandler {
                         acceptedButtons: Qt.LeftButton
                         onTapped: root.selectedSlide = cell.index
-                        onDoubleTapped: root.takeSlideLive(cell.index, cell.modelData)
+                        onDoubleTapped: root.takeSlideLive(cell.index, cell.modelData, cell.styled)
                     }
                     TapHandler {
                         acceptedButtons: Qt.RightButton
@@ -467,7 +494,7 @@ Item {
                     TapHandler {
                         acceptedButtons: Qt.LeftButton
                         onTapped: root.selectedSlide = listRow.index
-                        onDoubleTapped: root.takeSlideLive(listRow.index, listRow.modelData)
+                        onDoubleTapped: root.takeSlideLive(listRow.index, listRow.modelData, listRow.styled)
                     }
                     TapHandler {
                         acceptedButtons: Qt.RightButton
@@ -551,11 +578,44 @@ Item {
             id: barRow
             x: 1; y: 1; height: parent.height - 2
 
+            // Step the selected show slide onto the monitor tile without
+            // requiring another click in the slide grid. These controls use
+            // the same staging path as a slide double-click.
+            Item {
+                objectName: "selfTestShowPreviousSlide"
+                visible: root.type === "show"
+                width: visible ? 34 : 0; height: parent.height
+                opacity: root.selectedSlide > 0 ? 1 : 0.38
+                Rectangle {
+                    anchors.centerIn: parent; width: 30; height: 30; radius: 15; color: "transparent"
+                    HoverGlow { anchors.fill: parent; radius: parent.radius; hovered: prevSlideHover.hovered; glowColor: Theme.hoverBg }
+                }
+                IconGlyph { anchors.centerIn: parent; name: "previous"; color: Theme.controlInk; width: 14; height: 14; fit: true }
+                HoverHandler { id: prevSlideHover; cursorShape: root.selectedSlide > 0 ? Qt.PointingHandCursor : Qt.ArrowCursor }
+                TapHandler { enabled: root.selectedSlide > 0; onTapped: root.stepSlide(-1) }
+            }
+            Item {
+                objectName: "selfTestShowNextSlide"
+                visible: root.type === "show"
+                width: visible ? 34 : 0; height: parent.height
+                opacity: root.selectedSlide >= 0 && root.selectedSlide < root.slides.length - 1 ? 1 : 0.38
+                Rectangle {
+                    anchors.centerIn: parent; width: 30; height: 30; radius: 15; color: "transparent"
+                    HoverGlow { anchors.fill: parent; radius: parent.radius; hovered: nextSlideHover.hovered; glowColor: Theme.hoverBg }
+                }
+                IconGlyph { anchors.centerIn: parent; name: "next"; color: Theme.controlInk; width: 14; height: 14; fit: true }
+                HoverHandler { id: nextSlideHover; cursorShape: root.selectedSlide >= 0 && root.selectedSlide < root.slides.length - 1 ? Qt.PointingHandCursor : Qt.ArrowCursor }
+                TapHandler { enabled: root.selectedSlide >= 0 && root.selectedSlide < root.slides.length - 1; onTapped: root.stepSlide(1) }
+            }
+
             // chevron: opens the bar (the zoom hides behind it, like FreeShow's)
             Item {
                 objectName: "selfTestBarChevron"
                 width: 40; height: parent.height
-                Rectangle { anchors.centerIn: parent; width: 32; height: 32; radius: 16; color: chevHover.hovered ? Theme.hoverBg : "transparent" }
+                Rectangle {
+                    anchors.centerIn: parent; width: 32; height: 32; radius: 16; color: "transparent"
+                    HoverGlow { anchors.fill: parent; radius: parent.radius; hovered: chevHover.hovered; glowColor: Theme.hoverBg }
+                }
                 // a chevron drawn as two bars, so it sits dead centre: > while the bar is open, < while it is shut
                 Item {
                     anchors.centerIn: parent
@@ -577,7 +637,10 @@ Item {
                 id: timerButton
                 objectName: "selfTestBarClock"
                 width: 40; height: parent.height
-                Rectangle { anchors.centerIn: parent; width: 32; height: 32; radius: 16; color: timerHover.hovered || root.timerOpen ? Theme.hoverBg : "transparent" }
+                Rectangle {
+                    anchors.centerIn: parent; width: 32; height: 32; radius: 16; color: "transparent"
+                    HoverGlow { anchors.fill: parent; radius: parent.radius; hovered: timerHover.hovered || root.timerOpen; glowColor: Theme.hoverBg }
+                }
                 IconGlyph { anchors.centerIn: parent; name: "clock"; color: root.timerTotal > 0 ? Theme.accent : Theme.controlInk; fit: true; width: 16; height: 16 }
                 HoverHandler { id: timerHover; cursorShape: Qt.PointingHandCursor }
                 TapHandler {
@@ -682,7 +745,10 @@ Item {
                 id: zoomButton
                 visible: root.barOpen
                 width: 40; height: parent.height
-                Rectangle { anchors.centerIn: parent; width: 32; height: 32; radius: 16; color: zoomHover.hovered || root.zoomOpen ? Theme.hoverBg : "transparent" }
+                Rectangle {
+                    anchors.centerIn: parent; width: 32; height: 32; radius: 16; color: "transparent"
+                    HoverGlow { anchors.fill: parent; radius: parent.radius; hovered: zoomHover.hovered || root.zoomOpen; glowColor: Theme.hoverBg }
+                }
                 IconGlyph { anchors.centerIn: parent; name: "zoomIn"; color: root.zoomOpen ? Theme.controlInk : Theme.navLabelMuted; fit: true; width: 16; height: 16 }
                 HoverHandler { id: zoomHover; cursorShape: Qt.PointingHandCursor }
                 TapHandler { onTapped: { root.zoomOpen = !root.zoomOpen; root.timerOpen = false } }
@@ -731,7 +797,10 @@ Item {
             // the view: grid -> list -> lyrics
             Item {
                 width: 44; height: parent.height
-                Rectangle { anchors.centerIn: parent; width: 34; height: 34; radius: 17; color: viewHover.hovered ? Theme.hoverBg : "transparent" }
+                Rectangle {
+                    anchors.centerIn: parent; width: 34; height: 34; radius: 17; color: "transparent"
+                    HoverGlow { anchors.fill: parent; radius: parent.radius; hovered: viewHover.hovered; glowColor: Theme.hoverBg }
+                }
                 IconGlyph {
                     anchors.centerIn: parent
                     name: root.viewMode === "list" ? "listView" : (root.viewMode === "lyrics" ? "textLines" : "gridView")
@@ -784,6 +853,33 @@ Item {
             onDoubleTapped: {
                 if (root.item)
                     LiveOutputService.takeMedia(String(root.item.ref), String(root.item.name ?? ""))
+            }
+        }
+
+        // Still images also need an obvious take-to-monitor control in the
+        // centre preview, matching the play/take affordance on video previews.
+        Rectangle {
+            visible: root.item !== null
+                     && !(LiveOutputService.mediaOnAir
+                          && LiveOutputService.mediaPath === String(root.item.ref))
+            anchors.centerIn: parent
+            width: 64; height: 64; radius: 32
+            color: "#b0000000"
+            border.width: 2
+            border.color: Theme.accent
+            IconGlyph {
+                anchors.centerIn: parent
+                name: "play"
+                color: Theme.controlInk
+                fit: true
+                width: 26; height: 26
+            }
+            PositionHoverArea {
+                anchors.fill: parent
+                onClicked: {
+                    if (root.item)
+                        LiveOutputService.takeMedia(String(root.item.ref), String(root.item.name ?? ""))
+                }
             }
         }
     }

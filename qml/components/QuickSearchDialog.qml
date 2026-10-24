@@ -336,7 +336,10 @@ ModalCard {
             root.searchPending = true
             root.results = []
             root.current = 0
-            SearchService.searchAsync(root.query, 4, root.searchToken, root.exact)
+            // Show a broader capped set per category so relevant matches lower
+            // in the ranking are reachable without letting one category flood
+            // the quick-search list.
+            SearchService.searchAsync(root.query, 8, root.searchToken, root.exact)
             root.resolveToken++
             SearchService.resolveWordsAsync(root.query, root.resolveToken)
             hint.text = ""
@@ -387,12 +390,14 @@ ModalCard {
             return source
         const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
         const safeWords = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-        const re = new RegExp("(" + safeWords.join("|") + ")", "gi")
+        const boundary = root.exact ? "\\b" : ""
+        const re = new RegExp(boundary + "(" + safeWords.join("|") + ")" + boundary, "gi")
         // Unmissable: Qt's StyledText subset does NOT honor background-color on a
         // span (the first attempt: bold applied, the yellow silently dropped —
         // "it still showing white"). A colored <font> IS honored: bright gold on
         // the dark card reads as the yellow highlight.
-        return esc(source).replace(re, '<b><font color=Theme.highlightInk>$1</font></b>')
+        const gold = String(Theme.highlightInk)
+        return esc(source).replace(re, '<b><font color="' + gold + '">$1</font></b>')
     }
     function move(delta) {
         if (root.results.length === 0) return
@@ -440,6 +445,10 @@ ModalCard {
         function onResultsReady(token, rows) {
             if (token !== root.searchToken || !root.shown) return
             root.searchPending = false
+            root.results = root.rankByPicks(rows)
+        }
+        function onResultsProgress(token, rows) {
+            if (token !== root.searchToken || !root.shown) return
             root.results = root.rankByPicks(rows)
         }
         function onWordsResolved(token, rows) { root.applyResolvedWords(token, rows) }

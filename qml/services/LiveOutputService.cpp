@@ -488,6 +488,28 @@ QVariantMap slideToVariantMap(const pl::Slide *slide)
     return slideToVariantMap(slide, pl::PresentationEngine::Instance().ActiveOutputStyle());
 }
 
+// One NDI program sender exists today. Honor the row the operator marked LIVE
+// when that row is NDI; otherwise keep the first enabled NDI row as the
+// sidecar feed while HDMI (or another output) is active.
+QVariantMap preferredNdiOutput(const OutputListModel *model)
+{
+    if (!model)
+        return {};
+    QVariantMap firstEnabled;
+    for (int i = 0; i < model->rowCount(); ++i) {
+        QVariantMap out = model->getOutput(i);
+        if (out.value("kind").toString() != QLatin1String("NDI")
+            || !out.value("isEnabled").toBool())
+            continue;
+        out.insert(QStringLiteral("_row"), i);
+        if (firstEnabled.isEmpty())
+            firstEnabled = out;
+        if (out.value("active").toBool())
+            return out;
+    }
+    return firstEnabled;
+}
+
 } // namespace
 
 LiveOutputService *LiveOutputService::s_instance = nullptr;
@@ -543,6 +565,8 @@ void LiveOutputService::ndiWorkerSendFrame(void *providerVoid,
     // so neither side waits for the other.
     if (sent) {
         svc.ndiFramesSent_.store(provider->FramesSent(), std::memory_order_relaxed);
+        if (provider->FramesSent() == 1)
+            qInfo("LiveOutputService: first frame sent for NDI output '%s'", provider->SenderName().c_str());
         if (!svc.ndiFirstFrameLogged_) {
             svc.ndiFirstFrameLogged_ = true;
             qCWarning(lcNdiProgress, "LiveOutputService: NDI frames flowing as '%s' — discovery on a receiving monitor can take 10-30s",
@@ -582,32 +606,28 @@ void LiveOutputService::ndiWorkerTick()
     // The feed thread's OWN plan: handed over by handOverNdiPlan (a queued call
     // installs it on THIS thread), so reading it takes no lock and cannot be
     // made to wait on the GUI thread.
-    const NdiSendPlan plan = ndiFeedPlan_;
+    const auto plans = ndiFeedPlan_;
     // Nothing to feed (stopped, no enabled NDI row, the output gone): sleep the
     // clock rather than tick into an empty plan 30-60x/s, and drop the pacing
     // clock with it — the next feed is a NEW session and must not inherit this
     // one's gap between sends.
-    if (!plan.want || !plan.provider || !plan.buffer) {
+    if (plans.empty()) {
         if (ndiSendTimer_ && ndiSendTimer_->isActive())
             ndiSendTimer_->stop();
         ndiSendClock_.invalidate();
         return;
     }
-    const float fps = plan.fps > 0.0f ? plan.fps : 30.0f;
-    const int periodMs = qMax(1, int(std::llround(1000.0 / double(fps))));
-    // The rate the plan asks for is followed HERE, so a Settings · Outputs
-    // change reaches the wire within a poll (the plan republishes at 10 Hz)
-    // without the GUI thread ever touching this timer.
-    if (ndiSendTimer_ && ndiSendTimer_->interval() != periodMs)
-        ndiSendTimer_->setInterval(periodMs);
-    if (ndiSendClock_.isValid() && ndiSendClock_.elapsed() < qint64(periodMs * 0.9))
-        return;                       // inside the previous period: drop this beat
-
-    const auto frame = plan.buffer->LastFrameSnapshot();
-    if (!frame || frame->empty())
-        return;                       // the live loop has not rendered one yet
-    ndiSendClock_.restart();
-    ndiWorkerSendFrame(static_cast<void *>(plan.provider), frame, plan.senderName, fps);
+    for (const auto &plan : plans) {
+        if (!plan.provider || !plan.buffer) continue;
+        const float fps = plan.fps > 0.0f ? plan.fps : 30.0f;
+        const int periodMs = qMax(1, int(std::llround(1000.0 / double(fps))));
+        auto &last = ndiSendClocks_[plan.outputName];
+        if (last.isValid() && last.elapsed() < qint64(periodMs * 0.9)) continue;
+        const auto frame = plan.buffer->LastFrameSnapshot();
+        if (!frame || frame->empty()) continue;
+        last.restart();
+        ndiWorkerSendFrame(plan.provider.get(), frame, plan.senderName, fps);
+    }
 }
 
 // The five NDI property readers — QML bindings and the 10 Hz poll, all on the
@@ -654,15 +674,15 @@ void LiveOutputService::setNdiWarming(bool on, const QString &name)
 // lock — and the GUI thread can never be made to wait for a feed in progress.
 // A poll that resolves the same plan again posts nothing (a steady feed would
 // otherwise queue ten identical hand-overs a second).
-void LiveOutputService::handOverNdiPlan(const NdiSendPlan &plan)
+void LiveOutputService::handOverNdiPlan(const std::vector<NdiSendPlan> &plans)
 {
-    if (ndiPlanPublished_ && plan == ndiSentPlan_)
+    if (ndiPlanPublished_ && plans == ndiSentPlan_)
         return;
     if (!ndiWorker_)
         return;   // no feed thread: the feed thread's own default already means "nothing to feed"
-    ndiSentPlan_ = plan;
+    ndiSentPlan_ = plans;
     ndiPlanPublished_ = true;
-    QMetaObject::invokeMethod(ndiWorker_, [this, plan] { ndiFeedPlan_ = plan; }, Qt::QueuedConnection);
+    QMetaObject::invokeMethod(ndiWorker_, [this, plans] { ndiFeedPlan_ = plans; }, Qt::QueuedConnection);
 }
 
 LiveOutputService::LiveOutputService(QObject *parent)
@@ -835,8 +855,8 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         emit onAirChanged();
         return;
     }
-    // This live session's NDI sender opens under the FIRST enabled NDI
-    // output's own name (see armNdiSenderForSession).
+    // This live session's NDI sender opens under the selected NDI output's
+    // own name, or the first enabled NDI row when another transport is live.
     armNdiSenderForSession();
     // ANY OTHER CONTENT ENDS A BLACKOUT. The carrier is its own marker (a
     // clearStage slide is the blackout, not content), so a pick that goes on
@@ -882,6 +902,12 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
 // before.
 void LiveOutputService::stageSlides(const QString &name, const QVariantList &slides)
 {
+    stageSlidesWithPreview(name, slides, {});
+}
+
+void LiveOutputService::stageSlidesWithPreview(const QString &name, const QVariantList &slides,
+                                                const QVariantMap &styledPreview)
+{
     if (live_) {
         goLiveWithSlides(name, slides);   // commit the pick to the engine now
         stagedName_.clear();
@@ -898,7 +924,9 @@ void LiveOutputService::stageSlides(const QString &name, const QVariantList &sli
     // larger template text the instant GO LIVE actually committed it (live
     // reported: "the main output preview got bolder" after pressing GO
     // LIVE). Staging should already show what it will look like once live.
-    stagedSlide_ = slides.isEmpty() ? QVariantMap{} : previewWithActiveStyle(slides.first().toMap());
+    stagedSlide_ = slides.isEmpty() ? QVariantMap{}
+                 : (!styledPreview.isEmpty() ? styledPreview
+                                             : previewWithActiveStyle(slides.first().toMap()));
     emit stagedChanged();
 }
 
@@ -2916,6 +2944,7 @@ void LiveOutputService::ensurePollTimer()
 
 void LiveOutputService::pollTick()
 {
+    connectToNdiOutputRoster();
     auto &ctrl = bps::live::LiveOutputController::Instance();
 
     // THE CACHE-BUSTER RUNS OFF AIR TOO — GO LIVE IS NOT THE GATE TO THE
@@ -2935,6 +2964,11 @@ void LiveOutputService::pollTick()
 
     if (!live_)
         return;
+
+    // Keep the output roster/feed plans current even while a slide/content
+    // replacement is pending. Returning before this refresh used to strand
+    // NDI outputs added during that window until the next live session.
+    pollTickRecheckNdi();
 
     if (ctrl.IsLiveContentReplacementPending())
         return;
@@ -2968,7 +3002,7 @@ void LiveOutputService::pollTick()
     }
 
     // ---- NDI program sender ------------------------------------------------
-    // The FIRST enabled NDI output's feed also goes to the network while the
+    // The selected NDI output's feed also goes to the network while the
     // show is live (regardless of which output is active — a projector on
     // air must not mute the NDI program feed): the display engine's
     // NdiDisplayProvider sends each RGBA frame UNCONVERTED ('RGBA' fourCC)
@@ -2982,10 +3016,6 @@ void LiveOutputService::pollTick()
     // feed thread, armed at the output's configured Refresh rate, so the feed
     // runs at the setting's rate instead of this poll's 10 Hz — and no GUI-side
     // hiccup can punch a hole in it. What runs here is the cheap half: publish
-    // WHAT to feed (see pollTickRecheckNdi), which is how a roster edit, a
-    // rename or a rate change reaches the wire within one poll.
-    pollTickRecheckNdi();
-
     // Watch the NDI feed's real send rate against its configured Refresh rate
     // (drift warning + the runtime halving/restore toasts).
     checkNdiFeedRate();
@@ -3032,7 +3062,7 @@ void LiveOutputService::pollTick()
 // ---------------------------------------------------------------------------
 // The NDI program sender — the display engine's NdiDisplayProvider IS the
 // output ("ndi-program" device, real NDI SDK via the BroadcastEngine with an
-// automatic software-loopback fallback). This reads the FIRST enabled NDI
+// automatic software-loopback fallback). This reads the selected NDI
 // output's frame (its own styled buffer, or the shared preview feed for an
 // unstyled output — the same source the monitor tile shows) and PUBLISHES it
 // as the feed's plan; the feed thread's own clock does the sending at the
@@ -3062,262 +3092,138 @@ void LiveOutputService::pollTick()
 // walk runs on the pool and its answer comes back through applyNdiPlanProbe.
 void LiveOutputService::recheckNdiPlanOffThread()
 {
-    // First ENABLED output whose kind is NDI wins (row order = roster order,
-    // so the first NDI row is deterministic); a disabled one can't go live
-    // and must not feed either. Styled vs unstyled mirrors FrameBufferRole
-    // exactly (its tile and this feed always show the same picture).
-    bool want = false;
-    int ndiRow = -1;
-    QString ndiOutputName;
     const auto *model = OutputListModel::instance();
+    struct Request { QString name, buffer, sender; float fps; std::shared_ptr<bps::display::NdiDisplayProvider> provider; };
+    std::vector<Request> requests;
     if (model) {
         for (int i = 0; i < model->rowCount(); ++i) {
-            const QVariantMap out = model->getOutput(i);
-            if (out.value("kind").toString() == QLatin1String("NDI")
-                && out.value("isEnabled").toBool()) {
-                want = true;
-                ndiRow = i;
-                ndiOutputName = out.value("name").toString();
-                break;
-            }
+            const QVariantMap row = model->getOutput(i);
+            if (row.value("kind").toString() != QLatin1String("NDI") || !row.value("isEnabled").toBool()) continue;
+            const QString name = row.value("name").toString();
+            auto provider = ndiProviders_.value(name);
+            if (!provider) { provider = std::make_shared<bps::display::NdiDisplayProvider>(); ndiProviders_.insert(name, provider); }
+            const QString styleId = row.value("styleId").toString();
+            const std::string buffer = styleId.isEmpty() ? bps::live::LiveOutputController::kPreviewName
+                : QStringLiteral("__out_%1__").arg(qHash(name)).toStdString();
+            const QString rate = row.value("refresh").toString();
+            bool ok = false;
+            const float rawFps = rate.left(rate.indexOf(QLatin1Char(' '))).toFloat(&ok);
+            const float fps = bps::display::AcceptedOutputFrameRate(ok ? rawFps : 0.0f);
+            requests.push_back({name, QString::fromStdString(buffer), ndiSenderDisplayName(name), fps, provider});
         }
     }
-    // Feature switch off: the sender can't exist (the BroadcastEngine
-    // refuses NDI-shaped sends). Log it ONCE per outage so "my NDI monitor
-    // shows nothing" has a reason in the log — and then STOP, before any
-    // frame is copied or queued.
-    //
-    // This used to only LOG the gate and fall through to the send. The
-    // worker then called the provider's SendFrame, the BroadcastEngine
-    // refused it ("NDI is switched off"), and the failure surfaced as a
-    // misleading "NDI SendFrame FAILED — check the engine log" plus a
-    // spurious reset of the sending state. Worse, the provider's lazy sender
-    // creation ran first: an enabled NDI output row with the NDI feature OFF
-    // (a real configuration — the row outlives the feature toggle) tried to
-    // build an SDK sender it was not allowed to have, every single tick.
-    const bool ndiUsable = EngineBridge::instance().ndiAvailable();
-    // "unknown" is NOT a verdict — it is the state the runtime probe sits in
-    // until its worker answers. That probe is ASYNC (see
-    // EngineBridge::probeNdiAsync) and a device refresh re-runs it (a settings
-    // visit, a display-mode change), so for the few ms between the refresh and
-    // the answer ndiAvailable() reads false with an EMPTY status. Warning on
-    // that window toasted a false
-    //   "NDI output requested but NDI is not usable () — no frames will be sent"
-    // every time one landed mid-live — the log shows the warning at 48.024 and
-    // "NDI program sending started" 36 ms later, i.e. the feed was fine and
-    // the operator got a crash-flavoured error box for a probe in flight.
-    // Only a REAL verdict (disabled / notInstalled / error) earns the warning.
-    const QString ndiState = EngineBridge::instance().ndiState();
-    const bool ndiVerdict = ndiState != QLatin1String("unknown");
-    if (want && !ndiUsable) {
-        // The plug-in tears down its SDK sender; force a fresh identity arm
-        // when the runtime becomes ready, even if the output name is unchanged.
-        ndiArmedName_.clear();
-        if (ndiVerdict && !ndiGateLogged_) {
+    QStringList rosterParts;
+    for (const auto &request : requests)
+        rosterParts.append(QStringLiteral("%1->%2@%3").arg(request.name, request.buffer).arg(request.fps, 0, 'f', 1));
+    const QString rosterSignature = rosterParts.join(QStringLiteral(" | "));
+    if (rosterSignature != ndiRosterLogSignature_) {
+        ndiRosterLogSignature_ = rosterSignature;
+        qInfo("LiveOutputService: NDI recheck live=%d model=%p rows=%d enabledNdi=%d [%s]",
+              live_ ? 1 : 0, static_cast<const void *>(model), model ? model->rowCount() : -1,
+              static_cast<int>(requests.size()), qUtf8Printable(rosterSignature));
+    }
+    QSet<QString> enabledNames;
+    for (const auto &request : requests) enabledNames.insert(request.name);
+    for (auto it = ndiProviders_.begin(); it != ndiProviders_.end();) {
+        if (!enabledNames.contains(it.key())) {
+            const auto retired = it.value();
+            it = ndiProviders_.erase(it);
+            ensureNdiWorker();
+            if (ndiWorker_)
+                QMetaObject::invokeMethod(ndiWorker_, [retired] { retired->ResetSender(); }, Qt::QueuedConnection);
+        } else {
+            ++it;
+        }
+    }
+    bool stateAdded = false;
+    for (const auto &request : requests) {
+        if (ndiOutputStates_.contains(request.name)) continue;
+        ndiOutputStates_.insert(request.name, QVariantMap{
+            { QStringLiteral("frames"), QVariant::fromValue<qulonglong>(request.provider->FramesSent()) },
+            { QStringLiteral("sending"), false },
+            { QStringLiteral("warming"), true }
+        });
+        stateAdded = true;
+    }
+    if (stateAdded) emit ndiChanged();
+    const bool usable = EngineBridge::instance().ndiAvailable();
+    const QString state = EngineBridge::instance().ndiState();
+    if (!requests.empty() && !usable) {
+        if (state != QLatin1String("unknown") && !ndiGateLogged_) {
             ndiGateLogged_ = true;
-            qWarning("LiveOutputService: NDI output requested but NDI is not usable (%s) — no frames will be sent",
-                     qUtf8Printable(EngineBridge::instance().ndiStatus()));
+            qWarning("LiveOutputService: enabled NDI outputs cannot send: %s", qUtf8Printable(EngineBridge::instance().ndiStatus()));
         }
-    } else {
-        ndiGateLogged_ = false;
+        ndiOutputStates_.clear(); ndiSending_ = false; ndiSendingOutput_.clear();
+        setNdiWarming(false, {}); clearNdiPlan(); emit ndiChanged(); return;
     }
-    if (want && !ndiUsable) {
-        // Tear the feed state down and stop. The gate re-opens by itself:
-        // ndiGateLogged_ and this early return both clear the moment the
-        // feature is switched back on (or the probe answers Ready), and the
-        // next tick resumes sending. A probe still in flight takes this same
-        // exit without a word — the answer is milliseconds away.
-        if (ndiSending_) {          // the GUI thread's own state (see the members)
-            ndiSending_ = false;
-            ndiSendingOutput_.clear();
-        }
-        setNdiWarming(false, QString());   // NDI unusable: nothing is warming
-        clearNdiPlan();                    // ...and nothing to feed, either
-        emit ndiChanged();
-        return;
+    ndiGateLogged_ = false;
+    if (requests.empty()) {
+        ndiOutputStates_.clear(); ndiSending_ = false; ndiSendingOutput_.clear();
+        setNdiWarming(false, {}); clearNdiPlan(); emit ndiChanged(); return;
     }
-
-    if (!want) {
-        if (ndiSending_) {
-            ndiSending_ = false;
-            ndiSendingOutput_.clear();
-            emit ndiChanged();
-        }
-        setNdiWarming(false, QString());   // no NDI row wants feeding
-        clearNdiPlan();
-        return;
-    }
-
-    // The frame name: THIS output's own gated buffer when styled, else the
-    // shared preview feed (FrameBufferRole's exact keying — qHash(name)).
-    const QString styleId = model && ndiRow >= 0
-        ? model->getOutput(ndiRow).value("styleId").toString() : QString();
-    const std::string buffer = styleId.isEmpty()
-        ? std::string(bps::live::LiveOutputController::kPreviewName)
-        : QStringLiteral("__out_%1__").arg(qHash(ndiOutputName)).toStdString();
-    // The Output row's own name IS the network-visible NDI source name
-    // (re-resolved per poll; the sender's SDK identity is fixed at creation,
-    // so a mid-session rename lands next session). The rate advertised is the
-    // CONFIGURED Refresh rate — the same number the feed's clock is armed at —
-    // and it no longer drops to half under backpressure: a receiver is told the
-    // truth, and the beats a slow send overruns are simply skipped.
-    const QString senderName = ndiSenderDisplayName(ndiOutputName);
-    const float configuredFps = ndiConfiguredFps();
-    const float fps = configuredFps > 0.0f ? configuredFps : 30.0f;
-
-    if (ndiPlanProbeBusy_.exchange(true))
-        return;   // a walk is already in flight — it publishes, this poll does not
-
+    if (ndiPlanProbeBusy_.exchange(true)) return;
     QPointer<LiveOutputService> guard(this);
-    QThreadPool::globalInstance()->start([guard, buffer, ndiOutputName, senderName, fps]() {
-        // THE ENGINE WALK, off the interface thread: the provider map and the
-        // render registry are engine singletons, and the frame buffer's own
-        // snapshot is taken under its lock — never on the thread that draws.
-        auto *provider = []() -> bps::display::NdiDisplayProvider * {
-            auto p = bps::display::DisplayEngine::Instance().Provider("Ndi");
-            return p ? dynamic_cast<bps::display::NdiDisplayProvider *>(p.get()) : nullptr;
-        }();
-        bool bufferOk = false;
-        bool enabled = false;
-        bool hasFrame = false;
-        std::shared_ptr<pr::FrameBufferOutput> fb;
-        if (provider) {
-            auto out = pr::RenderEngine::Instance().GetOutput(buffer);
-            if (out.ok()) {
-                fb = std::dynamic_pointer_cast<pr::FrameBufferOutput>(out.value());
-                bufferOk = fb != nullptr;
-            }
-            if (fb) {
-                enabled = fb->Enabled();
-                const auto peek = fb->LastFrameSnapshot();
-                hasFrame = peek && !peek->empty();
-            }
+    QThreadPool::globalInstance()->start([guard, requests = std::move(requests)]() mutable {
+        std::vector<NdiProbeResult> results;
+        results.reserve(requests.size());
+        for (const auto &request : requests) {
+            NdiProbeResult result;
+            result.outputName = request.name; result.senderName = request.sender; result.fps = request.fps; result.provider = request.provider;
+            auto output = pr::RenderEngine::Instance().GetOutput(request.buffer.toStdString());
+            if (output.ok()) { result.buffer = std::dynamic_pointer_cast<pr::FrameBufferOutput>(output.value()); result.bufferOk = bool(result.buffer); }
+            if (result.buffer) { result.enabled = result.buffer->Enabled(); const auto frame = result.buffer->LastFrameSnapshot(); result.hasFrame = frame && !frame->empty(); }
+            results.push_back(std::move(result));
         }
-        if (!guard)
-            return;   // the service is gone; there is nothing to publish onto
-        vgr::EngineWorker::onInterfaceThread(guard.data(),
-            [guard, provider, fb, bufferOk, enabled, hasFrame, ndiOutputName, senderName, fps]() {
-                if (LiveOutputService *self = guard.data())
-                    self->applyNdiPlanProbe(provider, fb, bufferOk, enabled, hasFrame,
-                                            ndiOutputName, senderName, fps);
-            });
+        if (!guard) return;
+        vgr::EngineWorker::onInterfaceThread(guard.data(), [guard, results = std::move(results)]() mutable {
+            if (auto *self = guard.data()) self->applyNdiPlanProbe(results);
+        });
     });
 }
 
-// The walk's answer, back on the interface thread. Every branch here is one the
-// inline code used to take, in the same order, with the same note and toast:
-// no provider at all, a buffer the live loop has not registered yet, a buffer
-// that is not enabled, a buffer with no frame yet, and the real thing.
-void LiveOutputService::applyNdiPlanProbe(bps::display::NdiDisplayProvider *provider,
-                                          const std::shared_ptr<pr::FrameBufferOutput> &fb,
-                                          bool bufferOk, bool enabled, bool hasFrame,
-                                          const QString &outputName, const QString &senderName,
-                                          float fps)
+void LiveOutputService::applyNdiPlanProbe(const std::vector<NdiProbeResult> &results)
 {
     ndiPlanProbeBusy_ = false;
-    if (!live_) {
-        // Off air while the walk ran: the feed is stopping anyway, and a plan
-        // published now would arm a clock nobody is stopping again.
-        clearNdiPlan();
-        return;
-    }
-    if (!provider) {
-        if (ndiSending_) {
-            ndiSending_ = false;
-            ndiSendingOutput_.clear();
-            emit ndiChanged();
+    if (!live_) { clearNdiPlan(); return; }
+    std::vector<NdiSendPlan> plans;
+    QVariantMap states;
+    QString firstSending, firstWarming;
+    for (const auto &result : results) {
+        QVariantMap status;
+        const auto oldStatus = ndiOutputStates_.value(result.outputName).toMap();
+        const qulonglong count = result.provider ? result.provider->FramesSent() : 0;
+        const bool ready = result.provider && result.bufferOk && result.enabled;
+        const bool sending = ready && result.hasFrame;
+        status.insert(QStringLiteral("frames"), QVariant::fromValue<qulonglong>(count));
+        status.insert(QStringLiteral("sending"), sending);
+        status.insert(QStringLiteral("warming"), !sending);
+        states.insert(result.outputName, status);
+        if (ready) {
+            NdiSendPlan plan; plan.outputName = result.outputName; plan.provider = result.provider;
+            plan.buffer = result.buffer; plan.senderName = result.senderName; plan.fps = result.fps;
+            plans.push_back(std::move(plan));
         }
-        setNdiWarming(false, QString());   // the sending half is not even there
-        clearNdiPlan();
-        return;
+        if (sending && firstSending.isEmpty()) firstSending = result.outputName;
+        if (!sending && firstWarming.isEmpty()) firstWarming = result.outputName;
+        if (sending && !oldStatus.value(QStringLiteral("sending")).toBool())
+            qCWarning(lcNdiProgress, "LiveOutputService: NDI output '%s' is sending", qUtf8Printable(result.outputName));
     }
-    if (!bufferOk) {
-        // One-shot per outage: a missing buffer means the live loop hasn't
-        // registered it yet (GO LIVE just pressed) — silence here read as
-        // "NDI broken" when it was "NDI warming up".
-        if (!ndiWaitLogged_) {
-            ndiWaitLogged_ = true;
-            qCWarning(lcNdiProgress, "LiveOutputService: NDI output '%s' waiting for its buffer (live loop warming up)",
-                     qUtf8Printable(outputName));
-            // EXPLICIT toast (not the qWarning→toast path — these progress
-            // lines are category-suppressed in main.cpp): the operator needs
-            // to know the feed is WARMING UP, not broken, when a receiver
-            // shows nothing for the first second or two after GO LIVE. One
-            // per outage, re-armed once frames flow.
-            EventBus::instance().notify(
-                QStringLiteral("NDI output '%1' is warming up — waiting for the live loop's first frame. Sending starts automatically.").arg(outputName),
-                QStringLiteral("info"), QStringLiteral("NDI"), QStringLiteral("outputs.ndi.warmingUp"));
-        }
-        // The live loop has not registered the buffer yet (GO LIVE just
-        // pressed): an enabled NDI row WANTS feeding and has no frame on the
-        // wire — the inline "warming up" state Settings · Outputs shows.
-        setNdiWarming(true, outputName);
-        clearNdiPlan();
-        if (ndiSending()) {
-            ndiSending_ = false;
-            ndiSendingOutput_.clear();
-            emit ndiChanged();
-        }
-        return;
+    QStringList probeParts;
+    for (const auto &result : results) {
+        const qulonglong frames = result.provider ? result.provider->FramesSent() : 0;
+        probeParts.append(QStringLiteral("%1{buffer=%2,enabled=%3,frame=%4,sent=%5}")
+                              .arg(result.outputName).arg(result.bufferOk ? 1 : 0)
+                              .arg(result.enabled ? 1 : 0).arg(result.hasFrame ? 1 : 0).arg(frames));
     }
-    if (!fb || !enabled) {
-        clearNdiPlan();
-        return;
+    const QString probeSignature = probeParts.join(QStringLiteral(" | "));
+    if (probeSignature != ndiProbeLogSignature_) {
+        ndiProbeLogSignature_ = probeSignature;
+        qInfo("LiveOutputService: NDI probe result: %s", qUtf8Printable(probeSignature));
     }
-
-    // PUBLISH WHAT TO FEED. This is the GUI thread's whole part in the feed —
-    // a value copy under its own mutex — and the feed thread's own clock does
-    // the sending (see ndiWorkerTick). Nothing here touches pixels, and nothing
-    // here can be late in a way the wire notices: the plan is republished every
-    // poll, so a rename, a rate change or a disabled row lands within 100 ms.
-    NdiSendPlan plan;
-    plan.want = true;
-    plan.provider = provider;
-    plan.buffer = fb;
-    plan.senderName = senderName;
-    plan.fps = fps;
-
-    // The NDI SDK fixes a sender's network-visible name when it is created.
-    // A row can be added, renamed, or become the first enabled NDI output
-    // during a live session, so arm the sender again before publishing the
-    // new plan. The reset itself is queued onto the feed thread by this helper.
-    if (!senderName.isEmpty() && senderName != ndiArmedName_)
-        armNdiSenderForSession();
-    setNdiPlan(plan);
-
-    // The frame may not exist yet (GO LIVE just pressed): an enabled NDI row
-    // wants feeding and has nothing on the wire — the inline "warming up"
-    // state Settings · Outputs shows. One note and one toast per outage; the
-    // feed thread starts sending by itself the moment a frame is there.
-    if (!hasFrame) {
-        if (!ndiWaitLogged_) {
-            ndiWaitLogged_ = true;
-            qCWarning(lcNdiProgress, "LiveOutputService: NDI output waiting for the live loop's first rendered frame");
-            EventBus::instance().notify(
-                QStringLiteral("NDI output '%1' is warming up — waiting for the live loop's first frame. Sending starts automatically.").arg(outputName),
-                QStringLiteral("info"), QStringLiteral("NDI"), QStringLiteral("outputs.ndi.warmingUp"));
-        }
-        setNdiWarming(true, outputName);   // buffer exists, no frame yet
-        if (ndiSending()) {
-            ndiSending_ = false;
-            ndiSendingOutput_.clear();
-            emit ndiChanged();
-        }
-        return;
-    }
-
-    // The pill lights on the GUI the moment there is something to feed (the
-    // send itself is the feed thread's job and may take a moment on its first
-    // frame — the SDK sender is created there); the worker's own first-frame
-    // log covers the frames-flowing beat.
-    ndiSendingOutput_ = outputName;   // the pill's LIVE row (rename-safe)
-    if (!ndiSending_) {
-        ndiSending_ = true;
-        qCWarning(lcNdiProgress, "LiveOutputService: NDI program sending started (%s)",
-                 qUtf8Printable(senderName.isEmpty() ? QStringLiteral("VGR Program") : senderName));
-    }
-    ndiWaitLogged_ = false;            // frames are flowing — the waiting notes re-arm
-    setNdiWarming(false, QString());   // on the wire: no longer warming
+    ndiOutputStates_ = states;
+    setNdiPlan(plans);
+    ndiSending_ = !firstSending.isEmpty(); ndiSendingOutput_ = firstSending;
+    setNdiWarming(!firstWarming.isEmpty(), firstWarming);
     emit ndiChanged();
 }
 
@@ -3335,6 +3241,8 @@ void LiveOutputService::stopNdiFeed()
     }
     if (changed)
         emit ndiChanged();
+    ndiOutputStates_.clear();
+    setNdiWarming(false, {});
     // Reset the incident state: the slow-send latch and the rate watch belong to
     // the live session that just ended — the next one starts clean (and
     // re-reports its monitors from scratch). The feed thread decides these
@@ -3345,6 +3253,14 @@ void LiveOutputService::stopNdiFeed()
     // The plan goes with the session: an empty plan is what stops the feed
     // thread's own clock (see ndiWorkerTick).
     clearNdiPlan();
+    if (ndiWorker_) {
+        const auto providers = ndiProviders_.values();
+        QMetaObject::invokeMethod(ndiWorker_, [providers] {
+            for (const auto &provider : providers)
+                if (provider) provider->ResetSender();
+        }, Qt::QueuedConnection);
+    }
+    emit ndiChanged();
 }
 
 // The feed thread, one per process, created on demand (GUI side).
@@ -3386,18 +3302,18 @@ void LiveOutputService::ensureNdiWorker()
 void LiveOutputService::clearNdiPlan()
 {
     ndiClockArmed_ = false;   // no plan: the feed stops its own clock next beat
-    handOverNdiPlan(NdiSendPlan{});
+    handOverNdiPlan({});
 }
 
-void LiveOutputService::setNdiPlan(const NdiSendPlan &plan)
+void LiveOutputService::setNdiPlan(const std::vector<NdiSendPlan> &plans)
 {
     // The thread that will run the feed has to exist before the plan is handed
     // to it (arm first, then publish — the order the mutex version used, so the
     // opening frame still does not wait for the next poll).
-    if (plan.want)
+    if (!plans.empty())
         ensureNdiWorker();
-    handOverNdiPlan(plan);   // ...it has the plan before its first tick
-    if (!plan.want) {
+    handOverNdiPlan(plans);   // ...it has the plan before its first tick
+    if (plans.empty()) {
         ndiClockArmed_ = false;     // the feed thread stops its own clock
         return;
     }
@@ -3414,15 +3330,16 @@ void LiveOutputService::setNdiPlan(const NdiSendPlan &plan)
         if (!ndiSendTimer_) {
             ndiSendTimer_ = new QTimer(ndiWorker_);
             ndiSendTimer_->setTimerType(Qt::PreciseTimer);
+            ndiSendTimer_->setInterval(5);
             connect(ndiSendTimer_, &QTimer::timeout, ndiWorker_, [this] { ndiWorkerTick(); });
         }
         if (!ndiSendTimer_->isActive())
-            ndiSendTimer_->start(0);   // the tick itself sets the real interval
+            ndiSendTimer_->start();
     }, Qt::QueuedConnection);
 }
 
 // ---------------------------------------------------------------------------
-// The NDI send clock — paced at the FIRST enabled NDI output's configured
+// The NDI send clock — paced at the selected NDI output's configured
 // Refresh rate (Settings · Outputs). pushNdiFrame used to ride the 10 Hz
 // GUI poll, which made that select decorative: the feed ran at the poll's
 // rate whatever the setting said. Now the setting IS the cadence — the
@@ -3432,6 +3349,14 @@ void LiveOutputService::setNdiPlan(const NdiSendPlan &plan)
 // ---------------------------------------------------------------------------
 float LiveOutputService::ndiConfiguredFps()
 {
+    const QVariantMap preferred = preferredNdiOutput(OutputListModel::instance());
+    if (!preferred.isEmpty()) {
+        const QString preferredRate = preferred.value("refresh").toString();
+        bool preferredOk = false;
+        const float preferredFps = preferredRate.left(preferredRate.indexOf(QLatin1Char(' ')))
+                                       .toFloat(&preferredOk);
+        return bps::display::AcceptedOutputFrameRate(preferredOk ? preferredFps : 0.0f);
+    }
     const auto *model = OutputListModel::instance();
     if (!model)
         return 0.0f;
@@ -3537,7 +3462,7 @@ void LiveOutputService::stopNdiSendClock()
 }
 
 // The poll's NDI watch: publish WHAT to feed. Every beat of the 10 Hz poll
-// re-resolves the first enabled NDI output (the roster is GUI-owned) and hands
+// re-resolves the selected NDI output (the roster is GUI-owned) and hands
 // the feed thread a fresh value — so a row enabled mid-live, a rename, a
 // disabled output or a changed Refresh rate all reach the wire within a poll,
 // with no clock to re-arm and nothing to keep in sync by hand. The empty-plan
@@ -3547,6 +3472,25 @@ void LiveOutputService::pollTickRecheckNdi()
     if (!live_)
         return;
     recheckNdiPlanOffThread();
+}
+
+void LiveOutputService::connectToNdiOutputRoster()
+{
+    if (ndiRosterConnected_)
+        return;
+    auto *model = OutputListModel::instance();
+    if (!model)
+        return;
+    ndiRosterConnected_ = true;
+    const QMetaObject::Connection rosterConnection = connect(model, &OutputListModel::outputRosterChanged, this, [this] {
+        qInfo("LiveOutputService: outputRosterChanged received live=%d", live_ ? 1 : 0);
+        if (live_) {
+            qInfo("LiveOutputService: output roster changed during live; refreshing all NDI send plans");
+            recheckNdiPlanOffThread();
+        }
+    }, Qt::DirectConnection);
+    qInfo("LiveOutputService: connected output roster signal model=%p ok=%d rows=%d",
+          static_cast<void *>(model), bool(rosterConnection), model->rowCount());
 }
 
 // ---- Output frame-rate watch -----------------------------------------------
@@ -3688,17 +3632,7 @@ QString LiveOutputService::ndiSenderDisplayName(const QString &rowName)
 {
     QString resolved = rowName;
     if (resolved.isEmpty()) {
-        const auto *model = OutputListModel::instance();
-        if (!model)
-            return {};
-        for (int i = 0; i < model->rowCount(); ++i) {
-            const QVariantMap out = model->getOutput(i);
-            if (out.value("kind").toString() == QLatin1String("NDI")
-                && out.value("isEnabled").toBool()) {
-                resolved = out.value("name").toString();
-                break;
-            }
-        }
+        resolved = preferredNdiOutput(OutputListModel::instance()).value("name").toString();
     }
     if (resolved.isEmpty())
         return {};

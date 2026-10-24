@@ -147,7 +147,8 @@ public:
     Result<std::vector<TheTableSearchHit>> Search(std::string_view query, size_t limit = 60,
                                                  bool exactWords = false,
                                                  std::string_view scopeBookId = "",
-                                                 int scopeChapter = 0) const;
+                                                 int scopeChapter = 0,
+                                                 const std::function<bool()>& cancelled = {}) const;
 
     // A sermon's citation line in the way these sermons are cited: the year
     // without its "19", the sermon's date code, its title stripped to

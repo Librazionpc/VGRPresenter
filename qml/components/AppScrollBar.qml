@@ -192,7 +192,6 @@ Item {
             radius: parent.radius
             hovered: root.pointerOnBar
             glowColor: Qt.rgba(1, 1, 1, 0.12)
-            quick: true
         }
     }
 
@@ -293,7 +292,6 @@ Item {
             // in this build — the glow would never go out).
             hovered: root.pointerOnBar
             glowColor: Qt.rgba(1, 1, 1, 0.12)
-            quick: true
         }
         // The thumb runs across the track; its length/position come from the
         // bar axis. Vertical: fixed trackWidth-wide, y driven. Horizontal:

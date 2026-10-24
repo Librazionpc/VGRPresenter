@@ -19,6 +19,9 @@
 #include <QJSEngine>
 #include <QQmlEngine>
 
+#include <algorithm>
+#include <vector>
+
 namespace bb = bps::bible;
 namespace pf = bps::presentation;
 
@@ -787,9 +790,21 @@ QVariantList ScriptureService::readSearch(const QString &text, const QString &bi
     const QStringList words = exactWords ? queryWords(text) : QStringList();
     if (exactWords && words.isEmpty())
         return out;
+    struct RankedRow {
+        int phraseRank = 1;
+        QVariantMap row;
+    };
+    std::vector<RankedRow> ranked;
+    std::vector<std::string> phraseTerms;
+    if (exactWords) {
+        phraseTerms.reserve(static_cast<size_t>(words.size()));
+        for (const QString &word : words)
+            phraseTerms.push_back(word.toStdString());
+    }
     for (const bb::BibleSearchHit &h : hits.value()) {
         if (!bibleId.isEmpty() && qstr(h.bibleId) != bibleId)
             continue;
+        int phraseRank = 1;
         if (exactWords) {
             auto verse = engine.GetVerse(h.bibleId, h.bookId, h.chapter, h.verse);
             if (!verse.ok())
@@ -800,17 +815,31 @@ QVariantList ScriptureService::readSearch(const QString &text, const QString &bi
                 if (!bps::search::textmatch::ContainsWord(hay, w.toStdString())) { all = false; break; }
             if (!all)
                 continue;
+            if (bps::search::textmatch::ContainsPhrase(hay, phraseTerms, nullptr, true))
+                phraseRank = 0;
         }
         auto book = engine.GetBook(h.bibleId, h.bookId);
         const QString bookName = book.ok() ? qstr(book.value().name) : qstr(h.bookId);
-        out.append(QVariantMap{
+        QVariantMap row{
             { QStringLiteral("reference"), QStringLiteral("%1 %2:%3").arg(bookName).arg(h.chapter).arg(h.verse) },
             { QStringLiteral("bookId"), qstr(h.bookId) }, { QStringLiteral("book"), bookName },
             { QStringLiteral("chapter"), h.chapter }, { QStringLiteral("verse"), h.verse },
             { QStringLiteral("snippet"), qstr(h.snippet) },
-        });
-        if (out.size() >= limit)
+        };
+        if (exactWords)
+            ranked.push_back({ phraseRank, std::move(row) });
+        else
+            out.append(row);
+        if (!exactWords && out.size() >= limit)
             break;
+    }
+    if (exactWords) {
+        std::stable_sort(ranked.begin(), ranked.end(), [](const RankedRow &a, const RankedRow &b) {
+            return a.phraseRank < b.phraseRank;
+        });
+        const int resultLimit = std::max(0, limit);
+        for (int i = 0; i < resultLimit && i < static_cast<int>(ranked.size()); ++i)
+            out.append(ranked[static_cast<size_t>(i)].row);
     }
     return out;
 }

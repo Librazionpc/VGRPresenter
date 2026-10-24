@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <thread>
@@ -49,6 +50,9 @@ public:
 
     // One sermon's paragraphs: [{ number, text, heading }]
     Q_INVOKABLE QVariantList chapter(const QString &bookId, int chapter) const;
+    // Search-result hover preview: fetch the sermon without making the UI wait on
+    // the library lock held by an in-flight corpus search.
+    Q_INVOKABLE void previewChapterAsync(const QString &bookId, int chapter, int token);
     // Loads a chapter off the UI thread; stale requests are discarded.
     Q_INVOKABLE void chapterAsync(const QString &bookId, int chapter, int token);
     // A paragraph's FULL text — `count` 1 = just that paragraph, 2 = it and its
@@ -67,6 +71,11 @@ public:
                                     bool exactWords = false, bool includeFullText = false,
                                     const QString &scopeBookId = QString(),
                                     int scopeChapter = 0) const;
+    // C++ aggregate-search path: lets a superseded query stop its corpus scan
+    // rather than making the newest Quick Search wait behind it.
+    QVariantList searchCancellable(const QString &text, int limit, bool exactWords,
+                                   bool includeFullText, const QString &scopeBookId,
+                                   int scopeChapter, const std::function<bool()>& cancelled) const;
     // ASYNC search (the Quick-search pattern): the same rows on a worker thread
     // — the pill search pane runs this per keystroke and the GUI never blocks
     // on a big query. `token` = newest request wins; answers arrive as
@@ -168,11 +177,13 @@ signals:
     // (search()'s shape). Stale tokens never emit.
     void searchResultsReady(int token, const QVariantList &rows);
     void chapterReady(int token, const QString &bookId, int chapter, const QVariantList &rows);
+    void previewChapterReady(int token, const QString &bookId, int chapter, const QVariantList &rows);
     void userDataChanged();
 
 private:
     std::atomic<int> latestSearchToken_{0};   // searchAsync: only the newest emits
     std::atomic<int> latestChapterToken_{0};  // chapterAsync: only the newest emits
+    std::atomic<int> latestPreviewToken_{0};  // previewChapterAsync: latest hovered row wins
     explicit TheTableService(QObject *parent = nullptr);
 
     // THE SPLIT CUT AHEAD OF THE CLICK — the same contract as ScriptureService's

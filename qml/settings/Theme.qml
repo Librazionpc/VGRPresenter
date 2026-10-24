@@ -195,9 +195,9 @@ QtObject {
     // These close the last gap Light mode had: the chrome files at one point
     // hardcoded their own dark shades, so picking Light recoloured the settings
     // screens and left the header/menus dark. Their families live here now.
-    // A restrained accent wash keeps button and row hovers on-brand without
-    // making the hover state look like a selected control.
-    readonly property color hoverBg: Qt.alpha(accent, 0.08)
+    // Hovers use the same visible accent tint as the highlighted paragraph,
+    // so hover affordances remain clear across cards, rows, and controls.
+    readonly property color hoverBg: Qt.alpha(accent, hoverGlowAlpha)
     readonly property color activeBg: dark ? "#1e1f29" : "#e9ebf1"    // active tab pill
     readonly property color iconChrome: dark ? "#b4bccb" : "#5a6272"  // header icon at rest
 
@@ -255,13 +255,12 @@ QtObject {
     //      surface instead of two properties racing;
     //   2. everything times to the constants below, so changing the feel of the
     //      app's hover is a one-line change and no surface can drift.
-    readonly property int hoverFade: 220        // cards, rows, tiles, buttons
-    readonly property int hoverFadeFast: 130    // micro-controls: scrollbar, chevrons, close X
+    readonly property int hoverFade: 220        // shared hover timing, including tabs
     readonly property var hoverEasing: Easing.InOutQuad
     // The accent wash a lit surface takes, and the strength of its edge. Kept
     // as ALPHAS so every surface derives its look from the user's own accent
     // choice instead of hard-coding a purple.
-    readonly property real hoverGlowAlpha: 0.10
+    readonly property real hoverGlowAlpha: 0.24
     readonly property real hoverEdgeAlpha: 0.45
 
     // ---- Radius scale ----

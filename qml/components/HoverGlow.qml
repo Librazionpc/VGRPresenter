@@ -34,9 +34,6 @@ Rectangle {
     // do not).
     property bool edge: false
     property color edgeColor: Qt.alpha(Theme.accent, Theme.hoverEdgeAlpha)
-    // Micro-controls fade quicker; everything else uses the shared pace.
-    property bool quick: false
-
     color: root.glowColor
     border.width: root.edge ? 1 : 0
     border.color: root.edgeColor
@@ -45,7 +42,7 @@ Rectangle {
 
     Behavior on opacity {
         NumberAnimation {
-            duration: root.quick ? Theme.hoverFadeFast : Theme.hoverFade
+            duration: Theme.hoverFade
             easing.type: Theme.hoverEasing
         }
     }

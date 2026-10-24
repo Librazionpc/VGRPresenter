@@ -6,6 +6,7 @@
 #include <QPointer>
 #include <QSet>
 #include <atomic>
+#include <functional>
 #include <QString>
 #include <QStringList>
 #include <QVariantList>
@@ -136,6 +137,8 @@ signals:
     void bibleProgressChanged();
     // An async search (searchAsync) finished: the token matches the request.
     void resultsReady(int token, const QVariantList &rows);
+    // Categories that finished before the full-library Table scan completes.
+    void resultsProgress(int token, const QVariantList &rows);
     // An async word resolution (resolveWordsAsync) finished: the token matches.
     void wordsResolved(int token, const QVariantList &rows);
     // A hover preview's verse text landed (see fullVerse): the dialog re-asks for
@@ -167,7 +170,9 @@ private:
     QStringList readBibles() const;
     QVariantList readResolveWords(const QString &text) const;
     QString readFullVerse(const QString &bibleId, const QString &bookId, int chapter, int verse) const;
-    QVariantList readSearch(const QString &rawText, int perKind, bool exactWords) const;
+    QVariantList readSearch(const QString &rawText, int perKind, bool exactWords,
+                            const std::function<bool()>& cancelled = {},
+                            const std::function<void(const QVariantList&)>& progress = {}) const;
 
     static QString verseCacheKey(const QString &bibleId, const QString &bookId, int chapter, int verse);
     void refreshBiblesOffThread() const;

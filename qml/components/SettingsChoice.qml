@@ -29,6 +29,12 @@ Item {
         menu.openAt(root, root.width - menu.width, root.height + 4, root.Window.contentItem)
     }
 
+    HoverGlow {
+        anchors.fill: parent
+        hovered: pickerArea.containsMouse
+        glowColor: Theme.hoverBg
+    }
+
     Row {
         id: pickerRow
         anchors.right: parent.right

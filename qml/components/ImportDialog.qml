@@ -260,7 +260,6 @@ Item {
                     radius: parent.radius
                     hovered: backHover.hovered
                     glowColor: Theme.hoverBg
-                    quick: true
                 }
                 IconGlyph { anchors.centerIn: parent; name: "chevronRight"; rotation: 180; color: Theme.textSecondary; width: 12; height: 12 }
                 HoverHandler { id: backHover; cursorShape: Qt.PointingHandCursor }
@@ -283,7 +282,6 @@ Item {
                     radius: parent.radius
                     hovered: closeHover.hovered
                     glowColor: Theme.hoverBg
-                    quick: true
                 }
                 IconGlyph { anchors.centerIn: parent; name: "close"; color: Theme.textSecondary; width: 10; height: 10 }
                 HoverHandler { id: closeHover; cursorShape: Qt.PointingHandCursor }

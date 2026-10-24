@@ -132,9 +132,14 @@ Rectangle {
             width: 60
             height: 30
             radius: 8
-            color: goLiveArea.hovered ? Qt.lighter(goLiveButton.baseColor(), 1.15)
-                                            : goLiveButton.baseColor()
+            color: goLiveButton.baseColor()
             Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+            HoverGlow {
+                anchors.fill: parent
+                radius: parent.radius
+                hovered: goLiveArea.hovered
+                glowColor: Qt.alpha(Theme.controlInk, 0.16)
+            }
 
             Rectangle {
                 anchors.centerIn: parent
@@ -210,8 +215,14 @@ Rectangle {
             width: 60
             height: 30
             radius: 8
-            color: searchHover.hovered ? Theme.hoverBg : "transparent"
+            color: "transparent"
             Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+            HoverGlow {
+                anchors.fill: parent
+                radius: parent.radius
+                hovered: searchHover.hovered
+                glowColor: Theme.hoverBg
+            }
 
             // (IconGlyph's search icon is a fixed 10.5 px, so the large one is drawn here.)
             Shape {
@@ -323,8 +334,14 @@ Rectangle {
             radius: 8
             // Position truth - containsMouse latches forever in this build
             // (KNOWN_ISSUES.md).
-            color: gearHover.hovered ? Theme.hoverBg : "transparent"
+            color: "transparent"
             Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+            HoverGlow {
+                anchors.fill: parent
+                radius: parent.radius
+                hovered: gearHover.hovered
+                glowColor: Theme.hoverBg
+            }
 
             // A 24 px box holding the gear. IconGlyph is a plain Item that needs an explicit
             // size and is drawn at ~10 px, so it is enlarged with scale (its stroke is

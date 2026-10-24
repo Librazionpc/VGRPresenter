@@ -2871,7 +2871,7 @@ Rectangle {
                                 border.color: metaHover.hovered ? Qt.alpha(Theme.accent, 0.55)
                                                                 : Qt.alpha(Theme.borderSubtle, 0.85)
                                 Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-                                Behavior on border.color { ColorAnimation { duration: 110 } }
+                                Behavior on border.color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                                 // A tick down the left edge while the pointer is on
                                 // the chip — the hover state, drawn without moving

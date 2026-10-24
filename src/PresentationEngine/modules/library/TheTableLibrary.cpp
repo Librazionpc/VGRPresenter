@@ -2001,7 +2001,10 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
                                                           size_t limit,
                                                           bool exactWords,
                                                           std::string_view scopeBookId,
-                                                          int scopeChapter) const {
+                                                          int scopeChapter,
+                                                          const std::function<bool()>& cancelled) const {
+    if (cancelled && cancelled())
+        return std::vector<TheTableSearchHit>{};
     // A bare paragraph number inside a LOCKED search is a LOCATION, not a word (see
     // the block further down). It is recognised HERE because the word requirement
     // below rejects a one-character query ("5"), which is a perfectly good
@@ -2064,6 +2067,8 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     // The padlock is the exception: locked, words are meant verbatim.)
     std::vector<std::string> bonusWords;
     auto resolved = search::SearchEngine::Instance().ResolveTermsWithSplits(terms, !exactWords);
+    if (cancelled && cancelled())
+        return std::vector<TheTableSearchHit>{};
     // THE TYPING TAIL'S CANDIDATE LADDER, most confident first ("rec" -> receive,
     // received, record, ...). The tail itself stays the TYPED PREFIX — it matches
     // any word starting with it — and this ladder decides WHICH of those readings
@@ -2161,8 +2166,12 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         const size_t digitCount = std::count_if(norm.begin(), norm.end(),
                                                 [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
         if (!norm.empty() && (dash || digitCount >= 3)) {
-            for (const TheTableBook& book : books_)
+            for (const TheTableBook& book : books_) {
+                if (cancelled && cancelled())
+                    return std::vector<TheTableSearchHit>{};
                 for (const TheTableChapter& ch : book.chapters) {
+                    if (cancelled && cancelled())
+                        return std::vector<TheTableSearchHit>{};
                     if (!inScope(book, ch)) continue;   // the chapter lock scopes the code tier too
                     const std::string bare = Lower(ch.code.empty() ? CodeFromTitle(ch.title) : ch.code);
                     // The typed form is the CITATION shape — "47-0412" (yy-code),
@@ -2195,6 +2204,7 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
                     }
                     if (score != 0) codeHits.push_back({&book, &ch, score});
                 }
+            }
 
             // A citation query names sermons, not their paragraph text. Return
             // these hits directly: scanning every paragraph while holding the
@@ -2321,8 +2331,8 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     //     multi-word lock requires at least TWO of its words next to each other
     //     (floorRun below), so the loose sprinkling of the words is exactly what
     //     the padlock refuses. A one-word lock is a whole-word search, as before.
-    // `phrase` (run == terms.size()) rides along for the loose path's ordering,
-    // where every hit already carries all the words.
+    // `phrase` records a contiguous, punctuation-insensitive exact phrase. Keep
+    // it separate from `run`: a full run may contain up to two filler words.
     struct Acc { const TheTableVerse* v; const TheTableBook* b; const TheTableChapter* ch; int score; bool spanned; bool phrase; int run; int sermonRank; };
     std::vector<Acc> hits;
     auto scanChapter = [&](const TheTableBook& book, const TheTableChapter& ch, int sermonRank) {
@@ -2334,7 +2344,13 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         if (cached == lowerParagraphs_.end()) {
             std::vector<std::string> low;
             low.reserve(ch.verses.size());
-            for (const TheTableVerse& v : ch.verses) low.push_back(Lower(v.text));
+            for (size_t i = 0; i < ch.verses.size(); ++i) {
+                if ((i & 0x3Fu) == 0 && cancelled && cancelled())
+                    return;
+                low.push_back(Lower(ch.verses[i].text));
+            }
+            if (cancelled && cancelled())
+                return;
             cached = lowerParagraphs_.emplace(std::move(key), std::move(low)).first;
         }
         const std::vector<std::string>& hay = cached->second;
@@ -2365,6 +2381,8 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         std::vector<unsigned> bm(n, 0u);   // per-paragraph term-hit bitmask (substring)
         std::vector<unsigned> wm(n, 0u);   // of those, whole-word hits
         for (size_t i = 0; i < n; ++i) {
+            if ((i & 0x3Fu) == 0 && cancelled && cancelled())
+                return;
             unsigned m = 0, w = 0;
             for (size_t t = 0; t < terms.size(); ++t) {
                 // ONE walk of the paragraph per term for all three questions
@@ -2510,11 +2528,12 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
                 // answers; it just never answers with loose words.
                 if (size_t(runOf[i]) < floorRun)
                     continue;
+                const bool exactPhrase = ContainsPhrase(hay[i], terms, nullptr, true);
                 hits.push_back({&ch.verses[i], &book, &ch,
                                 1000 + quality(bm[i], wm[i])
                                     + (size_t(runOf[i]) == terms.size() ? 500 : 0)
                                     + 20 * bonusOf(i, n),
-                                false, size_t(runOf[i]) == terms.size(), runOf[i], sermonRank});
+                                false, exactPhrase, runOf[i], sermonRank});
             }
             // A ONE-WORD lock never needs the pair phase: a word sitting in the
             // pair is already a hit from whichever paragraph holds it (locked, a
@@ -2563,11 +2582,13 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
                     continue;
                 if (run == runOf[i] || run == runOf[i + 1])
                     continue;   // the same combination, already listed from one paragraph
+                const std::string joined = hay[i] + ' ' + hay[i + 1];
+                const bool exactPhrase = ContainsPhrase(joined, terms, nullptr, true);
                 hits.push_back({&ch.verses[i], &book, &ch,
                                 quality(pair, wm[i] | wm[i + 1])
                                     + (size_t(run) == terms.size() ? 500 : 0)
                                     + 20 * bonusOf(i, i + 1),
-                                true, size_t(run) == terms.size(), run, sermonRank});
+                                true, exactPhrase, run, sermonRank});
             }
         } else {
             for (size_t i = 0; i < n; ++i)
@@ -2623,6 +2644,8 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     int rank = 0;
     for (const TheTableBook& book : books_) {
         for (const TheTableChapter& ch : book.chapters) {
+            if (cancelled && cancelled())
+                return std::vector<TheTableSearchHit>{};
             bool skip = !inScope(book, ch);
             if (skip) {
                 ++rank;   // the sermon-level tiebreak counts every sermon, scoped or not
@@ -2640,16 +2663,18 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
             ++rank;
         }
     }
-    // ONE order for both paths: THE SENTENCE FIRST (see the ladder above), then
-    // within a shape the score (the verbatim bonus still separates phrase hits
-    // from each other), the engine's candidate order as the sermon-level tiebreak,
-    // then reading order. Then the per-sermon variety cap — a long sermon matching
+    if (cancelled && cancelled())
+        return std::vector<TheTableSearchHit>{};
+    // ONE order for both paths: a contiguous phrase first, then the longest
+    // ordered combination (see the ladder above), then within a shape the score,
+    // the engine's candidate order as the sermon-level tiebreak, then reading
+    // order. Then the per-sermon variety cap — a long sermon matching
     // a common-word query hundreds of times must not flood the list and push other
     // sermons' (often better) matches past the display limit (the para-7 probe).
     std::stable_sort(hits.begin(), hits.end(), [](const Acc& a, const Acc& b) {
+        if (a.phrase != b.phrase) return a.phrase;
         if (a.run != b.run) return a.run > b.run;    // THE SENTENCE, then the next combination
         if (a.spanned != b.spanned) return !a.spanned;
-        if (a.phrase != b.phrase) return a.phrase;
         if (a.score != b.score) return a.score > b.score;
         if (a.sermonRank != b.sermonRank) return a.sermonRank < b.sermonRank;
         return a.v->number < b.v->number;

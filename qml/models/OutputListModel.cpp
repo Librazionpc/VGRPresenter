@@ -14,6 +14,7 @@
 #include <QGuiApplication>
 #include <QJSEngine>
 #include <QScreen>
+#include <QStringList>
 #include <QTimer>
 #include <QTimerEvent>
 #include <algorithm>
@@ -283,8 +284,21 @@ void OutputListModel::saveRoster()
             so.contentToggles[i] = item.content.at(i).enabled;
         stored.append(so);
     }
-    (void)bps::project::OutputStore::Instance().Save(
+    const auto saveResult = bps::project::OutputStore::Instance().Save(
         std::vector<bps::project::StoredOutput>(stored.cbegin(), stored.cend()));
+    int enabledNdi = 0;
+    QStringList ndiNames;
+    for (const OutputItem &item : m_outputs) {
+        if (item.kind == QLatin1String("NDI") && item.isEnabled) {
+            ++enabledNdi;
+            ndiNames.append(item.name);
+        }
+    }
+    qInfo("OutputListModel: roster saved rows=%d enabledNdi=%d names=[%s] persisted=%d booted=%d",
+          m_outputs.size(), enabledNdi, qUtf8Printable(ndiNames.join(QStringLiteral(", "))),
+          saveResult.ok() ? 1 : 0, EngineBridge::instance().booted() ? 1 : 0);
+    if (!saveResult.ok())
+        qWarning("OutputListModel: saving output roster failed: %s", saveResult.error().message.c_str());
 
     // EVERY roster change re-pushes the engine's per-output style set (and
     // the active style). saveRoster is the one door every mutator already
@@ -297,6 +311,7 @@ void OutputListModel::saveRoster()
     // Both pushes are idempotent and cheap (SetLiveOutputStyles stores and
     // the loop re-reads per frame; SetActiveOutputStyle no-ops on equality).
     pushEngineStyle(activeStyleId());
+    emit outputRosterChanged();
 }
 
 void OutputListModel::connectToEngineBoot()
@@ -1207,6 +1222,9 @@ void OutputListModel::pushEngineStyle(const QString &styleId)
     }
     if (SettingsService *settings2 = SettingsService::instancePtr())
         settings2->setLiveOutputStyles(specs, buffers, sizes);
+    qInfo("OutputListModel: pushed engine output styles specs=%d buffers=%d activeStyle='%s' booted=%d",
+          static_cast<int>(specs.size()), static_cast<int>(buffers.size()),
+          qUtf8Printable(styleId), EngineBridge::instance().booted() ? 1 : 0);
 }
 
 // One push for the CURRENT active output's style — the single entry point

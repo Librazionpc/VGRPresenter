@@ -327,7 +327,6 @@ Rectangle {
             radius: parent.radius
             hovered: closeArea.containsMouse
             glowColor: Theme.chip
-            quick: true
         }
 
         Text {

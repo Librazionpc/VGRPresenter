@@ -47,8 +47,13 @@ Item {
 
         Rectangle {
             anchors.fill: parent
-            color: btn.hovered ? (btn.danger ? Theme.danger : Qt.alpha(Theme.textPrimary, 0.12)) : "transparent"
-            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+            color: "transparent"
+            HoverGlow {
+                anchors.fill: parent
+                hovered: btn.hovered
+                glowColor: btn.danger ? Qt.alpha(Theme.danger, 0.2)
+                                      : Qt.alpha(Theme.textPrimary, 0.12)
+            }
         }
         Item {
             id: glyphHolder

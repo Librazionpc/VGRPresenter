@@ -1070,6 +1070,12 @@ void SettingsService::setLiveOutputStyles(
     const std::vector<std::string> &bufferNames,
     const std::vector<std::pair<int, int>> &bufferSizes)
 {
-    if (EngineBridge::instance().booted())
-        (void)bps::presentation::PresentationEngine::Instance().SetLiveOutputStyles(specs, bufferNames, bufferSizes);
+    const bool booted = EngineBridge::instance().booted();
+    qInfo("SettingsService: live output styles push booted=%d specs=%d buffers=%d",
+          booted ? 1 : 0, static_cast<int>(specs.size()), static_cast<int>(bufferNames.size()));
+    if (booted) {
+        const auto result = bps::presentation::PresentationEngine::Instance().SetLiveOutputStyles(specs, bufferNames, bufferSizes);
+        if (!result.ok())
+            qWarning("SettingsService: live output styles push failed: %s", result.error().message.c_str());
+    }
 }

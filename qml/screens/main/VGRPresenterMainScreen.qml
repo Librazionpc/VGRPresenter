@@ -411,17 +411,28 @@ Rectangle {
                         height: 36
                         width: 240
 
-                        border.color: actionQuickSearchHover.hovered ? Theme.borderSubtle : Theme.border
+                        border.color: Theme.border
                         border.width: 1
-                        color: actionQuickSearchMouse.pressed ? Theme.activeBg
-                             : (actionQuickSearchHover.hovered ? Theme.hoverBg : Theme.rowBg)
+                        color: actionQuickSearchMouse.pressed ? Theme.activeBg : Theme.rowBg
                         radius: 8
-                        Behavior on border.color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
-                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                        PositionHoverArea {
-                            id: actionQuickSearchHover
+                        HoverGlow {
                             anchors.fill: parent
+                            radius: parent.radius
+                            hovered: actionQuickSearchHover.hovered || actionQuickSearchPosition.hovered
+                            glowColor: Theme.hoverBg
+                            edge: true
+                            edgeColor: Theme.borderSubtle
+                        }
+
+                        HoverHandler {
+                            id: actionQuickSearchHover
+                            cursorShape: Qt.PointingHandCursor
+                        }
+                        PositionHoverArea {
+                            id: actionQuickSearchPosition
+                            anchors.fill: parent
+                            showCursor: false
+                            clickEnabled: false
                         }
 
                         MouseArea {
@@ -505,17 +516,28 @@ Rectangle {
                         height: 36
                         width: 240
 
-                        border.color: actionNewProjectHover.hovered ? Theme.borderSubtle : Theme.border
+                        border.color: Theme.border
                         border.width: 1
-                        color: actionNewProjectMouse.pressed ? Theme.activeBg
-                             : (actionNewProjectHover.hovered ? Theme.hoverBg : Theme.rowBg)
+                        color: actionNewProjectMouse.pressed ? Theme.activeBg : Theme.rowBg
                         radius: 8
-                        Behavior on border.color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
-                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                        PositionHoverArea {
-                            id: actionNewProjectHover
+                        HoverGlow {
                             anchors.fill: parent
+                            radius: parent.radius
+                            hovered: actionNewProjectHover.hovered || actionNewProjectPosition.hovered
+                            glowColor: Theme.hoverBg
+                            edge: true
+                            edgeColor: Theme.borderSubtle
+                        }
+
+                        HoverHandler {
+                            id: actionNewProjectHover
+                            cursorShape: Qt.PointingHandCursor
+                        }
+                        PositionHoverArea {
+                            id: actionNewProjectPosition
+                            anchors.fill: parent
+                            showCursor: false
+                            clickEnabled: false
                         }
 
                         MouseArea {
@@ -594,17 +616,28 @@ Rectangle {
                         height: 36
                         width: 240
 
-                        border.color: actionNewShowHover.hovered ? Theme.borderSubtle : Theme.border
+                        border.color: Theme.border
                         border.width: 1
-                        color: actionNewShowMouse.pressed ? Theme.activeBg
-                             : (actionNewShowHover.hovered ? Theme.hoverBg : Theme.rowBg)
+                        color: actionNewShowMouse.pressed ? Theme.activeBg : Theme.rowBg
                         radius: 8
-                        Behavior on border.color { ColorAnimation { duration: 250; easing.type: Easing.OutCubic } }
-                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                        PositionHoverArea {
-                            id: actionNewShowHover
+                        HoverGlow {
                             anchors.fill: parent
+                            radius: parent.radius
+                            hovered: actionNewShowHover.hovered || actionNewShowPosition.hovered
+                            glowColor: Theme.hoverBg
+                            edge: true
+                            edgeColor: Theme.borderSubtle
+                        }
+
+                        HoverHandler {
+                            id: actionNewShowHover
+                            cursorShape: Qt.PointingHandCursor
+                        }
+                        PositionHoverArea {
+                            id: actionNewShowPosition
+                            anchors.fill: parent
+                            showCursor: false
+                            clickEnabled: false
                         }
 
                         MouseArea {
@@ -695,6 +728,7 @@ Rectangle {
                     anchors.fill: parent
                     visible: vGRPresenter_Main_Screen.centerItem !== null
                     item: vGRPresenter_Main_Screen.centerItem
+                    slideHotkeysEnabled: media_tab_bar.currentPane === "shows"
                     onEditRequested: (path) => vGRPresenter_Main_Screen.openShowRequested(path)
                     onCloseRequested: vGRPresenter_Main_Screen.centerItem = null
                 }
@@ -1741,6 +1775,7 @@ Rectangle {
                                 width: ListView.view.width - 8
 
                                 radius: 4
+                                readonly property bool selectorSelected: index === table_body.showCursor
                                 // The floating "New show" pill sits OVER the last rows.
                                 // PositionHoverArea reads pure geometry (AppCursor.hovered),
                                 // so it cannot see the pill on top of it — without the gate
@@ -1748,10 +1783,14 @@ Rectangle {
                                 // Odd rows carry the app's shared list stripe
                                 // (ListRows), so the shows table reads in the same
                                 // bands as the action lists.
-                                color: ((rowHover.hovered || index === table_body.showCursor)
-                                        && !newShowDockHover.hovered) ? Theme.activeBg
-                                                                      : ListRows.stripeOverlay(index)
+                                color: selectorSelected ? Theme.activeBg : ListRows.stripeOverlay(index)
                                 Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+                                HoverGlow {
+                                    anchors.fill: parent
+                                    radius: parent.radius
+                                    hovered: rowHover.hovered && !newShowDockHover.hovered
+                                    glowColor: Theme.hoverBg
+                                }
                                 PositionHoverArea {
                                     id: rowHover
                                     anchors.fill: parent
@@ -1766,7 +1805,8 @@ Rectangle {
                                     x: 8
                                     anchors.verticalCenter: parent.verticalCenter
                                     name: "shows"
-                                    color: rowHover.hovered ? Theme.textSecondary : Theme.textMuted
+                                    color: rowHover.hovered || parent.selectorSelected
+                                           ? Theme.accent : Theme.textMuted
                                     width: 15; height: 15
                                     Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                                 }
@@ -1808,7 +1848,19 @@ Rectangle {
                                     payload: ({ kind: "show_drawer", items: [{ ref: modelData.path, name: modelData.name }] })
                                     label: modelData.name
                                     onActivated: vGRPresenter_Main_Screen.centerItem = { type: "show", ref: modelData.path, name: modelData.name, layout: "" }
-                                    onOpened: ProjectService.dropOnProject("show_drawer", [{ ref: modelData.path, name: modelData.name }])
+                                    onOpened: {
+                                        const showRef = String(modelData.path)
+                                        const showName = String(modelData.name)
+                                        ProjectService.dropOnProject("show_drawer", [{ ref: showRef, name: showName }])
+                                        // Opening/creating a project can publish its active
+                                        // item back to centerItem (often a media item).
+                                        // Keep the show the user double-clicked in the
+                                        // centre preview after the project drop completes.
+                                        vGRPresenter_Main_Screen.centerItem = {
+                                            type: "show", ref: showRef,
+                                            name: showName, layout: ""
+                                        }
+                                    }
                                     onContextRequested: (x, y) => {
                                         const p = rowMouse.mapToItem(media_table, x, y)
                                         media_table.openShowMenu(index, p.x, p.y)

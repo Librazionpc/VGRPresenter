@@ -39,9 +39,15 @@ Item {
         id: field
         anchors.fill: parent
         radius: root.flat ? 0 : Theme.radiusMd
-        color: fieldHover.hovered ? Theme.hoverBg : (root.flat ? "transparent" : Theme.card)
+        color: root.flat ? "transparent" : Theme.card
         border.width: root.flat ? 0 : 1
         border.color: Theme.border
+        HoverGlow {
+            anchors.fill: parent
+            radius: parent.radius
+            hovered: fieldHover.hovered
+            glowColor: Theme.hoverBg
+        }
         Row {
             anchors.fill: parent
             anchors.leftMargin: 10
