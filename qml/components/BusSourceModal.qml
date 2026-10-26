@@ -340,8 +340,6 @@ Item {
             root.problem = why === "bus-has-video"
                 ? qsTr("That source is already feeding another bus. A bus takes one video source at a time.")
                 : qsTr("That source could not be routed into a new bus. Choose another one.")
-            console.log("[NEWBUS] route refused kind=" + source.kind
-                        + " row=" + source.row + " reason=" + why)
             return
         }
         // One line per creation, the same shape the bus monitor's own lines

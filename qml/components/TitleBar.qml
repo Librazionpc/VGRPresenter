@@ -19,7 +19,6 @@ Rectangle {
     id: root
 
     property string searchPlaceholder: "Search settings"
-    property alias searchText: searchInput.text
 
     signal sectionRequested(string key)
     signal closeRequested()

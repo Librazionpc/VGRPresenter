@@ -536,19 +536,15 @@ Item {
                             // TOP, always: the passage is one column starting at
                             // the page's top edge, not a block centred in the box.
                             verticalAlignment: Text.AlignTop
-                            // NoWrap, ALWAYS — not fitText.wrapMode. The service's
-                            // own readingFlowText already carries a \n at every one
-                            // of the CANONICAL style's own wrap points (see
-                            // LiveOutputService::flowTextFor's own comment); letting
-                            // THIS box word-wrap it too re-breaks it at wherever
-                            // this box's own (possibly narrower, e.g. a Lower Third
-                            // output's) width happens to fall, landing different
-                            // words on screen than the output the lines were
-                            // measured for. A box too narrow for one of those lines
-                            // clips it at its own edge instead — the user's own
-                            // call: every output shows the same words at the same
-                            // step, in its own template's font/colour/box.
-                            wrapMode: Text.NoWrap
+                            // REVERTED to fitText.wrapMode (WordWrap) — NoWrap only
+                            // made sense paired with flowTextFor's wrapped-lines
+                            // build (now reverted — see its own comment: that build
+                            // broke el.drawsFlow's prefix match against the block's
+                            // raw text, which is what actually caused "not moving").
+                            // With the raw text restored here too, NoWrap would draw
+                            // each authored paragraph as one unbroken line clipped
+                            // at the box edge.
+                            wrapMode: fitText.wrapMode
                             lineHeight: fitText.lineHeight
                             lineHeightMode: fitText.lineHeightMode
                         }

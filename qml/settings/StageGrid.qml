@@ -64,11 +64,6 @@ QtObject {
             height: grid.mapH(Number(block.height) || 0, targetH)
         }
     }
-    // A text size is a HEIGHT quantity: the engine scales a block's fontSize by
-    // the frame's height (never its width), so a font sized here lands on air at
-    // the size the frame draws.
-    function mapFontSize(fontSize, targetH) { return grid.mapH(fontSize, targetH) }
-
     // --- rule 2: the stage's own proportion (pictures of the whole stage) -----
     // Height for a given width, and the reverse — what the thumbnails use.
     function heightForWidth(px) { return Math.round(px * grid.aspect) }

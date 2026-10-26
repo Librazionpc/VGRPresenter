@@ -249,23 +249,6 @@ Item {
         }
         return null
     }
-    // Same green→amber→red language the meters use elsewhere this session,
-    // sampled as a single COLOR at a given level (0..1) rather than a
-    // gradient fill — the L/R channel buttons glow with this instead of
-    // showing a partial-height bar.
-    function levelGlowColor(level, alpha) {
-        const t = Math.max(0, Math.min(1, level))
-        const stops = [
-            { r: 0.29, g: 0.88, b: 0.63 },   // #4ade80-ish green (quiet)
-            { r: 1.00, g: 0.82, b: 0.40 },   // amber (mid)
-            { r: 1.00, g: 0.42, b: 0.38 }    // red (hot)
-        ]
-        const seg = t < 0.5 ? 0 : 1
-        const k = t < 0.5 ? t / 0.5 : (t - 0.5) / 0.5
-        const a = stops[seg], b = stops[seg + 1]
-        return Qt.rgba(a.r + (b.r - a.r) * k, a.g + (b.g - a.g) * k,
-                       a.b + (b.b - a.b) * k, alpha === undefined ? 1 : alpha)
-    }
     function toggleAudioMeter(label) {
         const want = label === undefined ? "" : String(label).trim()
         // NO DEVICE, NO TAP. This used to hand the bridge an empty label, which

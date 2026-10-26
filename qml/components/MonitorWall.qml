@@ -131,7 +131,6 @@ Item {
             return rows * slotHeightForPage(page)
         }
         readonly property int columns: columnsForPage(currentPage)
-        readonly property int rowsPerPage: rowsForPage(currentPage)
 
         width: root.width
         height: {

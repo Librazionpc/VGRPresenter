@@ -357,7 +357,6 @@ ModalCard {
     }
 
     function choose(result) {
-        console.log("[QS] choose:", result.kind, result.title)
         root.rememberPick(result)
         root.searchPending = false
         root.searchToken++

@@ -798,11 +798,24 @@ ApplicationWindow {
     // next slide first line and move the current slide first line out").
     Shortcut {
         action: "lineStepNext"
-        onActivated: LiveOutputService.lineStep(1)
+        // ONE-SHOT DIAGNOSTIC: logged at the EARLIEST point this action can be
+        // seen, before lineStep() runs its own (LiveOutputService's own
+        // "LineStep: dir=..." line). If THIS line is missing from engine.log
+        // after a press, the key never reached this Shortcut at all (something
+        // else — a focused TextInput, a modal, another Shortcut/MouseArea —
+        // swallowed it first); if it's there but LiveOutputService's own line
+        // is not, the call into lineStep() itself is the break.
+        onActivated: {
+            EngineBridge.log("info", "LineStepShortcut", "lineStepNext activated")
+            LiveOutputService.lineStep(1)
+        }
     }
     Shortcut {
         action: "lineStepPrevious"
-        onActivated: LiveOutputService.lineStep(-1)
+        onActivated: {
+            EngineBridge.log("info", "LineStepShortcut", "lineStepPrevious activated")
+            LiveOutputService.lineStep(-1)
+        }
     }
 
     AppMenuBar {

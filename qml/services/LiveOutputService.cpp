@@ -1244,6 +1244,19 @@ QStringList LiveOutputService::readingLines(const QVariantMap &slide) const
     lines.reserve(spans.size());
     for (const VisualSpan &span : spans)
         lines.append(text.mid(span.start, span.end - span.start));
+    // ONE-SHOT DIAGNOSTIC: the box THIS side wrapped against (bodyCarried's
+    // branch decides whether it is the composed template's box or the raw
+    // slide's own), and how many visual lines it found — compare directly
+    // against ReadingFlowRender's el.width/flowText.width in
+    // DesignPreview.qml for the same press. A real width mismatch between
+    // the two sides is exactly what would turn NoWrap's exact-line-sharing
+    // into clipped, seemingly-frozen text.
+    EngineBridge::write(QStringLiteral("info"), QStringLiteral("ReadingFlowBox"),
+                        QStringLiteral("bodyCarried=%1 boxW=%2 boxH=%3 lines=%4")
+                            .arg(bodyCarried)
+                            .arg(box.value(QStringLiteral("width")).toDouble())
+                            .arg(box.value(QStringLiteral("height")).toDouble())
+                            .arg(lines.size()));
     return lines;
 }
 
@@ -1376,32 +1389,36 @@ void LiveOutputService::stageSlideSet(const QString &name, const QVariantList &s
 // break. Two pages and no more — a step only ever has to show the lines directly
 // below the box, and the next page's first line is the last thing it needs.
 //
-// BUILT FROM readingLinesAt()'s OWN WRAPPED LINES, not the raw authored text —
-// every \n here is one of THIS pick's canonical visual-line breaks (measured
-// against the active style's own box, the one readingLines()/ownLines already
-// use for every stepping decision). Two real outputs with different templates
-// (a full-screen Main, a narrow Lower Third caption band) each word-wrap the
-// SAME raw string differently at their own box width, which put different
-// words on screen for the identical readingScroll number — two outputs
-// visibly "moving at different speeds" for no reason either output could see
-// on its own. Handing every reader the SAME pre-broken lines (DesignPreview's
-// flowText then draws them with Text.NoWrap — see its own comment) means
-// every output shows the exact words Main's own wrap decided belong on each
-// line; a box too narrow for one of those lines clips it at its own edge
-// instead of silently re-breaking it into different words (the user's own
-// call: Lower Third matches Main's wrap exactly, keeping its own template's
-// font/colour/box — only the line-break positions are shared).
+// REVERTED to the RAW authored text (was briefly built from readingLinesAt()'s
+// own wrapped lines, to share Main's exact wrap with Lower Third — see the
+// ReadingFlowBox/ReadingFlowRender diagnostics in readingLines() and
+// DesignPreview.qml, added to chase this). That broke something more basic
+// than the wrap-matching it was meant to fix: DesignPreview's el.drawsFlow
+// gate checks readingFlowText.indexOf(el.modelData.text) === 0 — a literal
+// PREFIX match against the block's raw, unwrapped text — and a flow text with
+// a \n inserted at every WRAPPED visual line (often within the first few
+// words) broke that match everywhere, permanently, so the flow never drew at
+// all (reported: "alt+up or down is not moving"; confirmed via
+// ReadingFlowRender never once appearing in engine.log while ReadingFlowBox
+// and LineStepShortcut both fired normally — the step itself was always
+// working, only its own drawing gate was not). The join is a newline, and the
+// engine's own layout is what turns the rest into lines: the passage is
+// measured (and drawn) at the page's fitted size, so the page inside it
+// breaks exactly where the page alone broke — which is also why the prefix
+// match holds again. Matching Lower Third's wrap to Main's needs a different
+// approach (e.g. fixing el.drawsFlow's own match to compare against wrapped
+// text consistently, verified live) rather than another patch on this.
 QString LiveOutputService::flowTextFor(int slideIndex) const
 {
     if (slideIndex < 0 || slideIndex >= lineSetRaw_.size())
         return QString();
-    QStringList lines = readingLinesAt(slideIndex);
+    QString flow = readingTextOf(lineSetRaw_.at(slideIndex).toMap());
     if (slideIndex + 1 < lineSetRaw_.size()) {
-        const QStringList nextLines = readingLinesAt(slideIndex + 1);
-        if (!nextLines.isEmpty())
-            lines += nextLines;
+        const QString next = readingTextOf(lineSetRaw_.at(slideIndex + 1).toMap());
+        if (!next.trimmed().isEmpty())
+            flow += QLatin1Char('\n') + next;
     }
-    return lines.join(QLatin1Char('\n'));
+    return flow;
 }
 
 // THE ONE NUMBER. Every surface reads it: DesignPreview draws the passage at

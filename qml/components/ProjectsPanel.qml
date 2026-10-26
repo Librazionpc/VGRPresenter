@@ -33,7 +33,6 @@ Item {
     // own text colour. Names are the theme's primary text now, and the surfaces
     // under them come from the same place, so dark stays as it looked and Light
     // is readable rather than white-on-white.
-    readonly property color cPrimary: Theme.inset
     readonly property color cLighter: Theme.borderSubtle
     readonly property color cDarker: Theme.rowBg
     readonly property color cDarkest: Theme.panelBg
@@ -231,7 +230,6 @@ Item {
         else if (what === "media") root.dockTabRequested("media")
         else if (what === "section") nameDialog.ask("section", qsTr("New section"), "", "")
     }
-    function openAddMenu() { root.dropdown = ""; root.addMenuOpen = true }
     // "Convert to template" (a project's own right-click - FreeShow's copy_to_template): the engine has no separate stored
     // "template" concept to convert it INTO, so this files it in a root "Templates" folder instead (made the first time it is
     // needed) - a real, visible place "Project template" in the + menu's picker (which lists every project) finds it again,
@@ -249,7 +247,6 @@ Item {
         menu.model = root.entriesFor("projectTemplate", null)
         menu.openAt(addTray, 0, 0, Window.window.contentItem)
     }
-    function closeMenus() { menu.visible = false; root.dropdown = ""; root.addMenuOpen = false }
 
     // A project: FreeShow's document icon, in the app's accent purple rather
     // than FreeShow's own red (that red was the last non-purple accent left in
@@ -326,7 +323,6 @@ Item {
                                 required property int index
                                 readonly property bool isFolder: modelData.type === "folder"
                                 readonly property bool active: !isFolder && modelData.id === ProjectService.activeProjectId
-                                readonly property bool inFolder: card.modelData.title === ""
                                 readonly property real indent: 14 * modelData.depth
                                 // Flat, edge-to-edge rows — EVERY row (folder
                                 // or a project nested under one) starts right

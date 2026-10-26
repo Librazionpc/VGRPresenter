@@ -57,8 +57,6 @@ Column {
         : meterLayout === "stereo" ? 2
         : meterLayout === "multi" && meterLevels.length > 0 ? meterLevels.length
         : channels
-    // Back-compat passthrough for the single-level case.
-    property real meterLevel: meterLevels.length > 0 ? meterLevels[0] : 0
     // (No raw field aliases — the id names below are the targets; all
     // consumer access goes through the typed passthroughs.)
 

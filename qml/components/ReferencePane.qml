@@ -2528,8 +2528,21 @@ Item {
             return
         }
         root.wallStepperId = id
-        const ours = (root.adapter.liveIsOurs && root.adapter.liveIsOurs(root.referenceText))
-                  || (root.adapter.stagedIsOurs && root.adapter.stagedIsOurs(root.referenceText))
+        // lineStepOwnerRef when an active pick has one (see its own comment on
+        // root.selected) — NOT the live root.referenceText, which for The Table
+        // includes the current paragraph number and DRIFTS as followLiveStep
+        // tracks the stepper into a new one ("47-1100X - Fellowship 1" ->
+        // "...Fellowship 6"). LiveOutputService's own stagedName_/onAirTitle
+        // stay fixed at the ORIGINAL pick, so a drifted reference read here as
+        // "this isn't my content any more" and called setWallStepper(id,
+        // false) — withdrawing stepper status mid-step, every single time the
+        // selector moved (user report: "it[s] update is moving to the next,
+        // that cause[s] an update on the monitor[s]" — this handler fires on
+        // EVERY onReferenceTextChanged, which followLiveStep's own
+        // root.selected write triggers).
+        const ref = root.lineStepOwnerRef !== "" ? root.lineStepOwnerRef : root.referenceText
+        const ours = (root.adapter.liveIsOurs && root.adapter.liveIsOurs(ref))
+                  || (root.adapter.stagedIsOurs && root.adapter.stagedIsOurs(ref))
         LiveOutputService.setWallStepper(id, ours)
     }
     onReferenceTextChanged: root.refreshWallStepper()
@@ -3976,8 +3989,13 @@ Item {
                     id: playPickedButton
                     visible: !root.searching
                     width: 28; height: 26
+                    // lineStepOwnerRef over the live root.referenceText — same
+                    // drift reasoning as refreshWallStepper's own comment —
+                    // so this button doesn't flicker back to "Play" mid-step
+                    // just because the selector tracked into a new paragraph.
                     readonly property bool isOurs: root.adapter && root.adapter.liveIsOurs
-                                                   ? root.adapter.liveIsOurs(root.referenceText) : false
+                                                   ? root.adapter.liveIsOurs(root.lineStepOwnerRef !== "" ? root.lineStepOwnerRef : root.referenceText)
+                                                   : false
                     Rectangle { anchors.fill: parent; radius: 13; color: playPickedHover.hovered || parent.isOurs ? Theme.hoverBg : "transparent" }
                     // FreeShow's scripture play button: PLAY (outlined) when this
                     // passage is not on air; when it IS, the green filled STOP

@@ -2723,13 +2723,6 @@ Rectangle {
                         readonly property var cfg: canvasItemObject.modelData.meta
                         readonly property string shapeType: shapeContent.cfg.shapeType ?? "rectangle"
                         readonly property var st: canvasItemObject.style
-                        // Alpha-based transparent test, NOT `!== "transparent"`:
-                        // a QML color holding "transparent" reads back as
-                        // #00000000, so a string comparison is ALWAYS true and
-                        // the fallback never fired — every shape rendered with a
-                        // fully transparent fill (the "shape doesn't show" bug).
-                        // Verified with a standalone qml runtime probe.
-                        readonly property bool hasFill: shapeContent.st && shapeContent.st.backgroundColor.a > 0
                         // The fill is exactly the item's background: "transparent" (picked in the colour palette) draws nothing,
                         // so outline-only frames work. A NEW shape is given a visible fill when it is added (shapeSourceModal).
                         readonly property color fillColor: shapeContent.st ? shapeContent.st.backgroundColor : "#3a3f55"

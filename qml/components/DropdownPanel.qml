@@ -104,13 +104,6 @@ Rectangle {
     property int highlightedIndex: -1
     signal itemPicked(int index, var payload)
 
-    // The field's own click is the toggle: without this the catcher would eat
-    // the very press that should re-open a closed popup.
-    function outsidePressed() {
-        if (root.dismissOnOutsideClick && root.visible)
-            root.visible = false
-    }
-
     // While open, CLAIM the pointer (AppCursor.blocked): a PositionHoverArea
     // beneath the panel — a design card, a list row — must not light up as
     // though the pointer were on it. Hover is derived from pure geometry, so

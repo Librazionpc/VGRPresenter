@@ -34,16 +34,6 @@ Item {
     readonly property var values: SettingsService.values
     readonly property var definitions: SettingsService.definitions
 
-    // The label of the choice a "pick one" setting is on ("Every 30 minutes"). Reads `values`, so a binding using it follows the setting.
-    function choiceText(key) {
-        const def = root.definitions[key]
-        const current = root.values[key]
-        if (def)
-            for (let i = 0; i < def.choices.length; ++i)
-                if (def.choices[i].value === current)
-                    return def.choices[i].label
-        return current === undefined ? "" : String(current)
-    }
     // The label of one of the resource profiles (by its engine value).
     function profileLabel(value) {
         const choices = root.definitions["resources.profile"].choices

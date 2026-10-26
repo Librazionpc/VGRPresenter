@@ -6,9 +6,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <format>
 #include <set>
+#include <system_error>
 
 namespace bps::library {
 
@@ -550,8 +552,21 @@ Result<std::vector<std::string>> ProjectLibrary::AddItems(std::string_view proje
         if (deduped.empty()) return std::vector<std::string>{};
 
         long long next = 0;
-        for (const ProjectItem& i : project->items)
-            if (i.id.rfind("pi-", 0) == 0) { try { next = std::max(next, std::stoll(i.id.substr(3))); } catch (...) {} }
+        for (const ProjectItem& i : project->items) {
+            if (i.id.rfind("pi-", 0) != 0)
+                continue;
+            // std::from_chars, NOT std::stoll: an id whose suffix is not a
+            // number (a hand-edited .vgr, an id from a future scheme) must not
+            // throw, and the old `catch (...) {}` swallowed the failure so
+            // silently that a too-large suffix reset the counter to 0 and handed
+            // the next item an id an existing one already held.
+            long long parsed = 0;
+            const char* const first = i.id.data() + 3;
+            const char* const last = i.id.data() + i.id.size();
+            const auto res = std::from_chars(first, last, parsed);
+            if (res.ec == std::errc{} && res.ptr == last)
+                next = std::max(next, parsed);
+        }
 
         std::vector<ProjectItem> added = deduped;
         for (ProjectItem& i : added) {

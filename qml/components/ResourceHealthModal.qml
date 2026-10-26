@@ -24,7 +24,6 @@ ModalCard {
     readonly property var health: TelemetryService.health
     readonly property var engine: TelemetryService.engine
     readonly property bool hasGpu: health.gpuPct !== undefined && health.gpuPct >= 0
-    readonly property bool hasTemp: health.tempC !== undefined && health.tempC >= 0
     readonly property bool cpuMeasured: health.cpuPct !== undefined && health.cpuPct >= 0
     readonly property bool memMeasured: health.memUsedPct !== undefined && health.memUsedPct >= 0
 
